@@ -40,7 +40,7 @@ export function Hero() {
               transition={{ duration: 0.5, delay: 0.3 }}
               className="font-mono text-base text-text-secondary leading-relaxed max-w-lg mb-10"
             >
-              Backend architecture and DevOps engineering for startups that can&apos;t
+              Backend architecture and DevOps engineering for startups/enterprises that can&apos;t
               afford to be slow, brittle, or down. 6+ years building systems that
               survive production.
             </motion.p>
