@@ -9,7 +9,7 @@ type Props = {
   params: Promise<{ lesson: string }>;
 };
 
-const PHASE = PHASES.find((p) => p.number === 1)!;
+const PHASE = PHASES.find((p) => p.number === 2)!;
 const COURSE_BASE = '/tutorials/backend-engineering-with-nodejs';
 
 export function generateStaticParams() {
@@ -32,10 +32,12 @@ export default async function LessonPage({ params }: Props) {
 
   let data;
   try {
-    data = getLessonData(1, slug);
+    data = getLessonData(2, slug);
   } catch {
     notFound();
   }
+
+  const prevPhase = PHASES.find((p) => p.number === 1)!;
 
   return (
     <div className="lesson-page-wrapper">
@@ -58,9 +60,13 @@ export default async function LessonPage({ params }: Props) {
               <span className="lesson-nav-title">{data.prev.title}</span>
             </Link>
           ) : (
-            <Link href={COURSE_BASE} className="lesson-nav-link">
-              <span className="lesson-nav-dir">← Overview</span>
-              <span className="lesson-nav-title">Course Overview</span>
+            // First lesson in Phase 2 — link back to last lesson of Phase 1
+            <Link
+              href={`${COURSE_BASE}/${prevPhase.urlSegment}/${prevPhase.lessons[prevPhase.lessons.length - 1].slug}`}
+              className="lesson-nav-link"
+            >
+              <span className="lesson-nav-dir">← Phase 1</span>
+              <span className="lesson-nav-title">{prevPhase.lessons[prevPhase.lessons.length - 1].title}</span>
             </Link>
           )}
 
@@ -73,13 +79,10 @@ export default async function LessonPage({ params }: Props) {
               <span className="lesson-nav-title">{data.next.title}</span>
             </Link>
           ) : (
-            <Link
-              href={`${COURSE_BASE}/${PHASES[1].urlSegment}/${PHASES[1].lessons[0].slug}`}
-              className="lesson-nav-link lesson-nav-link--next"
-            >
-              <span className="lesson-nav-dir">Phase 2 →</span>
-              <span className="lesson-nav-title">{PHASES[1].lessons[0].title}</span>
-            </Link>
+            <div className="lesson-nav-link lesson-nav-link--next lesson-nav-link--complete">
+              <span className="lesson-nav-dir">✓ Phase 2 in progress</span>
+              <span className="lesson-nav-title">More lessons coming soon</span>
+            </div>
           )}
         </div>
       </nav>
