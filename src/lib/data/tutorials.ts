@@ -14,6 +14,38 @@ export type Tutorial = {
 
 export const tutorials: Tutorial[] = [
   {
+    slug: 'ml-and-dl-mastery',
+    title: 'ML & DL Mastery',
+    description:
+      'A structured, from-scratch path through machine learning and deep learning — built for engineers who want to understand the math and code, not just import sklearn. Six phases covering data science foundations, classical ML, deep learning, NLP, computer vision, and MLOps.',
+    difficulty: 'intermediate',
+    parts: 6,
+    estimatedHours: 60,
+    tags: ['python', 'numpy', 'pandas', 'machine-learning', 'deep-learning', 'pytorch'],
+    featured: true,
+    learningOutcomes: [
+      'Master NumPy and Pandas for fast numerical computing and data manipulation',
+      'Implement classical ML algorithms from scratch — linear models, trees, ensembles',
+      'Build and train neural networks with PyTorch from first principles',
+      'Apply NLP techniques and work with large language model APIs',
+      'Solve computer vision tasks with CNNs and transfer learning',
+      'Package, monitor, and deploy ML models to production',
+    ],
+    prerequisites: [
+      'Solid Python programming (functions, classes, list comprehensions)',
+      'Basic high-school linear algebra (vectors, matrices) is helpful but not required',
+      'No ML experience needed — we build intuition before formulas',
+    ],
+    parts_list: [
+      { title: 'Phase 1 — Data Science Foundations', duration: 200 },
+      { title: 'Phase 2 — Classical Machine Learning', duration: 600 },
+      { title: 'Phase 3 — Deep Learning Fundamentals', duration: 600 },
+      { title: 'Phase 4 — NLP & Large Language Models', duration: 480 },
+      { title: 'Phase 5 — Computer Vision', duration: 480 },
+      { title: 'Phase 6 — MLOps & Production', duration: 360 },
+    ],
+  },
+  {
     slug: 'backend-engineering-with-nodejs',
     title: "Backend Engineering with Node.js",
     description:

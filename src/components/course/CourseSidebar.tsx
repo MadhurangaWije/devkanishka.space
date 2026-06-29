@@ -8,7 +8,7 @@ import type { PhaseMeta } from '@/lib/backend-course';
 
 const COURSE_BASE = '/tutorials/backend-engineering-with-nodejs';
 
-const COMING_SOON_PHASES = [
+const DEFAULT_COMING_SOON = [
   'Phase 3 — Data & Persistence',
   'Phase 4 — Authentication & Security',
   'Phase 5 — Production Readiness',
@@ -18,9 +18,10 @@ const COMING_SOON_PHASES = [
 
 type Props = {
   phases: PhaseMeta[];
+  comingSoonPhases?: string[];
 };
 
-export function CourseSidebar({ phases }: Props) {
+export function CourseSidebar({ phases, comingSoonPhases = DEFAULT_COMING_SOON }: Props) {
   const pathname = usePathname();
   const [mobileOpen, setMobileOpen] = useState(false);
 
@@ -98,7 +99,7 @@ export function CourseSidebar({ phases }: Props) {
 
       {/* Coming-soon phases */}
       <div className="space-y-2 border-t border-site-border pt-4">
-        {COMING_SOON_PHASES.map((phase) => (
+        {comingSoonPhases.map((phase) => (
           <div key={phase} className="px-2 py-1.5 opacity-30 cursor-default">
             <p className="font-mono text-xs text-text-muted flex items-center gap-2">
               <span className="shrink-0">·</span>

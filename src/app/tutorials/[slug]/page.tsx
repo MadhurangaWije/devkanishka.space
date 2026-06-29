@@ -8,10 +8,12 @@ type Props = {
   params: Promise<{ slug: string }>;
 };
 
-// 'backend-engineering-with-nodejs' is handled by its own static route
+// These slugs have their own static folder routes and must be excluded
+const STATIC_COURSE_SLUGS = ['backend-engineering-with-nodejs', 'ml-and-dl-mastery'];
+
 export async function generateStaticParams() {
   return tutorials
-    .filter((t) => t.slug !== 'backend-engineering-with-nodejs')
+    .filter((t) => !STATIC_COURSE_SLUGS.includes(t.slug))
     .map((t) => ({ slug: t.slug }));
 }
 
