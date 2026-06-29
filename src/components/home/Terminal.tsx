@@ -98,11 +98,13 @@ export function Terminal() {
   const [cmdHistory, setCmdHistory] = useState<string[]>([]);
   const [historyIdx, setHistoryIdx] = useState(-1);
   const [focused, setFocused] = useState(false);
-  const endRef = useRef<HTMLDivElement>(null);
+  const outputRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    endRef.current?.scrollIntoView({ behavior: 'smooth' });
+    if (outputRef.current) {
+      outputRef.current.scrollTop = outputRef.current.scrollHeight;
+    }
   }, [lines]);
 
   const runCommand = (raw: string) => {
@@ -185,7 +187,7 @@ export function Terminal() {
       </div>
 
       {/* Output area */}
-      <div className="p-5 h-72 overflow-y-auto font-mono text-sm leading-relaxed">
+      <div ref={outputRef} className="p-5 h-72 overflow-y-auto font-mono text-sm leading-relaxed">
         {lines.map((line) => (
           <div key={line.id} className="mb-1">
             {line.type === 'welcome' && (
@@ -199,7 +201,6 @@ export function Terminal() {
             )}
           </div>
         ))}
-        <div ref={endRef} />
       </div>
 
       {/* Input row */}
