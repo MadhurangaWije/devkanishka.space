@@ -75,7 +75,7 @@ run: open /tutorials  to start learning`,
 
   contact: `get in touch:
 
-Email:    hi@kanishka.dev
+Email:    hi@devkanishka.space
 GitHub:   github.com/kanishka
 LinkedIn: linkedin.com/in/kanishka
 Twitter:  twitter.com/kanishka

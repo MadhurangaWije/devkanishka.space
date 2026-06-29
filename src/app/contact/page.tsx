@@ -9,8 +9,8 @@ export const metadata: Metadata = {
 const SOCIAL_LINKS = [
   {
     label: 'Email',
-    value: 'hi@kanishka.dev',
-    href: 'mailto:hi@kanishka.dev',
+    value: 'hi@devkanishka.space',
+    href: 'mailto:hi@devkanishka.space',
   },
   {
     label: 'GitHub',

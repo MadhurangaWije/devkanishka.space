@@ -30,7 +30,7 @@ export const metadata: Metadata = {
   openGraph: {
     type: 'website',
     locale: 'en_US',
-    url: 'https://kanishka.dev',
+    url: 'https://devkanishka.space',
     siteName: 'Kanishka',
   },
 };

@@ -26,8 +26,8 @@ export default function HomePage() {
             <Button href="/contact" variant="terminal">
               ./start-a-conversation
             </Button>
-            <Button href="mailto:hi@kanishka.dev" variant="ghost" external>
-              hi@kanishka.dev
+            <Button href="mailto:hi@devkanishka.space" variant="ghost" external>
+              hi@devkanishka.space
             </Button>
           </div>
         </div>

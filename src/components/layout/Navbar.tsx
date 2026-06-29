@@ -112,7 +112,7 @@ export function Navbar() {
               ))}
             </ul>
             <div className="mt-auto mb-12 text-text-muted font-mono text-sm">
-              hi@kanishka.dev
+              hi@devkanishka.space
             </div>
           </motion.div>
         )}
