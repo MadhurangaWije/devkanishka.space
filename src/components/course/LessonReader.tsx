@@ -14,9 +14,11 @@ export function LessonReader({ lessonCss, bodyHtml, script }: LessonReaderProps)
   useEffect(() => {
     if (!script) return;
     const el = document.createElement('script');
-    // Wrap in IIFE so const/let declarations don't leak to global scope.
-    // Without this, navigating between lessons causes "already declared" errors.
-    el.textContent = `;(function(){\n${script}\n})();`;
+    // Convert const/let to var so re-navigation doesn't trigger "already declared"
+    // errors, while keeping functions in global scope for onclick= attributes.
+    // (An IIFE would fix the redeclaration but breaks onclick="answer(i)" calls.)
+    const patched = script.replace(/\b(const|let)\b/g, 'var');
+    el.textContent = patched;
     document.body.appendChild(el);
     return () => {
       if (document.body.contains(el)) document.body.removeChild(el);
