@@ -65,8 +65,8 @@ export function Hero() {
             >
               {[
                 { value: '6+', label: 'years in production' },
-                { value: '1M+', label: 'jobs/day in prod' },
-                { value: '50K', label: 'events/sec handled' },
+                // { value: '1M+', label: 'jobs/day in prod' },
+                // { value: '50K', label: 'events/sec handled' },
               ].map((stat) => (
                 <div key={stat.label}>
                   <div className="font-sans text-2xl font-black text-text-primary">
