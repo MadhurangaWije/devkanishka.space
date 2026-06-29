@@ -8,8 +8,11 @@ type Props = {
   params: Promise<{ slug: string }>;
 };
 
+// 'backend-engineering-with-nodejs' is handled by its own static route
 export async function generateStaticParams() {
-  return tutorials.map((t) => ({ slug: t.slug }));
+  return tutorials
+    .filter((t) => t.slug !== 'backend-engineering-with-nodejs')
+    .map((t) => ({ slug: t.slug }));
 }
 
 export async function generateMetadata({ params }: Props): Promise<Metadata> {
@@ -129,7 +132,9 @@ export default async function TutorialDetailPage({ params }: Props) {
                     </span>
                   </div>
                   <span className="font-mono text-xs text-text-muted shrink-0 ml-4">
-                    {part.duration}m
+                    {part.duration >= 60
+                      ? `${Math.floor(part.duration / 60)}h${part.duration % 60 ? ` ${part.duration % 60}m` : ''}`
+                      : `${part.duration}m`}
                   </span>
                 </div>
               ))}

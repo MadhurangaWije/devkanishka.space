@@ -14,6 +14,61 @@ export type Tutorial = {
 
 export const tutorials: Tutorial[] = [
   {
+    slug: 'backend-engineering-with-nodejs',
+    title: "Backend Engineering with Node.js",
+    description:
+      "A complete learning path from zero to production — structured, progressive, no gaps. Seven phases covering how the web works, REST APIs, databases, authentication, testing, Docker, CI/CD, and advanced system design. Built for aspiring engineers who want to understand the backend deeply, not just follow recipes.",
+    difficulty: 'beginner',
+    parts: 7,
+    estimatedHours: 40,
+    tags: ['node.js', 'javascript', 'backend', 'rest-api', 'postgresql', 'docker'],
+    featured: true,
+    learningOutcomes: [
+      'Understand how the web works at the protocol level — HTTP, DNS, TCP/IP',
+      'Build production-grade REST APIs with Express.js, validation, and proper error handling',
+      'Design and query relational databases with PostgreSQL, Prisma, and Redis',
+      'Implement authentication from scratch — password hashing, JWTs, OAuth 2.0',
+      'Write tests, add structured logging, and configure error monitoring',
+      'Containerise with Docker and deploy with CI/CD via GitHub Actions',
+      'Graduate to advanced topics: WebSockets, message queues, microservices, observability',
+    ],
+    prerequisites: [
+      'Basic JavaScript knowledge (variables, functions, arrays, objects)',
+      'Comfort with the terminal / command line',
+      'No backend experience required — we start from zero',
+    ],
+    parts_list: [
+      {
+        title: 'Phase 1 — Foundations',
+        duration: 300,
+      },
+      {
+        title: 'Phase 2 — Building REST APIs',
+        duration: 360,
+      },
+      {
+        title: 'Phase 3 — Data & Persistence',
+        duration: 360,
+      },
+      {
+        title: 'Phase 4 — Authentication & Security',
+        duration: 360,
+      },
+      {
+        title: 'Phase 5 — Production Readiness',
+        duration: 300,
+      },
+      {
+        title: 'Phase 6 — Infrastructure & Deployment',
+        duration: 330,
+      },
+      {
+        title: 'Phase 7 — Advanced Topics',
+        duration: 390,
+      },
+    ],
+  },
+  {
     slug: 'distributed-systems-from-scratch',
     title: "Distributed Systems from Scratch",
     description:
