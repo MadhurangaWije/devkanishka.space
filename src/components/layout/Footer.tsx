@@ -2,7 +2,7 @@ import Link from 'next/link';
 
 const SOCIAL_LINKS = [
   { label: 'GitHub', href: 'https://github.com/kanishka' },
-  { label: 'LinkedIn', href: 'https://linkedin.com/in/kanishka' },
+  { label: 'LinkedIn', href: 'https://linkedin.com' },
   { label: 'Twitter', href: 'https://twitter.com/kanishka' },
 ];
 

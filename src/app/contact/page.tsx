@@ -19,8 +19,8 @@ const SOCIAL_LINKS = [
   },
   {
     label: 'LinkedIn',
-    value: 'linkedin.com/in/kanishka',
-    href: 'https://linkedin.com/in/kanishka',
+    value: 'linkedin.com',
+    href: 'https://linkedin.com',
   },
   {
     label: 'Twitter',
