@@ -14,6 +14,38 @@ export type Tutorial = {
 
 export const tutorials: Tutorial[] = [
   {
+    slug: 'azure-administration',
+    title: 'Azure Administration (AZ-104)',
+    description:
+      'A complete, practitioner-oriented guide through every AZ-104 exam domain — 25 lessons across 6 modules covering identity & governance, storage, compute, networking, monitoring, and enterprise-scale architecture. Built for engineers who want to understand the reasoning behind every Azure decision, not just the commands.',
+    difficulty: 'intermediate',
+    parts: 6,
+    estimatedHours: 12,
+    tags: ['azure', 'cloud', 'az-104', 'devops', 'networking', 'identity'],
+    featured: true,
+    learningOutcomes: [
+      'Master Azure\'s 5-level resource hierarchy and design governance with RBAC and Azure Policy',
+      'Configure storage accounts, Blob Storage, Azure Files, and lifecycle management',
+      'Deploy and scale VMs, App Service, containers, and IaC with Bicep',
+      'Design VNets, NSGs, private endpoints, and all four Azure load balancing services',
+      'Set up Azure Monitor, Log Analytics with KQL, Backup, and Site Recovery',
+      'Apply Defender for Cloud, Landing Zones, and FinOps practices at enterprise scale',
+    ],
+    prerequisites: [
+      'Comfort with cloud concepts (regions, virtual machines, networking basics)',
+      'Basic experience with any cloud provider is helpful but not required',
+      'No Azure experience required — the course builds from first principles',
+    ],
+    parts_list: [
+      { title: 'Module 1 — Identity & Governance (5 lessons)', duration: 125 },
+      { title: 'Module 2 — Storage (3 lessons)', duration: 75 },
+      { title: 'Module 3 — Compute (5 lessons)', duration: 125 },
+      { title: 'Module 4 — Networking (5 lessons)', duration: 125 },
+      { title: 'Module 5 — Monitor & Maintain (4 lessons)', duration: 100 },
+      { title: 'Module 6 — Enterprise Architecture (3 lessons)', duration: 75 },
+    ],
+  },
+  {
     slug: 'ml-and-dl-mastery',
     title: 'ML & DL Mastery',
     description:

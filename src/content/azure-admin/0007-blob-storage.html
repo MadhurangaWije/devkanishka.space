@@ -1,0 +1,458 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lesson 07 — Azure Blob Storage: Access, Lifecycle &amp; Security</title>
+  <link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<!-- ═══════════════════════════════════════════════
+     HEADER
+═══════════════════════════════════════════════ -->
+<header class="lesson-header">
+  <h1>Lesson 07 — Azure Blob Storage: Access, Lifecycle &amp; Security</h1>
+  <div class="lesson-meta">
+    <span class="badge badge-domain">Domain 2 — Storage</span>
+    <span class="badge badge-exam">AZ-104: 15–20%</span>
+    <span class="badge badge-time">~30 min</span>
+    <span class="badge badge-prereq">Prereq: Lesson 06 — Storage Accounts</span>
+  </div>
+</header>
+
+<!-- ═══════════════════════════════════════════════
+     WHY THIS MATTERS
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Why Blob Storage Deserves Its Own Lesson</h2>
+  <p>Blob storage is the most-used Azure storage service. Every application generating unstructured data — images, videos, logs, backups, telemetry exports, build artefacts — stores it in blob storage. The exam tests it at a depth that surprises many candidates: SAS token types and revocation mechanics, the precise behaviour of Archive rehydration, lifecycle management rule structure, and the interactions between soft delete, versioning, and immutability policies.</p>
+  <p>Beyond the exam, getting SAS token architecture wrong is one of the most common storage security vulnerabilities in real-world Azure deployments. Understand the three SAS types and when each one is appropriate.</p>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     BLOB FUNDAMENTALS
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Blob Types</h2>
+  <p>A blob storage account organises data as: storage account → containers → blobs. You choose a blob type at creation — it cannot be changed afterwards.</p>
+
+  <table>
+    <thead>
+      <tr><th>Type</th><th>Optimised for</th><th>Max size</th><th>Common use</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>Block blob</strong></td>
+        <td>Sequential read/write of large files</td>
+        <td>190.7 TiB</td>
+        <td>Images, videos, backups, build artefacts, general unstructured data</td>
+      </tr>
+      <tr>
+        <td><strong>Append blob</strong></td>
+        <td>Append-only operations (existing blocks immutable)</td>
+        <td>195 GiB</td>
+        <td>Application logs, audit logs, diagnostic streams</td>
+      </tr>
+      <tr>
+        <td><strong>Page blob</strong></td>
+        <td>Random read/write access</td>
+        <td>8 TiB</td>
+        <td>VHD files for unmanaged VM disks (legacy — use Managed Disks)</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="callout callout-info">
+    <strong>Use append blobs for logs</strong>
+    Append blobs are the only blob type where you can add data to the end without reading and rewriting the entire blob. Applications writing logs should use append blobs. Block blobs require a full download-modify-upload cycle to append — at log scale this is catastrophically inefficient.
+  </div>
+
+  <h3>Container Public Access Levels</h3>
+  <p>Containers have a public access setting that controls anonymous (unauthenticated) access:</p>
+  <table>
+    <thead>
+      <tr><th>Level</th><th>Anonymous access permitted</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><strong>Private</strong> (default)</td><td>None — all requests require authentication</td></tr>
+      <tr><td><strong>Blob</strong></td><td>Anonymous read of individual blobs if you know the URL — no container listing</td></tr>
+      <tr><td><strong>Container</strong></td><td>Anonymous read of blobs AND anonymous listing of the container contents</td></tr>
+    </tbody>
+  </table>
+
+  <div class="callout callout-warn">
+    <strong>Storage account-level anonymous access override</strong>
+    Even if a container is set to Blob or Container access level, if the storage account has <em>blob public access disabled</em> at the account level, all anonymous access is blocked. The account-level setting takes precedence over the container-level setting. In production, disable anonymous blob access at the account level as a baseline security control.
+  </div>
+
+  <h3>Blob URL Structure</h3>
+  <pre><code>https://&lt;accountname&gt;.blob.core.windows.net/&lt;container&gt;/&lt;blob-path&gt;
+
+Example:
+https://mystorageaccount.blob.core.windows.net/images/profile/user-12345.jpg</code></pre>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     ACCESS TIERS
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Blob Access Tiers In Depth</h2>
+
+  <h3>Archive Tier: Rehydration</h3>
+  <p>Archive-tier blobs are stored offline — the data is not available for reads until the blob is <strong>rehydrated</strong> to an online tier (Hot, Cool, or Cold). Rehydration works in two ways:</p>
+  <ol>
+    <li><strong>Copy to new blob</strong>: use <code>Copy Blob</code> to copy the archived blob to a new online-tier blob. The original archive blob remains. This is the preferred approach as it is non-destructive.</li>
+    <li><strong>Change tier in-place</strong>: set the blob's tier directly to Hot or Cool. The blob transitions in place.</li>
+  </ol>
+
+  <table>
+    <thead>
+      <tr><th>Rehydration priority</th><th>Duration</th><th>Size constraint</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>Standard</strong></td>
+        <td>Up to 15 hours</td>
+        <td>No limit</td>
+      </tr>
+      <tr>
+        <td><strong>High</strong></td>
+        <td>Within 1 hour</td>
+        <td>Objects under 10 GiB only</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="callout callout-danger">
+    <strong>Archive blobs return 409 on direct read attempts</strong>
+    If an application tries to read a blob in the Archive tier without rehydrating first, it receives HTTP 409 (Conflict). There is no automatic background rehydration on read — the operation simply fails. Applications must handle this explicitly: check tier before reading, or implement retry logic after initiating rehydration.
+  </div>
+
+  <h3>Tier Transitions</h3>
+  <p>You can move blobs between any tier. Moving to a colder tier (hot → archive) is instant — no data movement latency. Moving to a warmer tier from archive requires rehydration as described above. Minimum storage duration penalties apply on early transitions to warmer tiers just as they do for deletions.</p>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     LIFECYCLE MANAGEMENT
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Lifecycle Management Policies</h2>
+  <p>Lifecycle management policies automate blob tier transitions and deletions based on age criteria. They are defined as JSON rules and evaluated daily — Azure scans the storage account and applies matching rules.</p>
+
+  <h3>Rule Structure</h3>
+  <p>Each rule has three components:</p>
+  <ul>
+    <li><strong>Filters</strong>: scope which blobs the rule applies to — by blob type (blockBlob, appendBlob), by prefix match (e.g. <code>logs/</code>), by minimum/maximum blob size.</li>
+    <li><strong>Actions</strong>: what to do — <code>tierToCool</code>, <code>tierToCold</code>, <code>tierToArchive</code>, or <code>delete</code>.</li>
+    <li><strong>Conditions</strong>: the age trigger — <code>daysAfterModificationGreaterThan</code>, <code>daysAfterCreationGreaterThan</code>, or <code>daysAfterLastAccessTimeGreaterThan</code> (requires last access time tracking to be enabled).</li>
+  </ul>
+
+  <div class="callout callout-info">
+    <strong>Last access time tracking adds overhead</strong>
+    Access-time-based lifecycle rules require enabling last access time tracking on the storage account. This adds a small performance and cost overhead because Azure must update the last-access timestamp on every read operation. Only enable it if you genuinely use access-time-based policies.
+  </div>
+
+  <h3>Example Lifecycle Policy JSON</h3>
+  <pre><code>{
+  "rules": [
+    {
+      "name": "tiering-rule",
+      "type": "Lifecycle",
+      "definition": {
+        "filters": {
+          "blobTypes": ["blockBlob"],
+          "prefixMatch": ["data/"]
+        },
+        "actions": {
+          "baseBlob": {
+            "tierToCool": { "daysAfterModificationGreaterThan": 30 },
+            "tierToArchive": { "daysAfterModificationGreaterThan": 90 },
+            "delete": { "daysAfterModificationGreaterThan": 365 }
+          }
+        }
+      }
+    }
+  ]
+}</code></pre>
+
+  <p>This policy targets block blobs under the <code>data/</code> prefix and: moves them to Cool after 30 days, to Archive after 90 days, and deletes them after 365 days of inactivity — all without any manual intervention.</p>
+
+  <h3>Lifecycle Rules for Versions and Snapshots</h3>
+  <p>Lifecycle management rules can also target blob versions and snapshots separately from the current version. This is important when blob versioning is enabled: previous versions accumulate and incur storage costs. A separate rule can archive or delete previous versions after a defined period.</p>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     SAS TOKENS
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Shared Access Signatures (SAS)</h2>
+  <p>A SAS is a URI with embedded query parameters that grants scoped, time-limited access to storage resources without sharing the account key. This is the standard mechanism for granting third-party or temporary access to specific blobs or containers.</p>
+
+  <h3>The Three SAS Types</h3>
+  <table>
+    <thead>
+      <tr><th>Type</th><th>Signed with</th><th>Scope</th><th>Security level</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>Account SAS</strong></td>
+        <td>Storage account key</td>
+        <td>Multiple services in one account</td>
+        <td>Lowest — key compromise invalidates all account SAS</td>
+      </tr>
+      <tr>
+        <td><strong>Service SAS</strong></td>
+        <td>Storage account key</td>
+        <td>One service (e.g. one blob container)</td>
+        <td>Medium — tighter scope but still key-signed</td>
+      </tr>
+      <tr>
+        <td><strong>User Delegation SAS</strong></td>
+        <td>Entra ID credentials</td>
+        <td>Blob and ADLS Gen2 only</td>
+        <td>Highest — no account key involved; backed by identity</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="callout callout-info">
+    <strong>Always prefer User Delegation SAS</strong>
+    User Delegation SAS (UDS) is the most secure SAS type because it is not signed with a storage account key. Even if the SAS URI is leaked, rotating the account key does not invalidate it — but revoking the user's access in Entra ID or waiting for UDS expiry does. For Blob and ADLS Gen2 workloads, there is no reason to use an Account or Service SAS if you have Entra ID identities available.
+  </div>
+
+  <h3>SAS Key Parameters</h3>
+  <p>A SAS URI includes these query parameters (abbreviated):</p>
+  <ul>
+    <li><code>sp</code> — signed permissions: <code>r</code>=read, <code>w</code>=write, <code>d</code>=delete, <code>l</code>=list, <code>a</code>=add, <code>c</code>=create</li>
+    <li><code>st</code> / <code>se</code> — start time and expiry time (ISO 8601)</li>
+    <li><code>sip</code> — allowed IP addresses or ranges</li>
+    <li><code>spr</code> — protocol restriction (<code>https</code> only in production — never allow HTTP)</li>
+    <li><code>sig</code> — the HMAC-SHA256 signature computed from the parameters</li>
+  </ul>
+
+  <h3>Stored Access Policies</h3>
+  <p>A Stored Access Policy is a named policy defined on a container (or queue/table/file share). You attach a Service SAS to a Stored Access Policy instead of baking the permissions and expiry directly into the SAS URI. The benefit: <strong>you can revoke the SAS by deleting the policy</strong>, without rotating the storage account key.</p>
+
+  <h3>Revoking a SAS — The Full Matrix</h3>
+  <table>
+    <thead>
+      <tr><th>SAS type</th><th>How to revoke immediately</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>Account SAS or Service SAS (no stored policy)</td>
+        <td>Rotate the storage account key used to sign it — invalidates ALL SAS signed with that key</td>
+      </tr>
+      <tr>
+        <td>Service SAS with Stored Access Policy</td>
+        <td>Delete or modify the Stored Access Policy on the container</td>
+      </tr>
+      <tr>
+        <td>User Delegation SAS</td>
+        <td>Revoke the user's Entra ID permissions, or wait for expiry. Rotating the key has no effect.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="callout callout-danger">
+    <strong>Rotating keys invalidates ALL key-signed SAS simultaneously</strong>
+    When you rotate a storage account key, every Account SAS and Service SAS signed with that key — across all applications, all environments — becomes invalid instantly. Before rotating, audit all consumers of key-signed SAS and have a plan for issuing new ones. This is a significant operational risk, which is another reason to prefer User Delegation SAS and Entra ID-based access.
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     DATA PROTECTION
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Data Protection Features</h2>
+  <p>Azure Blob Storage has multiple overlapping data protection capabilities. Understanding when to use each — and how they interact — is critical for both production design and exam questions.</p>
+
+  <h3>Protection Feature Overview</h3>
+  <table>
+    <thead>
+      <tr><th>Feature</th><th>Protects against</th><th>Recovery method</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>Soft delete (blobs)</strong></td>
+        <td>Accidental blob deletion or overwrite</td>
+        <td>Undelete within retention period (1–365 days)</td>
+      </tr>
+      <tr>
+        <td><strong>Soft delete (containers)</strong></td>
+        <td>Accidental container deletion (must enable separately)</td>
+        <td>Undelete container within retention period</td>
+      </tr>
+      <tr>
+        <td><strong>Blob versioning</strong></td>
+        <td>Overwrites — each write creates a new version</td>
+        <td>Promote any previous version to current</td>
+      </tr>
+      <tr>
+        <td><strong>Point-in-time restore</strong></td>
+        <td>Bulk accidental delete or corruption across blobs</td>
+        <td>Restore all block blobs to a past timestamp</td>
+      </tr>
+      <tr>
+        <td><strong>Immutability (WORM)</strong></td>
+        <td>Regulatory requirement — blobs cannot be modified or deleted</td>
+        <td>N/A — data cannot be altered until policy expires</td>
+      </tr>
+      <tr>
+        <td><strong>Change feed</strong></td>
+        <td>Audit trail — durable ordered log of all blob changes</td>
+        <td>Replay log for event-driven recovery or auditing</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>Point-in-Time Restore Dependencies</h3>
+  <p>Point-in-time restore for block blobs requires <em>all three</em> of the following to be enabled on the storage account:</p>
+  <ol>
+    <li><strong>Blob versioning</strong> — maintains previous states</li>
+    <li><strong>Blob soft delete</strong> — protects deleted blobs during the restore window</li>
+    <li><strong>Change feed</strong> — provides the ordered change log that restoration uses</li>
+  </ol>
+  <p>The restore point cannot be older than the soft delete retention period and cannot be more recent than the last 15 minutes (to allow change feed propagation).</p>
+
+  <h3>Immutability Policies (WORM)</h3>
+  <p>WORM (Write Once Read Many) compliance is implemented via two policy types:</p>
+  <ul>
+    <li><strong>Time-based retention policy</strong>: blobs cannot be modified or deleted until the retention period expires. Can be applied at the container or blob-version level. Can be locked (making the policy itself immutable — required for SEC 17a-4 and similar regulations).</li>
+    <li><strong>Legal hold</strong>: blocks modification and deletion indefinitely until the legal hold tag is removed. Used during litigation or regulatory investigation when no defined retention period is known.</li>
+  </ul>
+
+  <div class="callout callout-warn">
+    <strong>Locking an immutability policy is irreversible</strong>
+    When you lock a time-based retention policy on a container, you cannot reduce the retention period or delete the policy — you can only extend it. This is intentional (SEC 17a-4 compliance requires it) but means a misconfigured retention period can result in unbillable storage that cannot be deleted for years. Verify the retention period carefully before locking.
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     QUIZ
+═══════════════════════════════════════════════ -->
+<section class="quiz">
+  <h2>Check Your Understanding</h2>
+  <p>Click any option to see immediate feedback. Answers represent correct behaviour in a real Azure environment.</p>
+
+  <!-- Q1 -->
+  <div class="quiz-question" data-correct="a">
+    <p>1. A security audit finds your application is using storage account access keys embedded in its configuration. What is the most secure replacement approach?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q1"> Assign the Storage Blob Data Contributor role to the application's managed identity, use DefaultAzureCredential in the app, and disable shared key auth on the storage account</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q1"> Store the access keys in Azure Key Vault and retrieve them at runtime via Key Vault secret references</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q1"> Generate a User Delegation SAS token and embed the SAS URI in the application configuration instead</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q1"> Rotate the storage access keys every 30 days using an Azure Automation runbook to reduce exposure</label>
+    </div>
+    <div class="quiz-feedback">The most secure approach eliminates secrets entirely. A managed identity authenticates to Azure storage via Entra ID — no key, no SAS, no secret to store, rotate, or leak. DefaultAzureCredential automatically uses the managed identity when running in Azure. Storing keys in Key Vault (option B) still requires a secret to exist and be retrieved. A User Delegation SAS (option C) still has a time-limited URI that can be leaked. Key rotation (option D) reduces the exposure window but does not eliminate the secret.</div>
+  </div>
+
+  <!-- Q2 -->
+  <div class="quiz-question" data-correct="a">
+    <p>2. A blob is in the Archive tier. An application tries to read it immediately without rehydrating. What happens?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q2"> The read fails with HTTP 409 — Archive blobs are offline and must be rehydrated to Hot, Cool, or Cold tier before they can be read</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q2"> The read succeeds but with significantly higher latency than Hot tier blobs (typically over 10 seconds)</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q2"> The read succeeds and automatically triggers background rehydration to Cool tier for future requests</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q2"> The read succeeds if and only if the application uses the Azure Storage SDK with retry logic enabled</label>
+    </div>
+    <div class="quiz-feedback">Archive blobs are physically offline — they are not immediately accessible under any circumstances. Reading an archived blob returns HTTP 409 (Conflict) with error code BlobArchived. There is no automatic rehydration on read. The application must first call SetBlobTier to initiate rehydration (Standard: up to 15 hours; High priority: under 1 hour for blobs under 10 GiB), then poll until the blob is online before reading.</div>
+  </div>
+
+  <!-- Q3 -->
+  <div class="quiz-question" data-correct="a">
+    <p>3. You need to ensure a container's blobs cannot be deleted for 7 years to meet compliance requirements. How do you implement this?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q3"> Configure a time-based immutability policy (WORM) on the container with a 7-year retention period — blobs cannot be deleted or modified until the policy expires</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q3"> Enable soft delete with a 365-day retention period and cascade it annually to cover a 7-year window</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q3"> Apply a CanNotDelete resource lock to the container resource to block deletion for seven years</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q3"> Configure blob versioning and remove all delete permissions from RBAC roles for seven years</label>
+    </div>
+    <div class="quiz-feedback">Time-based immutability (WORM) policies are the correct answer for compliance retention requirements. They prevent deletion and modification at the storage engine level, not through RBAC or locks. Soft delete (option B) only retains deleted blobs for a maximum of 365 days — insufficient for 7 years. Resource locks (option C) can be removed by anyone with Owner role. RBAC (option D) can be reassigned. Only WORM provides the tamper-resistant protection that compliance frameworks require.</div>
+  </div>
+
+  <!-- Q4 -->
+  <div class="quiz-question" data-correct="a">
+    <p>4. You create a Service SAS for a blob container valid for 7 days. After 2 days you discover the SAS URI has been leaked. What is the fastest way to invalidate it?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q4"> Rotate the storage account key used to sign the SAS — this immediately invalidates all SAS tokens signed with that key</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q4"> Delete the blob container and recreate it with the same name to invalidate all existing SAS tokens</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q4"> Set the storage account firewall to block all IP addresses until the SAS naturally expires in 5 days</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q4"> Wait for the SAS to expire naturally — there is no revocation mechanism for a non-policy-backed SAS</label>
+    </div>
+    <div class="quiz-feedback">For a Service SAS (or Account SAS) not backed by a Stored Access Policy, rotating the account key is the only immediate revocation mechanism. This invalidates every SAS signed with that key simultaneously. The operational cost is significant — all other services using that key must be updated. This is why Stored Access Policies (which allow targeted revocation) and User Delegation SAS (which can be revoked via Entra ID) are preferred for production scenarios.</div>
+  </div>
+
+  <!-- Q5 -->
+  <div class="quiz-question" data-correct="a">
+    <p>5. You want blobs automatically moved to Archive tier 90 days after last modification, and deleted entirely after 365 days. Which feature implements this?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q5"> A Lifecycle Management policy with tierToArchive at daysAfterModificationGreaterThan 90 and delete at daysAfterModificationGreaterThan 365</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q5"> An Azure Function triggered by Event Grid blob modification events evaluating age and moving blobs manually</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q5"> A manual Azure Automation runbook that queries blob metadata nightly and moves blobs based on age</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q5"> Azure Backup retention policies configured on the storage account to control blob lifecycle automatically</label>
+    </div>
+    <div class="quiz-feedback">Lifecycle Management policies are the built-in, serverless, zero-maintenance answer. They evaluate daily and apply tier transitions and deletions automatically based on modification date (or creation date, or last access time if tracking is enabled). Azure Functions (option B) and Automation runbooks (option C) are functional but require you to build and maintain custom code. Azure Backup retention (option D) does not apply to individual blob tiers — it is for backup recovery points.</div>
+  </div>
+
+  <!-- Q6 -->
+  <div class="quiz-question" data-correct="a">
+    <p>6. Your application generates append-only log files stored in Azure Blob Storage. Which blob type should you use?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q6"> Append blobs — specifically optimised for append-only workloads like logging; designed to add new data to the end without modifying existing blocks</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q6"> Block blobs — require downloading the full blob, appending locally, and re-uploading the entire blob to add new log entries</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q6"> Page blobs — designed for random access patterns which can be adapted for sequential log appending operations</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q6"> Standard file blobs — the default blob type used for text-based workloads such as log file storage</label>
+    </div>
+    <div class="quiz-feedback">Append blobs are the correct and purpose-built answer. Each append operation adds a new block to the end of the blob — existing blocks are immutable and the operation is atomic. This is ideal for logging. Block blobs (option B) support append via Put Block, but the full-write pattern described is not how the SDK works — the real issue is that block blobs don't have a native append semantic for concurrent writers. Page blobs (option C) are for random I/O. "Standard file blobs" (option D) is not a real blob type.</div>
+  </div>
+
+  <div class="quiz-score"></div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     PRIMARY SOURCE
+═══════════════════════════════════════════════ -->
+<div class="primary-source">
+  <strong>Primary source for this lesson</strong>
+  <a href="https://learn.microsoft.com/en-us/azure/storage/blobs/storage-blobs-overview" target="_blank">
+    Introduction to Azure Blob Storage (Microsoft Learn)
+  </a>
+  <p style="margin-top:0.5rem;font-size:0.9rem;color:#deecf9;">Also read: <a href="https://learn.microsoft.com/en-us/azure/storage/common/storage-sas-overview" target="_blank" style="color:#90caf9;">Grant limited access with SAS</a>, <a href="https://learn.microsoft.com/en-us/azure/storage/blobs/lifecycle-management-overview" target="_blank" style="color:#90caf9;">Lifecycle management overview</a>, and <a href="https://learn.microsoft.com/en-us/azure/storage/blobs/immutable-storage-overview" target="_blank" style="color:#90caf9;">Immutable blob storage overview</a>.</p>
+</div>
+
+<!-- ═══════════════════════════════════════════════
+     ASK YOUR TEACHER
+═══════════════════════════════════════════════ -->
+<div class="ask-teacher">
+  <strong>Questions for your teacher (the AI agent)</strong><br>
+  This lesson covered blob types, access tiers, SAS tokens, lifecycle management, and data protection. Go deeper on:
+  <ul style="margin-top:0.5rem;">
+    <li>Walk me through generating a User Delegation SAS using the Azure CLI with specific permissions and a 2-hour expiry.</li>
+    <li>How do I set up point-in-time restore and what are the exact steps to initiate a restoration to a specific timestamp?</li>
+    <li>What is the difference between a versioning delete marker and a soft-deleted blob — how do they interact in Cost Management?</li>
+    <li>Can I apply a lifecycle policy rule specifically to previous blob versions to prevent unbounded version accumulation?</li>
+    <li>How does a legal hold interact with a time-based retention policy on the same container?</li>
+  </ul>
+</div>
+
+<!-- ═══════════════════════════════════════════════
+     NEXT LESSON PREVIEW
+═══════════════════════════════════════════════ -->
+<div class="callout callout-info">
+  <strong>Coming up: Lesson 08 — Azure Files: SMB, NFS &amp; Sync</strong>
+  The next lesson shifts from unstructured blob storage to structured file shares. Azure Files provides fully managed SMB and NFS file shares in the cloud. We cover share types, authentication (Kerberos vs. on-premises AD DS vs. Entra Kerberos), Azure File Sync for hybrid scenarios, and snapshot management. This is a common exam domain for candidates with a Windows Server background.
+</div>
+
+<!-- ═══════════════════════════════════════════════
+     NAVIGATION
+═══════════════════════════════════════════════ -->
+<nav class="lesson-nav">
+  <a href="0006-storage-accounts.html">← Lesson 06 — Storage Accounts</a>
+  <a href="0008-azure-files.html">Lesson 08 — Azure Files →</a>
+</nav>
+
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

@@ -1,0 +1,481 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lesson 14 — Virtual Networks &amp; Subnets</title>
+  <link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<!-- ═══════════════════════════════════════════════
+     HEADER
+═══════════════════════════════════════════════ -->
+<header class="lesson-header">
+  <h1>Lesson 14 — Virtual Networks &amp; Subnets</h1>
+  <div class="lesson-meta">
+    <span class="badge badge-domain">Domain 4 — Networking</span>
+    <span class="badge badge-exam">AZ-104: 15–20%</span>
+    <span class="badge badge-time">~35 min</span>
+    <span class="badge badge-prereq">Prereq: Lessons 01–13</span>
+  </div>
+</header>
+
+<!-- ═══════════════════════════════════════════════
+     WHY THIS MATTERS
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Why You Need to Understand This First</h2>
+  <p>Every Azure workload runs inside a Virtual Network, or connects through one. VNets are the foundational networking primitive — they determine how VMs talk to each other, how resources connect to the internet, how traffic is inspected, and where PaaS services are reachable. Without a solid understanding of VNet structure, address spaces, subnets, and routing, every subsequent networking topic (NSGs, peering, private endpoints, VPN gateways) will feel arbitrary.</p>
+  <p>On the AZ-104 exam, networking accounts for 15–20% of questions. Most of these questions assume you can reason through IP addressing, route precedence, and subnet sizing without hesitation. This lesson gives you that foundation.</p>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     VNET FUNDAMENTALS
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>VNet Fundamentals</h2>
+  <p>An Azure <strong>Virtual Network (VNet)</strong> is a logically isolated network in the Azure cloud. Resources deployed into a VNet communicate with each other using private IP addresses by default — no public internet exposure, no routing through Microsoft's external network.</p>
+
+  <ul>
+    <li><strong>Region-specific:</strong> a VNet always lives in exactly one Azure region. You cannot stretch a single VNet across regions. For cross-region connectivity you use VNet Peering or a VPN Gateway.</li>
+    <li><strong>Availability zones:</strong> a single VNet can span all availability zones within its region. A subnet in that VNet also spans all AZs — you do not need separate subnets per AZ.</li>
+    <li><strong>No cost for the VNet itself:</strong> creating a VNet is free. You pay for associated resources (public IPs, gateways, firewalls) not for the VNet or subnets.</li>
+    <li><strong>Soft isolation boundary:</strong> resources in different VNets cannot communicate by default, even within the same subscription. Peering or gateways must be explicitly configured.</li>
+  </ul>
+
+  <div class="hierarchy">
+<span class="hier-tenant">Azure Region (e.g. East US)</span>
+<span class="hier-sub">  └─ VNet: 10.10.0.0/16</span>
+<span class="hier-rg">       ├─ Subnet: 10.10.1.0/24  (WebTier)</span>
+<span class="hier-rg">       │    ├─ VM: 10.10.1.4</span>
+<span class="hier-rg">       │    ├─ VM: 10.10.1.5</span>
+<span class="hier-rg">       │    └─ VM: 10.10.1.6</span>
+<span class="hier-rg">       ├─ Subnet: 10.10.2.0/24  (AppTier)</span>
+<span class="hier-rg">       │    ├─ VM: 10.10.2.4</span>
+<span class="hier-rg">       │    └─ VM: 10.10.2.5</span>
+<span class="hier-rg">       └─ Subnet: 10.10.3.0/28  (GatewaySubnet)</span>
+<span class="hier-resource">            └─ VPN Gateway NIC: 10.10.3.4</span>
+  </div>
+
+  <div class="callout callout-info">
+    <strong>VNet ≠ Subscription boundary</strong>
+    A single subscription can have up to 1,000 VNets per region. Multiple VNets in the same subscription do not automatically communicate — each is isolated. You must explicitly configure peering, VPN, or ExpressRoute connections.
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     ADDRESS SPACE
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Address Space &amp; CIDR Planning</h2>
+  <p>When you create a VNet, you assign one or more <strong>address spaces</strong> in CIDR notation. All subnets within the VNet must fall within these address spaces. You can add address spaces later, but you cannot remove an address space that contains active subnets.</p>
+
+  <h3>RFC 1918 private ranges</h3>
+  <p>Always use RFC 1918 private ranges for VNet address spaces. These ranges are not routable on the public internet:</p>
+  <table>
+    <thead>
+      <tr><th>Range</th><th>CIDR</th><th>Addresses</th><th>Common Azure use</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>10.0.0.0</code></td><td>/8</td><td>16,777,216</td><td>Large enterprises — subdivided per region/spoke</td></tr>
+      <tr><td><code>172.16.0.0</code></td><td>/12</td><td>1,048,576</td><td>Medium environments</td></tr>
+      <tr><td><code>192.168.0.0</code></td><td>/16</td><td>65,536</td><td>Small workloads / dev environments</td></tr>
+    </tbody>
+  </table>
+
+  <div class="callout callout-danger">
+    <strong>Non-overlapping is non-negotiable</strong>
+    If you plan to connect your VNet to on-premises via VPN or ExpressRoute, or peer it with other VNets, the address spaces must not overlap. Overlap means routing ambiguity — Azure will refuse to create the peering or gateway connection. Plan your address space before deploying anything into it. Changing it later requires deleting and recreating subnets.
+  </div>
+
+  <h3>Practical CIDR reference</h3>
+  <table>
+    <thead>
+      <tr><th>CIDR</th><th>Total IPs</th><th>Azure-usable IPs</th><th>Typical use</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>/16</td><td>65,536</td><td>65,531</td><td>Hub or large spoke VNet</td></tr>
+      <tr><td>/24</td><td>256</td><td>251</td><td>Standard application subnet</td></tr>
+      <tr><td>/26</td><td>64</td><td>59</td><td>AzureFirewallSubnet minimum</td></tr>
+      <tr><td>/27</td><td>32</td><td>27</td><td>GatewaySubnet minimum (recommended)</td></tr>
+      <tr><td>/28</td><td>16</td><td>11</td><td>Small service subnet</td></tr>
+      <tr><td>/29</td><td>8</td><td>3</td><td>Absolute minimum — avoid in practice</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     SUBNETS
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Subnets &amp; Azure Reserved Addresses</h2>
+  <p>A <strong>subnet</strong> divides a VNet's address space into smaller segments. Every resource that requires network connectivity (VMs, load balancers, App Service Environments, etc.) must be deployed into a subnet.</p>
+
+  <h3>The 5 reserved addresses per subnet</h3>
+  <p>Azure reserves <strong>5 IP addresses</strong> from every subnet. You cannot assign these to resources:</p>
+  <table>
+    <thead>
+      <tr><th>Reserved IP</th><th>Purpose</th><th>Example (/24 starting at 10.10.1.0)</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>First address (.0)</td><td>Network address</td><td>10.10.1.0</td></tr>
+      <tr><td>Second address (.1)</td><td>Default gateway</td><td>10.10.1.1</td></tr>
+      <tr><td>Third address (.2)</td><td>DNS mapping (Azure DNS)</td><td>10.10.1.2</td></tr>
+      <tr><td>Fourth address (.3)</td><td>DNS mapping (Azure DNS)</td><td>10.10.1.3</td></tr>
+      <tr><td>Last address (.255)</td><td>Broadcast address</td><td>10.10.1.255</td></tr>
+    </tbody>
+  </table>
+
+  <div class="callout callout-warn">
+    <strong>Subnet sizing exam trap</strong>
+    A <strong>/27 subnet has 32 IPs. Azure reserves 5, leaving 27 usable IPs for resources.</strong> A /29 has 8 IPs, reserves 5, leaving only 3 — this is the smallest possible subnet. For any production workload, use /28 (11 usable) as a minimum. When planning VM-dense subnets, remember that each VM NIC consumes one IP, plus any attached load balancer front-end IPs or private endpoints.
+  </div>
+
+  <h3>Subnet properties</h3>
+  <ul>
+    <li>Subnets span all availability zones within the VNet's region — you do not need to create per-AZ subnets.</li>
+    <li>A subnet cannot span multiple VNets or multiple regions.</li>
+    <li>You can add subnets to a VNet at any time without downtime to existing resources.</li>
+    <li>Subnets can optionally have an NSG associated (traffic filtering) and a Route Table associated (custom routing).</li>
+  </ul>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     SERVICE DELEGATION
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Service Delegation</h2>
+  <p><strong>Service delegation</strong> reserves a subnet exclusively for a specific Azure managed service. When you delegate a subnet to a service, that service gains the permission to configure the subnet and inject resources directly into it with private IPs from your address space.</p>
+
+  <h3>Common service delegations</h3>
+  <table>
+    <thead>
+      <tr><th>Delegation value</th><th>Service</th><th>Notes</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>Microsoft.Web/serverFarms</code></td><td>App Service (VNet Integration)</td><td>Outbound VNet integration for App Service Plans</td></tr>
+      <tr><td><code>Microsoft.Sql/managedInstances</code></td><td>SQL Managed Instance</td><td>Requires dedicated subnet; mandatory delegation</td></tr>
+      <tr><td><code>Microsoft.ContainerInstance/containerGroups</code></td><td>Azure Container Instances</td><td>ACI with VNet injection</td></tr>
+      <tr><td><code>Microsoft.Databricks/workspaces</code></td><td>Azure Databricks</td><td>Requires 2 delegated subnets (public + private)</td></tr>
+      <tr><td><code>Microsoft.NetApp/volumes</code></td><td>Azure NetApp Files</td><td>Dedicated subnet required</td></tr>
+    </tbody>
+  </table>
+
+  <div class="callout callout-danger">
+    <strong>Delegation is exclusive</strong>
+    Once a subnet is delegated to a service, you cannot deploy other resource types (VMs, other Azure services) into it. The subnet is reserved entirely for that service. Plan delegated subnets as purpose-built allocations — size them for the service's scale requirements, not for general use.
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     USER DEFINED ROUTES
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>User Defined Routes (UDR) &amp; Route Tables</h2>
+  <p>Azure automatically creates <strong>system routes</strong> for every subnet: a route for the VNet address space (to keep intra-VNet traffic local), a default internet route (0.0.0.0/0 → Internet), and routes for any peered VNets or connected gateways. You can override these with <strong>User Defined Routes</strong>.</p>
+
+  <h3>UDR next hop types</h3>
+  <table>
+    <thead>
+      <tr><th>Next Hop Type</th><th>Behaviour</th><th>When to use</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><strong>VirtualNetwork</strong></td><td>Routes within the VNet address space</td><td>Rarely overridden — system handles this</td></tr>
+      <tr><td><strong>Internet</strong></td><td>Sends traffic to the public internet</td><td>Explicitly route traffic out via internet</td></tr>
+      <tr><td><strong>VirtualAppliance</strong></td><td>Forwards traffic to a specific private IP (NVA or Azure Firewall)</td><td>Force internet traffic or spoke-to-spoke through a firewall</td></tr>
+      <tr><td><strong>VirtualNetworkGateway</strong></td><td>Routes to VPN or ExpressRoute gateway</td><td>Injected automatically by gateway; rarely set manually</td></tr>
+      <tr><td><strong>None</strong></td><td>Drops the traffic (black hole)</td><td>Block specific destinations at the routing layer</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Forced tunneling pattern</h3>
+  <p>The most common UDR pattern in enterprise environments is <strong>forced tunneling</strong> through Azure Firewall:</p>
+  <pre><code>Route Table: rt-spoke-webtier
+  Route: 0.0.0.0/0  →  VirtualAppliance  →  10.10.0.4  (Azure Firewall private IP)
+  Associated to: subnet-webtier, subnet-apptier</code></pre>
+
+  <p>This overrides the default internet route, forcing all outbound internet traffic from those subnets through the Azure Firewall for inspection before it leaves the VNet.</p>
+
+  <div class="callout callout-warn">
+    <strong>Route Table association is per-subnet</strong>
+    A route table must be explicitly associated with each subnet you want to affect. Creating a route table and adding routes does nothing until it is associated. Multiple subnets can share the same route table. A subnet can have at most one route table associated with it.
+  </div>
+
+  <div class="callout callout-info">
+    <strong>Longest prefix match wins</strong>
+    When multiple routes match a destination, Azure selects the most specific route (longest prefix match). A /32 route to a specific host IP overrides a /24 subnet route, which overrides a /0 default route. User-defined routes override system routes for the same prefix.
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     AZURE FIREWALL
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Azure Firewall (NVA Reference Point)</h2>
+  <p><strong>Azure Firewall</strong> is a managed, stateful, cloud-native firewall-as-a-service. For the AZ-104 exam you do not need deep Firewall configuration knowledge — but you must understand it as the canonical NVA (Network Virtual Appliance) target for UDRs and the hub-spoke pattern.</p>
+
+  <h3>Key deployment facts</h3>
+  <ul>
+    <li>Deployed into a dedicated subnet named <code>AzureFirewallSubnet</code> — this exact name is required.</li>
+    <li>Minimum subnet size: <strong>/26</strong> (64 IPs). Microsoft recommends /26 to accommodate scaling.</li>
+    <li>Requires a Standard or Premium tier public IP (Standard SKU, static allocation).</li>
+    <li>Stateful — return traffic is automatically allowed; no need for reverse rules.</li>
+  </ul>
+
+  <h3>Rule types (know the names)</h3>
+  <table>
+    <thead>
+      <tr><th>Rule type</th><th>Layer</th><th>What it matches</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Network rules</td><td>L4</td><td>Source IP, destination IP, protocol, port</td></tr>
+      <tr><td>Application rules</td><td>L7</td><td>FQDNs, URLs, HTTP/S traffic categories</td></tr>
+      <tr><td>DNAT rules</td><td>L4</td><td>Inbound port forwarding from public IP to private backend</td></tr>
+    </tbody>
+  </table>
+
+  <div class="callout callout-info">
+    <strong>Exam context for Azure Firewall</strong>
+    AZ-104 questions on Azure Firewall typically centre on: (1) what subnet name and minimum size is required, (2) how UDRs direct traffic to the Firewall's private IP, and (3) the forced tunneling pattern. Deep Firewall policy configuration belongs to AZ-700 (Network Engineer).
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     DNS IN VNETS
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>DNS in Virtual Networks</h2>
+  <p>DNS configuration in a VNet determines how all VMs in that VNet resolve hostnames. There are two modes: Azure-provided DNS and custom DNS servers.</p>
+
+  <h3>Azure-provided DNS (default)</h3>
+  <p>By default, VMs in a VNet use Azure's recursive DNS resolver at <strong>168.63.129.16</strong>. This virtual IP provides:</p>
+  <ul>
+    <li>Resolution of Azure-provided internal hostnames (e.g. <code>vm-name.internal.cloudapp.net</code>)</li>
+    <li>Resolution of names in <strong>Private DNS Zones</strong> that are linked to the VNet</li>
+    <li>Forwarding of all other queries to Azure's public DNS resolvers</li>
+  </ul>
+
+  <h3>Custom DNS servers</h3>
+  <p>Set custom DNS server IPs at the <strong>VNet level</strong> (Settings → DNS servers). This overrides 168.63.129.16 for all VMs in the VNet. Use cases:</p>
+  <ul>
+    <li><strong>Hybrid DNS:</strong> forward queries for on-premises domain (<code>corp.contoso.com</code>) to an on-premises DNS server</li>
+    <li><strong>Custom resolver:</strong> an Azure DNS Private Resolver or Windows Server DNS in the VNet</li>
+    <li><strong>Split-brain DNS:</strong> different resolution for internal vs external callers</li>
+  </ul>
+
+  <div class="callout callout-danger">
+    <strong>VM restart required after DNS change</strong>
+    VMs receive their DNS server setting via DHCP at startup. If you change the DNS servers on a VNet, <strong>existing VMs do not pick up the change until they are stopped (deallocated) and started again</strong>. A reboot is not sufficient — the VM must be deallocated to receive a fresh DHCP lease. This is a frequent exam question.
+  </div>
+
+  <div class="callout callout-warn">
+    <strong>Do not point VNet DNS directly at 168.63.129.16 as a custom server</strong>
+    If you configure custom DNS and need Azure DNS resolution (for Private DNS Zones), either use Azure DNS Private Resolver or add a forwarder in your custom DNS server that forwards Azure-specific zones to 168.63.129.16. Pointing directly at 168.63.129.16 in the custom DNS field actually works, but is not the recommended pattern for complex hybrid environments.
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     PUBLIC IP ADDRESSES
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Public IP Addresses</h2>
+  <p>Azure Public IP addresses attach to resources (VM NICs, Load Balancers, Application Gateways, Bastion, Firewall) to provide inbound and/or outbound internet connectivity. Public IPs come in two SKUs and two allocation methods.</p>
+
+  <h3>Basic SKU vs Standard SKU</h3>
+  <table>
+    <thead>
+      <tr><th>Feature</th><th>Basic SKU</th><th>Standard SKU</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Zone redundancy</td><td>Not zone-redundant</td><td>Zone-redundant by default</td></tr>
+      <tr><td>Default allocation</td><td>Dynamic (or static)</td><td>Static only</td></tr>
+      <tr><td>Inbound security (default)</td><td>Open — inbound allowed by default</td><td>Secure — all inbound blocked unless NSG permits</td></tr>
+      <tr><td>Load Balancer compatibility</td><td>Basic Load Balancer only</td><td>Standard Load Balancer required</td></tr>
+      <tr><td>App Gateway v2</td><td>Not supported</td><td>Required</td></tr>
+      <tr><td>Availability</td><td>Retiring November 2025</td><td>Current; use for all new deployments</td></tr>
+      <tr><td>Routing preference</td><td>Microsoft network only</td><td>Microsoft network or Internet routing</td></tr>
+    </tbody>
+  </table>
+
+  <div class="callout callout-danger">
+    <strong>Basic SKU is retiring</strong>
+    Basic Public IPs are being retired. For the AZ-104 exam you need to know the differences above, especially: Standard SKU is <strong>secure by default</strong> (all inbound blocked), requires an NSG to allow traffic, uses static allocation, and is required for Standard Load Balancer and Application Gateway v2. Basic SKU is open by default. Always use Standard for any new resource.
+  </div>
+
+  <h3>Allocation methods</h3>
+  <ul>
+    <li><strong>Dynamic allocation:</strong> IP is assigned when the resource starts and released when it is stopped/deallocated. The IP address can change between stop-start cycles. Basic SKU supports dynamic; Standard SKU is always static.</li>
+    <li><strong>Static allocation:</strong> IP is assigned when you create the public IP resource and held until you explicitly delete it — does not change on stop/start. Standard SKU is always static. Required for DNS A records, TLS certificates tied to IP, and scenarios needing a predictable inbound address.</li>
+  </ul>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     ENTERPRISE ADDRESS SPACE PLANNING
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Enterprise Address Space Planning</h2>
+  <p>Ad hoc IP address planning is one of the most painful technical debts in Azure environments. Retrofitting overlapping address spaces after deployment can require destroying and rebuilding entire VNets. Get this right at the start.</p>
+
+  <h3>Planning principles</h3>
+  <ul>
+    <li><strong>Reserve large blocks per region:</strong> allocate at least a /16 per region-spoke combination. This gives you 65,536 IPs to subdivide into subnets without running out.</li>
+    <li><strong>Never use 10.0.0.0/8 as one allocation:</strong> do not assign the entire /8 to a single VNet. Divide it into /16 blocks, one per region or business unit (e.g. 10.10.0.0/16 for East US, 10.20.0.0/16 for West Europe, 10.30.0.0/16 for dev, etc.).</li>
+    <li><strong>Document on-premises ranges first:</strong> collect all on-premises CIDR blocks before designing Azure ranges. Non-overlap with on-premises is mandatory for any hybrid scenario.</li>
+    <li><strong>Account for peered VNets:</strong> peered VNets cannot have overlapping address spaces. In a hub-spoke model, all spoke /16s must be unique across the entire estate.</li>
+    <li><strong>Use IPAM tooling:</strong> Azure Virtual Network Manager includes an IPAM feature. Third-party tools (Infoblox, phpIPAM, NetBox) are also common.</li>
+  </ul>
+
+  <h3>Example enterprise allocation</h3>
+  <pre><code>10.0.0.0/8  — Reserved for all Azure
+
+  10.10.0.0/16  — East US: Hub VNet
+    10.10.0.0/24  — AzureFirewallSubnet
+    10.10.1.0/24  — GatewaySubnet
+    10.10.2.0/24  — ManagementSubnet
+
+  10.20.0.0/16  — East US: Spoke-Prod
+    10.20.1.0/24  — WebTier
+    10.20.2.0/24  — AppTier
+    10.20.3.0/24  — DataTier
+
+  10.30.0.0/16  — East US: Spoke-Dev
+    (subdivide as needed)
+
+  10.100.0.0/16  — West Europe: Hub VNet
+  10.110.0.0/16  — West Europe: Spoke-Prod
+
+172.16.0.0/12 — Reserved for on-premises</code></pre>
+
+  <div class="callout callout-info">
+    <strong>Reserved Azure service ranges</strong>
+    Azure uses certain IP ranges internally. Do not use 169.254.0.0/16 (link-local), 168.63.0.0/16 (Azure platform), or 100.64.0.0/10 (CGNAT shared space) in your VNet address spaces. These will cause routing conflicts with Azure internal services.
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     QUIZ
+═══════════════════════════════════════════════ -->
+<section class="quiz">
+  <h2>Check Your Understanding</h2>
+  <p>Click any option to see immediate feedback. Answers reflect real Azure behaviour, not documentation theory.</p>
+
+  <!-- Q1 -->
+  <div class="quiz-question" data-correct="b">
+    <p>1. You create a /27 subnet within a VNet. How many IP addresses are available for virtual machines and other resources?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q1"> 32 — all addresses in a /27 are usable by resources</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q1"> 27 — Azure reserves 5 addresses (first 4 and last 1) from every subnet</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q1"> 30 — Azure only reserves 2 addresses per subnet</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q1"> 25 — Azure reserves 7 addresses including one per AZ</label>
+    </div>
+    <div class="quiz-feedback">A /27 contains 32 IPs. Azure always reserves 5: the network address (.0), default gateway (.1), two DNS addresses (.2 and .3), and broadcast (last IP). That leaves 32 − 5 = 27 usable IPs for resources. This arithmetic is essential for subnet sizing questions.</div>
+  </div>
+
+  <!-- Q2 -->
+  <div class="quiz-question" data-correct="c">
+    <p>2. You need all outbound internet traffic from a subnet to pass through Azure Firewall for inspection. What is the correct configuration?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q2"> Create an NSG rule denying direct internet access and allow only Firewall IPs</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q2"> Configure the VNet DNS server to point to Azure Firewall</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q2"> Create a route table with a 0.0.0.0/0 route, next hop type VirtualAppliance pointing to the Firewall's private IP, then associate it with the subnet</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q2"> Create a 0.0.0.0/0 route with next hop type Internet, then attach it to the Firewall subnet</label>
+    </div>
+    <div class="quiz-feedback">The correct approach is to create a route table with a default route (0.0.0.0/0) whose next hop type is VirtualAppliance and next hop IP is the Azure Firewall's private IP address. Associate this route table with every subnet you want to force through the Firewall. This overrides the system's default internet route for that subnet. NSGs are Layer 4 stateful filters, not routing devices — they cannot redirect traffic to another appliance.</div>
+  </div>
+
+  <!-- Q3 -->
+  <div class="quiz-question" data-correct="a">
+    <p>3. A subnet is delegated to Microsoft.Sql/managedInstances. What restrictions apply to that subnet?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q3"> Only SQL Managed Instance resources can be deployed into it — no VMs, ACI, or other services</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q3"> The subnet can be shared with VMs as long as they are in the same resource group</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q3"> Service delegation is advisory only — other resources can still be deployed with a warning</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q3"> The subnet is restricted to a single SQL MI instance; additional instances need a new subnet</label>
+    </div>
+    <div class="quiz-feedback">Service delegation is exclusive — a delegated subnet is reserved entirely for the designated service. No other resource types can be deployed into a subnet delegated to Microsoft.Sql/managedInstances. This is enforced at the control plane level, not just advisory. SQL Managed Instance also imposes additional requirements: no NSG rules blocking specific ports, no UDRs to certain prefixes, and a dedicated /27 or larger subnet.</div>
+  </div>
+
+  <!-- Q4 -->
+  <div class="quiz-question" data-correct="d">
+    <p>4. You need a public IP address for a new Standard Load Balancer and require the IP to be zone-redundant. Which public IP configuration meets these requirements?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q4"> Basic SKU, dynamic allocation</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q4"> Basic SKU, static allocation</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q4"> Standard SKU, dynamic allocation</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q4"> Standard SKU, static allocation (zone-redundant)</label>
+    </div>
+    <div class="quiz-feedback">Standard Load Balancer requires a Standard SKU public IP — Basic SKU is incompatible. Standard SKU public IPs are always statically allocated and zone-redundant by default. Standard SKU is also secure by default (all inbound blocked until NSG allows it), whereas Basic SKU allows inbound by default. Basic SKU is being retired and should not be used for any new resource.</div>
+  </div>
+
+  <!-- Q5 -->
+  <div class="quiz-question" data-correct="b">
+    <p>5. You change the DNS server setting on a VNet from Azure default to a custom DNS server at 10.10.2.4. When will existing running VMs start using the new DNS server?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q5"> Immediately — VNet DNS changes are pushed to VMs in real time</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q5"> After the VMs are stopped (deallocated) and started again to receive a fresh DHCP lease</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q5"> After the VMs are rebooted (restart from within the OS)</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q5"> After 15 minutes — Azure pushes DHCP updates to running VMs on a timer</label>
+    </div>
+    <div class="quiz-feedback">VMs receive DNS server configuration through DHCP at network interface initialisation — which happens when the VM boots after being allocated. An OS-level reboot does not deallocate the VM, so the NIC retains its existing DHCP configuration. The VM must be <strong>stopped (deallocated)</strong> via the Azure portal or CLI, then started again. "Restart" inside the OS is insufficient.</div>
+  </div>
+
+  <!-- Q6 -->
+  <div class="quiz-question" data-correct="c">
+    <p>6. What is the minimum subnet size in Azure, and how many IPs are usable for resources in that subnet?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q6"> /30 — 2 usable IPs</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q6"> /28 — 11 usable IPs</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q6"> /29 — 3 usable IPs (absolute minimum; use /28 in practice)</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q6"> /27 — 27 usable IPs</label>
+    </div>
+    <div class="quiz-feedback">The absolute minimum subnet size Azure supports is /29 (8 IPs). After Azure reserves 5 addresses, only 3 IPs remain for resources. While /29 is technically valid, it is impractical — even adding a second VM exhausts the subnet. Use /28 (16 IPs, 11 usable) as a practical minimum for most workloads. Note that GatewaySubnet requires at least /27 and AzureFirewallSubnet requires /26.</div>
+  </div>
+
+  <div class="quiz-score"></div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     PRIMARY SOURCE
+═══════════════════════════════════════════════ -->
+<div class="primary-source">
+  <strong>Primary source for this lesson</strong>
+  <a href="https://learn.microsoft.com/en-us/azure/virtual-network/virtual-networks-overview" target="_blank">
+    Azure Virtual Network — Overview (Microsoft Learn)
+  </a>
+  <p style="margin-top:0.5rem;font-size:0.9rem;color:#deecf9;">Read the full overview article and the linked subnet planning guide. Pay particular attention to the reserved address section and the service delegation list — both are directly tested on AZ-104.</p>
+</div>
+
+<!-- ═══════════════════════════════════════════════
+     ASK YOUR TEACHER
+═══════════════════════════════════════════════ -->
+<div class="ask-teacher">
+  <strong>Questions for your teacher (the AI agent)</strong><br>
+  This lesson covered VNet structure, addressing, routing, and public IPs. Go deeper on any of these:
+  <ul style="margin-top:0.5rem;">
+    <li>Walk me through designing a complete address space for a hub-spoke estate with 3 regions and 5 spoke VNets per region.</li>
+    <li>Explain the interaction between UDRs, system routes, and BGP routes — what happens when all three exist for the same prefix?</li>
+    <li>What are the specific NSG and UDR restrictions imposed on a SQL Managed Instance subnet?</li>
+    <li>How does Azure DNS Private Resolver fit into a hybrid DNS architecture, and when should it replace a custom DNS VM?</li>
+  </ul>
+</div>
+
+<!-- ═══════════════════════════════════════════════
+     NEXT LESSON PREVIEW
+═══════════════════════════════════════════════ -->
+<div class="callout callout-info">
+  <strong>Coming up: Lesson 15 — Network Security Groups &amp; Application Security Groups</strong>
+  Now that you can build a VNet and route traffic, the next lesson covers how to control which traffic is allowed or denied — using NSGs for stateful Layer 4 filtering, service tags for managed IP ranges, and Application Security Groups for role-based rules that survive VM IP changes.
+</div>
+
+<!-- ═══════════════════════════════════════════════
+     NAVIGATION
+═══════════════════════════════════════════════ -->
+<nav class="lesson-nav">
+  <a href="0013-bicep-arm.html">← Lesson 13 — Bicep &amp; ARM Templates</a>
+  <a href="0015-nsgs.html">Lesson 15 — NSGs &amp; ASGs →</a>
+</nav>
+
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

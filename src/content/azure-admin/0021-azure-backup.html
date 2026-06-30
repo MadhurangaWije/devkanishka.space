@@ -1,0 +1,499 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lesson 21 — Azure Backup &amp; Recovery Services Vault</title>
+  <link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<!-- ═══════════════════════════════════════════════
+     HEADER
+═══════════════════════════════════════════════ -->
+<header class="lesson-header">
+  <h1>Lesson 21 — Azure Backup &amp; Recovery Services Vault</h1>
+  <div class="lesson-meta">
+    <span class="badge badge-domain">Domain 5 — Monitor &amp; Maintain</span>
+    <span class="badge badge-exam">AZ-104: 10–15%</span>
+    <span class="badge badge-time">~30 min</span>
+    <span class="badge badge-prereq">Prereq: Lesson 20 — KQL &amp; Log Analytics</span>
+  </div>
+</header>
+
+<!-- ═══════════════════════════════════════════════
+     WHY THIS MATTERS
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Why You Need This</h2>
+  <p>Monitoring tells you when something goes wrong. Backup is what saves you after it does. Azure Backup is the cloud-native backup service that protects virtual machines, file shares, databases, and on-premises servers — all managed through a unified vault model. Understanding the two vault types, the backup policy parameters, and the restore options is essential for the AZ-104 exam and for day-to-day Azure administration.</p>
+  <p>In production, the question is never <em>whether</em> to back up — it is always <em>how long you can afford to lose data</em> (RPO) and <em>how fast you need to recover</em> (RTO). Those two numbers drive every backup policy decision you will make.</p>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     VAULT TYPES
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Two Vault Types — Know Which to Use When</h2>
+  <p>Azure Backup uses two different vault resource types. They are not interchangeable. The exam will test this distinction directly.</p>
+
+  <table>
+    <thead>
+      <tr><th>Feature</th><th>Recovery Services Vault</th><th>Backup Vault</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>Resource type</strong></td>
+        <td><code>Microsoft.RecoveryServices/vaults</code></td>
+        <td><code>Microsoft.DataProtection/backupVaults</code></td>
+      </tr>
+      <tr>
+        <td><strong>Azure VM backup</strong></td>
+        <td>Yes — primary use case</td>
+        <td>No</td>
+      </tr>
+      <tr>
+        <td><strong>Azure Disk backup</strong></td>
+        <td>No</td>
+        <td>Yes</td>
+      </tr>
+      <tr>
+        <td><strong>Azure Blob backup</strong></td>
+        <td>No</td>
+        <td>Yes</td>
+      </tr>
+      <tr>
+        <td><strong>Azure Files backup</strong></td>
+        <td>Yes</td>
+        <td>No</td>
+      </tr>
+      <tr>
+        <td><strong>SQL in Azure VM</strong></td>
+        <td>Yes</td>
+        <td>No</td>
+      </tr>
+      <tr>
+        <td><strong>SAP HANA in Azure VM</strong></td>
+        <td>Yes</td>
+        <td>No</td>
+      </tr>
+      <tr>
+        <td><strong>On-premises via MARS/MABS</strong></td>
+        <td>Yes</td>
+        <td>No</td>
+      </tr>
+      <tr>
+        <td><strong>Azure Database for PostgreSQL</strong></td>
+        <td>No</td>
+        <td>Yes</td>
+      </tr>
+      <tr>
+        <td><strong>Maturity</strong></td>
+        <td>Original, full-featured</td>
+        <td>Newer, simplified API-based model</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="callout callout-info">
+    <strong>Exam rule to memorise</strong>
+    Azure VM backup → <strong>Recovery Services Vault</strong>. Azure Disk backup → <strong>Backup Vault</strong>. Azure Files → Recovery Services Vault. When in doubt about newer services (Blobs, PostgreSQL, AKS), the answer is Backup Vault — it is the forward-looking vault type for Azure PaaS data.
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     AZURE VM BACKUP
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Azure VM Backup</h2>
+  <p>Backing up an Azure VM with Azure Backup requires no agent for a basic VM snapshot — the Backup service uses the Azure fabric to take a snapshot of the managed disks. For application-consistent backups (SQL, etc.), the VM Snapshot extension is installed automatically.</p>
+
+  <h3>Application-consistent backups</h3>
+  <p>A crash-consistent backup captures the exact disk state at the moment of the snapshot. An <strong>application-consistent backup</strong> goes further: it quiesces in-flight transactions before the snapshot so the resulting backup can be restored to a clean state without transaction log replay.</p>
+  <ul>
+    <li><strong>Windows:</strong> uses VSS (Volume Shadow Copy Service) — coordinates quiescing across all VSS-aware writers (SQL Server, Exchange, etc.)</li>
+    <li><strong>Linux:</strong> uses pre-script and post-script hooks configured per VM — the pre-script freezes the application, the backup runs, the post-script thaws it</li>
+  </ul>
+
+  <div class="callout callout-warn">
+    <strong>Crash-consistent vs. app-consistent</strong>
+    If VSS is unavailable (a VSS writer error, for example), Azure Backup falls back to a file-system-consistent backup (frozen filesystem, no VSS). This is still better than a crash-consistent backup but may require SQL log replay on restore. Monitor backup jobs for VSS warnings — they often indicate SQL Server issues.
+  </div>
+
+  <h3>Backup policy parameters</h3>
+  <table>
+    <thead>
+      <tr><th>Parameter</th><th>Options / Range</th><th>Notes</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>Backup frequency</td>
+        <td>Daily or weekly</td>
+        <td>Daily is the standard for production VMs</td>
+      </tr>
+      <tr>
+        <td>Backup time</td>
+        <td>Specific UTC time</td>
+        <td>Schedule during low-traffic windows to minimise VSS impact</td>
+      </tr>
+      <tr>
+        <td>Instant restore snapshot retention</td>
+        <td>1–5 days</td>
+        <td>Snapshots retained locally in the storage account for fast restore. Longer retention = higher cost.</td>
+      </tr>
+      <tr>
+        <td>Daily recovery point retention</td>
+        <td>Up to 9,999 days</td>
+        <td>One recovery point per day kept for this many days</td>
+      </tr>
+      <tr>
+        <td>Weekly recovery point retention</td>
+        <td>Up to 5,163 weeks</td>
+        <td>Which day of the week to designate as the weekly recovery point</td>
+      </tr>
+      <tr>
+        <td>Monthly recovery point retention</td>
+        <td>Up to 1,188 months</td>
+        <td>For long-term retention (LTR) / compliance archiving</td>
+      </tr>
+      <tr>
+        <td>Yearly recovery point retention</td>
+        <td>Up to 99 years</td>
+        <td>Regulatory requirements may mandate 7-year retention</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>Restore options</h3>
+  <p>When restoring an Azure VM backup, you have three distinct options — each suited to a different recovery scenario:</p>
+
+  <table>
+    <thead>
+      <tr><th>Restore option</th><th>What it does</th><th>When to use</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>Create new VM</strong></td>
+        <td>Provisions a completely new VM from the recovery point — new resource IDs, new NIC, new disk</td>
+        <td>Full VM failure; you need a clean replacement VM quickly</td>
+      </tr>
+      <tr>
+        <td><strong>Restore disks</strong></td>
+        <td>Restores the OS and data disks to a storage account as VHDs, which you then attach to an existing VM</td>
+        <td>You want to control VM configuration post-restore; good for testing before cutting over</td>
+      </tr>
+      <tr>
+        <td><strong>File recovery</strong></td>
+        <td>Mounts the backup recovery point as a file system on a running VM using a script; you browse and copy individual files, then unmount</td>
+        <td>Restoring one or a few files without full VM restore — fastest for partial recovery</td>
+      </tr>
+      <tr>
+        <td><strong>Replace existing disk</strong></td>
+        <td>Replaces an existing disk of the backed-up VM in place with the recovery point disk</td>
+        <td>VM still exists but you need to roll back the OS disk to a previous state</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>Instant restore</h3>
+  <p>When a backup runs, Azure Backup first takes a <strong>snapshot</strong> of the VM's managed disks and retains it in the source storage account for 1–5 days (configurable). Restoring from a snapshot is dramatically faster than restoring from the vault because the data never leaves the storage account — there is no transfer from vault storage to compute.</p>
+  <p>After the snapshot retention period expires, the backup data is transferred to vault storage and the snapshot is deleted. Restores from vault storage take significantly longer, proportional to disk size.</p>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     SOFT DELETE
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Soft Delete</h2>
+  <p>Soft delete is a critical security feature that protects backup data from ransomware attacks and accidental deletion by administrators.</p>
+
+  <p>When backup data is deleted (by stopping protection and deleting backup data, or by deleting a backup item), Azure Backup retains the data in a soft-deleted state for <strong>14 additional days</strong>. During this period:</p>
+  <ul>
+    <li>The backup data is marked as "soft deleted" and cannot be permanently purged</li>
+    <li>Storage costs still apply during the soft delete period</li>
+    <li>The data can be recovered ("undeleted") at any time within the 14 days</li>
+    <li>After 14 days, data is permanently deleted and cannot be recovered</li>
+  </ul>
+
+  <div class="callout callout-danger">
+    <strong>Never disable soft delete in production</strong>
+    Soft delete is enabled by default on all Recovery Services Vaults and should remain enabled. Disabling it requires explicit configuration and creates a window where a single admin action or ransomware payload can permanently destroy all backup data with no recovery path. If an attacker gains access to an account with Backup Operator role, soft delete is the last line of defence.
+  </div>
+
+  <div class="callout callout-info">
+    <strong>Enhanced soft delete (preview)</strong>
+    The enhanced soft delete feature extends the protection: soft delete becomes always-on and cannot be disabled, and the retention period can be extended up to 180 days. This is the recommended configuration for high-security environments.
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     AZURE FILES BACKUP
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Azure Files Backup</h2>
+  <p>Azure Backup for Azure Files uses <strong>share snapshots</strong> stored in the same storage account as the file share itself. These snapshots appear in the storage account as point-in-time copies and can be managed directly through Azure Backup policies.</p>
+  <ul>
+    <li>Backup is coordinated through a Recovery Services Vault, but the snapshot data lives in the storage account (not transferred to vault storage)</li>
+    <li>Restore: full share restore, or individual file/folder restore to the original or an alternate location</li>
+    <li>Maximum backup frequency: 4 backups per day</li>
+    <li>Maximum retention: 200 recovery points per share</li>
+  </ul>
+
+  <div class="callout callout-warn">
+    <strong>Storage account protection</strong>
+    Because Azure Files backup snapshots live inside the storage account, deleting the storage account destroys the backup data. Always apply a <code>CanNotDelete</code> resource lock to storage accounts that hold Azure Files backups.
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     MARS AGENT
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>MARS Agent — On-Premises Backup to Azure</h2>
+  <p>The <strong>Microsoft Azure Recovery Services (MARS) agent</strong> enables backing up on-premises Windows Server machines directly to a Recovery Services Vault in Azure — without requiring any Azure infrastructure (no Azure VMs, no Azure Backup Server).</p>
+
+  <h3>What MARS backs up</h3>
+  <ul>
+    <li>Files and folders (file-level granularity — not a full disk image)</li>
+    <li>Windows System State (registry, boot files, COM+ database, Active Directory for domain controllers)</li>
+  </ul>
+
+  <h3>What MARS does NOT back up</h3>
+  <ul>
+    <li>Linux systems — MARS is Windows-only</li>
+    <li>Full disk/VM images — for those, use Microsoft Azure Backup Server (MABS) or DPM</li>
+    <li>Application-consistent backups of SQL Server — SQL in Azure VM requires the dedicated SQL backup solution</li>
+  </ul>
+
+  <div class="callout callout-info">
+    <strong>MARS vs. MABS</strong>
+    MARS is the lightweight agent for individual Windows Servers backing up files directly to the vault. MABS (Microsoft Azure Backup Server) is a full backup server product (similar to DPM) that can protect application workloads (Exchange, SharePoint, Hyper-V VMs) and then transfer those backups to Azure. MARS is the exam answer for "on-premises Windows file backup to Azure" scenarios.
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     BACKUP CENTER AND REPORTS
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Backup Center and Backup Reports</h2>
+
+  <h3>Backup Center</h3>
+  <p><strong>Backup Center</strong> is the unified management console for Azure Backup across all vault types, subscriptions, and regions. From one blade you can:</p>
+  <ul>
+    <li>View all backup jobs across all vaults and subscriptions in one grid</li>
+    <li>Monitor backup health — which VMs have protection configured, which do not</li>
+    <li>Create and manage backup policies centrally</li>
+    <li>Configure backup for new resources at scale</li>
+    <li>View compliance against backup policies (which resources have not had a successful backup in the last 24 hours)</li>
+  </ul>
+
+  <h3>Backup Reports</h3>
+  <p><strong>Backup Reports</strong> is an Azure Monitor Workbook that provides historical reporting on backup jobs, protected instances, policy compliance, and cost estimation. It requires:</p>
+  <ol>
+    <li>Routing backup diagnostic logs to a Log Analytics workspace via <strong>diagnostic settings</strong> on each vault</li>
+    <li>Waiting for data to populate (typically 24 hours before meaningful data is available)</li>
+  </ol>
+  <p>Without the Log Analytics routing, Backup Reports shows no data. This is an extremely common misconfiguration — always configure diagnostic settings when deploying a Recovery Services Vault.</p>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     VAULT REDUNDANCY
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Vault Storage Redundancy</h2>
+  <p>Recovery Services Vaults can be configured with three storage redundancy options, selected at vault creation. The configuration <strong>cannot be changed after backup data has been stored</strong>.</p>
+
+  <table>
+    <thead>
+      <tr><th>Redundancy type</th><th>Copies</th><th>Cross-region restore</th><th>Use when</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>LRS</strong> (Locally Redundant)</td>
+        <td>3 within a single datacenter</td>
+        <td>No</td>
+        <td>Dev/test; when regulatory requirements prohibit data leaving the region</td>
+      </tr>
+      <tr>
+        <td><strong>GRS</strong> (Geo-Redundant)</td>
+        <td>3 locally + 3 in secondary region</td>
+        <td>Yes (requires explicit enablement)</td>
+        <td>Production workloads needing DR capability. Default for new vaults.</td>
+      </tr>
+      <tr>
+        <td><strong>ZRS</strong> (Zone-Redundant)</td>
+        <td>3 across availability zones within the region</td>
+        <td>No</td>
+        <td>When zone resiliency within a single region is the primary requirement</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="callout callout-info">
+    <strong>Cross Region Restore requires GRS</strong>
+    Cross Region Restore allows you to restore a VM backup into the secondary (paired) region during a primary region outage. It must be explicitly enabled in the vault properties and requires the vault to use GRS storage. LRS vaults cannot use Cross Region Restore. This is a frequently tested AZ-104 scenario.
+  </div>
+
+  <div class="callout callout-warn">
+    <strong>Change window is narrow</strong>
+    You can change vault redundancy settings only before any backup data is stored in the vault. Once you protect the first item and a backup runs, the redundancy type is locked. Set GRS at vault creation time for all production vaults — retrofitting later means creating a new vault, re-protecting all items, and waiting for initial backups to run.
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     RTO AND RPO
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>RPO and RTO for Azure Backup</h2>
+  <p>These two metrics define the business requirements that your backup design must satisfy. Getting these numbers from the business is the first step in any backup strategy.</p>
+
+  <table>
+    <thead>
+      <tr><th>Metric</th><th>Definition</th><th>Azure Backup reality</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>RPO</strong><br>(Recovery Point Objective)</td>
+        <td>Maximum data loss tolerated — how far back in time can you afford to restore?</td>
+        <td>With daily backup: up to 24 hours of data loss. A failure just before the next scheduled backup = worst case RPO.</td>
+      </tr>
+      <tr>
+        <td><strong>RTO</strong><br>(Recovery Time Objective)</td>
+        <td>Maximum downtime tolerated — how fast must the service be back online?</td>
+        <td>Instant restore (from snapshot): fastest — minutes. Restore from vault storage: slower, proportional to disk size and bandwidth.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="callout callout-info">
+    <strong>When Backup is not enough</strong>
+    If your business requires RPO of minutes (not hours) or RTO of seconds, Azure Backup cannot meet that requirement. <strong>Azure Site Recovery (ASR)</strong> provides continuous replication with RPO as low as seconds and supports planned/unplanned failover with RTO of minutes. Lesson 22 covers ASR. The exam frequently tests this boundary: Backup for accidental deletion and data corruption; ASR for disaster recovery with tight RPO/RTO.
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     QUIZ
+═══════════════════════════════════════════════ -->
+<section class="quiz">
+  <h2>Check Your Understanding</h2>
+  <p>Click any option to see immediate feedback.</p>
+
+  <!-- Q1 -->
+  <div class="quiz-question" data-correct="b">
+    <p>1. You back up a Windows VM running SQL Server using Azure Backup. What mechanism ensures the SQL database is in a consistent state in the backup?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q1"> Azure Backup takes the snapshot while SQL Server is offline — the database cannot be in a mid-transaction state</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q1"> VSS (Volume Shadow Copy Service) quiesces SQL Server's I/O before the snapshot is taken, ensuring application-consistent state</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q1"> The SQL Server VSS writer is bypassed and Azure Backup uses its own quiesce mechanism</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q1"> Application consistency is not supported for SQL Server — only crash-consistent backups are possible</label>
+    </div>
+    <div class="quiz-feedback">Azure Backup for Azure VMs creates application-consistent backups on Windows using VSS (Volume Shadow Copy Service). VSS coordinates with registered VSS writers — including the SQL Server VSS writer — to quiesce in-flight transactions before the snapshot, guaranteeing the backup is in a transactionally consistent state that can be restored without log replay errors.</div>
+  </div>
+
+  <!-- Q2 -->
+  <div class="quiz-question" data-correct="c">
+    <p>2. A developer accidentally deleted a single configuration file from a production VM. How should you recover it using Azure Backup without restoring the entire VM?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q2"> Create a new VM from the recovery point, copy the file, then delete the new VM</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q2"> Restore the entire disk to the production VM using the "Restore disks" option</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q2"> Use File Recovery to mount the recovery point as a file system on the production VM, copy the file, then unmount</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q2"> Download the recovery point as a VHD from the vault and manually extract the file</label>
+    </div>
+    <div class="quiz-feedback">File Recovery allows you to mount a backup recovery point as a local drive on any target VM using a download script. You browse the mounted filesystem, copy the specific files you need, and then run the unmount script. This is the fastest and least disruptive option for recovering individual files — no full VM restore required.</div>
+  </div>
+
+  <!-- Q3 -->
+  <div class="quiz-question" data-correct="a">
+    <p>3. A junior admin stops protection on a VM and deletes its backup data. Fifteen minutes later, you discover the error. Can you recover the backup data?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q3"> Yes — soft delete retains deleted backup data for 14 days. You can undelete it from the backup items view in the vault.</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q3"> No — deleting backup data is irreversible and cannot be undone</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q3"> Yes, but only if you contact Microsoft Support within 1 hour of deletion</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q3"> Yes — Azure Backup keeps a 7-day recycle bin that any vault owner can access</label>
+    </div>
+    <div class="quiz-feedback">Soft delete is enabled by default on Recovery Services Vaults and retains deleted backup data for 14 days in a soft-deleted state. During this window, the data appears in the vault with a "Soft deleted" status and can be recovered ("undeleted") by a Backup Admin. This protects against both accidental deletion and ransomware attacks that target backup data.</div>
+  </div>
+
+  <!-- Q4 -->
+  <div class="quiz-question" data-correct="d">
+    <p>4. Your primary Azure region (East US) is experiencing a widespread outage. You need to restore a VM backup to the West US paired region. What vault configuration must be in place for this to be possible?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q4"> The vault must use ZRS (Zone-Redundant Storage)</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q4"> The vault must use LRS and have a manual geo-copy policy configured</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q4"> Any vault redundancy type supports cross-region restore as long as the secondary region is in the same geography</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q4"> The vault must use GRS (Geo-Redundant Storage) with Cross Region Restore explicitly enabled in the vault properties</label>
+    </div>
+    <div class="quiz-feedback">Cross Region Restore has two hard requirements: the vault must use GRS storage (which replicates backup data to the secondary paired region), and Cross Region Restore must be explicitly enabled in the vault's Properties blade. Without both, the secondary region restore option simply does not appear in the portal. LRS and ZRS vaults cannot perform cross-region restores.</div>
+  </div>
+
+  <!-- Q5 -->
+  <div class="quiz-question" data-correct="b">
+    <p>5. You restore a VM from a recovery point taken 2 days ago. The recovery takes 8 minutes. What does this tell you about the recovery point used?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q5"> The data was restored from vault storage — 8 minutes is within the normal range for vault-based restores</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q5"> The data was restored from an instant restore snapshot still resident in the storage account — snapshot-based restores complete in minutes because no vault transfer is needed</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q5"> The VM was small (less than 4 GB OS disk), which allowed fast vault transfer</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q5"> The vault was configured with LRS which provides faster read access than GRS</label>
+    </div>
+    <div class="quiz-feedback">Instant restore snapshots are retained in the same storage account as the VM's disks for 1–5 days (configurable in backup policy). Restoring from a snapshot is dramatically faster than restoring from vault storage because the data never needs to be transferred from the vault — it is already co-located with the VM. An 8-minute restore for a production VM indicates snapshot-based recovery. Vault-based restores for large VMs can take significantly longer.</div>
+  </div>
+
+  <!-- Q6 -->
+  <div class="quiz-question" data-correct="c">
+    <p>6. Your SLA for a critical business application requires RPO of 5 minutes. Can Azure Backup meet this requirement?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q6"> Yes — configure Azure Backup with the "Hourly" backup frequency and set the interval to 5 minutes</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q6"> Yes — enable continuous backup mode for VMs, which replicates changes every 5 minutes</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q6"> No — Azure Backup supports daily or weekly schedules for VMs with RPO of up to 24 hours. Azure Site Recovery is needed for RPO of minutes.</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q6"> Yes — but only if the VM uses Premium SSD managed disks, which support snapshot intervals of 5 minutes</label>
+    </div>
+    <div class="quiz-feedback">Azure Backup for VMs supports daily backup (RPO up to 24 hours) or weekly backup. There is no 5-minute backup frequency for VMs. For an RPO of minutes, the correct solution is <strong>Azure Site Recovery</strong>, which provides continuous replication with crash-consistent recovery points every 5 minutes and app-consistent recovery points every 1–12 hours. Backup and ASR solve different problems: Backup for operational recovery (accidental deletion, corruption); ASR for disaster recovery.</div>
+  </div>
+
+  <div class="quiz-score"></div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     PRIMARY SOURCE
+═══════════════════════════════════════════════ -->
+<div class="primary-source">
+  <strong>Primary source for this lesson</strong>
+  <a href="https://learn.microsoft.com/en-us/azure/backup/backup-overview" target="_blank">
+    What is Azure Backup? — Microsoft Learn
+  </a>
+  <p style="margin-top:0.5rem;font-size:0.9rem;color:#deecf9;">Walk through the support matrix article to understand exactly which workloads each vault type supports — the exam tests this at a detailed level. Also review the backup policy design guide to understand retention hierarchy design for LTR (Long-Term Retention) scenarios.</p>
+</div>
+
+<!-- ═══════════════════════════════════════════════
+     ASK YOUR TEACHER
+═══════════════════════════════════════════════ -->
+<div class="ask-teacher">
+  <strong>Questions for your teacher (the AI agent)</strong><br>
+  This lesson covered Azure Backup fundamentals. Go deeper on:
+  <ul style="margin-top:0.5rem;">
+    <li>Walk me through designing a backup policy that meets a 7-year legal retention requirement for financial data on Azure VMs.</li>
+    <li>What is the difference between stopping protection and retaining data vs. stopping protection and deleting data — and when would you use each?</li>
+    <li>How do I configure Backup Reports to show backup compliance across 50 subscriptions in a single dashboard?</li>
+    <li>When should I use MABS (Microsoft Azure Backup Server) instead of the MARS agent, and what does MABS add?</li>
+  </ul>
+</div>
+
+<!-- ═══════════════════════════════════════════════
+     NEXT LESSON PREVIEW
+═══════════════════════════════════════════════ -->
+<div class="callout callout-info">
+  <strong>Coming up: Lesson 22 — Azure Site Recovery &amp; Network Watcher</strong>
+  Backup protects against data loss over time. The next lesson covers Disaster Recovery — Azure Site Recovery replicates entire VMs continuously so you can fail over with seconds of data loss. We'll also cover Network Watcher, Azure's toolset for diagnosing network connectivity issues — IP flow verify, next hop analysis, connection monitor, and NSG flow logs.
+</div>
+
+<!-- ═══════════════════════════════════════════════
+     NAVIGATION
+═══════════════════════════════════════════════ -->
+<nav class="lesson-nav">
+  <a href="0020-kql-log-analytics.html">← Lesson 20 — Log Analytics &amp; KQL</a>
+  <a href="0022-site-recovery-network-watcher.html">Lesson 22 — Site Recovery &amp; Network Watcher →</a>
+</nav>
+
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

@@ -1,0 +1,508 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lesson 17 — DNS in Azure</title>
+  <link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<!-- ═══════════════════════════════════════════════
+     HEADER
+═══════════════════════════════════════════════ -->
+<header class="lesson-header">
+  <h1>Lesson 17 — DNS in Azure</h1>
+  <div class="lesson-meta">
+    <span class="badge badge-domain">Domain 4 — Networking</span>
+    <span class="badge badge-exam">AZ-104: 15–20%</span>
+    <span class="badge badge-time">~25 min</span>
+    <span class="badge badge-prereq">Prereq: VNets, Private Endpoints</span>
+  </div>
+</header>
+
+<!-- ═══════════════════════════════════════════════
+     WHY THIS MATTERS
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Why DNS Matters for Azure Administrators</h2>
+  <p>DNS is the nervous system of every network, and Azure's DNS story has three distinct layers that every AZ-104 candidate must understand: public DNS hosting (Azure DNS), private DNS zones for VNet-internal resolution, and the specialised private endpoint DNS zones that make PaaS service private connectivity actually work.</p>
+  <p>In the exam, DNS scenarios appear in the context of hybrid connectivity, private endpoints, and custom DNS configuration. Getting these wrong in production leads to silent failures — traffic resolves to a public IP instead of the private endpoint, or on-premises clients cannot reach Azure private zones. This lesson gives you the complete mental model.</p>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     1. AZURE DNS (PUBLIC ZONES)
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>1. Azure DNS — Public Zones</h2>
+  <p><strong>Azure DNS</strong> is a hosting service for DNS domains. You can host your public DNS domains in Azure and manage DNS records using the same RBAC and tools as all your other Azure resources. Azure DNS is backed by Microsoft's global anycast network, delivering high availability and fast resolution worldwide.</p>
+
+  <div class="callout callout-warn">
+    <strong>Critical distinction</strong>
+    Azure DNS is NOT a domain registrar. You cannot buy domain names from Azure DNS. You register domains at a registrar (GoDaddy, Namecheap, your ISP, etc.) and then delegate the NS records from the registrar to Azure DNS. Once delegated, Azure becomes authoritative for that zone.
+  </div>
+
+  <h3>How delegation works</h3>
+  <ol>
+    <li>Register <code>contoso.com</code> at your domain registrar.</li>
+    <li>Create a DNS zone called <code>contoso.com</code> in Azure DNS.</li>
+    <li>Azure assigns four name server hostnames to your zone (e.g. <code>ns1-01.azure-dns.com</code>).</li>
+    <li>At your registrar, update the NS records for <code>contoso.com</code> to point to these four Azure name servers.</li>
+    <li>Azure DNS is now authoritative for <code>contoso.com</code>.</li>
+  </ol>
+
+  <div class="callout callout-info">
+    <strong>Azure RBAC integration</strong>
+    Because Azure DNS is a first-class Azure resource, you can control who can create, modify, or delete DNS records using standard RBAC role assignments. The built-in <em>DNS Zone Contributor</em> role grants full control over DNS records without giving access to other Azure resources — critical for least-privilege scenarios.
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     2. DNS RECORD TYPES
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>2. DNS Record Types</h2>
+  <p>Azure DNS supports the full set of standard DNS record types. The following table covers every type you need to know for the exam:</p>
+
+  <table>
+    <thead>
+      <tr><th>Record Type</th><th>Purpose</th><th>Exam Notes</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>A</strong></td>
+        <td>Maps a hostname to an IPv4 address</td>
+        <td>Most common record type</td>
+      </tr>
+      <tr>
+        <td><strong>AAAA</strong></td>
+        <td>Maps a hostname to an IPv6 address</td>
+        <td>Same semantics as A but for IPv6</td>
+      </tr>
+      <tr>
+        <td><strong>CNAME</strong></td>
+        <td>Alias — points one hostname to another FQDN</td>
+        <td><strong>Cannot be used at the zone apex</strong> (e.g. <code>contoso.com</code> itself). Can be used for subdomains like <code>www.contoso.com</code>.</td>
+      </tr>
+      <tr>
+        <td><strong>MX</strong></td>
+        <td>Mail exchange — specifies mail servers for the domain</td>
+        <td>Points to an FQDN (not an IP). Lower priority number = higher preference.</td>
+      </tr>
+      <tr>
+        <td><strong>TXT</strong></td>
+        <td>Arbitrary text — used for domain verification, SPF, DKIM, DMARC</td>
+        <td>Common in exam scenarios involving email security and domain ownership verification</td>
+      </tr>
+      <tr>
+        <td><strong>SRV</strong></td>
+        <td>Service location — specifies host and port for a service</td>
+        <td>Used by protocols like SIP, XMPP, Kerberos</td>
+      </tr>
+      <tr>
+        <td><strong>NS</strong></td>
+        <td>Name server — delegates a DNS zone to a set of name servers</td>
+        <td>Auto-created by Azure when you create a zone. Used for subdomain delegation.</td>
+      </tr>
+      <tr>
+        <td><strong>SOA</strong></td>
+        <td>Start of authority — zone metadata (primary NS, contact, serial number)</td>
+        <td>Auto-created and managed by Azure. One per zone.</td>
+      </tr>
+      <tr>
+        <td><strong>PTR</strong></td>
+        <td>Reverse DNS — maps an IP address back to a hostname</td>
+        <td>Used for reverse lookup zones (e.g. <code>1.0.168.192.in-addr.arpa</code>)</td>
+      </tr>
+      <tr>
+        <td><strong>CAA</strong></td>
+        <td>Certification Authority Authorization — specifies which CAs may issue certs for the domain</td>
+        <td>Security hardening — prevents mis-issuance by rogue CAs</td>
+      </tr>
+      <tr>
+        <td><strong>Alias</strong></td>
+        <td>Azure DNS extension — points to Azure resources directly (see below)</td>
+        <td><strong>Can be used at the zone apex</strong> — solves the CNAME-at-apex problem</td>
+      </tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     3. ALIAS RECORDS
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>3. Alias Records — Solving the Apex Problem</h2>
+  <p>The DNS specification (RFC 1912) prohibits CNAME records at the zone apex — you cannot create a CNAME for <code>contoso.com</code> itself, only for subdomains like <code>www.contoso.com</code>. This is a problem when you want the root domain to point to an Azure resource that has a dynamic IP (like a Load Balancer).</p>
+
+  <p><strong>Azure Alias records</strong> solve this. They are an Azure DNS extension that lets you create a record at the zone apex that points directly to:</p>
+  <ul>
+    <li>Azure Public Load Balancer (Standard SKU)</li>
+    <li>Azure Traffic Manager profile</li>
+    <li>Azure CDN endpoint</li>
+    <li>Azure Front Door</li>
+  </ul>
+
+  <div class="callout callout-success">
+    <strong>Why Alias records are better than CNAME</strong>
+    Alias records are tightly coupled to the Azure resource. If the underlying resource's IP address changes, Azure DNS automatically updates the resolved IP — there is no stale DNS record problem. During resolution, Azure DNS replaces the alias with the current IP of the target resource inline, so external resolvers see an A/AAAA record, not a CNAME chain.
+  </div>
+
+  <div class="callout callout-warn">
+    <strong>Exam trap: CNAME vs. Alias at apex</strong>
+    If an exam question asks how to point <code>contoso.com</code> (the root/apex domain, not a subdomain) to an Azure Load Balancer or Traffic Manager — the answer is always an <strong>Alias record</strong>. A CNAME at the apex is technically invalid and Azure DNS will reject it.
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     4. PRIVATE DNS ZONES
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>4. Private DNS Zones</h2>
+  <p>A <strong>Private DNS Zone</strong> is a DNS zone that is only resolvable from within Azure VNets that are linked to it — it does not appear on the public internet. Private DNS zones are the primary mechanism for internal name resolution in Azure, replacing the need for custom DNS server VMs in most pure-Azure scenarios.</p>
+
+  <h3>VNet links and auto-registration</h3>
+  <p>To use a private DNS zone from a VNet, you must create a <strong>VNet link</strong>. Each link can be configured in one of two modes:</p>
+
+  <table>
+    <thead>
+      <tr><th>Link Type</th><th>Behaviour</th><th>Limit</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>Auto-registration enabled</strong></td>
+        <td>Azure automatically creates and removes A records for VMs in the linked VNet as they start, stop, or are deleted. Records use the VM's hostname.</td>
+        <td>A VNet can be linked with auto-registration to <strong>only ONE</strong> private DNS zone</td>
+      </tr>
+      <tr>
+        <td><strong>Resolution only</strong></td>
+        <td>VMs in the linked VNet can resolve names in the private DNS zone, but records are not automatically created.</td>
+        <td>A VNet can have resolution-only links to <strong>multiple</strong> private DNS zones</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="callout callout-danger">
+    <strong>Auto-registration limit — common exam trap</strong>
+    A VNet can be configured for auto-registration in only <strong>one</strong> private DNS zone. However, you can link that same VNet for resolution (without auto-registration) to up to 1,000 private DNS zones. These are different link types — do not confuse them.
+  </div>
+
+  <h3>Use cases</h3>
+  <ul>
+    <li>Internal naming for Azure VMs — VMs get a predictable FQDN like <code>vm-api-prod-001.internal.contoso.com</code></li>
+    <li>Name resolution for PaaS services accessed over Private Endpoints (critical — see next section)</li>
+    <li>Multi-VNet environments where VMs in different VNets need to resolve a shared internal namespace</li>
+  </ul>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     5. PRIVATE ENDPOINT DNS
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>5. Private Endpoint DNS — The Critical Configuration</h2>
+  <p>When you create a Private Endpoint for a PaaS service (covered in Lesson 16), the service's public FQDN must resolve to the private endpoint's private IP address — not the public Azure IP. This requires a specific private DNS zone named exactly according to Microsoft's <code>privatelink</code> naming convention.</p>
+
+  <div class="callout callout-danger">
+    <strong>This is the most exam-tested DNS configuration in AZ-104</strong>
+    If the private DNS zone does not exist, is named incorrectly, or is not linked to the VNet, traffic will bypass the private endpoint entirely and go to the public endpoint. This breaks network isolation — VMs can still reach the service, but they do so over the public internet, not through the private IP.
+  </div>
+
+  <h3>Private DNS zone names per service</h3>
+  <table>
+    <thead>
+      <tr><th>Azure Service</th><th>Required Private DNS Zone</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Azure Storage — Blob</td><td><code>privatelink.blob.core.windows.net</code></td></tr>
+      <tr><td>Azure Storage — File</td><td><code>privatelink.file.core.windows.net</code></td></tr>
+      <tr><td>Azure Storage — Queue</td><td><code>privatelink.queue.core.windows.net</code></td></tr>
+      <tr><td>Azure Storage — Table</td><td><code>privatelink.table.core.windows.net</code></td></tr>
+      <tr><td>Azure Key Vault</td><td><code>privatelink.vaultcore.azure.net</code></td></tr>
+      <tr><td>Azure SQL Database</td><td><code>privatelink.database.windows.net</code></td></tr>
+      <tr><td>Azure App Service / Functions</td><td><code>privatelink.azurewebsites.net</code></td></tr>
+      <tr><td>Azure Cosmos DB (SQL)</td><td><code>privatelink.documents.azure.com</code></td></tr>
+      <tr><td>Azure Container Registry</td><td><code>privatelink.azurecr.io</code></td></tr>
+      <tr><td>Azure Service Bus</td><td><code>privatelink.servicebus.windows.net</code></td></tr>
+    </tbody>
+  </table>
+
+  <h3>How it works end-to-end</h3>
+  <ol>
+    <li>Private Endpoint is created for <code>mykeyvault.vault.azure.net</code>. Azure assigns it a private IP (e.g. <code>10.1.1.5</code>).</li>
+    <li>Azure creates a DNS A record: <code>mykeyvault.privatelink.vaultcore.azure.net → 10.1.1.5</code> in the private DNS zone.</li>
+    <li>Azure public DNS returns a CNAME: <code>mykeyvault.vault.azure.net → mykeyvault.privatelink.vaultcore.azure.net</code>.</li>
+    <li>When a VM in the linked VNet queries <code>mykeyvault.vault.azure.net</code>, Azure DNS follows the CNAME to the private zone and returns <code>10.1.1.5</code>.</li>
+    <li>Traffic flows over the private IP through the VNet to the Private Endpoint — never over the public internet.</li>
+  </ol>
+
+  <div class="callout callout-info">
+    <strong>Auto-registration vs. manual registration</strong>
+    When you create a Private Endpoint and configure DNS integration in the portal, Azure automatically creates the A record in the private DNS zone. If you create the private endpoint via ARM/Bicep/Terraform without DNS integration, you must create the A record manually.
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     6. DNS RESOLUTION FLOW FOR AZURE VMS
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>6. DNS Resolution Flow for Azure VMs</h2>
+  <p>By default, Azure configures VMs to use <strong>168.63.129.16</strong> as their DNS server. This is a virtual IP managed by the Azure platform — it is always reachable from within any Azure VNet and is not a real machine.</p>
+
+  <h3>What 168.63.129.16 resolves</h3>
+  <ul>
+    <li>All public internet DNS names (acts as a recursive resolver via Microsoft's resolvers)</li>
+    <li>Private DNS zones linked to the VNet the VM is in</li>
+    <li>Auto-registered VM names from private DNS zones</li>
+    <li>Internal Azure platform names (e.g. IMDS endpoint, health probe IPs)</li>
+  </ul>
+
+  <div class="hierarchy">
+<span class="hier-resource">Azure VM query: "mykeyvault.vault.azure.net"</span>
+<span class="hier-resource">  │</span>
+<span class="hier-resource">  ▼</span>
+<span class="hier-sub">168.63.129.16 (Azure DNS)</span>
+<span class="hier-sub">  ├─ Check: is this name in any linked private DNS zone?</span>
+<span class="hier-sub">  │    YES → return private IP from privatelink zone</span>
+<span class="hier-sub">  └─ NO → recursive public DNS resolution</span>
+<span class="hier-resource">       └─ return public IP (bypasses Private Endpoint!)</span>
+  </div>
+
+  <div class="callout callout-warn">
+    <strong>Custom DNS servers — the forwarding requirement</strong>
+    If you configure a custom DNS server (e.g. a Windows Server DNS VM) in the VNet's DNS settings, VMs will send queries to that custom server. The custom server must be configured to forward <strong>unresolved queries back to 168.63.129.16</strong>. If it doesn't, VMs lose the ability to resolve Azure private zones and Azure platform endpoints. This is a very common misconfiguration in hybrid environments.
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     7. AZURE DNS PRIVATE RESOLVER
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>7. Azure DNS Private Resolver</h2>
+  <p>The <strong>Azure DNS Private Resolver</strong> is a managed, serverless DNS forwarding service that replaces the traditional pattern of running custom DNS VMs in Azure for hybrid DNS scenarios. It eliminates the operational overhead of maintaining DNS VMs (patching, HA, scaling).</p>
+
+  <table>
+    <thead>
+      <tr><th>Component</th><th>Direction</th><th>Purpose</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>Inbound endpoint</strong></td>
+        <td>On-premises → Azure</td>
+        <td>A private IP in your VNet. On-premises DNS servers forward queries for Azure private zones to this IP. The Private Resolver then resolves them using Azure DNS (including private zones).</td>
+      </tr>
+      <tr>
+        <td><strong>Outbound endpoint</strong></td>
+        <td>Azure → On-premises</td>
+        <td>Sends DNS queries from Azure VMs to on-premises DNS. Configured via <em>forwarding rulesets</em> — e.g. forward <code>corp.local</code> queries to on-premises DNS server <code>192.168.1.10</code>.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="callout callout-success">
+    <strong>Why prefer Private Resolver over custom DNS VMs</strong>
+    Custom DNS VMs require: high availability (at least 2 VMs per region), OS patching, Windows Server licences, and manual forwarding rule management. The Private Resolver is a fully managed PaaS service deployed within your VNet subnets — no VMs to manage. It is the current recommended pattern for hybrid DNS.
+  </div>
+
+  <h3>Deployment requirements</h3>
+  <ul>
+    <li>Inbound and outbound endpoints are deployed into dedicated subnets (minimum /28) within a VNet.</li>
+    <li>Subnets used for Private Resolver endpoints cannot contain other resources.</li>
+    <li>Forwarding rulesets (for outbound) are associated with VNets — they define conditional forwarding rules (domain name → target DNS server IP).</li>
+  </ul>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     8. HYBRID DNS ARCHITECTURE
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>8. Hybrid DNS Architecture</h2>
+  <p>In hybrid environments where Azure VNets connect to on-premises networks via VPN or ExpressRoute, DNS resolution must work bidirectionally. The following architecture uses the DNS Private Resolver (preferred modern approach):</p>
+
+  <div class="hierarchy">
+<span class="hier-mgmt">── On-premises clients resolve Azure private names ──</span>
+<span class="hier-resource">On-prem DNS server</span>
+<span class="hier-resource">  └─ Conditional forwarder: "privatelink.*.net" → [Inbound Endpoint IP]</span>
+<span class="hier-sub">       └─ Private Resolver Inbound Endpoint (e.g. 10.0.1.4)</span>
+<span class="hier-sub">            └─ Azure DNS 168.63.129.16</span>
+<span class="hier-resource">                 └─ Returns: private IP from linked private zone</span>
+
+<span class="hier-mgmt">── Azure VMs resolve on-premises names ──</span>
+<span class="hier-resource">Azure VM → 168.63.129.16 (Azure DNS)</span>
+<span class="hier-sub">  └─ Outbound forwarding ruleset: "corp.local" → 192.168.1.10</span>
+<span class="hier-sub">       └─ Private Resolver Outbound Endpoint</span>
+<span class="hier-resource">            └─ On-premises DNS server → returns corp.local record</span>
+  </div>
+
+  <div class="callout callout-info">
+    <strong>Older pattern: custom DNS VMs</strong>
+    Before the DNS Private Resolver was available, the standard pattern was to deploy Windows Server DNS VMs in Azure, configure them with conditional forwarders, and point VNet DNS settings to these VMs. You may still encounter this in older deployments and in exam scenarios. The mechanics are the same — the key difference is operational (managed service vs. VM). Both patterns require forwarding unresolved queries to 168.63.129.16.
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     9. DNS TTL CONSIDERATIONS
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>9. DNS TTL and Operational Considerations</h2>
+  <p>TTL (Time-To-Live) controls how long DNS resolvers cache a record before re-querying the authoritative server. The right TTL depends on the stability of the record.</p>
+
+  <table>
+    <thead>
+      <tr><th>Scenario</th><th>Recommended TTL</th><th>Reasoning</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>Pre-migration (before a planned DNS change)</td>
+        <td>60 seconds (1 min)</td>
+        <td>Lower TTL 24–48 hours before migration so caches flush quickly when you cut over</td>
+      </tr>
+      <tr>
+        <td>Active failover / blue-green deployment</td>
+        <td>60–300 seconds</td>
+        <td>Fast failover requires short TTL so clients pick up the new IP quickly</td>
+      </tr>
+      <tr>
+        <td>Stable production records (e.g. MX, NS)</td>
+        <td>3600 seconds (1 hr) or higher</td>
+        <td>High TTL reduces DNS query load and improves resolution performance</td>
+      </tr>
+      <tr>
+        <td>Traffic Manager weighted routing (A/B test)</td>
+        <td>0–30 seconds</td>
+        <td>Traffic Manager overrides TTL for fast rerouting — set the profile's TTL, not the individual record</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="callout callout-warn">
+    <strong>TTL during DR events</strong>
+    When a failover is needed urgently but your TTL is set to 3600 seconds, clients will continue hitting the old endpoint until their cache expires. This is why you should pre-emptively lower TTL before planned maintenance windows. In an unplanned DR event, you are at the mercy of whatever TTL you had configured — this is why 300–600 seconds is a common operational default for externally-facing records.
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     QUIZ
+═══════════════════════════════════════════════ -->
+<section class="quiz">
+  <h2>Check Your Understanding</h2>
+  <p>Click any option to see immediate feedback. Answers reflect real Azure DNS behaviour.</p>
+
+  <!-- Q1 -->
+  <div class="quiz-question" data-correct="c">
+    <p>1. You link a VNet to a private DNS zone named <code>internal.contoso.com</code> with auto-registration enabled. You then try to link the same VNet with auto-registration to a second private DNS zone named <code>backend.contoso.com</code>. What happens?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q1"> The second link succeeds — a VNet can have auto-registration to multiple private zones</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q1"> The second link succeeds but auto-registration is disabled for both zones</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q1"> The second link fails — a VNet can be configured for auto-registration in only one private DNS zone, but can have resolution-only links to multiple zones</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q1"> The second link succeeds but Azure creates records in both zones</label>
+    </div>
+    <div class="quiz-feedback">Azure enforces a hard limit: each VNet can be linked with auto-registration to exactly ONE private DNS zone. You can create additional resolution-only links to as many other private DNS zones as needed. Attempting to enable auto-registration on a second zone returns an error in the portal and a 400 error via API.</div>
+  </div>
+
+  <!-- Q2 -->
+  <div class="quiz-question" data-correct="a">
+    <p>2. Your company wants to point <code>contoso.com</code> (the root/apex domain, not <code>www.contoso.com</code>) to an Azure Traffic Manager profile. What DNS record type must you create in Azure DNS?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q2"> An Alias record at the apex — Alias records can point directly to Azure Traffic Manager from the zone root</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q2"> A CNAME record at the apex — CNAME supports all Azure resource targets</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q2"> An A record pointing to the Traffic Manager's static IP address</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q2"> A TXT record that tells the DNS resolver where to find the Traffic Manager profile</label>
+    </div>
+    <div class="quiz-feedback">CNAME records cannot be placed at the zone apex — this is a hard constraint in the DNS specification (RFC 1912). Azure Alias records were specifically created to solve this problem. An Alias record at the apex can point to Azure Load Balancer (Standard), Traffic Manager, Azure CDN, or Azure Front Door, and Azure DNS resolves it to the current IP inline.</div>
+  </div>
+
+  <!-- Q3 -->
+  <div class="quiz-question" data-correct="d">
+    <p>3. You configure a custom DNS server VM in a VNet's DNS settings. Azure VMs in that VNet can resolve on-premises names correctly, but they can no longer resolve names in private DNS zones linked to the VNet. What is the most likely cause?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q3"> Private DNS zones must be recreated when custom DNS servers are configured</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q3"> Custom DNS servers automatically override private DNS zones, which must now be replicated to the on-premises DNS server</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q3"> Private DNS zone links must be re-created after changing the VNet's DNS server settings</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q3"> The custom DNS server is not configured to forward unresolved queries to 168.63.129.16, so Azure private zone queries are never forwarded to Azure DNS</label>
+    </div>
+    <div class="quiz-feedback">When a custom DNS server is configured, all VM queries go to that server. The custom DNS server must have a conditional forwarder (or a catch-all forwarder) pointing to 168.63.129.16 for any names it cannot resolve locally. Without this, private DNS zone names and Azure platform endpoints (like the IMDS at 169.254.169.254) fail to resolve.</div>
+  </div>
+
+  <!-- Q4 -->
+  <div class="quiz-question" data-correct="b">
+    <p>4. You create a Private Endpoint for an Azure Key Vault named <code>myvault</code>. A VM in the linked VNet queries <code>myvault.vault.azure.net</code> and receives the public IP instead of the private endpoint IP. The VM can reach the Key Vault but over the public internet. What configuration is most likely missing?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q4"> The VNet must be peered with the Key Vault's VNet</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q4"> A private DNS zone named <code>privatelink.vaultcore.azure.net</code> must be created, the private endpoint A record registered in it, and the zone linked to the VNet</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q4"> A private DNS zone named <code>privatelink.vault.azure.net</code> must be created and linked to the VNet</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q4"> The NSG on the VNet must block port 443 to the public internet to force traffic through the private endpoint</label>
+    </div>
+    <div class="quiz-feedback">Without the correct private DNS zone (<code>privatelink.vaultcore.azure.net</code>), Azure DNS follows the public CNAME chain for <code>myvault.vault.azure.net</code> and returns the public IP. The zone must be exactly named <code>privatelink.vaultcore.azure.net</code> (not <code>privatelink.vault.azure.net</code>), the A record for <code>myvault</code> must be in it pointing to the private IP, and the zone must be linked to the VNet where the VM resides.</div>
+  </div>
+
+  <!-- Q5 -->
+  <div class="quiz-question" data-correct="c">
+    <p>5. Your organisation wants on-premises clients to resolve Azure private DNS zones, and Azure VMs to resolve on-premises corporate hostnames — without managing any DNS VMs in Azure. What is the recommended modern architecture?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q5"> Configure on-premises DNS with conditional forwarders pointing to 168.63.129.16 directly over ExpressRoute</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q5"> Deploy Windows Server DNS VMs in Azure with conditional forwarders and point VNet DNS settings to them</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q5"> Deploy Azure DNS Private Resolver — inbound endpoints for on-premises to forward Azure queries to, outbound endpoints with forwarding rulesets for Azure VMs to forward on-premises queries to on-prem DNS</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q5"> Create a public DNS zone in Azure DNS that mirrors all private DNS zones so on-premises clients can resolve them via public internet</label>
+    </div>
+    <div class="quiz-feedback">Azure DNS Private Resolver is the modern managed alternative to custom DNS VMs. Inbound endpoints receive queries from on-premises DNS servers (via conditional forwarders). Outbound endpoints, governed by forwarding rulesets, forward Azure VM queries for corporate domains to on-premises DNS servers. No VMs to manage, no patching, and it scales automatically.</div>
+  </div>
+
+  <!-- Q6 -->
+  <div class="quiz-question" data-correct="a">
+    <p>6. You manage the DNS for <code>contoso.com</code> in Azure DNS. You need to configure email so that messages to <code>@contoso.com</code> are accepted by your mail provider at <code>mail.mailprovider.com</code> (higher priority) and <code>backup.mailprovider.com</code> (lower priority). Which configuration is correct?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q6"> MX record: <code>mail.mailprovider.com</code> priority 10 and <code>backup.mailprovider.com</code> priority 20 — lower priority number means higher preference</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q6"> MX record: <code>mail.mailprovider.com</code> priority 20 and <code>backup.mailprovider.com</code> priority 10 — higher priority number means higher preference</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q6"> A records pointing to the mail server IPs at <code>mail</code> and <code>backup</code> subdomains — MX records are not used for modern email routing</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q6"> CNAME record for <code>contoso.com</code> pointing to <code>mail.mailprovider.com</code></label>
+    </div>
+    <div class="quiz-feedback">MX records define mail server preferences. The priority value is a number where <strong>lower numbers mean higher priority</strong> — so priority 10 is preferred over priority 20. MX records must point to FQDNs (not IP addresses). Setting <code>mail.mailprovider.com</code> at priority 10 and <code>backup.mailprovider.com</code> at priority 20 makes the first server the primary mail exchanger.</div>
+  </div>
+
+  <div class="quiz-score"></div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     PRIMARY SOURCE
+═══════════════════════════════════════════════ -->
+<div class="primary-source">
+  <strong>Primary source for this lesson</strong>
+  <a href="https://learn.microsoft.com/en-us/azure/dns/dns-overview" target="_blank">
+    Azure DNS overview — Microsoft Learn
+  </a>
+  <p style="margin-top:0.5rem;font-size:0.9rem;color:#deecf9;">Read the Private DNS zone overview, the Private Endpoint DNS configuration docs, and the DNS Private Resolver overview. Pay special attention to the private DNS zone names for each PaaS service — these are frequently tested.</p>
+</div>
+
+<!-- ═══════════════════════════════════════════════
+     ASK YOUR TEACHER
+═══════════════════════════════════════════════ -->
+<div class="ask-teacher">
+  <strong>Questions for your teacher (the AI agent)</strong><br>
+  This lesson covered Azure DNS architecture end to end. Go deeper on any of these:
+  <ul style="margin-top:0.5rem;">
+    <li>Walk me through configuring a complete private endpoint DNS setup for an Azure SQL Database using Bicep.</li>
+    <li>How do you set up split-horizon DNS so internal clients resolve a name to a private IP while external clients resolve to the public IP?</li>
+    <li>What is DNSSEC and does Azure DNS support it?</li>
+    <li>How does Azure DNS Private Resolver differ in architecture from an Azure Firewall with DNS proxy enabled?</li>
+  </ul>
+</div>
+
+<!-- ═══════════════════════════════════════════════
+     NEXT LESSON PREVIEW
+═══════════════════════════════════════════════ -->
+<div class="callout callout-info">
+  <strong>Coming up: Lesson 18 — Load Balancing in Azure</strong>
+  With DNS resolved (literally), the next lesson covers how Azure distributes traffic across multiple backends. Azure has four load balancing services — Azure Load Balancer, Application Gateway, Azure Front Door, and Traffic Manager — each targeting different scenarios. You will learn exactly which to use when, a question that appears on virtually every AZ-104 exam.
+</div>
+
+<!-- ═══════════════════════════════════════════════
+     NAVIGATION
+═══════════════════════════════════════════════ -->
+<nav class="lesson-nav">
+  <a href="0016-vnet-peering-private-endpoints.html">← Lesson 16 — VNet Peering &amp; Private Endpoints</a>
+  <a href="0018-load-balancing.html">Lesson 18 — Load Balancing →</a>
+</nav>
+
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

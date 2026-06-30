@@ -1,0 +1,555 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lesson 04 — Azure Policy: Governance at Scale</title>
+  <link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<!-- ═══════════════════════════════════════════════
+     HEADER
+═══════════════════════════════════════════════ -->
+<header class="lesson-header">
+  <h1>Lesson 04 — Azure Policy: Governance at Scale</h1>
+  <div class="lesson-meta">
+    <span class="badge badge-domain">Domain 1 — Identity &amp; Governance</span>
+    <span class="badge badge-exam">AZ-104: 20–25%</span>
+    <span class="badge badge-time">~35 min</span>
+    <span class="badge badge-prereq">Prereq: Lessons 01–03</span>
+  </div>
+</header>
+
+<!-- ═══════════════════════════════════════════════
+     WHY THIS MATTERS
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>What Azure Policy Is — and What It Is Not</h2>
+  <p>Azure Policy enforces <em>resource configurations</em>. RBAC controls <em>who can perform actions</em>. These are orthogonal systems that must both be satisfied for an operation to succeed — but they operate independently, and conflating them is a source of real architectural mistakes.</p>
+
+  <table>
+    <thead>
+      <tr><th>Dimension</th><th>Azure RBAC</th><th>Azure Policy</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>Question it answers</strong></td>
+        <td>Can <em>this identity</em> perform this action?</td>
+        <td>Is <em>this resource configuration</em> allowed in this environment?</td>
+      </tr>
+      <tr>
+        <td><strong>Grants permissions?</strong></td>
+        <td>Yes — explicitly grants actions to principals</td>
+        <td>No — never grants permissions; only restricts or audits what permitted users deploy</td>
+      </tr>
+      <tr>
+        <td><strong>Can block an Owner?</strong></td>
+        <td>Only via Deny Assignments (not direct RBAC)</td>
+        <td>Yes — a Policy Deny blocks a resource deployment even if the deployer is an Owner</td>
+      </tr>
+      <tr>
+        <td><strong>Operates at</strong></td>
+        <td>Identity plane — the principal making the request</td>
+        <td>Resource plane — the resource being created or modified</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="callout callout-info">
+    <strong>Both must be satisfied</strong>
+    For a resource to be successfully deployed: (1) the deployer must have the RBAC permissions to perform the action, AND (2) the resource configuration must comply with all applicable Azure Policy assignments. Policy Deny fires at the ARM control plane before the resource is written, regardless of who is asking.
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     POLICY DEFINITIONS
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Policy Definitions: Structure</h2>
+  <p>A policy definition is a JSON document that specifies a condition (<code>if</code>) and an effect (<code>then</code>). When a resource matches the <code>if</code> condition, the effect is applied.</p>
+
+  <pre><code>{
+  "mode": "Indexed",
+  "policyRule": {
+    "if": {
+      "allOf": [
+        { "field": "type", "equals": "Microsoft.Storage/storageAccounts" },
+        { "field": "Microsoft.Storage/storageAccounts/supportsHttpsTrafficOnly",
+          "notEquals": true }
+      ]
+    },
+    "then": {
+      "effect": "Deny"
+    }
+  },
+  "parameters": {
+    "allowedEffect": {
+      "type": "String",
+      "defaultValue": "Deny",
+      "allowedValues": ["Audit", "Deny", "Disabled"]
+    }
+  }
+}</code></pre>
+
+  <h3>The mode field</h3>
+  <table>
+    <thead>
+      <tr><th>Mode</th><th>What it evaluates</th><th>When to use</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>All</strong></td>
+        <td>Every resource type, including resource groups and subscriptions themselves</td>
+        <td>Policies that apply to resource group properties, or subscription-level configurations</td>
+      </tr>
+      <tr>
+        <td><strong>Indexed</strong></td>
+        <td>Only resource types that support tags and location metadata</td>
+        <td>Tag and location policies — the default for most compliance policies. Avoids false positives on resource types that don't have tags (e.g. extensions, providers).</td>
+      </tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     POLICY EFFECTS
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Policy Effects — Memorise All Seven</h2>
+  <p>The effect determines what Azure does when a resource matches the policy's <code>if</code> condition. This is the most heavily tested aspect of Azure Policy. Know all effects, their purpose, and their sequencing.</p>
+
+  <div class="hierarchy">
+<span class="hier-tenant">Evaluation order for new/updated resources:</span>
+<span class="hier-mgmt">  1. Disabled        — policy is off, nothing happens</span>
+<span class="hier-mgmt">  2. Append          — adds fields/tags to the resource request</span>
+<span class="hier-mgmt">  3. Modify          — adds/replaces/removes properties during create or update</span>
+<span class="hier-mgmt">  4. Deny            — blocks the operation entirely</span>
+<span class="hier-sub">  5. Audit           — allows the operation, marks resource non-compliant</span>
+<span class="hier-sub">  6. AuditIfNotExists — audits if a specified related resource does NOT exist</span>
+<span class="hier-rg">  7. DeployIfNotExists — deploys a related resource if it doesn't exist</span>
+  </div>
+
+  <table>
+    <thead>
+      <tr><th>Effect</th><th>What it does</th><th>Example use case</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>Disabled</strong></td>
+        <td>The policy is present but does nothing. Useful for testing or temporarily suspending a policy without deleting the assignment.</td>
+        <td>Disabling a Deny policy before a planned change window; testing a new policy definition before activating it.</td>
+      </tr>
+      <tr>
+        <td><strong>Append</strong></td>
+        <td>Adds fields or tags to a resource during create or update. Does not modify existing fields — only appends. Does not remediate existing resources.</td>
+        <td>Appending a <code>CreatedBy</code> tag using the request context; appending a default NSG rule that must always be present.</td>
+      </tr>
+      <tr>
+        <td><strong>Modify</strong></td>
+        <td>Adds, replaces, or removes properties during create or update. More powerful than Append — can change existing values. Requires a managed identity on the assignment for remediation of existing resources.</td>
+        <td>Inheriting a <code>CostCenter</code> tag from the resource group; enforcing a specific tag value; converting HTTP storage accounts to HTTPS on update.</td>
+      </tr>
+      <tr>
+        <td><strong>Deny</strong></td>
+        <td>Blocks the resource operation at the ARM layer. The deployment fails before the resource is written. Evaluates at create and update time.</td>
+        <td>Blocking storage accounts without HTTPS; blocking resources in non-allowed regions; blocking VM SKUs not in an approved list.</td>
+      </tr>
+      <tr>
+        <td><strong>Audit</strong></td>
+        <td>Allows the resource to be created/updated regardless, but marks it as Non-compliant in the compliance dashboard and creates a compliance event.</td>
+        <td>Auditing storage accounts without a specific tag; auditing VMs without Entra ID login extension — situations where you want visibility without blocking.</td>
+      </tr>
+      <tr>
+        <td><strong>AuditIfNotExists</strong></td>
+        <td>Audits a <em>parent</em> resource when a specified <em>related/child</em> resource does not exist. The parent resource is allowed to deploy; the audit marks it non-compliant if the related resource is absent.</td>
+        <td>Audit VMs without the Azure Monitor Agent extension; audit storage accounts without Defender for Storage enabled; audit App Services without diagnostic settings.</td>
+      </tr>
+      <tr>
+        <td><strong>DeployIfNotExists (DINE)</strong></td>
+        <td>Deploys a related resource if it doesn't exist. Actively remediates the gap — does not just audit it. Requires a managed identity on the assignment with sufficient permissions to deploy the related resource.</td>
+        <td>Automatically deploy diagnostic settings on new storage accounts; deploy Log Analytics agent to new VMs; enable Defender for Storage on new storage accounts.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="callout callout-warn">
+    <strong>AuditIfNotExists vs. Audit — the exam always tests this distinction</strong>
+    <strong>Audit</strong> evaluates the resource itself — it checks a property on the resource being deployed. <strong>AuditIfNotExists</strong> evaluates whether a <em>related resource</em> (a child resource, an extension, a linked resource) exists. If you want to audit "VMs without the Azure Monitor Agent," use AuditIfNotExists — because you're checking for the absence of a child extension resource, not a property on the VM itself.
+  </div>
+
+  <div class="callout callout-danger">
+    <strong>DeployIfNotExists requires permissions — and a managed identity</strong>
+    A DINE policy that deploys diagnostic settings needs to actually call ARM on your behalf. The policy assignment must have a managed identity (system-assigned, created automatically when you assign the policy) and that identity must have a role with sufficient permissions — typically Monitoring Contributor or a custom role. If the managed identity lacks permissions, the DINE effect will silently fail and resources will remain non-compliant.
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     EVALUATION LOGIC
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Policy Evaluation Logic</h2>
+  <p>Understanding <em>when</em> policies are evaluated is as important as understanding effects.</p>
+
+  <h3>New and updated resources</h3>
+  <p>When a resource is created or updated (via portal, CLI, ARM template, Terraform, or any other mechanism), Azure evaluates all applicable policies at the ARM layer <em>before</em> writing the resource. Deny effects fire here and return a 403 to the caller. This happens synchronously during the deployment.</p>
+
+  <h3>Existing resources</h3>
+  <p>Policies do not retroactively block existing non-compliant resources. Existing resources are evaluated during <strong>compliance scan cycles</strong>. These run:</p>
+  <ul>
+    <li>Automatically approximately every <strong>24 hours</strong> on a schedule Azure controls</li>
+    <li>On-demand via <code>az policy state trigger-scan</code> or the portal's "Trigger evaluation" button</li>
+    <li>Immediately after a new policy assignment is made (on the resources within that scope)</li>
+  </ul>
+
+  <div class="callout callout-info">
+    <strong>Compliance is eventually consistent</strong>
+    After assigning a new policy, expect up to 30 minutes for initial compliance data to appear in the dashboard, and up to 24 hours for the full scan of all resources in scope to complete. For large environments with thousands of resources, the compliance report is always a point-in-time snapshot, not a real-time view.
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     INITIATIVES
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Policy Initiatives (Policy Sets)</h2>
+  <p>An <strong>initiative</strong> is a collection of policy definitions grouped together to achieve a common governance goal. Instead of assigning 50 individual policies, you assign one initiative. Compliance is reported at both the initiative level and the individual policy level within it.</p>
+
+  <h3>Built-in initiatives for compliance frameworks</h3>
+  <table>
+    <thead>
+      <tr><th>Initiative</th><th>Purpose</th><th>Typical assignment scope</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><strong>Azure Security Benchmark</strong></td><td>Microsoft's baseline security recommendations for Azure. Good starting point for any environment.</td><td>Root Management Group or per-environment subscription</td></tr>
+      <tr><td><strong>CIS Microsoft Azure Foundations Benchmark</strong></td><td>Center for Internet Security hardening guidelines mapped to Azure policies.</td><td>Production subscriptions requiring CIS compliance</td></tr>
+      <tr><td><strong>NIST SP 800-53 Rev. 5</strong></td><td>US federal controls framework. Required for FedRAMP and many US government workloads.</td><td>Government or regulated environment subscriptions</td></tr>
+      <tr><td><strong>PCI DSS v4.0</strong></td><td>Payment card industry data security standard. Required for cardholder data environments.</td><td>Subscriptions containing CDE (cardholder data environment) workloads</td></tr>
+      <tr><td><strong>ISO 27001:2013</strong></td><td>International information security management standard.</td><td>Enterprise-wide or per-certification-scope subscriptions</td></tr>
+    </tbody>
+  </table>
+
+  <div class="callout callout-info">
+    <strong>Assign initiatives, not individual policies, for compliance frameworks</strong>
+    Built-in compliance initiatives are maintained by Microsoft — when a new control is added to a framework (e.g. a new NIST control), Microsoft updates the initiative and your assignment automatically covers the new policy. If you'd assigned individual policies, you'd need to manually track and add each new one.
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     POLICY ASSIGNMENTS
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Policy Assignments</h2>
+  <p>A policy assignment is the binding of a policy (or initiative) definition to a scope. The same definition can be assigned at multiple scopes with different parameters and different enforcement modes.</p>
+
+  <h3>Assignment components</h3>
+  <table>
+    <thead>
+      <tr><th>Component</th><th>Description</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><strong>Scope</strong></td><td>Management Group, Subscription, or Resource Group. Lower scope = narrower application. RBAC applies: you need write permissions on the scope to create an assignment.</td></tr>
+      <tr><td><strong>Parameters</strong></td><td>Override the policy definition's default parameter values for this specific assignment. E.g. set <code>allowedLocations</code> to <code>["eastus", "westus2"]</code> for this subscription while a different subscription uses <code>["northeurope"]</code>.</td></tr>
+      <tr><td><strong>Non-compliance message</strong></td><td>A custom message shown to deployers when their resource is blocked by this policy. Should clearly explain what the user must do differently.</td></tr>
+      <tr><td><strong>Enforcement mode</strong></td><td><code>Enabled</code>: policy is fully enforced (Deny fires, DINE deploys). <code>Disabled</code>: policy evaluates for compliance reporting only, but Deny does not block and DINE does not deploy — useful for pre-testing a policy in production.</td></tr>
+      <tr><td><strong>Managed identity</strong></td><td>Required for Modify and DeployIfNotExists effects. Azure creates a system-assigned managed identity for the assignment; you must grant it the necessary RBAC role.</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     EXEMPTIONS VS EXCLUSIONS
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Policy Exclusions vs. Exemptions — A Critical Distinction</h2>
+  <p>Both mechanisms allow resources to be excluded from a policy assignment, but they behave very differently:</p>
+
+  <table>
+    <thead>
+      <tr><th>Property</th><th>Exclusion (notScope)</th><th>Exemption</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><strong>How configured</strong></td><td>A scope listed in <code>notScope</code> on the assignment — set at assignment creation time</td><td>A separate Exemption resource created on a specific resource or scope</td></tr>
+      <tr><td><strong>Granularity</strong></td><td>Entire scope (subscription, resource group) — cannot target individual resources</td><td>Can target a specific resource, resource group, or subscription</td></tr>
+      <tr><td><strong>Compliance dashboard</strong></td><td>Excluded resources are invisible — they do not appear in compliance reports at all</td><td>Exempt resources appear in the compliance dashboard with state <em>Exempt</em> and the documented reason</td></tr>
+      <tr><td><strong>Time limit</strong></td><td>Permanent — no expiry</td><td>Time-bounded — has an optional expiry date (after which the resource becomes non-compliant again)</td></tr>
+      <tr><td><strong>Documented reason</strong></td><td>No — no audit trail or reason required</td><td>Yes — requires a category (Waiver or Mitigated) and a description</td></tr>
+      <tr><td><strong>Audit trail</strong></td><td>No dedicated audit trail — it is just a scope in the assignment definition</td><td>Appears in Activity Log; shows in compliance report as Exempt</td></tr>
+    </tbody>
+  </table>
+
+  <div class="callout callout-warn">
+    <strong>Prefer exemptions over exclusions in regulated environments</strong>
+    In an audited environment, using <code>notScope</code> to exclude a resource makes it invisible to compliance reports — your auditors will have no way to see the exception was made. Exemptions with documented reasons appear in reports as <em>Exempt</em> with justification, satisfying audit requirements. Use <code>notScope</code> only for entire development environments or sandboxes that should never contribute to production compliance metrics.
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     REMEDIATION
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Remediation Tasks</h2>
+  <p>Policies with <strong>Modify</strong> or <strong>DeployIfNotExists</strong> effects can automatically fix non-compliant existing resources through <strong>remediation tasks</strong>. New resources are handled at deployment time; existing resources require an explicit remediation task.</p>
+
+  <h3>How remediation works</h3>
+  <ol>
+    <li>A policy with DINE or Modify effect is assigned, or resources already exist that are non-compliant with such a policy.</li>
+    <li>The compliance scan identifies non-compliant resources.</li>
+    <li>An administrator triggers a <strong>Remediation Task</strong> from the Policy compliance blade (or it can be configured to auto-remediate on assignment).</li>
+    <li>Azure iterates through all non-compliant resources in scope and applies the effect — deploying the missing resource (DINE) or modifying the existing resource (Modify).</li>
+    <li>The remediation task runs using the <strong>managed identity</strong> attached to the policy assignment. If the managed identity lacks permissions, individual resources will fail to remediate and you'll see per-resource errors in the task log.</li>
+  </ol>
+
+  <div class="callout callout-danger">
+    <strong>Managed identity permissions must be granted before remediation</strong>
+    When Azure creates a system-assigned managed identity for a DINE or Modify policy assignment, it does not automatically grant the identity the permissions it needs. You must explicitly assign the required RBAC role to the managed identity. For diagnostic settings DINE policies, grant Monitoring Contributor. For tag Modify policies, grant Tag Contributor or Contributor on the scope. Missing this step is the most common reason DINE policies appear to do nothing.
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     COMPLIANCE
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Compliance States</h2>
+  <p>The Azure Policy compliance dashboard reports four possible states per resource per assignment:</p>
+
+  <table>
+    <thead>
+      <tr><th>State</th><th>Meaning</th><th>Action required</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>Compliant</strong></td>
+        <td>Resource satisfies the policy condition</td>
+        <td>None</td>
+      </tr>
+      <tr>
+        <td><strong>Non-compliant</strong></td>
+        <td>Resource does not satisfy the policy condition. For Audit/AuditIfNotExists policies, the resource is deployed but flagged. For Deny policies, this state indicates an existing resource that pre-dates the policy assignment.</td>
+        <td>Remediate the resource (for Modify/DINE policies), or manually bring it into compliance</td>
+      </tr>
+      <tr>
+        <td><strong>Exempt</strong></td>
+        <td>Resource has an active Exemption applied</td>
+        <td>Review exemption justification and expiry — ensure it is still valid</td>
+      </tr>
+      <tr>
+        <td><strong>Conflict</strong></td>
+        <td>Two or more policy assignments produce contradictory evaluations for the same resource (e.g. one policy requires tag value "A" and another requires tag value "B" for the same tag)</td>
+        <td>Resolve by making one policy more specific, adding an exemption, or consolidating the conflicting assignments</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="callout callout-info">
+    <strong>Conflict state is rare but important</strong>
+    A Conflict state usually indicates overlapping policy assignments with incompatible conditions on the same resource property. The common cause is assigning multiple initiatives that each contain policies targeting the same resource property with different requirements. Resolve by examining which assignments are in conflict in the compliance detail blade, then adjusting scope, parameters, or adding a targeted exemption.
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     COMMON REAL-WORLD POLICIES
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Common Real-World Policies (Production Reference)</h2>
+  <p>These are the policies you will encounter most frequently in real Azure environments. Know their names, effects, and how they are typically configured:</p>
+
+  <table>
+    <thead>
+      <tr><th>Policy</th><th>Effect</th><th>Notes</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Allowed locations</td><td>Deny</td><td>Restricts resource creation to specific Azure regions. Assign at Management Group scope to cover all subscriptions. Use parameters to customise per-environment allowed locations.</td></tr>
+      <tr><td>Require a tag and its value</td><td>Deny</td><td>Blocks resources that are missing a specific tag or have an incorrect value. Commonly used for <code>CostCenter</code>, <code>Environment</code>, <code>Owner</code>.</td></tr>
+      <tr><td>Inherit a tag from resource group</td><td>Modify</td><td>Copies a tag value from the resource group to child resources at create/update time. Requires a managed identity on the assignment with Tag Contributor or Contributor role.</td></tr>
+      <tr><td>Allowed virtual machine SKUs</td><td>Deny</td><td>Restricts VM creation to an approved list of SKUs. Prevents engineers from accidentally deploying oversized or expensive SKUs in dev/test environments.</td></tr>
+      <tr><td>Secure transfer to storage accounts should be enabled</td><td>Deny</td><td>Blocks creation of storage accounts with HTTPS-only disabled. One of the most important baseline security policies — no exceptions.</td></tr>
+      <tr><td>Deploy Log Analytics agent to Windows/Linux VMs</td><td>DeployIfNotExists</td><td>Automatically deploys the Log Analytics (or Azure Monitor) agent extension to new VMs. Requires managed identity with VM Contributor + Log Analytics Contributor roles.</td></tr>
+      <tr><td>Audit VMs without backup configured</td><td>AuditIfNotExists</td><td>Audits VMs that do not have an active Azure Backup protection item. Uses AuditIfNotExists to check for the absence of the backup-related child resource.</td></tr>
+      <tr><td>Storage accounts should use customer-managed keys</td><td>Audit</td><td>Flags storage accounts not encrypted with CMK. Commonly used in regulated industries to enforce CMK over Microsoft-managed keys.</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     BLUEPRINTS VS DEPLOYMENT STACKS
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Azure Blueprints vs. Deployment Stacks</h2>
+  <p><strong>Azure Blueprints</strong> was Microsoft's original mechanism for packaging ARM templates, RBAC assignments, and Policy assignments together for repeatable environment deployment. Blueprints are <strong>deprecated</strong> — Microsoft stopped developing them and recommends migration to the replacement: <strong>Azure Deployment Stacks</strong>.</p>
+
+  <table>
+    <thead>
+      <tr><th>Feature</th><th>Azure Blueprints (deprecated)</th><th>Azure Deployment Stacks</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Status</td><td>Deprecated — will be retired</td><td>GA — active development</td></tr>
+      <tr><td>Template support</td><td>ARM templates only</td><td>ARM templates and Bicep files</td></tr>
+      <tr><td>Deny assignments</td><td>Yes — could lock down blueprint-managed resources</td><td>Yes — DenySettings control what operations are allowed on stack-managed resources</td></tr>
+      <tr><td>Scope</td><td>Subscription and management group</td><td>Resource group, subscription, and management group</td></tr>
+      <tr><td>CI/CD integration</td><td>Limited</td><td>Native Azure CLI / PowerShell / Bicep support — integrates naturally with pipelines</td></tr>
+    </tbody>
+  </table>
+
+  <div class="callout callout-warn">
+    <strong>Exam note: Blueprints may still appear in AZ-104 questions</strong>
+    As of 2026, some exam questions may still reference Azure Blueprints since the exam pool is not always immediately updated when features are deprecated. Know what Blueprints are and that they have been superseded by Deployment Stacks. In production, always recommend Deployment Stacks for new implementations.
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     HANDS-ON
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Hands-On: Assign and Evaluate a Policy</h2>
+
+  <ol>
+    <li>
+      <strong>Assign the Azure Security Benchmark initiative</strong>: Navigate to <em>Policy → Definitions</em>. Filter by Category = <em>Security Center</em>. Find the <em>Azure Security Benchmark</em> initiative. Click Assign. Set scope to a development subscription. Set enforcement mode to <em>DoNotEnforce</em> (Disabled) — this evaluates for compliance without blocking anything. Submit the assignment.
+    </li>
+    <li>
+      <strong>Trigger a compliance scan</strong>: Go to <em>Policy → Compliance</em>. Find your initiative assignment. Click the "…" menu → <em>Trigger evaluation</em>. Wait 5–10 minutes for initial results to appear. Examine which policies show Non-compliant resources.
+    </li>
+    <li>
+      <strong>Create a custom Deny policy</strong>: Go to <em>Policy → Definitions → + Policy definition</em>. Set the scope to your subscription. Create a policy that denies storage account creation when <code>supportsHttpsTrafficOnly</code> is not <code>true</code>. Use the JSON example from earlier in this lesson. Assign it with enforcement mode <em>Enabled</em>.
+    </li>
+    <li>
+      <strong>Test the Deny policy</strong>: Attempt to create a storage account with <em>Secure transfer required</em> set to <em>Disabled</em>. The deployment should fail with a policy violation message. Examine the error — it will reference the policy definition name and assignment. Then create the same storage account with HTTPS enabled — it should succeed.
+    </li>
+    <li>
+      <strong>Create an exemption</strong>: For one non-compliant resource in the compliance dashboard, create an Exemption. Set category to <em>Waiver</em>, add a justification note, and set an expiry date 30 days in the future. Observe how the compliance state changes to <em>Exempt</em> and the exemption appears in the compliance report.
+    </li>
+  </ol>
+
+  <div class="callout callout-success">
+    <strong>Checkpoint</strong>
+    You should now be able to assign policies and initiatives at the correct scope, read a compliance report and interpret each state, create a remediation task for a DINE policy, and explain to a colleague the difference between every policy effect.
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     QUIZ
+═══════════════════════════════════════════════ -->
+<section class="quiz">
+  <h2>Check Your Understanding</h2>
+  <p>Click any option to see immediate feedback. These questions reflect real exam reasoning and production decision-making.</p>
+
+  <!-- Q1 -->
+  <div class="quiz-question" data-correct="b">
+    <p>1. You assign a policy with Deny effect to a Management Group. An Owner of a subscription inside that MG deploys a resource that violates the policy. What happens?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q1"> The deployment succeeds — the Owner role at subscription scope overrides policy restrictions from parent scopes</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q1"> The deployment fails — Azure Policy Deny is enforced at the ARM control plane before the resource is created, regardless of the user's RBAC role</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q1"> The deployment succeeds but creates a Non-compliant audit event in the compliance dashboard</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q1"> The deployment fails only if the resource is tagged as a production resource</label>
+    </div>
+    <div class="quiz-feedback">Azure Policy Deny fires at the ARM control plane layer — before any resource is written. RBAC authorises the caller (the Owner) to perform the action, but Policy then evaluates whether the resulting resource configuration is permitted. Policy Deny cannot be overridden by RBAC, even by a subscription Owner. This is the precise separation of concerns between RBAC (who can act) and Policy (what configurations are allowed). The only way to allow the deployment is an exemption on the scope or changing the policy assignment.</div>
+  </div>
+
+  <!-- Q2 -->
+  <div class="quiz-question" data-correct="c">
+    <p>2. You want to automatically add a missing <code>CostCenter</code> tag to resources deployed without it, inheriting the value from their resource group. Which policy effect should you use?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q2"> Append — this effect is designed to add fields to resource requests</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q2"> Deny — block all deployments without the CostCenter tag so engineers are forced to add it themselves</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q2"> Modify — this effect can add or replace tag properties on a resource during create or update, and can read the tag value from the parent resource group using <code>resourceGroup().tags</code></label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q2"> AuditIfNotExists — log all resources missing the tag without blocking or modifying anything</label>
+    </div>
+    <div class="quiz-feedback">Modify is the correct effect for inheriting tags from a resource group. The Modify effect can read the resource group's tag value using the <code>resourceGroup().tags['CostCenter']</code> expression and write it to the resource. Append can add a field but cannot read from a parent scope to inherit a value, and cannot replace an existing incorrect value. Deny (B) would block deployments but not automatically fix them — creating friction for engineers rather than a seamless governance control. AuditIfNotExists (D) only audits and makes no changes.</div>
+  </div>
+
+  <!-- Q3 -->
+  <div class="quiz-question" data-correct="a">
+    <p>3. A policy with DeployIfNotExists effect needs to automatically deploy a diagnostic setting on every new storage account. What does the policy assignment require beyond the definition itself?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q3"> A managed identity on the policy assignment, granted a role with permission to deploy diagnostic settings (such as Monitoring Contributor) on the target scope</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q3"> No additional configuration — ARM handles DINE deployments using the deploying user's credentials</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q3"> A service principal with Owner rights on the subscription, referenced in the policy assignment</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q3"> Global Administrator credentials stored securely in the policy definition's parameter block</label>
+    </div>
+    <div class="quiz-feedback">DeployIfNotExists policies deploy resources on your behalf using a managed identity attached to the policy assignment. Azure creates this system-assigned managed identity automatically when you assign the policy, but you must manually grant it the RBAC role it needs. For deploying diagnostic settings to a storage account, Monitoring Contributor on the subscription (or resource group) scope is the typical grant. Without this role assignment, the DINE effect evaluates correctly but deployment tasks will fail with "Authorization" errors that appear only in the remediation task log — a common source of confusion.</div>
+  </div>
+
+  <!-- Q4 -->
+  <div class="quiz-question" data-correct="b">
+    <p>4. What is the difference between a policy exclusion (<code>notScope</code>) and a policy exemption?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q4"> They are functionally identical — both remove a resource from compliance evaluation with no difference in audit trail</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q4"> <code>notScope</code> permanently excludes an entire child scope with no documentation, audit trail, or expiry; an Exemption is time-bounded, requires a documented category and reason, and appears in compliance reports as Exempt</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q4"> <code>notScope</code> is used at resource group level; exemptions are for individual resources only</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q4"> Exemptions can override Deny effects; <code>notScope</code> only affects Audit policies</label>
+    </div>
+    <div class="quiz-feedback">The audit trail distinction is the most operationally important difference. notScope makes a scope invisible to the policy entirely — excluded resources don't appear in compliance reports at all. In a regulated environment, this is problematic: you cannot demonstrate to an auditor that exceptions were reviewed and approved. Policy exemptions create a documented, time-bounded exception with a reason, and the resource shows as Exempt in the compliance dashboard — satisfying audit requirements. Both mechanisms stop the Deny effect from firing and both remove resources from compliance counts.</div>
+  </div>
+
+  <!-- Q5 -->
+  <div class="quiz-question" data-correct="d">
+    <p>5. You assign an initiative containing 50 policy definitions to a subscription. Three policies in the initiative overlap with a separate Deny policy assigned at the Management Group. What compliance state will a resource show when it satisfies the initiative but violates the standalone MG-level Deny policy?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q5"> Non-compliant — the strictest applicable policy always wins and determines the reported state</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q5"> Compliant — initiative assignments at a lower scope take precedence over single assignments at parent scopes</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q5"> The resource is blocked from deployment entirely and no compliance state is assigned</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q5"> Conflict — when two policy assignments produce contradictory evaluations for the same resource, the compliance state is Conflict, indicating it needs manual resolution</label>
+    </div>
+    <div class="quiz-feedback">Conflict is the compliance state assigned when two policy assignments reach contradictory conclusions about the same resource at the same time. It does not mean the stricter wins — it means the system detected an inconsistency that requires human resolution. In practice, resolve Conflicts by: (1) making one policy more specific so it doesn't overlap, (2) adding a targeted exemption, or (3) consolidating overlapping assignments. Note: Conflict is different from a Deny block — a resource in Conflict state may or may not be deployable depending on which conflicting effect fires first.</div>
+  </div>
+
+  <!-- Q6 -->
+  <div class="quiz-question" data-correct="a">
+    <p>6. You need to audit whether all VMs have the Azure Monitor Agent extension installed, without blocking deployments of VMs that don't have it. Which policy effect is correct?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q6"> AuditIfNotExists — audits the VM (parent resource) when the related Azure Monitor Agent extension (child resource) does NOT exist, without blocking the VM deployment</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q6"> Audit — evaluates the VM resource itself and marks it non-compliant if it fails the condition</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q6"> DeployIfNotExists — automatically deploys the Azure Monitor Agent extension to VMs that don't have it</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q6"> Deny — blocks VM creation unless the deployment includes the Azure Monitor Agent extension</label>
+    </div>
+    <div class="quiz-feedback">AuditIfNotExists is the correct effect here. The presence of the extension is a related resource (a child VM extension object) — not a property on the VM itself. AuditIfNotExists evaluates the parent resource (the VM) and checks whether the specified child/related resource exists. If the extension is absent, the VM is marked Non-compliant, but it was still allowed to deploy. Audit (B) evaluates a property on the resource itself — you cannot use plain Audit to check for the existence of a child resource. DINE (C) would automatically fix the issue rather than just report it. Deny (D) would block all VMs without the extension included at deployment time, which is too disruptive for a first-pass audit posture.</div>
+  </div>
+
+  <div class="quiz-score"></div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     PRIMARY SOURCE
+═══════════════════════════════════════════════ -->
+<div class="primary-source">
+  <strong>Primary source for this lesson</strong>
+  <a href="https://learn.microsoft.com/en-us/azure/governance/policy/overview" target="_blank">
+    What is Azure Policy? — Microsoft Learn
+  </a>
+  <p style="margin-top:0.5rem;font-size:0.9rem;color:#deecf9;">Also read: <a href="https://learn.microsoft.com/en-us/azure/governance/policy/concepts/effects" target="_blank" style="color:#90caf9;">Understand Azure Policy effects</a> (the canonical reference for all effect semantics and evaluation order) and <a href="https://learn.microsoft.com/en-us/azure/governance/policy/concepts/exemption-structure" target="_blank" style="color:#90caf9;">Azure Policy exemption structure</a>. The effects article is required reading before the exam.</p>
+</div>
+
+<!-- ═══════════════════════════════════════════════
+     ASK YOUR TEACHER
+═══════════════════════════════════════════════ -->
+<div class="ask-teacher">
+  <strong>Questions for your teacher (the AI agent)</strong><br>
+  This lesson covered the full Azure Policy model. There is significant depth to explore — ask your teacher to go deeper on any of these:
+  <ul style="margin-top:0.5rem;">
+    <li>Walk me through authoring a complete DeployIfNotExists policy definition in JSON that deploys diagnostic settings to a storage account, including the managed identity configuration.</li>
+    <li>How does the policy evaluation order interact with ARM template deployments that create multiple resources — does each resource get evaluated independently?</li>
+    <li>When should I use Azure Policy's Modify effect vs. a DeployIfNotExists effect for tag inheritance — what are the operational trade-offs?</li>
+    <li>How do I migrate an existing Azure Blueprint assignment to Deployment Stacks without disrupting production environments?</li>
+  </ul>
+</div>
+
+<!-- ═══════════════════════════════════════════════
+     NEXT LESSON PREVIEW
+═══════════════════════════════════════════════ -->
+<div class="callout callout-info">
+  <strong>Coming up: Lesson 05 — Resource Locks, Tags &amp; Cost Management</strong>
+  With identity, access, and policy governance covered, the next lesson completes the Domain 1 governance triad: resource locks that protect against accidental deletion and modification, tag strategies for cost allocation and resource organisation, and Azure Cost Management for budget controls, cost alerts, and chargeback reporting.
+</div>
+
+<!-- ═══════════════════════════════════════════════
+     NAVIGATION
+═══════════════════════════════════════════════ -->
+<nav class="lesson-nav">
+  <a href="0003-rbac.html">← Lesson 03 — RBAC</a>
+  <a href="0005-locks-tags-cost.html">Lesson 05 — Locks, Tags &amp; Cost →</a>
+</nav>
+
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

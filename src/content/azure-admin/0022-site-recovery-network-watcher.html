@@ -1,0 +1,597 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lesson 22 — Azure Site Recovery &amp; Network Watcher</title>
+  <link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<!-- ═══════════════════════════════════════════════
+     HEADER
+═══════════════════════════════════════════════ -->
+<header class="lesson-header">
+  <h1>Lesson 22 — Azure Site Recovery &amp; Network Watcher</h1>
+  <div class="lesson-meta">
+    <span class="badge badge-domain">Domain 5 — Monitor &amp; Maintain</span>
+    <span class="badge badge-exam">AZ-104: 10–15%</span>
+    <span class="badge badge-time">~30 min</span>
+    <span class="badge badge-prereq">Prereq: Lesson 21 — Azure Backup</span>
+  </div>
+</header>
+
+<!-- ═══════════════════════════════════════════════
+     WHY THIS MATTERS
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Why You Need This</h2>
+  <p>Azure Backup recovers from data loss — a deleted file, a corrupted database, an accidental VM deletion. Azure Site Recovery answers a harder question: <em>what happens if the entire Azure region goes down?</em> ASR continuously replicates your VMs to a secondary region so that a regional failure becomes a planned failover with minutes of downtime rather than a catastrophic loss.</p>
+  <p>Network Watcher completes the operational picture. Once your infrastructure is running and protected, you need tools to diagnose network issues in real time. NSG flow analysis, routing verification, and end-to-end connectivity monitoring are all in Network Watcher's toolbox — and several of these tools appear directly in AZ-104 scenario questions.</p>
+</section>
+
+<hr>
+
+<!-- ═══════════════════════════════════════════════
+     ASR: OVERVIEW
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Part 1 — Azure Site Recovery</h2>
+
+  <h3>ASR purpose and positioning</h3>
+  <p><strong>Azure Site Recovery (ASR)</strong> is Azure's Disaster Recovery (DR) service. It continuously replicates Azure VMs (or on-premises VMs and physical servers) to a secondary Azure region, enabling failover with near-zero data loss when the primary region becomes unavailable.</p>
+
+  <table>
+    <thead>
+      <tr><th></th><th>Azure Backup</th><th>Azure Site Recovery</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>Purpose</strong></td>
+        <td>Operational recovery — restore from accidental deletion, corruption, ransomware</td>
+        <td>Disaster recovery — survive regional outages</td>
+      </tr>
+      <tr>
+        <td><strong>RPO</strong></td>
+        <td>Up to 24 hours (daily backup frequency)</td>
+        <td>As low as seconds (crash-consistent); ~1 hour (app-consistent)</td>
+      </tr>
+      <tr>
+        <td><strong>RTO</strong></td>
+        <td>Minutes (instant restore) to hours (vault restore, large disks)</td>
+        <td>Minutes (failover starts VMs in secondary region)</td>
+      </tr>
+      <tr>
+        <td><strong>Replication</strong></td>
+        <td>Scheduled snapshots</td>
+        <td>Continuous, near-real-time disk change replication</td>
+      </tr>
+      <tr>
+        <td><strong>Target</strong></td>
+        <td>Recovery Services Vault</td>
+        <td>Secondary Azure region (or secondary site)</td>
+      </tr>
+      <tr>
+        <td><strong>Vault type</strong></td>
+        <td>Recovery Services Vault</td>
+        <td>Also uses Recovery Services Vault — but as an ASR vault, not a backup vault</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="callout callout-info">
+    <strong>The key exam differentiator</strong>
+    Azure Backup = data recovery (recover from what someone did). Azure Site Recovery = infrastructure recovery (recover from where you are). If the exam scenario mentions "regional outage", "RPO of minutes", or "failover" — the answer is ASR. If it mentions "deleted file", "corrupted database", or "accidental VM deletion" — the answer is Azure Backup.
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     HOW ASR WORKS
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>How Azure-to-Azure ASR Works</h2>
+
+  <h3>Architecture components</h3>
+  <p>When you enable replication for an Azure VM, ASR creates and manages several resources automatically:</p>
+
+  <div class="hierarchy">
+<span class="hier-tenant">Source Region (e.g. East US)</span>
+<span class="hier-sub">  ├─ Source VM  (running production workload)</span>
+<span class="hier-sub">  │    └─ Mobility Service agent  (auto-installed by ASR)</span>
+<span class="hier-rg">  └─ Cache Storage Account  (temporary staging for disk changes)</span>
+<span class="hier-tenant" style="margin-top:0.8rem;display:block;">Target Region (e.g. West US)</span>
+<span class="hier-sub">  ├─ Replica Managed Disks  (continuously updated from cache)</span>
+<span class="hier-sub">  ├─ Replica VM  (stopped — started only on failover)</span>
+<span class="hier-rg">  ├─ Target VNet  (must be pre-created; configured via network mapping)</span>
+<span class="hier-resource">  └─ Recovery Services Vault  (orchestrates replication and failover)</span>
+  </div>
+
+  <h3>Replication flow</h3>
+  <ol>
+    <li>The <strong>Mobility Service agent</strong> is installed on the source VM (ASR installs it automatically when you enable replication). It intercepts all disk writes.</li>
+    <li>Changes are written to a <strong>cache storage account</strong> in the source region.</li>
+    <li>ASR reads from the cache and asynchronously replicates changes to the <strong>replica managed disks</strong> in the target region.</li>
+    <li>ASR creates <strong>recovery points</strong> at defined intervals: crash-consistent every 5 minutes, app-consistent (VSS) every 1 hour (configurable in the replication policy).</li>
+    <li>The replica VM exists in the target region but is in a <strong>stopped/deallocated</strong> state — you pay for disk storage but not compute until failover.</li>
+  </ol>
+
+  <div class="callout callout-warn">
+    <strong>Network mapping is mandatory before failover</strong>
+    ASR requires you to map source VNets to target VNets before the first failover. If network mapping is not configured, the failed-over VM will have no network connectivity in the target region. Create target VNets before enabling replication, then configure the mapping in the ASR vault.
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     REPLICATION POLICY
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Replication Policy</h2>
+  <p>The replication policy controls how ASR creates and manages recovery points. Key parameters:</p>
+  <table>
+    <thead>
+      <tr><th>Parameter</th><th>Default</th><th>Range</th><th>Notes</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>RPO warning threshold</td>
+        <td>30 minutes</td>
+        <td>Minutes</td>
+        <td>Alert fires if replication lag exceeds this threshold — does not stop replication</td>
+      </tr>
+      <tr>
+        <td>Crash-consistent recovery point</td>
+        <td>Every 5 minutes</td>
+        <td>Fixed</td>
+        <td>Always retained; frequency is not configurable</td>
+      </tr>
+      <tr>
+        <td>App-consistent recovery point frequency</td>
+        <td>Every 4 hours</td>
+        <td>1–12 hours</td>
+        <td>Uses VSS — higher frequency increases performance impact on source VM</td>
+      </tr>
+      <tr>
+        <td>Recovery point retention</td>
+        <td>24 hours</td>
+        <td>Up to 72 hours</td>
+        <td>How far back you can failover to — the history of recovery points retained</td>
+      </tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     FAILOVER TYPES
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Failover Types</h2>
+  <p>ASR provides three distinct failover operations, each appropriate for different scenarios. Choosing the wrong one in a real incident can cause unnecessary data loss or disrupt the production environment.</p>
+
+  <table>
+    <thead>
+      <tr><th>Failover type</th><th>Source VM state</th><th>Data loss</th><th>When to use</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>Test Failover</strong></td>
+        <td>Continues running — not affected</td>
+        <td>None (test network is isolated)</td>
+        <td>DR drills, compliance validation, verifying the DR plan. Always test before a real incident.</td>
+      </tr>
+      <tr>
+        <td><strong>Planned Failover</strong></td>
+        <td>Must be shut down before failover</td>
+        <td>Zero — replication fully synchronises before failover</td>
+        <td>Planned maintenance, region migrations, or any scenario where you control the timing</td>
+      </tr>
+      <tr>
+        <td><strong>Unplanned Failover</strong></td>
+        <td>Unavailable (region down)</td>
+        <td>Potential loss up to the last recovery point</td>
+        <td>Actual disaster — the primary region is unavailable and you must fail over immediately</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="callout callout-danger">
+    <strong>Test failover is the safe DR drill mechanism</strong>
+    Test failover spins up replica VMs in an <em>isolated test network</em> that has no connectivity to the production environment or the replication process. Production continues running. The replication continues. The test VMs are spun up in isolation and deleted after the test. Running a test failover does not commit the failover — it is entirely non-destructive. This is the correct mechanism for DR drills, not a real failover.
+  </div>
+
+  <h3>Failover process for unplanned failover</h3>
+  <ol>
+    <li>In the ASR vault, navigate to Replicated items → select the VM → Failover</li>
+    <li>Choose the recovery point to fail over to (latest processed, latest app-consistent, or a specific point in time)</li>
+    <li>Confirm you want to shut down the source VM before failover (if still accessible)</li>
+    <li>ASR starts the replica VM in the target region and connects it to the target VNet (via network mapping)</li>
+    <li>Update DNS to point at the new VM's IP address in the target region</li>
+    <li>Validate the application in the target region</li>
+    <li>Click "Commit" to finalise the failover — this discards old recovery points and severs the relationship with the source</li>
+  </ol>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     FAILBACK AND RECOVERY PLANS
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Failback and Recovery Plans</h2>
+
+  <h3>Failback</h3>
+  <p>After a failover, your production workload is now running in the secondary region. Once the primary region is restored and stable, you <strong>fail back</strong>: you reverse-replicate from the secondary region back to the primary, then perform a planned failover back to primary. ASR supports this reprotect and failback workflow natively.</p>
+
+  <h3>Recovery plans</h3>
+  <p>A <strong>recovery plan</strong> orchestrates the failover of a multi-VM application in a defined sequence with automated steps between groups. This is essential for multi-tier applications where the order of failover matters.</p>
+
+  <p>For a classic 3-tier web application, the recovery plan sequence would be:</p>
+  <div class="hierarchy">
+<span class="hier-resource">Group 1 — Database tier  (SQL Server must be up before app tier starts)</span>
+<span class="hier-resource">  └─ Wait step: 2 minutes for SQL to initialise</span>
+<span class="hier-rg">Group 2 — Application tier  (API servers — depend on DB being ready)</span>
+<span class="hier-rg">  └─ Azure Automation runbook: run health check script</span>
+<span class="hier-sub">Group 3 — Web / presentation tier  (only start after app tier is healthy)</span>
+  </div>
+
+  <p>Recovery plans can include:</p>
+  <ul>
+    <li>Azure Automation runbooks — for complex pre/post steps (update DNS, warm up caches, disable traffic manager endpoints)</li>
+    <li>Manual action steps — checkpoints requiring human confirmation before proceeding</li>
+    <li>Wait steps — timed delays between groups</li>
+  </ul>
+
+  <div class="callout callout-info">
+    <strong>Recovery plans for exam scenarios</strong>
+    When the exam describes a 3-tier application and asks how to ensure the database is available before the web tier starts during failover, the answer is a <strong>recovery plan</strong> with group ordering. Recovery plans are the orchestration layer that makes multi-tier ASR practical.
+  </div>
+
+  <h3>RTO and RPO for ASR</h3>
+  <table>
+    <thead>
+      <tr><th>Metric</th><th>Value for ASR</th><th>Notes</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>RPO</strong></td>
+        <td>Typically 15–30 seconds for crash-consistent; up to 1 hour for app-consistent</td>
+        <td>Measured from last recovery point to failover time. Not the same as replication lag — actual RPO depends on how recently a recovery point was created.</td>
+      </tr>
+      <tr>
+        <td><strong>RTO</strong></td>
+        <td>Minutes for the VM to start; additional time for DNS propagation and application warm-up</td>
+        <td>VM start time is typically 1–5 minutes. Total application RTO depends on application startup time and DNS TTL.</td>
+      </tr>
+    </tbody>
+  </table>
+</section>
+
+<hr>
+
+<!-- ═══════════════════════════════════════════════
+     NETWORK WATCHER
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Part 2 — Azure Network Watcher</h2>
+
+  <h3>What is Network Watcher?</h3>
+  <p><strong>Azure Network Watcher</strong> is a regional service providing monitoring, diagnostics, and logging capabilities for Azure virtual networks. It must be <strong>enabled per region</strong> — it is not a global service. When you create a VNet in a region, Azure often auto-enables Network Watcher for that region, but it is best practice to verify this explicitly.</p>
+
+  <div class="callout callout-warn">
+    <strong>Regional scope</strong>
+    Network Watcher tools operate within a single region. To diagnose network issues in East US, you use the East US Network Watcher. There is no cross-region Network Watcher instance — each region has its own, stored in the <code>NetworkWatcherRG</code> resource group.
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     NETWORK WATCHER TOOLS TABLE
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Network Watcher Tools Reference</h2>
+
+  <table>
+    <thead>
+      <tr><th>Tool</th><th>What it does</th><th>When to use it</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>IP Flow Verify</strong></td>
+        <td>Tests whether a specific traffic flow (source IP, source port, destination IP, destination port, protocol, direction) would be allowed or denied by the NSG rules on a VM's NIC. Returns the specific NSG rule responsible for the decision.</td>
+        <td>First-line NSG troubleshooting. "Why can't I connect to port 443 on this VM?" — run IP Flow Verify before reading NSG rules manually.</td>
+      </tr>
+      <tr>
+        <td><strong>Next Hop</strong></td>
+        <td>Shows the effective next hop for traffic leaving a VM toward a destination IP — based on system routes, UDRs (User-Defined Routes), and BGP routes. Returns hop type (VirtualNetworkGateway, Internet, VirtualAppliance, None) and the route table entry.</td>
+        <td>Diagnosing routing issues. "Traffic should go through the firewall NVA but it's being dropped." — Next Hop reveals if a UDR is sending it to <em>None</em> (blackhole) instead.</td>
+      </tr>
+      <tr>
+        <td><strong>Effective Security Rules</strong></td>
+        <td>Displays the merged, prioritised list of NSG rules actually applied to a VM's NIC — combining both the NIC-level NSG and the subnet-level NSG in effective order.</td>
+        <td>Understanding the full security posture of a VM when multiple NSGs are applied. Covered extensively in Lesson 15.</td>
+      </tr>
+      <tr>
+        <td><strong>VPN Diagnostics</strong></td>
+        <td>Runs diagnostics against a VPN Gateway or VPN connection. Checks IKE negotiation logs, tunnel status, and BGP routes. Results are stored in a Storage Account blob.</td>
+        <td>VPN tunnel is down or flapping. Connection is established but BGP routes are not being exchanged.</td>
+      </tr>
+      <tr>
+        <td><strong>Connection Monitor</strong></td>
+        <td>Continuously monitors TCP/HTTP connectivity between a source endpoint (Azure VM, on-premises agent) and a destination (VM, URL, IP address). Provides reachability status, round-trip latency, topology view, and alert integration. Tests run on a configurable schedule.</td>
+        <td>Ongoing SLA monitoring for critical connections. Validates private endpoint connectivity. Tests cross-region reachability. Provides latency baselines and alerts when connectivity degrades.</td>
+      </tr>
+      <tr>
+        <td><strong>Packet Capture</strong></td>
+        <td>Captures network packets from a VM's NIC to a Storage Account blob or local file. No agent installation required — done at the Azure host level via a VM extension. Supports capture filters (IP, port, protocol).</td>
+        <td>Deep packet analysis for unexplained application failures. Protocol debugging when higher-level tools are inconclusive. Requires a storage account to store captures.</td>
+      </tr>
+      <tr>
+        <td><strong>NSG Flow Logs</strong></td>
+        <td>Enables per-NSG logging of every allowed and denied connection (5-tuple: source IP, source port, destination IP, destination port, protocol) to a Storage Account. V2 logs also include bytes and packet counts. Managed through Network Watcher in the portal.</td>
+        <td>Security audit trails. Traffic volume analysis. Identifying which IPs are communicating with which resources. Required input for Traffic Analytics.</td>
+      </tr>
+      <tr>
+        <td><strong>Traffic Analytics</strong></td>
+        <td>Processes NSG Flow Logs through a Log Analytics workspace to produce visualised dashboards: top talkers, allowed vs. denied flow distribution, geo-mapped traffic origins, hot spots, and anomaly detection.</td>
+        <td>Macro-level network traffic visibility. Security reviews. Identifying unexpected cross-region traffic or public internet ingress patterns at scale.</td>
+      </tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     IP FLOW VERIFY IN DEPTH
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>IP Flow Verify — The NSG Diagnostic Tool</h2>
+  <p>IP Flow Verify is the most frequently used Network Watcher tool for day-to-day Azure administration. It answers the exact question NSG troubleshooting always starts with: <em>"Is this specific connection being blocked, and by which rule?"</em></p>
+
+  <h3>How to use it</h3>
+  <p>In the Azure portal, navigate to Network Watcher → IP Flow Verify, then specify:</p>
+  <ul>
+    <li><strong>Subscription, Resource Group, VM, NIC:</strong> the target VM's network interface</li>
+    <li><strong>Direction:</strong> Inbound or Outbound</li>
+    <li><strong>Protocol:</strong> TCP or UDP</li>
+    <li><strong>Local port:</strong> the port on the VM's NIC</li>
+    <li><strong>Remote IP address:</strong> source IP (inbound) or destination IP (outbound)</li>
+    <li><strong>Remote port:</strong> source port (inbound) or destination port (outbound)</li>
+  </ul>
+
+  <p>IP Flow Verify evaluates the effective NSG rules (NIC-level and subnet-level) and returns:</p>
+  <ul>
+    <li><strong>Access: Allow or Deny</strong></li>
+    <li><strong>Rule name:</strong> the specific NSG rule that made the decision (e.g. <code>DenyAllInbound</code>, <code>Port_8080</code>)</li>
+    <li><strong>NSG name and resource group:</strong> which NSG contains the rule</li>
+  </ul>
+
+  <div class="callout callout-info">
+    <strong>IP Flow Verify vs. Effective Security Rules</strong>
+    <em>IP Flow Verify</em> tests a specific hypothetical traffic flow and returns a binary allow/deny with the responsible rule — it simulates a packet. <em>Effective Security Rules</em> shows you the complete merged ruleset as a list. Use IP Flow Verify when you know the specific flow you want to test. Use Effective Security Rules when you want to audit the full NSG configuration for a VM.
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     NEXT HOP IN DEPTH
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Next Hop — Routing Diagnostics</h2>
+  <p>Next Hop diagnoses routing issues by showing the effective route for a specific source VM and destination IP combination. Azure evaluates system routes, UDRs, and BGP-advertised routes to determine the effective next hop.</p>
+
+  <h3>Common Next Hop types and what they mean</h3>
+  <table>
+    <thead>
+      <tr><th>Next Hop type</th><th>Meaning</th><th>Typical scenario</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>Internet</code></td>
+        <td>Traffic exits to the public internet via Azure's default internet gateway</td>
+        <td>Expected for public endpoint destinations</td>
+      </tr>
+      <tr>
+        <td><code>VirtualNetwork</code></td>
+        <td>Traffic stays within the VNet (direct routing to another VM in the same VNet)</td>
+        <td>Expected for intra-VNet communication</td>
+      </tr>
+      <tr>
+        <td><code>VirtualNetworkGateway</code></td>
+        <td>Traffic is routed through a VPN or ExpressRoute Gateway</td>
+        <td>Expected for on-premises bound traffic via S2S VPN</td>
+      </tr>
+      <tr>
+        <td><code>VirtualAppliance</code></td>
+        <td>Traffic is directed to a Network Virtual Appliance (NVA) — Azure Firewall or third-party firewall VM</td>
+        <td>Expected in hub-spoke topologies with forced tunnelling</td>
+      </tr>
+      <tr>
+        <td><code>None</code></td>
+        <td>No valid route — traffic is blackholed and dropped</td>
+        <td><strong>Problem indicator</strong> — a misconfigured UDR is sending traffic to a non-existent next hop</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="callout callout-danger">
+    <strong>None means blackhole</strong>
+    When Next Hop returns <code>None</code>, traffic to that destination is silently dropped. This is almost always caused by a UDR that routes traffic to a next hop IP address that is unreachable, deleted, or on a deallocated NVA. Fix the UDR to point to the correct NVA IP, or delete the UDR to fall back to system routes.
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     CONNECTION MONITOR
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Connection Monitor — Continuous Connectivity Testing</h2>
+  <p><strong>Connection Monitor</strong> is distinct from the point-in-time diagnostic tools (IP Flow Verify, Next Hop). It runs <em>continuously</em> on a schedule, testing TCP or HTTP connectivity between defined source and destination endpoints. This makes it appropriate for ongoing SLA validation, not just one-time troubleshooting.</p>
+
+  <h3>Connection Monitor architecture</h3>
+  <ul>
+    <li><strong>Sources:</strong> Azure VMs with the Network Watcher agent extension installed, or on-premises machines with the Log Analytics agent</li>
+    <li><strong>Destinations:</strong> Azure VMs (by NIC), Azure service endpoints, public URLs, or IP addresses with specific ports</li>
+    <li><strong>Test frequency:</strong> every 30 seconds to 5 minutes</li>
+    <li><strong>Metrics collected:</strong> checks failed (%), round-trip latency (ms), topology path</li>
+  </ul>
+
+  <h3>Use cases</h3>
+  <ul>
+    <li><strong>Private endpoint validation:</strong> continuously prove that your Azure SQL private endpoint is reachable from the application subnet — and alert immediately if it is not</li>
+    <li><strong>Cross-region reachability:</strong> verify that VNet peering between East US and West US is operational</li>
+    <li><strong>Baseline SLA monitoring:</strong> document the normal latency between your app tier and database tier, and alert when it exceeds threshold</li>
+    <li><strong>Third-party SaaS connectivity:</strong> continuously verify outbound connectivity to external APIs from your VMs</li>
+  </ul>
+
+  <div class="callout callout-info">
+    <strong>Connection Monitor vs. a simple ping</strong>
+    A ping is a one-time manual test. Connection Monitor runs automatically every 30–300 seconds, logs results to a Log Analytics workspace, provides topology visualisation showing the exact path of the connection, generates Azure Monitor alerts when connectivity drops, and gives you SLA reporting over time. These capabilities make Connection Monitor appropriate for production monitoring, not just ad-hoc troubleshooting.
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     NSG FLOW LOGS AND TRAFFIC ANALYTICS
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>NSG Flow Logs and Traffic Analytics</h2>
+  <p>NSG Flow Logs and Traffic Analytics form a traffic observability pipeline. They were covered in Lesson 15 from an NSG perspective — here we focus on the Network Watcher management layer.</p>
+
+  <h3>NSG Flow Logs</h3>
+  <p>Enable per NSG. Each allowed or denied connection generates a log entry containing the 5-tuple (source IP, source port, destination IP, destination port, protocol), direction, action, and (in V2) byte and packet counts. Logs are written to a Storage Account in JSON format.</p>
+  <p><strong>Version 2 is the current standard</strong> — it adds throughput data (bytes/packets) that V1 lacks. Always configure V2 for new deployments.</p>
+
+  <h3>Traffic Analytics</h3>
+  <p>Traffic Analytics processes NSG Flow Log data through Log Analytics to produce visualised intelligence. It aggregates flows at configurable intervals (10 or 60 minutes) and produces:</p>
+  <ul>
+    <li>Top talkers (source/destination pairs by volume)</li>
+    <li>Geo-mapped traffic origin dashboards</li>
+    <li>Allowed vs. denied flow ratios</li>
+    <li>Hot spots — workloads receiving the most traffic</li>
+    <li>Malicious IP detection via Microsoft Threat Intelligence integration</li>
+  </ul>
+
+  <div class="callout callout-warn">
+    <strong>Traffic Analytics requires a Log Analytics workspace</strong>
+    Enabling Traffic Analytics requires routing NSG Flow Logs to a Log Analytics workspace. There is an additional per-GB processing cost on top of the Log Analytics ingestion cost. For large environments with many NSGs, this can be significant — evaluate against the observability value before enabling on every NSG in the environment.
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     QUIZ
+═══════════════════════════════════════════════ -->
+<section class="quiz">
+  <h2>Check Your Understanding</h2>
+  <p>Click any option to see immediate feedback.</p>
+
+  <!-- Q1 -->
+  <div class="quiz-question" data-correct="b">
+    <p>1. A critical application with an RPO requirement of 2 minutes is running on Azure VMs. Which service is the correct solution?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q1"> Azure Backup with a backup frequency of every 2 minutes</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q1"> Azure Site Recovery — it provides continuous replication with crash-consistent RPO as low as seconds</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q1"> Azure Backup with instant restore snapshots retained for 5 days</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q1"> Azure VM managed disk snapshots scheduled via Azure Automation every 2 minutes</label>
+    </div>
+    <div class="quiz-feedback">Azure Backup supports only daily or weekly backup schedules for VMs — it cannot meet a 2-minute RPO. Azure Site Recovery provides continuous replication with crash-consistent recovery points created every 5 minutes, resulting in RPO typically measured in seconds to low minutes. ASR is designed for disaster recovery with tight RPO requirements; Azure Backup is designed for operational recovery from accidental loss or corruption.</div>
+  </div>
+
+  <!-- Q2 -->
+  <div class="quiz-question" data-correct="c">
+    <p>2. Your team wants to run a DR drill to validate the ASR failover configuration without affecting production workloads or the ongoing replication process. Which failover type should you use?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q2"> Planned Failover — this is designed for low-impact controlled failovers</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q2"> Unplanned Failover — this tests the real-world scenario of an uncontrolled region failure</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q2"> Test Failover — it starts replica VMs in an isolated test network without affecting production or replication</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q2"> A simulated failover — run a Bicep template that creates VMs from the last recovery point in a test resource group</label>
+    </div>
+    <div class="quiz-feedback">Test Failover is the purpose-built DR drill mechanism in ASR. It spins up replica VMs in an isolated VNet that has no connectivity to the production environment, the source VMs continue running, and replication continues uninterrupted. After the drill, you clean up the test VMs. Test Failover is non-destructive and should be run at least quarterly to validate your DR plan.</div>
+  </div>
+
+  <!-- Q3 -->
+  <div class="quiz-question" data-correct="a">
+    <p>3. You are configuring ASR for a 3-tier application: web servers, application servers, and SQL Server. How do you ensure that during failover, the SQL Server VMs are started before the application servers, and application servers before the web servers?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q3"> Create an ASR recovery plan with three groups in order: SQL tier in Group 1, app tier in Group 2, web tier in Group 3</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q3"> Configure VM startup dependencies in Azure Resource Manager tags on each VM</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q3"> Set boot sequence priorities in the VM OS configuration files before enabling ASR replication</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q3"> Add an Azure Automation runbook that monitors VM startup and starts the next tier when the previous one passes a health check</label>
+    </div>
+    <div class="quiz-feedback">ASR Recovery Plans are the built-in orchestration mechanism for multi-VM failover ordering. You define groups (Group 1, Group 2, Group 3) and assign VMs to each group. ASR fails over Group 1, waits for all VMs in that group to start, then proceeds to Group 2, and so on. Groups can also include Azure Automation runbook steps and manual confirmation checkpoints between groups.</div>
+  </div>
+
+  <!-- Q4 -->
+  <div class="quiz-question" data-correct="d">
+    <p>4. An engineer reports they cannot connect from their VM (10.1.0.4) to a web server VM (10.1.1.10) on port 443. You need to quickly determine whether an NSG rule is blocking the connection and which rule it is. Which Network Watcher tool do you use?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q4"> Connection Monitor — configure a test from 10.1.0.4 to 10.1.1.10:443 and wait for the results</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q4"> Next Hop — check the routing path from 10.1.0.4 to 10.1.1.10 to find any routing issues</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q4"> Packet Capture — start a packet capture on the source VM and examine the captured traffic</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q4"> IP Flow Verify — specify the source VM, direction inbound on the destination VM, source IP 10.1.0.4, destination port 443, and the tool returns whether the flow is allowed or denied and names the specific NSG rule</label>
+    </div>
+    <div class="quiz-feedback">IP Flow Verify is the correct tool for this exact scenario. You specify the target VM (10.1.1.10's NIC), the direction (inbound), source IP (10.1.0.4), port 443, and protocol TCP. It returns "Allow" or "Deny" and the specific NSG rule name responsible. This is far faster than manually reading all NSG rules. Connection Monitor would work for ongoing monitoring but requires setup time and does not immediately return which rule is responsible.</div>
+  </div>
+
+  <!-- Q5 -->
+  <div class="quiz-question" data-correct="b">
+    <p>5. Traffic from an application VM is not reaching the Azure Firewall NVA as expected — it appears to be going directly to the internet instead. Which Network Watcher tool identifies the cause?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q5"> IP Flow Verify — test the connection from the VM to the firewall's private IP to see if an NSG is blocking it</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q5"> Next Hop — run from the application VM to the destination IP to see the effective next hop; if the UDR is misconfigured, it will show "Internet" or "None" instead of "VirtualAppliance"</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q5"> NSG Flow Logs — examine the logs to see what the traffic pattern shows</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q5"> VPN Diagnostics — verify that the on-premises VPN tunnel is still routing traffic correctly</label>
+    </div>
+    <div class="quiz-feedback">Next Hop directly answers routing questions. If a UDR is supposed to route traffic through the firewall NVA (next hop type: VirtualAppliance) but the UDR is missing or misconfigured, Next Hop will return "Internet" (falling back to system route) or "None" (blackhole). The output includes the specific route table entry responsible, pointing you directly to the UDR that needs fixing.</div>
+  </div>
+
+  <!-- Q6 -->
+  <div class="quiz-question" data-correct="c">
+    <p>6. You need to continuously monitor the TCP connectivity between your application VMs in East US and your Azure SQL private endpoint, with automatic alerting if connectivity drops and SLA reporting over 30 days. Which tool provides this?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q6"> Run IP Flow Verify on a daily schedule using Azure Automation</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q6"> Configure a ping test from the VMs to the SQL private endpoint IP and pipe output to Log Analytics</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q6"> Network Watcher Connection Monitor — configure source as the app VMs and destination as the SQL private endpoint, with TCP:1433, and set up an alert rule on the monitor</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q6"> NSG Flow Logs — enable on the SQL subnet NSG and query for allowed flows to 1433</label>
+    </div>
+    <div class="quiz-feedback">Connection Monitor is the correct solution for continuous end-to-end connectivity monitoring with SLA reporting. It tests TCP connectivity on a schedule (down to every 30 seconds), logs results to Log Analytics, generates topology diagrams showing the full path, and integrates with Azure Monitor alerts. It provides the reachability percentage and latency metrics needed for 30-day SLA reporting. IP Flow Verify and NSG Flow Logs are point-in-time or historical tools — they cannot provide continuous proactive monitoring.</div>
+  </div>
+
+  <div class="quiz-score"></div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     PRIMARY SOURCE
+═══════════════════════════════════════════════ -->
+<div class="primary-source">
+  <strong>Primary source for this lesson</strong>
+  <a href="https://learn.microsoft.com/en-us/azure/site-recovery/site-recovery-overview" target="_blank">
+    About Azure Site Recovery — Microsoft Learn
+  </a>
+  <p style="margin-top:0.5rem;font-size:0.9rem;color:#deecf9;">For Network Watcher, the companion reference is the <a href="https://learn.microsoft.com/en-us/azure/network-watcher/network-watcher-overview" target="_blank" style="color:#90caf9;">Azure Network Watcher overview</a>. Walk through the IP Flow Verify and Next Hop quickstarts in the portal against a test VM — these tools require hands-on practice to develop the muscle memory for real incident response.</p>
+</div>
+
+<!-- ═══════════════════════════════════════════════
+     ASK YOUR TEACHER
+═══════════════════════════════════════════════ -->
+<div class="ask-teacher">
+  <strong>Questions for your teacher (the AI agent)</strong><br>
+  This lesson covered ASR for disaster recovery and Network Watcher for network diagnostics. Go deeper on:
+  <ul style="margin-top:0.5rem;">
+    <li>Walk me through the complete ASR setup process for an Azure-to-Azure replication, including pre-creating target VNets and configuring network mapping.</li>
+    <li>What is the difference between crash-consistent and app-consistent recovery points in ASR, and how do I tune the replication policy for a SQL Server workload?</li>
+    <li>How do I configure Traffic Analytics to identify unexpected internet ingress flows across all VNets in my subscription?</li>
+    <li>Can I use ASR to migrate a VM from one Azure region to another permanently, and if so, what is the migration procedure vs. a DR failover?</li>
+  </ul>
+</div>
+
+<!-- ═══════════════════════════════════════════════
+     NEXT LESSON PREVIEW
+═══════════════════════════════════════════════ -->
+<div class="callout callout-info">
+  <strong>Coming up: Lesson 23 — Microsoft Defender for Cloud</strong>
+  With monitoring, backup, and DR in place, the next lesson focuses on security posture management. Defender for Cloud provides a unified security score across all your Azure resources, identifies misconfigurations and vulnerabilities, and integrates with Microsoft Defender extended detection and response (XDR). We'll cover secure score, security recommendations, workload protection plans, and regulatory compliance dashboards.
+</div>
+
+<!-- ═══════════════════════════════════════════════
+     NAVIGATION
+═══════════════════════════════════════════════ -->
+<nav class="lesson-nav">
+  <a href="0021-azure-backup.html">← Lesson 21 — Azure Backup</a>
+  <a href="0023-defender-for-cloud.html">Lesson 23 — Defender for Cloud →</a>
+</nav>
+
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

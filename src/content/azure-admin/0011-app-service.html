@@ -1,0 +1,559 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lesson 11 — Azure App Service</title>
+  <link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<!-- ═══════════════════════════════════════════════
+     HEADER
+═══════════════════════════════════════════════ -->
+<header class="lesson-header">
+  <h1>Lesson 11 — Azure App Service</h1>
+  <div class="lesson-meta">
+    <span class="badge badge-domain">Domain 3 — Compute</span>
+    <span class="badge badge-exam">AZ-104: 20–25%</span>
+    <span class="badge badge-time">~30 min</span>
+    <span class="badge badge-prereq">Prereq: Lessons 01–10</span>
+  </div>
+</header>
+
+<!-- ═══════════════════════════════════════════════
+     WHY THIS MATTERS
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Why App Service Is the Most Exam-Dense PaaS Topic</h2>
+  <p>App Service is Azure's flagship platform-as-a-service compute offering. It covers more exam surface area than any other single PaaS service in the AZ-104 domain: plans, slots, scaling, networking, authentication, certificates, and deployment strategies are all in scope. More importantly, App Service is the default answer for "how do I host a web application in Azure without managing infrastructure" — a question that comes up constantly in real production environments.</p>
+  <p>The exam tests whether you understand the boundaries between tiers, the mechanics of zero-downtime deploys, and the important distinction between making the app's <em>outbound</em> traffic private (VNet Integration) versus making its <em>inbound</em> endpoint private (Private Endpoints). These are commonly confused and frequently tested.</p>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     APP SERVICE OVERVIEW
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>App Service Overview</h2>
+  <p><strong>Azure App Service</strong> is a fully managed HTTP-based hosting platform for web applications, REST APIs, and mobile backends. Azure handles the operating system, runtime patching, load balancing, and hardware provisioning. You bring the code.</p>
+
+  <h3>Supported runtimes</h3>
+  <p>App Service supports .NET, Node.js, Python, PHP, Java, and Ruby on both <strong>Linux</strong> and <strong>Windows</strong> hosting stacks. You can also deploy custom containers (Docker images) to App Service instead of using a built-in runtime stack.</p>
+
+  <div class="callout callout-info">
+    <strong>Linux vs Windows hosting</strong>
+    Linux and Windows App Service Plans cannot share the same resource group in the same region — they require separate plans. This is a commonly tested constraint. If you have both Linux and Windows apps, they need separate App Service Plans (and either different resource groups or different regions).
+  </div>
+
+  <h3>The hosting model</h3>
+  <p>App Service abstracts the compute into a two-layer model: the <strong>App Service Plan</strong> defines and pays for the compute resources, and one or more <strong>App Service apps</strong> run on that plan. Multiple apps can share a single plan at no extra compute cost — though they compete for the plan's resources.</p>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     APP SERVICE PLANS
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>App Service Plans — The Tier Decision</h2>
+  <p>The App Service Plan is the billing unit. It defines the region, the number of VM instances, and the size (vCPU/RAM) of those instances. Every app must belong to a plan. <strong>Choosing the wrong tier is the most common App Service mistake</strong> because critical features like autoscale and deployment slots are tier-gated.</p>
+
+  <table>
+    <thead>
+      <tr>
+        <th>Tier</th>
+        <th>Infrastructure</th>
+        <th>SLA</th>
+        <th>Autoscale</th>
+        <th>Deployment Slots</th>
+        <th>VNet Integration</th>
+        <th>Key Use Case</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>Free (F1)</strong></td>
+        <td>Shared</td>
+        <td>None</td>
+        <td>No</td>
+        <td>No</td>
+        <td>No</td>
+        <td>Exploration, learning</td>
+      </tr>
+      <tr>
+        <td><strong>Shared (D1)</strong></td>
+        <td>Shared</td>
+        <td>None</td>
+        <td>No</td>
+        <td>No</td>
+        <td>No</td>
+        <td>Custom domains on shared infra</td>
+      </tr>
+      <tr>
+        <td><strong>Basic (B1/B2/B3)</strong></td>
+        <td>Dedicated VMs</td>
+        <td>99.95%</td>
+        <td>No</td>
+        <td>No</td>
+        <td>No</td>
+        <td>Dev/test, low-traffic apps</td>
+      </tr>
+      <tr>
+        <td><strong>Standard (S1/S2/S3)</strong></td>
+        <td>Dedicated VMs</td>
+        <td>99.95%</td>
+        <td>Yes</td>
+        <td>5 slots</td>
+        <td>Yes (regional)</td>
+        <td>Production web apps</td>
+      </tr>
+      <tr>
+        <td><strong>Premium v2/v3 (P0v3–P3v3)</strong></td>
+        <td>Dedicated VMs (faster)</td>
+        <td>99.95%</td>
+        <td>Yes</td>
+        <td>20 slots</td>
+        <td>Yes + private endpoints</td>
+        <td>High-performance production</td>
+      </tr>
+      <tr>
+        <td><strong>Isolated v2 (I1v2–I3v2)</strong></td>
+        <td>Dedicated hosts in your VNet (ASE)</td>
+        <td>99.95%</td>
+        <td>Yes</td>
+        <td>20 slots</td>
+        <td>Full VNet isolation</td>
+        <td>Compliance, strict isolation</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="callout callout-warn">
+    <strong>Exam trap: Basic tier</strong>
+    Basic plan gives you dedicated VMs, custom domains, TLS, and manual scale — but <strong>no autoscale and no deployment slots</strong>. Many questions present a scenario where a customer wants deployment slots and is on Basic: the answer is always "upgrade to Standard or higher."
+  </div>
+
+  <div class="callout callout-info">
+    <strong>Scale up vs. Scale out</strong>
+    <strong>Scale up</strong> means moving to a higher App Service Plan tier (more vCPU/RAM per instance). <strong>Scale out</strong> means adding more instances of the existing plan. These are independent axes. Autoscale only controls scale-out (instance count) — it does not change the plan tier automatically.
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     DEPLOYMENT SLOTS
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Deployment Slots</h2>
+  <p>Deployment slots are live, independently addressable copies of your App Service app within the same App Service Plan. They are the mechanism for <strong>zero-downtime deployments</strong> in Azure App Service.</p>
+
+  <h3>How slots work</h3>
+  <ul>
+    <li>Each slot has its own URL: <code>myapp.azurewebsites.net</code> (production) and <code>myapp-staging.azurewebsites.net</code> (staging).</li>
+    <li>Slots are fully live — staging can be hit directly by QA teams or smoke tests.</li>
+    <li>A <strong>swap operation</strong> atomically exchanges the content and configuration between two slots. After a swap, staging becomes production and vice versa.</li>
+    <li>Swaps are instant from the perspective of clients — no downtime, no connection resets in flight.</li>
+    <li>Swaps are reversible: immediately swap back if you discover a problem in production.</li>
+  </ul>
+
+  <h3>Slot-sticky settings</h3>
+  <p>Some app settings and connection strings should <em>not</em> travel with the code when you swap. For example, the production database connection string should always stay in the production slot — you never want staging's DB string to accidentally land in production (or vice versa) after a swap.</p>
+  <p>Mark a setting as <strong>deployment slot setting</strong> (sticky) in the App Service Configuration blade. Sticky settings stay with the slot regardless of which code revision is currently deployed there.</p>
+
+  <div class="callout callout-danger">
+    <strong>Critical: Sticky settings exist to prevent data disasters</strong>
+    If your production and staging databases are different (as they should be), <em>always</em> mark the database connection string as slot-sticky. A single swap without sticky settings can redirect production traffic to a staging database — a live data loss or corruption event.
+  </div>
+
+  <h3>Traffic splitting (A/B testing)</h3>
+  <p>You can route a percentage of live traffic to a non-production slot without a full swap. This is configured in the Deployment Slots blade as a traffic percentage. Use this for gradual rollouts (e.g. 5% of traffic → new version) or A/B feature testing with real users.</p>
+
+  <h3>Slot limits by tier</h3>
+  <table>
+    <thead>
+      <tr><th>Tier</th><th>Max Deployment Slots (including production)</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Free, Shared, Basic</td><td>1 (production only — no staging slots)</td></tr>
+      <tr><td>Standard</td><td>6 (production + 5 staging slots)</td></tr>
+      <tr><td>Premium v2/v3, Isolated v2</td><td>21 (production + 20 staging slots)</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     DEPLOYMENT METHODS
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Deployment Methods</h2>
+  <p>App Service supports several ways to get your code into a slot. Each has different tradeoffs for reliability, speed, and automation:</p>
+
+  <table>
+    <thead>
+      <tr><th>Method</th><th>Description</th><th>Best For</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>ZIP Deploy</strong></td>
+        <td>POST a ZIP of the app to the Kudu REST API. Fast, simple, widely supported.</td>
+        <td>CI/CD pipelines, scripted deploys</td>
+      </tr>
+      <tr>
+        <td><strong>Run From Package</strong></td>
+        <td>Mount a ZIP as a read-only file system. App runs directly from the ZIP — wwwroot is read-only. Recommended method.</td>
+        <td>Production — eliminates partial deploy state</td>
+      </tr>
+      <tr>
+        <td><strong>GitHub Actions</strong></td>
+        <td>Azure provides a starter workflow. Deploys on push to a branch.</td>
+        <td>GitHub-hosted source repositories</td>
+      </tr>
+      <tr>
+        <td><strong>Azure DevOps Pipelines</strong></td>
+        <td>Full CI/CD pipeline with YAML definitions. Native Azure integration.</td>
+        <td>Enterprise DevOps workflows</td>
+      </tr>
+      <tr>
+        <td><strong>Local Git / GitHub / GitLab</strong></td>
+        <td>Push to a Git remote hosted by App Service (Kudu). App Service builds on receive.</td>
+        <td>Simple projects, demo environments</td>
+      </tr>
+      <tr>
+        <td><strong>Container Registry</strong></td>
+        <td>Pull a Docker image from ACR, Docker Hub, or any OCI registry on startup.</td>
+        <td>Containerised app deployments</td>
+      </tr>
+      <tr>
+        <td><strong>FTP</strong></td>
+        <td>Legacy file transfer. Available but not recommended — no atomicity, partial states possible.</td>
+        <td>Legacy only — avoid in new deployments</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="callout callout-info">
+    <strong>Run From Package is the recommended production method</strong>
+    When <code>WEBSITE_RUN_FROM_PACKAGE=1</code> is set, the app mounts the deployment ZIP as a read-only file system. This means: no partial deploys (the ZIP either mounts or it doesn't), consistent disk state across all instances, and faster cold starts because there's no extraction step. The trade-off is that the app cannot write to its own wwwroot directory — use Azure Files or Blob Storage for writable storage needs.
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     CUSTOM DOMAINS AND TLS
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Custom Domains and TLS/SSL Certificates</h2>
+  <h3>Adding a custom domain</h3>
+  <p>By default, App Service apps get a free <code>.azurewebsites.net</code> subdomain. To use a custom domain you own:</p>
+  <ul>
+    <li><strong>Subdomain</strong> (e.g. <code>api.contoso.com</code>): Create a <strong>CNAME</strong> record pointing to <code>myapp.azurewebsites.net</code>, then add a TXT record for domain verification.</li>
+    <li><strong>Apex/root domain</strong> (e.g. <code>contoso.com</code>): Create an <strong>A record</strong> pointing to the app's inbound IP address, plus a TXT record (<code>awverify</code>) for verification. CNAMEs cannot be used at the zone apex.</li>
+  </ul>
+  <p>Domain ownership is verified via a TXT record before App Service will accept the domain binding.</p>
+
+  <h3>TLS/SSL certificates</h3>
+  <table>
+    <thead>
+      <tr><th>Certificate Type</th><th>Cost</th><th>Domains Supported</th><th>Auto-Renew</th><th>Exportable</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>App Service Managed Certificate</strong></td>
+        <td>Free</td>
+        <td>Subdomains only (CNAME-verified)</td>
+        <td>Yes</td>
+        <td>No</td>
+      </tr>
+      <tr>
+        <td><strong>App Service Certificate</strong></td>
+        <td>Paid (purchased via Azure)</td>
+        <td>Subdomain or wildcard</td>
+        <td>Yes</td>
+        <td>Yes (stored in Key Vault)</td>
+      </tr>
+      <tr>
+        <td><strong>Third-party / uploaded certificate</strong></td>
+        <td>Varies</td>
+        <td>Any (subdomain, wildcard, SAN)</td>
+        <td>Manual</td>
+        <td>Yes</td>
+      </tr>
+      <tr>
+        <td><strong>Certificate from Key Vault</strong></td>
+        <td>Key Vault pricing</td>
+        <td>Any</td>
+        <td>Yes (Key Vault auto-rotate)</td>
+        <td>Depends on certificate</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="callout callout-warn">
+    <strong>Managed Certificate limitation</strong>
+    The free App Service Managed Certificate works only for subdomains validated via CNAME. It does <strong>not</strong> support apex/root domains (because root domain validation requires A-record, not CNAME). It also cannot be exported. If you need TLS on <code>contoso.com</code> (no subdomain), use a third-party certificate or an App Service Certificate.
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     SCALING
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Scaling App Service</h2>
+
+  <h3>Scale up (vertical scaling)</h3>
+  <p>Scale up by moving the App Service Plan to a higher tier — for example, from S1 to S2 or from S3 to P1v3. This gives each instance more vCPU and RAM. Scale-up is a manual operation and requires a brief instance restart.</p>
+
+  <h3>Scale out (horizontal scaling)</h3>
+  <p>Scale out by increasing the instance count — running multiple identical instances behind App Service's built-in load balancer. Scale-out can be <strong>manual</strong> (set a fixed instance count) or <strong>automatic</strong> via autoscale rules. Autoscale requires Standard tier or higher.</p>
+
+  <h3>Autoscale rules</h3>
+  <p>Autoscale rules define when to add or remove instances automatically:</p>
+  <ul>
+    <li><strong>Metric-based rules</strong>: trigger when a metric crosses a threshold. Common metrics: CPU percentage, memory percentage, HTTP queue length, requests per second. Each rule specifies direction (scale out / scale in), instance count change, and a cooldown period.</li>
+    <li><strong>Schedule-based rules</strong>: scale to a specific instance count at a defined time (e.g. scale to 5 instances weekdays at 08:00, scale to 2 at 20:00).</li>
+  </ul>
+
+  <div class="callout callout-info">
+    <strong>Autoscale best practice</strong>
+    Always configure both scale-out <em>and</em> scale-in rules. If you only set a scale-out rule, autoscale will keep adding instances but never reduce them. Set minimum and maximum instance bounds (e.g. min: 2, max: 10) to control costs and ensure availability. Use a cooldown period (typically 5 minutes) to avoid thrashing.
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     AUTHENTICATION / EASY AUTH
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Authentication / Authorization (Easy Auth)</h2>
+  <p>App Service has a built-in authentication and authorisation layer called <strong>Easy Auth</strong>. It integrates with identity providers — Microsoft Entra ID, Facebook, Google, Apple, Twitter — <strong>without any changes to your application code</strong>.</p>
+
+  <h3>How Easy Auth works</h3>
+  <p>Easy Auth operates as middleware that runs <em>before</em> requests reach your application code. Unauthenticated requests are intercepted and redirected to the configured identity provider's login page. After successful authentication, the provider returns a token, and Easy Auth injects the user's identity information into HTTP request headers (<code>X-MS-CLIENT-PRINCIPAL</code>, <code>X-MS-CLIENT-PRINCIPAL-NAME</code>) that your application can read if needed.</p>
+
+  <h3>Configuration options</h3>
+  <ul>
+    <li><strong>Require authentication</strong>: any unauthenticated request is rejected (HTTP 401) or redirected to login.</li>
+    <li><strong>Allow unauthenticated requests</strong>: your app receives all requests but gets the identity headers when a user is authenticated. Your code handles authorisation logic.</li>
+    <li>Token store: App Service can cache and refresh tokens, making them available to your app via <code>/.auth/me</code> endpoint.</li>
+  </ul>
+
+  <div class="callout callout-info">
+    <strong>Easy Auth for internal tools</strong>
+    Easy Auth with Entra ID is the fastest way to add "sign in with your corporate account" to an internal tool. Configure the Entra app registration, paste the client ID and secret into the App Service Authentication blade — done. No SDK, no code changes, no cookie management in application logic.
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     NETWORKING: VNET INTEGRATION & PRIVATE ENDPOINTS
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Networking: VNet Integration and Private Endpoints</h2>
+  <p>App Service networking has two distinct axes that confuse many candidates: <strong>outbound</strong> (traffic leaving the app) and <strong>inbound</strong> (traffic arriving at the app). VNet Integration controls outbound; Private Endpoints control inbound.</p>
+
+  <h3>VNet Integration</h3>
+  <p>VNet Integration allows the App Service app to make <strong>outbound</strong> calls to resources in a VNet — a database on a private IP, an internal API, an on-premises service reached via ExpressRoute/VPN. The app's outbound traffic is routed through a delegated subnet in the target VNet.</p>
+
+  <div class="callout callout-warn">
+    <strong>VNet Integration does NOT make the app private</strong>
+    A common misconception: VNet Integration only affects <em>outbound</em> traffic from the app. The app's inbound endpoint (<code>myapp.azurewebsites.net</code>) remains publicly accessible. To make inbound traffic private, you need a <strong>Private Endpoint</strong>.
+  </div>
+
+  <h3>Private Endpoints for App Service</h3>
+  <p>A Private Endpoint assigns a private IP address (from your VNet) to the App Service app's inbound interface. Traffic from within the VNet (or connected networks) reaches the app over the private IP. The public endpoint can optionally be disabled, making the app inaccessible from the public internet.</p>
+
+  <table>
+    <thead>
+      <tr><th>Feature</th><th>Controls</th><th>Minimum Tier</th><th>Effect on Public Endpoint</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>VNet Integration</strong></td>
+        <td>Outbound (app → VNet)</td>
+        <td>Standard</td>
+        <td>No change — still public</td>
+      </tr>
+      <tr>
+        <td><strong>Private Endpoint</strong></td>
+        <td>Inbound (VNet → app)</td>
+        <td>Premium v2/v3 or Isolated</td>
+        <td>Can disable public access</td>
+      </tr>
+      <tr>
+        <td><strong>Access Restrictions</strong></td>
+        <td>Inbound IP allow/deny rules</td>
+        <td>Any paid tier</td>
+        <td>Filters but keeps public endpoint</td>
+      </tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     APP SERVICE ENVIRONMENT
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>App Service Environment (ASE) v3</h2>
+  <p>An <strong>App Service Environment</strong> is a fully isolated, single-tenant deployment of App Service into your own VNet. It is the most private and compliant App Service option — all inbound and outbound traffic stays within your network perimeter.</p>
+
+  <h3>ASE deployment modes</h3>
+  <ul>
+    <li><strong>External ASE</strong>: inbound traffic arrives via a public VIP (load balancer with a public IP). Still network-isolated but internet-reachable through the public IP.</li>
+    <li><strong>Internal Load Balancer (ILB) ASE</strong>: inbound traffic only via a private VIP on the VNet. The ASE is completely unreachable from the public internet — traffic must originate from within the VNet or connected networks (ExpressRoute, VPN).</li>
+  </ul>
+
+  <div class="callout callout-info">
+    <strong>When to use ASE vs Private Endpoints</strong>
+    Private Endpoints on a Premium plan are the right choice for most scenarios where you want to make one or a few apps private. ASE is warranted when you need full tenant isolation (a regulatory requirement such as PCI-DSS or HIPAA that forbids shared compute), need all outbound traffic to go through a dedicated egress IP, or are running a very large fleet of apps that all need the same network isolation.
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     DIAGNOSTICS AND MONITORING
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Diagnostics and Monitoring</h2>
+
+  <h3>App Service Logs</h3>
+  <p>Configurable in the App Service Monitoring → App Service Logs blade:</p>
+  <ul>
+    <li><strong>Application logging</strong>: output from your app's logging framework (stderr/stdout). Stored to filesystem (short-lived) or Blob Storage (long-term). Configurable verbosity level.</li>
+    <li><strong>Web server logging</strong>: raw HTTP request/response logs (IIS-format on Windows, nginx-format on Linux). Stored to filesystem or Blob Storage.</li>
+    <li><strong>Detailed error messages</strong>: HTML pages with full error details, saved to disk for 4XX and 5XX responses.</li>
+    <li><strong>Failed request tracing</strong>: full IIS-level request traces for requests that fail. Useful for diagnosing intermittent failures.</li>
+  </ul>
+
+  <h3>Log Stream</h3>
+  <p>The Log Stream feature streams live application and web server log output to your browser or Azure CLI session in real time. Useful for debugging a live issue — no need to pull log files manually.</p>
+
+  <h3>Application Insights</h3>
+  <p>Application Insights is the recommended telemetry solution for App Service. It provides distributed tracing, performance monitoring, dependency tracking, exception logging, and live metrics. Integration is available as a one-click enable from the App Service portal blade (code-based instrumentation) or via the Application Insights SDK added to your application code. App Insights stores data in a Log Analytics workspace.</p>
+
+  <h3>WebJobs</h3>
+  <p><strong>WebJobs</strong> are background tasks that run in the same App Service Plan as your main app, using the same compute allocation. They are a lightweight way to run background processing without a separate service:</p>
+  <ul>
+    <li><strong>Continuous WebJobs</strong>: start immediately and run on a loop. Useful for queue processors, background polling tasks.</li>
+    <li><strong>Triggered WebJobs</strong>: run on a CRON schedule or on-demand. Useful for periodic batch jobs, nightly data processing.</li>
+  </ul>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     QUIZ
+═══════════════════════════════════════════════ -->
+<section class="quiz">
+  <h2>Check Your Understanding</h2>
+  <p>Click any option to see immediate feedback. Answers represent correct behaviour in a real Azure environment.</p>
+
+  <!-- Q1 -->
+  <div class="quiz-question" data-correct="b">
+    <p>1. A developer is using a Basic (B1) App Service Plan and wants to use deployment slots for zero-downtime deployments. What must they do?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q1"> Enable deployment slots in the App Service Configuration blade — they are disabled by default on all tiers</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q1"> Upgrade to Standard tier or higher — deployment slots are not available on Free, Shared, or Basic plans</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q1"> Purchase an add-on slot licence through the Azure Marketplace</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q1"> Create a second App Service app manually and use Traffic Manager to split traffic</label>
+    </div>
+    <div class="quiz-feedback">Deployment slots require Standard tier or higher. Basic plan supports custom domains, dedicated VMs, and manual scale — but does NOT include deployment slots. The minimum tier for slots is Standard (S1), which provides up to 5 slots including production.</div>
+  </div>
+
+  <!-- Q2 -->
+  <div class="quiz-question" data-correct="c">
+    <p>2. Your App Service has a production slot and a staging slot. The staging slot is configured with a <code>DB_CONNECTION</code> app setting pointing to the staging database. You want to ensure that after a slot swap, production always uses the production database connection string. What should you configure?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q2"> Set the same connection string value in both slots — identical values are safe to swap</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q2"> Use a Key Vault reference for the connection string — Key Vault references automatically resolve per-slot</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q2"> Mark <code>DB_CONNECTION</code> as a deployment slot setting (sticky) in both slots — each slot will retain its own value after swaps</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q2"> Configure the connection string in the web.config or appsettings.json file inside the deployment package</label>
+    </div>
+    <div class="quiz-feedback">Marking a setting as a "deployment slot setting" (slot-sticky) means it stays with the slot after a swap. The production slot keeps its production DB string and the staging slot keeps its staging DB string — the code swap proceeds but the sticky settings do not cross over. This is the canonical pattern for safe zero-downtime deployments.</div>
+  </div>
+
+  <!-- Q3 -->
+  <div class="quiz-question" data-correct="a">
+    <p>3. You enable VNet Integration on your Standard tier App Service app so it can reach a SQL Managed Instance on a private IP in your VNet. A security auditor asks if the App Service is now accessible only from within the VNet. What is the correct answer?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q3"> No — VNet Integration only affects outbound traffic from the app to the VNet. The app's inbound endpoint remains publicly accessible. A Private Endpoint is required to make inbound private.</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q3"> Yes — enabling VNet Integration automatically disables the public endpoint and routes all inbound traffic through the VNet</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q3"> Partially — VNet Integration restricts inbound traffic to the VNet's IP address range but does not fully disable the public endpoint</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q3"> Yes — VNet Integration and Private Endpoints are the same feature with different naming in different regions</label>
+    </div>
+    <div class="quiz-feedback">VNet Integration is exclusively an <em>outbound</em> feature — it lets the app initiate connections to private resources in a VNet (databases, internal APIs, on-premises resources). It has zero effect on inbound access. To restrict who can reach the app, you need either Access Restrictions (IP-based allow/deny rules) or a Private Endpoint (assigns the app a private VNet IP and optionally disables public access).</div>
+  </div>
+
+  <!-- Q4 -->
+  <div class="quiz-question" data-correct="d">
+    <p>4. You set <code>WEBSITE_RUN_FROM_PACKAGE=1</code> on your App Service app and deploy a ZIP file. A developer reports that the app fails when it tries to write a log file to <code>/home/site/wwwroot/logs/</code>. What is the cause?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q4"> The <code>WEBSITE_RUN_FROM_PACKAGE</code> setting is incompatible with file I/O — all file operations must use Azure Blob Storage triggers instead</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q4"> The app identity does not have write permission on the wwwroot directory — assign Storage Blob Data Contributor role to the app's managed identity</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q4"> The ZIP file must contain the logs directory pre-created — App Service cannot create directories at runtime in Run From Package mode</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q4"> Run From Package mounts the deployment ZIP as a read-only file system — the app cannot write to wwwroot. Use <code>/home/LogFiles/</code> or mount an Azure Files share for writable storage.</label>
+    </div>
+    <div class="quiz-feedback">When using Run From Package, the deployment ZIP is mounted as a read-only squashfs filesystem at wwwroot. This is by design — it prevents partial deploy states and ensures all instances see identical content. Applications that need to write files should use the <code>/home/LogFiles/</code> directory (backed by shared storage), mount an Azure Files volume, or write to Azure Blob Storage directly.</div>
+  </div>
+
+  <!-- Q5 -->
+  <div class="quiz-question" data-correct="b">
+    <p>5. You enable Easy Auth on an App Service app and configure Microsoft Entra ID as the identity provider with "Require authentication" mode. What happens when an unauthenticated user hits the app's URL?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q5"> The request reaches the application code, which receives an empty <code>X-MS-CLIENT-PRINCIPAL</code> header and must handle the redirect logic itself</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q5"> The request is intercepted before reaching the application code and the user is redirected to the Entra ID login page — no application code changes are required</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q5"> The request is blocked with HTTP 403 Forbidden and the user must navigate to <code>/.auth/login/aad</code> manually to authenticate</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q5"> The App Service returns HTTP 503 until the application code is updated to integrate with the Entra ID SDK</label>
+    </div>
+    <div class="quiz-feedback">Easy Auth operates as a request middleware layer that runs <em>before</em> your application code. With "Require authentication" mode, unauthenticated requests are automatically redirected to the identity provider login page. The application code receives only authenticated requests with identity headers populated. No SDK integration or code changes are needed — this is the primary value proposition of Easy Auth.</div>
+  </div>
+
+  <!-- Q6 -->
+  <div class="quiz-question" data-correct="c">
+    <p>6. A team wants to add TLS to their app at the apex domain <code>contoso.com</code> (not a subdomain). They want a free certificate. Which option should they use?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q6"> App Service Managed Certificate — it supports all domain types including apex domains for free</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q6"> App Service Managed Certificate — configure it with a wildcard to cover the apex and all subdomains</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q6"> A third-party certificate is required for apex domains — App Service Managed Certificate only supports CNAME-verified subdomains and cannot be used for root/apex domains</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q6"> Enable HTTPS-only on the App Service — it automatically provisions a free certificate for any custom domain including apex domains</label>
+    </div>
+    <div class="quiz-feedback">App Service Managed Certificate is free and auto-renewing but has two key limitations: it only supports subdomain validation (CNAME-based) and cannot be exported. Apex/root domains require an A record and cannot use CNAME validation, making Managed Certificates incompatible. For apex domain TLS, use a third-party certificate (uploaded to App Service) or purchase an App Service Certificate through Azure. Also note: Managed Certificates do not support wildcards.</div>
+  </div>
+
+  <div class="quiz-score"></div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     PRIMARY SOURCE
+═══════════════════════════════════════════════ -->
+<div class="primary-source">
+  <strong>Primary source for this lesson</strong>
+  <a href="https://learn.microsoft.com/en-us/azure/app-service/overview" target="_blank">
+    Azure App Service overview — Microsoft Learn
+  </a>
+  <p style="margin-top:0.5rem;font-size:0.9rem;color:#deecf9;">Read the full overview and the linked articles on App Service Plans, deployment slots, and VNet integration. The networking section is particularly important for the exam — the inbound/outbound distinction is tested repeatedly.</p>
+</div>
+
+<!-- ═══════════════════════════════════════════════
+     ASK YOUR TEACHER
+═══════════════════════════════════════════════ -->
+<div class="ask-teacher">
+  <strong>Questions for your teacher (the AI agent)</strong><br>
+  This lesson covered the core App Service concepts. Explore these topics deeper in a follow-up conversation:
+  <ul style="margin-top:0.5rem;">
+    <li>Walk me through a complete zero-downtime deployment workflow using slots, including how to smoke-test staging before swapping.</li>
+    <li>What is the difference between App Service autoscale rules and Azure Monitor autoscale — are they the same thing?</li>
+    <li>When should I use App Service for containers vs. Azure Container Apps vs. AKS?</li>
+    <li>How do I configure a managed identity on App Service to access Key Vault secrets without storing credentials in app settings?</li>
+  </ul>
+</div>
+
+<!-- ═══════════════════════════════════════════════
+     NEXT LESSON PREVIEW
+═══════════════════════════════════════════════ -->
+<div class="callout callout-info">
+  <strong>Coming up: Lesson 12 — Containers: ACI, Container Apps &amp; AKS</strong>
+  App Service can host containers, but Azure has three additional container-focused services, each suited to different complexity levels. Lesson 12 covers Azure Container Registry, Azure Container Instances (serverless containers), Azure Container Apps (managed Kubernetes with scale-to-zero), and AKS (full Kubernetes). You will also build a decision matrix for choosing between these services.
+</div>
+
+<!-- ═══════════════════════════════════════════════
+     NAVIGATION
+═══════════════════════════════════════════════ -->
+<nav class="lesson-nav">
+  <a href="0010-vmss-bastion-jit.html">← Lesson 10 — VMSS, Bastion &amp; JIT</a>
+  <a href="0012-containers.html">Lesson 12 — Containers →</a>
+</nav>
+
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

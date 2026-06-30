@@ -6,8 +6,6 @@ import { usePathname } from 'next/navigation';
 import { motion, AnimatePresence } from 'framer-motion';
 import type { PhaseMeta } from '@/lib/backend-course';
 
-const COURSE_BASE = '/tutorials/backend-engineering-with-nodejs';
-
 const DEFAULT_COMING_SOON = [
   'Phase 3 — Data & Persistence',
   'Phase 4 — Authentication & Security',
@@ -19,14 +17,24 @@ const DEFAULT_COMING_SOON = [
 type Props = {
   phases: PhaseMeta[];
   comingSoonPhases?: string[];
+  courseBase: string;
+  courseTitle: string;
+  totalPhaseCount?: number;
 };
 
-export function CourseSidebar({ phases, comingSoonPhases = DEFAULT_COMING_SOON }: Props) {
+export function CourseSidebar({
+  phases,
+  comingSoonPhases = DEFAULT_COMING_SOON,
+  courseBase,
+  courseTitle,
+  totalPhaseCount,
+}: Props) {
   const pathname = usePathname();
   const [mobileOpen, setMobileOpen] = useState(false);
 
   const totalLessons = phases.reduce((sum, p) => sum + p.lessons.length, 0);
   const totalPhases = phases.length;
+  const denominator = totalPhaseCount ?? totalPhases + comingSoonPhases.length;
 
   const SidebarContent = () => (
     <div className="flex flex-col h-full py-6 px-4 overflow-y-auto">
@@ -44,18 +52,18 @@ export function CourseSidebar({ phases, comingSoonPhases = DEFAULT_COMING_SOON }
       <div className="mb-8">
         <p className="font-mono text-xs text-text-muted uppercase tracking-widest mb-2">Course</p>
         <Link
-          href={COURSE_BASE}
+          href={courseBase}
           onClick={() => setMobileOpen(false)}
           className="font-sans text-sm font-black tracking-tight text-text-primary hover:text-accent transition-colors leading-tight block"
         >
-          Backend Engineering with Node.js
+          {courseTitle}
         </Link>
       </div>
 
       {/* Active phases with lessons */}
       <div className="space-y-6 mb-6">
         {phases.map((phase) => {
-          const phaseBase = `${COURSE_BASE}/${phase.urlSegment}`;
+          const phaseBase = `${courseBase}/${phase.urlSegment}`;
           return (
             <div key={phase.number}>
               <p className="font-mono text-xs text-accent uppercase tracking-widest mb-2 px-2">
@@ -98,26 +106,28 @@ export function CourseSidebar({ phases, comingSoonPhases = DEFAULT_COMING_SOON }
       </div>
 
       {/* Coming-soon phases */}
-      <div className="space-y-2 border-t border-site-border pt-4">
-        {comingSoonPhases.map((phase) => (
-          <div key={phase} className="px-2 py-1.5 opacity-30 cursor-default">
-            <p className="font-mono text-xs text-text-muted flex items-center gap-2">
-              <span className="shrink-0">·</span>
-              <span className="truncate">{phase}</span>
-            </p>
-          </div>
-        ))}
-      </div>
+      {comingSoonPhases.length > 0 && (
+        <div className="space-y-2 border-t border-site-border pt-4">
+          {comingSoonPhases.map((phase) => (
+            <div key={phase} className="px-2 py-1.5 opacity-30 cursor-default">
+              <p className="font-mono text-xs text-text-muted flex items-center gap-2">
+                <span className="shrink-0">·</span>
+                <span className="truncate">{phase}</span>
+              </p>
+            </div>
+          ))}
+        </div>
+      )}
 
       {/* Progress footer */}
       <div className="mt-auto pt-6 border-t border-site-border">
         <p className="font-mono text-xs text-text-muted">
-          {totalPhases} of 7 phases · {totalLessons} lessons
+          {totalPhases} of {denominator} phases · {totalLessons} lessons
         </p>
         <div className="mt-2 h-1 rounded-full bg-surface-elevated overflow-hidden">
           <div
             className="h-full rounded-full bg-accent"
-            style={{ width: `${(totalPhases / 7) * 100}%` }}
+            style={{ width: `${(totalPhases / denominator) * 100}%` }}
           />
         </div>
       </div>

@@ -1,0 +1,430 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lesson 15 — Network Security Groups &amp; Application Security Groups</title>
+  <link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<!-- ═══════════════════════════════════════════════
+     HEADER
+═══════════════════════════════════════════════ -->
+<header class="lesson-header">
+  <h1>Lesson 15 — Network Security Groups &amp; Application Security Groups</h1>
+  <div class="lesson-meta">
+    <span class="badge badge-domain">Domain 4 — Networking</span>
+    <span class="badge badge-exam">AZ-104: 15–20%</span>
+    <span class="badge badge-time">~30 min</span>
+    <span class="badge badge-prereq">Prereq: Lesson 14 — Virtual Networks</span>
+  </div>
+</header>
+
+<!-- ═══════════════════════════════════════════════
+     WHY THIS MATTERS
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Why You Need to Understand This</h2>
+  <p>Network Security Groups are the primary traffic-filtering mechanism for IaaS workloads in Azure. Every production VM should have NSG rules controlling what can reach it and what it can reach — full stop. Misconfigured NSGs are the most common root cause of "my application can't connect" tickets and, at the other extreme, "our database was exposed to the internet" incidents.</p>
+  <p>On the AZ-104 exam, NSG questions are consistently among the highest-yield networking topics. You must understand rule evaluation order, the stateful nature of NSGs, service tags, the ASG model, and how to troubleshoot using effective security rules and IP flow verify. All of these appear regularly in scenario questions.</p>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     NSG FUNDAMENTALS
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>NSG Fundamentals</h2>
+  <p>An <strong>NSG (Network Security Group)</strong> is a stateful, Layer 4 packet filter. It contains a list of inbound security rules and a list of outbound security rules. Each rule either allows or denies traffic matching the specified criteria. NSGs operate at the network layer — they see IP headers and TCP/UDP port numbers, not application-layer content.</p>
+
+  <h3>Where NSGs can be attached</h3>
+  <ul>
+    <li><strong>Subnet:</strong> the NSG applies to all resources (VMs, private endpoints, etc.) in the subnet. All traffic entering or leaving the subnet is evaluated against the NSG's rules.</li>
+    <li><strong>NIC (Network Interface Card):</strong> the NSG applies to a single VM's network interface. Provides per-VM granularity within a shared subnet.</li>
+    <li>Both can be applied simultaneously to the same VM — inbound traffic passes through the subnet NSG first, then the NIC NSG. Outbound traffic passes through the NIC NSG first, then the subnet NSG.</li>
+  </ul>
+
+  <div class="callout callout-info">
+    <strong>NSG is stateful</strong>
+    This is the single most important fact about NSGs. If an inbound rule allows TCP port 443, the corresponding outbound return traffic for that established connection is <strong>automatically allowed</strong> without any explicit outbound rule. You do not need to create a matching outbound allow rule for TCP 443. This is fundamentally different from stateless firewalls.
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     RULE PROPERTIES
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Security Rule Properties</h2>
+  <p>Every NSG rule has these configurable properties:</p>
+  <table>
+    <thead>
+      <tr><th>Property</th><th>Values</th><th>Notes</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><strong>Priority</strong></td><td>100 – 4096</td><td>Lower number = higher priority. Rules are evaluated in ascending priority order; first match wins.</td></tr>
+      <tr><td><strong>Name</strong></td><td>String (unique per NSG)</td><td>Descriptive names improve operational clarity: <code>Allow-HTTPS-From-Internet</code></td></tr>
+      <tr><td><strong>Source</strong></td><td>Any, IP/CIDR, Service Tag, ASG</td><td>Where traffic originates</td></tr>
+      <tr><td><strong>Source port range</strong></td><td>Port number, range, or *</td><td>Usually * for inbound (client ports are ephemeral); specific ports for outbound</td></tr>
+      <tr><td><strong>Destination</strong></td><td>Any, IP/CIDR, Service Tag, ASG</td><td>Where traffic is going</td></tr>
+      <tr><td><strong>Destination port range</strong></td><td>Port number, range (80,443), or *</td><td>The service port the rule is protecting</td></tr>
+      <tr><td><strong>Protocol</strong></td><td>TCP, UDP, ICMP, ESP, AH, Any</td><td>Use TCP for web traffic, ICMP for ping rules</td></tr>
+      <tr><td><strong>Action</strong></td><td>Allow / Deny</td><td>What happens to matching traffic</td></tr>
+    </tbody>
+  </table>
+
+  <div class="callout callout-warn">
+    <strong>First match wins — order matters</strong>
+    NSG rules are evaluated from lowest priority number (highest priority) to highest number. The first rule that matches the traffic determines the outcome. Rules after the match are not evaluated. This means you can create a low-priority (high number) Deny-All rule and punch specific Allow rules above it at lower priority numbers.
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     DEFAULT RULES
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Default Rules (Always Present)</h2>
+  <p>Every NSG is created with a fixed set of <strong>default rules</strong> that cannot be deleted. They sit at very high priority numbers (65000+) and represent the minimum baseline behaviour. You can override them by creating your own rules with lower priority numbers.</p>
+
+  <h3>Inbound default rules</h3>
+  <table>
+    <thead>
+      <tr><th>Rule name</th><th>Priority</th><th>Source</th><th>Destination</th><th>Action</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>AllowVnetInBound</td><td>65000</td><td>VirtualNetwork</td><td>VirtualNetwork</td><td>Allow</td></tr>
+      <tr><td>AllowAzureLoadBalancerInBound</td><td>65001</td><td>AzureLoadBalancer</td><td>Any</td><td>Allow</td></tr>
+      <tr><td>DenyAllInBound</td><td>65500</td><td>Any</td><td>Any</td><td>Deny</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Outbound default rules</h3>
+  <table>
+    <thead>
+      <tr><th>Rule name</th><th>Priority</th><th>Source</th><th>Destination</th><th>Action</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>AllowVnetOutBound</td><td>65000</td><td>VirtualNetwork</td><td>VirtualNetwork</td><td>Allow</td></tr>
+      <tr><td>AllowInternetOutBound</td><td>65001</td><td>Any</td><td>Internet</td><td>Allow</td></tr>
+      <tr><td>DenyAllOutBound</td><td>65500</td><td>Any</td><td>Any</td><td>Deny</td></tr>
+    </tbody>
+  </table>
+
+  <div class="callout callout-danger">
+    <strong>AllowAzureLoadBalancerInBound is critical</strong>
+    If you add a DenyAllInBound rule above priority 65001 (e.g. at priority 100) to lock down a subnet, you also block Azure Load Balancer health probes. Health probes originate from 168.63.129.16, which is represented by the <code>AzureLoadBalancer</code> service tag. If health probes are blocked, the backend VM appears unhealthy and the Load Balancer stops sending it traffic — even if your application is running perfectly. Always include an explicit Allow rule for <code>AzureLoadBalancer</code> if you are locking down a load-balanced subnet.
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     NSG ATTACHMENT & EVALUATION
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>NSG Attachment &amp; Rule Evaluation</h2>
+  <p>Understanding the order in which NSGs are evaluated is essential for troubleshooting connectivity and passing exam scenario questions.</p>
+
+  <h3>Inbound traffic path (e.g. internet → VM)</h3>
+  <div class="hierarchy">
+<span class="hier-tenant">Internet source</span>
+<span class="hier-sub">  → Subnet NSG evaluated first (inbound rules)</span>
+<span class="hier-rg">     → If allowed: NIC NSG evaluated second (inbound rules)</span>
+<span class="hier-resource">          → If allowed: traffic reaches VM application</span>
+  </div>
+
+  <h3>Outbound traffic path (e.g. VM → internet)</h3>
+  <div class="hierarchy">
+<span class="hier-tenant">VM application sends traffic</span>
+<span class="hier-sub">  → NIC NSG evaluated first (outbound rules)</span>
+<span class="hier-rg">     → If allowed: Subnet NSG evaluated second (outbound rules)</span>
+<span class="hier-resource">          → If allowed: traffic leaves to destination</span>
+  </div>
+
+  <div class="callout callout-warn">
+    <strong>Both NSGs must allow the traffic</strong>
+    When a subnet NSG and NIC NSG are both applied, a Deny in <em>either</em> NSG blocks the traffic — regardless of what the other NSG says. The effective result is the most restrictive combination. A common troubleshooting mistake is fixing the subnet NSG and forgetting to also fix the NIC NSG, or vice versa.
+  </div>
+
+  <h3>Effective security rules</h3>
+  <p>When a VM has both a subnet NSG and a NIC NSG, seeing the actual combined ruleset can be difficult. Use <strong>Effective security rules</strong> — found in the VM's NIC blade under <em>Support + troubleshooting</em> → <em>Effective security rules</em>. This view shows the fully merged, prioritised inbound and outbound rule set that Azure is actually enforcing on that NIC.</p>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     SERVICE TAGS
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Service Tags</h2>
+  <p><strong>Service tags</strong> are named groups of IP address prefixes managed and updated by Microsoft. Instead of maintaining static IP address lists in your NSG rules, you reference a service tag — Microsoft keeps the underlying IP ranges current as Azure services grow and change infrastructure.</p>
+
+  <h3>Key service tags to memorise</h3>
+  <table>
+    <thead>
+      <tr><th>Service tag</th><th>Represents</th><th>Common use</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>VirtualNetwork</code></td><td>All VNet address space + peered VNets + on-prem connected ranges</td><td>Allow intra-VNet communication (default rule)</td></tr>
+      <tr><td><code>Internet</code></td><td>All public IP addresses not within VirtualNetwork</td><td>Allow/deny internet access</td></tr>
+      <tr><td><code>AzureLoadBalancer</code></td><td>Azure health probe source (168.63.129.16)</td><td>Allow load balancer health probes</td></tr>
+      <tr><td><code>Storage</code></td><td>Azure Storage service IP ranges</td><td>Allow outbound to Storage without enumerating IPs</td></tr>
+      <tr><td><code>Sql</code></td><td>Azure SQL Database and Azure Synapse IP ranges</td><td>Allow outbound to SQL service endpoints</td></tr>
+      <tr><td><code>AzureMonitor</code></td><td>Log Analytics, Application Insights endpoints</td><td>Allow diagnostic data outbound from VMs</td></tr>
+      <tr><td><code>AppService</code></td><td>App Service and Function App inbound IP ranges</td><td>Restrict inbound to App Service outbound IPs</td></tr>
+      <tr><td><code>EventHub</code></td><td>Azure Event Hubs service IP ranges</td><td>Allow outbound to Event Hub</td></tr>
+      <tr><td><code>KeyVault</code></td><td>Azure Key Vault service IP ranges</td><td>Allow outbound to Key Vault</td></tr>
+    </tbody>
+  </table>
+
+  <div class="callout callout-info">
+    <strong>Why service tags matter operationally</strong>
+    Azure regularly adds new datacenter capacity, which means new IP ranges for Azure services. If you hard-code IP ranges in NSG rules instead of using service tags, those rules silently break when Microsoft adds new IPs. Service tags are automatically updated — using them is not just convenient, it is operationally correct. Use them for any Azure-managed service.
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     APPLICATION SECURITY GROUPS
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Application Security Groups (ASGs)</h2>
+  <p><strong>Application Security Groups</strong> let you define security rules based on application role rather than IP address. Instead of writing rules like "allow 10.20.1.4 and 10.20.1.5 and 10.20.1.6 to reach 10.20.2.4 on port 8080", you write "allow <code>asg-webservers</code> to reach <code>asg-appservers</code> on port 8080".</p>
+
+  <h3>How ASGs work</h3>
+  <ol>
+    <li>Create an ASG resource (e.g. <code>asg-webservers</code>, <code>asg-appservers</code>, <code>asg-dbservers</code>).</li>
+    <li>Assign VM NICs to ASGs — a NIC can belong to multiple ASGs.</li>
+    <li>Reference ASGs as source or destination in NSG rules instead of IP addresses.</li>
+    <li>When a VM is added to or removed from an ASG, the NSG rules automatically apply or cease to apply — no rule editing required.</li>
+  </ol>
+
+  <h3>Example NSG rules using ASGs</h3>
+  <pre><code>Rule 100 Inbound Allow:
+  Source: asg-webservers   Destination: asg-appservers   Port: 8080  Protocol: TCP
+
+Rule 110 Inbound Allow:
+  Source: asg-appservers   Destination: asg-dbservers    Port: 1433  Protocol: TCP
+
+Rule 4000 Inbound Deny:
+  Source: *                Destination: asg-dbservers    Port: *     Protocol: *</code></pre>
+
+  <p>With these rules, web servers can reach app servers, app servers can reach the database — and nothing else can reach the database directly. When you scale out by adding new web VMs, you assign their NICs to <code>asg-webservers</code> and rule 100 immediately applies. Zero rule changes required.</p>
+
+  <div class="callout callout-warn">
+    <strong>ASG cross-VNet limitation</strong>
+    The source and destination ASGs referenced in the same NSG rule must be in the <strong>same VNet</strong>. You cannot write a single NSG rule that spans ASGs from two different VNets, even if those VNets are peered. This is a common gotcha in multi-VNet architectures — use IP ranges or service tags for cross-VNet rules.
+  </div>
+
+  <h3>ASG vs IP-based rules — when to use each</h3>
+  <table>
+    <thead>
+      <tr><th>Scenario</th><th>Use ASGs</th><th>Use IP/CIDR</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>VM-to-VM within same VNet</td><td>Yes — role-based, scale-friendly</td><td>Works but brittle to IP changes</td></tr>
+      <tr><td>On-premises to Azure</td><td>Not applicable</td><td>Yes — use on-prem CIDR ranges</td></tr>
+      <tr><td>Cross-VNet (peered)</td><td>Not supported across VNets</td><td>Yes — use the remote VNet CIDR</td></tr>
+      <tr><td>Azure service (Storage, SQL)</td><td>Not applicable</td><td>Use Service Tags instead</td></tr>
+      <tr><td>Dynamic VM fleets (VMSS, auto-scale)</td><td>Yes — new instances auto-inherit rules</td><td>Impractical — IPs change constantly</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     NSG FLOW LOGS
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>NSG Flow Logs &amp; Traffic Analytics</h2>
+  <p><strong>NSG Flow Logs</strong> capture metadata about every accepted and denied flow through an NSG. This is not packet capture — it is flow-level telemetry (source IP, destination IP, source port, destination port, protocol, direction, action).</p>
+
+  <h3>Flow log versions</h3>
+  <ul>
+    <li><strong>Version 1:</strong> basic flow information — 5-tuple + direction + action.</li>
+    <li><strong>Version 2:</strong> adds bytes transferred and packets per flow, enabling bandwidth analysis and anomaly detection.</li>
+  </ul>
+
+  <h3>Storage and processing</h3>
+  <ul>
+    <li>Flow logs are written as JSON to a <strong>Storage Account</strong> you specify. Each log entry represents a flow within a 1-minute aggregation window.</li>
+    <li><strong>Traffic Analytics</strong> processes flow logs through a <strong>Log Analytics Workspace</strong> to produce visual dashboards, geographic traffic maps, threat detection, and top-talker analysis. It ingests and aggregates flow data at configurable intervals (every 10 minutes or every 60 minutes).</li>
+  </ul>
+
+  <div class="callout callout-info">
+    <strong>Enable flow logs on all production NSGs</strong>
+    NSG flow logs are the primary evidence source for network incident response. Without them, you cannot answer "what traffic was hitting that VM before it was compromised?" or "is our compliance boundary actually being enforced?". The cost is low — primarily storage for the JSON blobs. Enable version 2 flow logs and Traffic Analytics on every production NSG.
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     TROUBLESHOOTING
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Troubleshooting NSG Issues</h2>
+  <p>NSG troubleshooting has a standard toolkit in Azure. Know all three tools for the exam.</p>
+
+  <h3>Tool 1 — IP Flow Verify (Network Watcher)</h3>
+  <p>Tests whether a <em>hypothetical</em> flow would be allowed or denied by the NSGs on a VM's NIC. You specify: VM, NIC, direction (inbound/outbound), source IP, destination IP, protocol, and port. Azure evaluates all NSGs and returns the first matching rule and its action (allow/deny).</p>
+  <p>Use when: "I need to know if TCP 443 from 1.2.3.4 to my VM would be allowed right now, without actually sending traffic."</p>
+
+  <h3>Tool 2 — Effective Security Rules</h3>
+  <p>Shows the merged, sorted list of all NSG rules actually applied to a specific NIC — combining rules from both the subnet NSG and the NIC NSG in a single view, sorted by priority. Available in the NIC blade under <em>Support + troubleshooting</em>.</p>
+  <p>Use when: "Traffic is being blocked and I can't figure out which rule is doing it."</p>
+
+  <h3>Tool 3 — NSG Flow Logs + Traffic Analytics</h3>
+  <p>Provides <em>historical</em> analysis of what traffic actually flowed (and was denied) through an NSG. Unlike IP Flow Verify (which is hypothetical), flow logs show real traffic from the past.</p>
+  <p>Use when: "An incident occurred 3 hours ago and I need to know what traffic was allowed or denied."</p>
+
+  <div class="callout callout-warn">
+    <strong>Connection Monitor is separate</strong>
+    Connection Monitor (also in Network Watcher) continuously tests end-to-end connectivity between endpoints and alerts on failures. It is not the same as IP Flow Verify. IP Flow Verify is a one-time, on-demand test against the NSG ruleset only. Connection Monitor tests actual network reachability end to end, including DNS, routing, and application-level responses.
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     EXAM TRAPS
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>AZ-104 Exam Traps</h2>
+
+  <div class="callout callout-danger">
+    <strong>Trap 1 — NSGs are stateful</strong>
+    Allowing inbound TCP 443 automatically allows return traffic. You do NOT need an outbound allow rule for TCP 443. If an exam question asks "what additional rule do you need to add for the response traffic to flow?", the answer is NONE — the NSG handles this automatically. Stateless firewalls (old on-prem ACLs) require both directions; NSGs do not.
+  </div>
+
+  <div class="callout callout-danger">
+    <strong>Trap 2 — Load Balancer health probes need AzureLoadBalancer tag</strong>
+    If your VMs behind a Standard Load Balancer appear unhealthy despite the application running, check for an NSG rule that blocks the <code>AzureLoadBalancer</code> service tag. Health probes come from 168.63.129.16 — if this is blocked, the VM appears down to the Load Balancer. The fix is to add an Allow rule for source <code>AzureLoadBalancer</code> above any DenyAll rule.
+  </div>
+
+  <div class="callout callout-danger">
+    <strong>Trap 3 — Both NSGs must allow for traffic to flow</strong>
+    With a subnet NSG and NIC NSG both applied, traffic must pass BOTH. A common exam scenario: subnet NSG allows HTTP, but NIC NSG has a DenyAll — the traffic is blocked. The answer is always to fix the blocking NSG (whichever one denies the traffic), not to remove one NSG entirely.
+  </div>
+
+  <div class="callout callout-danger">
+    <strong>Trap 4 — ASG members must be in the same VNet</strong>
+    Source and destination ASGs in a single NSG rule must be in the same VNet. If the question describes VMs in different VNets, ASGs cannot be used for cross-VNet rules — use IP ranges or service tags.
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     QUIZ
+═══════════════════════════════════════════════ -->
+<section class="quiz">
+  <h2>Check Your Understanding</h2>
+  <p>Click any option to see immediate feedback. Answers reflect real Azure behaviour.</p>
+
+  <!-- Q1 -->
+  <div class="quiz-question" data-correct="a">
+    <p>1. An NSG allows inbound TCP on port 443 from the Internet. There is no outbound rule for TCP 443. Will HTTPS responses from the VM reach external clients?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q1"> Yes — NSGs are stateful and the return traffic for an established connection is automatically allowed</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q1"> No — outbound TCP 443 is blocked by DenyAllOutBound unless an explicit allow rule is added</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q1"> Yes — but only if the AllowInternetOutBound default rule is still present</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q1"> No — return traffic must be explicitly allowed using a matching outbound rule with the same port range</label>
+    </div>
+    <div class="quiz-feedback">NSGs are stateful — this is one of the most tested facts on AZ-104. When an inbound allow rule permits an initial packet, the NSG creates a connection state entry. Return traffic for that established connection is automatically allowed by the stateful tracking mechanism, regardless of outbound rules. You never need to add an explicit outbound allow rule for return traffic. Option C is tempting but wrong — AllowInternetOutBound allows new outbound connections, not return traffic from inbound connections.</div>
+  </div>
+
+  <!-- Q2 -->
+  <div class="quiz-question" data-correct="c">
+    <p>2. VMs behind a Standard Load Balancer are marked unhealthy in the Load Balancer's backend health view, even though the application is responding normally. What is the most likely NSG-related cause?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q2"> The NSG is blocking outbound traffic from VMs to the internet</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q2"> The NSG does not have a rule allowing VirtualNetwork to VirtualNetwork traffic</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q2"> The NSG is blocking the AzureLoadBalancer service tag, preventing health probe traffic from reaching the VMs</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q2"> The NSG is applied to the Load Balancer frontend IP instead of the VM NICs</label>
+    </div>
+    <div class="quiz-feedback">Azure Load Balancer health probes originate from the IP address 168.63.129.16, represented by the <code>AzureLoadBalancer</code> service tag. If an NSG on the subnet or NIC has a DenyAll rule or any deny rule that blocks this source IP, health probes cannot reach the VMs. The Load Balancer marks the backend as unhealthy and stops sending real traffic to it. The fix is to add an explicit inbound Allow rule for the <code>AzureLoadBalancer</code> service tag at a priority lower than the blocking deny rule.</div>
+  </div>
+
+  <!-- Q3 -->
+  <div class="quiz-question" data-correct="b">
+    <p>3. A VM has a subnet NSG (allows TCP 80) and a NIC NSG (has no rule for TCP 80, only a DenyAllInBound at priority 4000). Inbound HTTP traffic arrives. What happens?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q3"> Traffic is allowed — the subnet NSG allows it and takes precedence over the NIC NSG</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q3"> Traffic is denied — both NSGs must allow the traffic; the NIC NSG's DenyAllInBound blocks it</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q3"> Traffic is allowed — the default AllowVnetInBound rule in the NIC NSG permits it</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q3"> Traffic is blocked by the subnet NSG because there is no matching NIC NSG rule</label>
+    </div>
+    <div class="quiz-feedback">When both a subnet NSG and NIC NSG are applied, inbound traffic must pass both NSGs. The subnet NSG is evaluated first (allows TCP 80), then the NIC NSG is evaluated. The NIC NSG has no specific Allow rule for TCP 80, so evaluation continues to the DenyAllInBound default rule at priority 4000 (which beats the 65500 DenyAllInBound). The traffic is denied. Option C is wrong because AllowVnetInBound (priority 65000) would only fire if no earlier rule matched — but DenyAllInBound at 4000 fires first.</div>
+  </div>
+
+  <!-- Q4 -->
+  <div class="quiz-question" data-correct="d">
+    <p>4. Your team manages a fleet of web VMs and app VMs. You want NSG rules to allow web VMs to reach app VMs on port 8080, with no rule changes required when VMs are added or replaced. What is the optimal approach?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q4"> Add each VM's IP address to the NSG source and destination fields manually as VMs are provisioned</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q4"> Use a /24 subnet range for both tiers and allow the entire range in NSG rules</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q4"> Apply the NSG at the subnet level — all VMs in the subnet are covered without individual rules</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q4"> Create Application Security Groups (asg-webservers and asg-appservers), assign VM NICs to them, and write NSG rules referencing the ASGs</label>
+    </div>
+    <div class="quiz-feedback">Application Security Groups are designed exactly for this scenario. Create <code>asg-webservers</code> and <code>asg-appservers</code>, then write one NSG rule: Allow source=asg-webservers, destination=asg-appservers, port=8080, TCP. When new web VMs are provisioned, assign their NICs to <code>asg-webservers</code> — the rule immediately applies without any modification. Option B works but lacks precision — it allows any VM in the /24 range to reach the app tier, not just web servers.</div>
+  </div>
+
+  <!-- Q5 -->
+  <div class="quiz-question" data-correct="a">
+    <p>5. You need to audit which traffic was blocked by an NSG on a production VM during a security incident that occurred 2 hours ago. Which tool provides this information?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q5"> NSG Flow Logs stored in the Storage Account — they capture accepted and denied flows with timestamps</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q5"> IP Flow Verify — it tests hypothetical flows against current NSG rules</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q5"> Effective security rules — they show the current merged rule set on the NIC</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q5"> Azure Monitor Metrics — they track NSG allow/deny counts per minute</label>
+    </div>
+    <div class="quiz-feedback">NSG Flow Logs are the correct answer for historical traffic analysis. They log every accepted and denied flow through the NSG as JSON blobs in a Storage Account, with timestamps, allowing you to reconstruct what happened during a past incident. IP Flow Verify is a real-time, hypothetical test — it tells you what would happen now, not what happened in the past. Effective security rules show the current rule configuration, not historical traffic. Flow logs (especially with Traffic Analytics) are essential for incident response.</div>
+  </div>
+
+  <!-- Q6 -->
+  <div class="quiz-question" data-correct="c">
+    <p>6. You want to allow outbound traffic from VMs in a subnet to Azure Storage without maintaining a static list of Azure Storage IP ranges that might change. What should you use as the destination in the NSG rule?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q6"> The current list of Azure Storage IP ranges, updated manually each month</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q6"> The VirtualNetwork service tag, since Storage uses private endpoints</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q6"> The Storage service tag — Microsoft maintains and automatically updates the IP ranges it represents</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q6"> The Internet service tag — Azure Storage is a public service and its IPs are in the Internet range</label>
+    </div>
+    <div class="quiz-feedback">The <code>Storage</code> service tag represents all Azure Storage service IP ranges and is automatically updated by Microsoft when those ranges change. Using it means your NSG rule remains correct even as Microsoft adds new Storage infrastructure. Hard-coding IP ranges (option A) creates operational burden and fails silently when Microsoft adds new IPs that aren't in your list. The Internet tag (option D) is too broad — it would also allow access to non-Azure internet destinations.</div>
+  </div>
+
+  <div class="quiz-score"></div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     PRIMARY SOURCE
+═══════════════════════════════════════════════ -->
+<div class="primary-source">
+  <strong>Primary source for this lesson</strong>
+  <a href="https://learn.microsoft.com/en-us/azure/virtual-network/network-security-groups-overview" target="_blank">
+    Network Security Groups — Overview (Microsoft Learn)
+  </a>
+  <p style="margin-top:0.5rem;font-size:0.9rem;color:#deecf9;">Read the full overview article and the linked Application Security Groups article. The Microsoft documentation on effective security rules and how both subnet and NIC NSGs are evaluated is particularly important for exam scenarios.</p>
+</div>
+
+<!-- ═══════════════════════════════════════════════
+     ASK YOUR TEACHER
+═══════════════════════════════════════════════ -->
+<div class="ask-teacher">
+  <strong>Questions for your teacher (the AI agent)</strong><br>
+  This lesson covered NSG fundamentals, default rules, ASGs, flow logs, and troubleshooting. Go deeper on:
+  <ul style="margin-top:0.5rem;">
+    <li>Walk me through the complete NSG rule evaluation sequence when a packet arrives at a VM with both a subnet NSG and a NIC NSG — include the exact order of evaluation for inbound vs outbound.</li>
+    <li>How do I design NSG rules for a three-tier application (web, app, data) using ASGs, minimising the number of rules while maximising security?</li>
+    <li>Explain how Traffic Analytics works internally — what does it do with flow log JSON blobs and what queries does it run in Log Analytics?</li>
+    <li>When should I use NSG service endpoints vs Private Endpoints for securing access to Azure Storage, and how does the NSG rule change?</li>
+  </ul>
+</div>
+
+<!-- ═══════════════════════════════════════════════
+     NEXT LESSON PREVIEW
+═══════════════════════════════════════════════ -->
+<div class="callout callout-info">
+  <strong>Coming up: Lesson 16 — VNet Peering, Service Endpoints &amp; Private Endpoints</strong>
+  You can now build and secure a VNet. The next lesson covers how to connect VNets to each other (peering), how to secure access to Azure PaaS services (service endpoints vs private endpoints), and the DNS configuration that makes private endpoints work. This is one of the highest-density networking topics on AZ-104.
+</div>
+
+<!-- ═══════════════════════════════════════════════
+     NAVIGATION
+═══════════════════════════════════════════════ -->
+<nav class="lesson-nav">
+  <a href="0014-virtual-networks.html">← Lesson 14 — Virtual Networks &amp; Subnets</a>
+  <a href="0016-vnet-peering-private-endpoints.html">Lesson 16 — VNet Peering &amp; Private Endpoints →</a>
+</nav>
+
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

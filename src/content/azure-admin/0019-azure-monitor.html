@@ -1,0 +1,586 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lesson 19 — Azure Monitor: Metrics, Logs &amp; Alerts</title>
+  <link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<!-- ═══════════════════════════════════════════════
+     HEADER
+═══════════════════════════════════════════════ -->
+<header class="lesson-header">
+  <h1>Lesson 19 — Azure Monitor: Metrics, Logs &amp; Alerts</h1>
+  <div class="lesson-meta">
+    <span class="badge badge-domain">Domain 5 — Monitor &amp; Maintain</span>
+    <span class="badge badge-exam">AZ-104: 10–15%</span>
+    <span class="badge badge-time">~35 min</span>
+    <span class="badge badge-prereq">Prereq: Resource hierarchy, VMs, Storage</span>
+  </div>
+</header>
+
+<!-- ═══════════════════════════════════════════════
+     WHY THIS MATTERS
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Why Monitoring Is Tested Differently from Other Domains</h2>
+  <p>The monitoring domain in AZ-104 does not just test whether you know what Azure Monitor is — it tests whether you can configure monitoring correctly: which agent to use, what a diagnostic setting routes, where the Activity Log is stored, what an Action Group does, and the difference between a metric alert and a log search alert.</p>
+  <p>In production, monitoring failures are silent. A misconfigured diagnostic setting means audit logs are never collected. A missing agent means VM performance data is missing from dashboards. An alert without a correctly configured Action Group fires and notifies nobody. This lesson covers every component you need to configure monitoring correctly from first principles.</p>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     1. AZURE MONITOR OVERVIEW
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>1. Azure Monitor — The Unified Platform</h2>
+  <p>Azure Monitor is Microsoft's single unified monitoring platform for all Azure resources, hybrid VMs, and applications. It collects, analyses, and acts on telemetry from every layer of your Azure environment.</p>
+
+  <div class="hierarchy">
+<span class="hier-tenant">Azure Monitor</span>
+<span class="hier-mgmt">  ├─ Data Sources</span>
+<span class="hier-resource">  │    ├─ Azure resources (platform metrics, resource logs)</span>
+<span class="hier-resource">  │    ├─ VMs (Azure Monitor Agent → DCR)</span>
+<span class="hier-resource">  │    ├─ Applications (Application Insights SDK)</span>
+<span class="hier-resource">  │    └─ Custom sources (REST API, OpenTelemetry)</span>
+<span class="hier-mgmt">  ├─ Data Types</span>
+<span class="hier-sub">  │    ├─ Metrics — numeric time-series (93 days, free)</span>
+<span class="hier-sub">  │    └─ Logs — structured records in Log Analytics Workspace</span>
+<span class="hier-mgmt">  └─ Analysis &amp; Action</span>
+<span class="hier-resource">       ├─ Metric Explorer (visualise, analyse metrics)</span>
+<span class="hier-resource">       ├─ Log Analytics (KQL queries over logs)</span>
+<span class="hier-resource">       ├─ Alerts (metric, log, activity log, resource health)</span>
+<span class="hier-resource">       ├─ Workbooks (interactive reports)</span>
+<span class="hier-resource">       └─ Dashboards (portal pin-boards)</span>
+  </div>
+
+  <div class="callout callout-info">
+    <strong>Metrics vs. Logs — the core distinction</strong>
+    <strong>Metrics</strong> are lightweight numeric time-series values collected automatically at no cost (e.g. CPU%, bytes sent, request count). They are stored for 93 days in a specialised time-series database.
+    <strong>Logs</strong> are richer structured records stored in a Log Analytics workspace. They require explicit configuration to collect and incur cost beyond the 30-day free retention period. Logs are queried with KQL (covered in Lesson 20).
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     2. METRICS
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>2. Metrics</h2>
+  <p>Metrics are numeric time-series data points emitted by Azure resources at regular intervals (typically 1-minute granularity). They are designed for fast, real-time monitoring and alerting.</p>
+
+  <h3>Platform metrics — automatic and free</h3>
+  <p>Most Azure services emit <strong>platform metrics</strong> automatically. No agent, diagnostic setting, or configuration is required. They appear immediately in Metric Explorer as soon as a resource is created.</p>
+
+  <table>
+    <thead>
+      <tr><th>Azure Service</th><th>Example Platform Metrics</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Virtual Machines</td><td>Percentage CPU, Network In/Out, Disk Read/Write Bytes, Disk IOPS</td></tr>
+      <tr><td>Storage Account</td><td>Transactions, Ingress, Egress, Availability, SuccessE2ELatency</td></tr>
+      <tr><td>Azure SQL Database</td><td>DTU consumption %, CPU percentage, Data IO percentage, Storage</td></tr>
+      <tr><td>App Service</td><td>Requests, HTTP server errors, Response time, CPU time, Memory working set</td></tr>
+      <tr><td>Azure Load Balancer</td><td>Packet count, Byte count, Health probe status, SNAT connection count</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Metric dimensions</h3>
+  <p>Many metrics support <strong>dimensions</strong> — additional properties that let you split a metric by a categorical attribute. For example, the <em>Requests</em> metric on an App Service can be split by the <em>HttpStatusCode</em> dimension to see how many requests returned 200, 404, or 500 separately.</p>
+
+  <h3>Custom metrics</h3>
+  <p>Applications can emit custom business metrics directly to Azure Monitor via the Azure Monitor REST API, Azure Monitor SDK, or OpenTelemetry. Custom metrics appear in Metric Explorer alongside platform metrics. They are billed based on the number of metric series ingested.</p>
+
+  <h3>Metric Explorer</h3>
+  <p>Metric Explorer is the portal tool for visualising and analysing metrics. Key capabilities:</p>
+  <ul>
+    <li>Plot multiple metrics from multiple resources on the same chart</li>
+    <li>Apply aggregations: average, maximum, minimum, sum, count</li>
+    <li>Split by dimension (e.g. CPU per VM in a VMSS)</li>
+    <li>Add filters (e.g. show only East US resources)</li>
+    <li>Pin charts to shared dashboards</li>
+    <li>Set the time range from 30 minutes to 30 days (93 days of data available)</li>
+  </ul>
+
+  <div class="callout callout-warn">
+    <strong>93-day retention — automatic, no configuration needed</strong>
+    Platform metrics are stored for 93 days at no cost with no configuration. This is different from Logs, which default to 30 days and require configuration and cost for extended retention. If you need metrics beyond 93 days, export them to a Storage Account or Log Analytics workspace using a diagnostic setting.
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     3. LOGS
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>3. Logs and Log Analytics Workspaces</h2>
+  <p>Logs are richer, structured records stored in a <strong>Log Analytics workspace</strong> — a dedicated storage and analytics engine built on Azure Data Explorer. Unlike metrics, logs require explicit configuration to collect, and they incur cost based on data ingestion volume and retention.</p>
+
+  <h3>Log types</h3>
+  <table>
+    <thead>
+      <tr><th>Log Type</th><th>Source</th><th>What it contains</th><th>Collection mechanism</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>Resource Logs</strong></td>
+        <td>Azure resources</td>
+        <td>Operations that happened <em>within</em> a resource (e.g. Key Vault: who accessed which secret; Storage: which blob was read)</td>
+        <td>Diagnostic setting on the resource</td>
+      </tr>
+      <tr>
+        <td><strong>Activity Log</strong></td>
+        <td>Azure subscription</td>
+        <td>Control-plane operations on Azure resources (create, delete, modify — who did what, when)</td>
+        <td>Auto-collected; send to Log Analytics via diagnostic setting for long-term retention</td>
+      </tr>
+      <tr>
+        <td><strong>Entra ID Logs</strong></td>
+        <td>Microsoft Entra ID</td>
+        <td>Sign-in events, audit log (user/group/role changes)</td>
+        <td>Diagnostic setting on Entra ID tenant</td>
+      </tr>
+      <tr>
+        <td><strong>VM Performance Counters</strong></td>
+        <td>VMs (Windows / Linux)</td>
+        <td>CPU, memory, disk, network at the OS level</td>
+        <td>Azure Monitor Agent + Data Collection Rule</td>
+      </tr>
+      <tr>
+        <td><strong>Windows Event Logs / Syslog</strong></td>
+        <td>VMs (Windows / Linux)</td>
+        <td>OS events, application events, security events</td>
+        <td>Azure Monitor Agent + Data Collection Rule</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>Log Analytics workspace</h3>
+  <p>All Azure Monitor logs land in a Log Analytics workspace. Key facts:</p>
+  <ul>
+    <li>A workspace is a single Log Analytics resource deployed to a region — data is stored in that region.</li>
+    <li>Multiple resources, subscriptions, and even tenants can send logs to the same workspace.</li>
+    <li>Logs are stored in tables within the workspace (e.g. <code>AzureActivity</code>, <code>SecurityEvent</code>, <code>Heartbeat</code>, <code>Perf</code>).</li>
+    <li>Queried with KQL (Kusto Query Language) — covered in Lesson 20.</li>
+    <li>Default retention: 30 days free. Configurable up to 2 years (charges apply after 30 days).</li>
+    <li>Data older than the interactive retention period can be archived to cheaper storage for up to 7 years.</li>
+  </ul>
+
+  <div class="callout callout-info">
+    <strong>Workspace design: centralised vs. decentralised</strong>
+    Most organisations use a <em>centralised</em> Log Analytics workspace model — one workspace per region, all resources in that region send logs there. This simplifies KQL queries (all data is co-located), reduces cost (pricing tiers apply at workspace level), and centralises access control. Decentralised workspaces per-team or per-application add complexity without proportionate benefit in most cases.
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     4. AZURE MONITOR AGENT
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>4. Azure Monitor Agent (AMA) and Data Collection Rules</h2>
+  <p>For VMs, platform metrics cover resource-level data (CPU%, disk IOPS from the hypervisor). But to collect OS-level data — Windows Event Logs, Syslog, IIS logs, custom performance counters — you must install an agent inside the VM. The <strong>Azure Monitor Agent (AMA)</strong> is the current, recommended agent.</p>
+
+  <div class="callout callout-danger">
+    <strong>Agent consolidation — critical for the exam</strong>
+    There were previously three separate agents: Log Analytics Agent (MMA/OMS), Azure Diagnostics Extension (WAD/LAD), and Dependency Agent. The Azure Monitor Agent replaces all of them. The older agents are being deprecated. On the exam, when asked about collecting VM logs and performance data, the answer is always <strong>Azure Monitor Agent + Data Collection Rule</strong>.
+  </div>
+
+  <h3>Data Collection Rules (DCRs)</h3>
+  <p>The AMA is configured via <strong>Data Collection Rules</strong> — Azure resources that define:</p>
+  <ul>
+    <li><strong>What data to collect</strong>: which Windows Event Log channels (System, Security, Application), which Syslog facilities (kern, daemon, auth), which performance counter names and sample rates, IIS log paths</li>
+    <li><strong>Where to send it</strong>: one or more Log Analytics workspaces (or Azure Monitor workspace for metrics)</li>
+    <li><strong>Transformations</strong>: filter or reshape data before ingestion (e.g. drop verbose debug events)</li>
+  </ul>
+
+  <table>
+    <thead>
+      <tr><th>DCR capability</th><th>Details</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>Multi-target</td>
+        <td>A single DCR can be associated with many VMs — configure once, apply broadly</td>
+      </tr>
+      <tr>
+        <td>Multi-DCR per VM</td>
+        <td>A single VM can have multiple DCRs associated — useful when different teams manage different data streams</td>
+      </tr>
+      <tr>
+        <td>Data destinations</td>
+        <td>Log Analytics workspace (for KQL querying), Azure Monitor workspace (for Prometheus metrics), Event Hub (streaming), Storage Account</td>
+      </tr>
+      <tr>
+        <td>Deployment</td>
+        <td>AMA installed via VM extension (AzureMonitorWindowsAgent / AzureMonitorLinuxAgent) or automatically via Azure Policy (Deploy If Not Exists)</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="callout callout-success">
+    <strong>Azure Policy for automatic agent deployment</strong>
+    The built-in policy initiative <em>Enable Azure Monitor for VMs</em> uses Deploy If Not Exists (DINE) effects to automatically install AMA and associate a DCR on any VM that does not have it. Assign this initiative at the management group or subscription scope so all new VMs are automatically onboarded to monitoring.
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     5. DIAGNOSTIC SETTINGS
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>5. Diagnostic Settings</h2>
+  <p>For <strong>Azure PaaS resources</strong> (not VMs), you configure a <strong>diagnostic setting</strong> on the resource to route its platform logs and metrics to one or more destinations. This is separate from the Azure Monitor Agent (which is for VMs only).</p>
+
+  <h3>What a diagnostic setting routes</h3>
+  <ul>
+    <li><strong>Resource logs</strong> (formerly "diagnostic logs"): operations that happened within the resource. Categories are service-specific (e.g. for Key Vault: AuditEvent; for SQL: SQLSecurityAuditEvents, QueryStoreRuntimeStatistics).</li>
+    <li><strong>Metrics</strong>: platform metrics sent to a Log Analytics workspace (where they can be queried with KQL) or to a storage account for archiving.</li>
+  </ul>
+
+  <h3>Destination options</h3>
+  <table>
+    <thead>
+      <tr><th>Destination</th><th>Use Case</th><th>Notes</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>Log Analytics Workspace</strong></td>
+        <td>KQL querying, alerts, Workbooks</td>
+        <td>Most flexible — enables cross-resource correlation and alerting</td>
+      </tr>
+      <tr>
+        <td><strong>Storage Account</strong></td>
+        <td>Long-term archiving, compliance, cost-effective retention</td>
+        <td>Stored as JSON blobs. Not queryable directly without additional tooling.</td>
+      </tr>
+      <tr>
+        <td><strong>Event Hub</strong></td>
+        <td>Real-time streaming to SIEM (Sentinel, Splunk, Elastic), third-party tools</td>
+        <td>High throughput streaming. Requires a consumer to process the stream.</td>
+      </tr>
+      <tr>
+        <td><strong>Partner solution</strong></td>
+        <td>Direct integration with Datadog, Elastic, Dynatrace, etc.</td>
+        <td>Bypasses intermediate storage — data goes directly to the partner platform.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="callout callout-warn">
+    <strong>Up to 5 diagnostic settings per resource</strong>
+    Each Azure resource can have up to 5 diagnostic settings simultaneously. This allows you to, for example, send audit logs to a central security workspace AND archive them to a storage account AND stream them to an Event Hub for real-time SIEM ingestion — all from the same diagnostic setting configuration.
+  </div>
+
+  <h3>Common exam scenario: configuring resource logs</h3>
+  <pre><code>Resource: Key Vault "prod-kv-eastus"
+Diagnostic setting: "send-to-law-and-archive"
+  ├─ Log categories: AuditEvent (who accessed which secret/key/cert)
+  ├─ Destination 1: Log Analytics Workspace "law-central-eastus" (retention: 90 days)
+  └─ Destination 2: Storage Account "starchiveprod001" (archiving: 2 years)</code></pre>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     6. ACTIVITY LOG
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>6. Activity Log</h2>
+  <p>The <strong>Activity Log</strong> records all <strong>control-plane operations</strong> on Azure resources within a subscription. Every time anyone — a user, a managed identity, a service principal, or Azure itself — creates, modifies, or deletes an Azure resource, an Activity Log entry is created.</p>
+
+  <h3>What the Activity Log captures</h3>
+  <ul>
+    <li>Who performed the operation (identity: user UPN, service principal, managed identity)</li>
+    <li>What operation was performed (resource type + operation name, e.g. <code>Microsoft.Compute/virtualMachines/write</code>)</li>
+    <li>When it happened (timestamp)</li>
+    <li>What the result was (Succeeded, Failed, Accepted)</li>
+    <li>Which resource was affected (resource ID)</li>
+    <li>The source IP of the operation</li>
+  </ul>
+
+  <div class="callout callout-info">
+    <strong>Activity Log scope: subscription, not resource</strong>
+    The Activity Log is a subscription-level construct, not a per-resource one. A single Activity Log covers all operations across all resources in a subscription. To view the Activity Log, navigate to the subscription and select Activity Log, or search for "Activity Log" in the portal to see a cross-subscription view.
+  </div>
+
+  <h3>Retention and forwarding</h3>
+  <table>
+    <thead>
+      <tr><th>Configuration</th><th>Details</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Default retention</td><td>90 days in the Activity Log — after that, entries are deleted</td></tr>
+      <tr><td>Extended retention</td><td>Create a diagnostic setting on the Activity Log to send entries to a Log Analytics workspace (query with KQL) or storage account (archive)</td></tr>
+      <tr><td>Real-time streaming</td><td>Send Activity Log to an Event Hub for real-time SIEM ingestion</td></tr>
+    </tbody>
+  </table>
+
+  <div class="callout callout-success">
+    <strong>Activity Log for security investigations</strong>
+    When investigating a security incident — "who deleted the storage account?" or "who changed the NSG rules at 2am?" — the Activity Log is your first stop. It gives you a precise, immutable record of every control-plane operation. Send it to Microsoft Sentinel or your SIEM for automated correlation and alerting on suspicious activity patterns.
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     7. ALERTS
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>7. Alerts</h2>
+  <p>Azure Monitor alerts evaluate a signal (metric, log query result, activity log event) on a schedule and fire an alert when the signal meets a defined condition. Alerts are composed of three parts: the alert rule, the action group, and the alert state.</p>
+
+  <h3>Alert rule types</h3>
+  <table>
+    <thead>
+      <tr><th>Alert Type</th><th>Signal</th><th>Evaluation</th><th>Use Case</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>Metric alert</strong></td>
+        <td>Platform or custom metric</td>
+        <td>Near-real-time (1-minute frequency)</td>
+        <td>CPU &gt; 90%, memory &gt; 85%, disk latency spike</td>
+      </tr>
+      <tr>
+        <td><strong>Log search alert</strong></td>
+        <td>KQL query against Log Analytics</td>
+        <td>Runs on a schedule (minimum 1 minute)</td>
+        <td>"Alert if more than 10 failed logins in 5 minutes"</td>
+      </tr>
+      <tr>
+        <td><strong>Activity log alert</strong></td>
+        <td>Activity Log events</td>
+        <td>Near-real-time on event match</td>
+        <td>"Alert when any resource in subscription is deleted"</td>
+      </tr>
+      <tr>
+        <td><strong>Resource health alert</strong></td>
+        <td>Azure platform health events</td>
+        <td>Platform-pushed</td>
+        <td>"Alert when a VM becomes unavailable due to a platform issue"</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>Static vs. dynamic thresholds for metric alerts</h3>
+  <p>Metric alerts support two threshold types:</p>
+  <ul>
+    <li><strong>Static threshold</strong>: a fixed numeric value (e.g. CPU &gt; 85%). Simple, predictable, but can produce false positives for workloads with expected patterns (e.g. Monday morning CPU spikes).</li>
+    <li><strong>Dynamic threshold</strong>: uses machine learning to learn the metric's normal pattern over time (including daily/weekly seasonality) and alerts when the metric deviates abnormally from the learned baseline. Reduces alert fatigue for variable workloads.</li>
+  </ul>
+
+  <div class="callout callout-info">
+    <strong>Alert severity levels</strong>
+    Severity 0 (Critical) through Severity 4 (Verbose). Severity drives routing and escalation policies in Action Groups and ITSM integrations. Severity 0 and 1 alerts should trigger immediate page/call; Severity 3 and 4 can be informational tickets.
+  </div>
+
+  <h3>Alert states</h3>
+  <p>Once fired, alerts go through a lifecycle:</p>
+  <ul>
+    <li><strong>Fired</strong>: condition met, action group executed, notifications sent</li>
+    <li><strong>Acknowledged</strong>: engineer has seen and is investigating the alert (suppresses re-notifications)</li>
+    <li><strong>Resolved</strong>: condition no longer met (metric-based alerts auto-resolve; log alerts require manual resolution)</li>
+  </ul>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     8. ACTION GROUPS
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>8. Action Groups</h2>
+  <p>An <strong>Action Group</strong> is a reusable collection of notification and remediation actions that are executed when an alert fires. Action groups decouple the <em>what happened</em> (the alert rule) from <em>what to do about it</em> (the action group), enabling the same response process to be triggered by multiple different alerts.</p>
+
+  <h3>Action types</h3>
+  <table>
+    <thead>
+      <tr><th>Action Type</th><th>Description</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><strong>Email / SMS / Push notification</strong></td><td>Direct notification to on-call engineers via email, SMS, or Azure mobile app</td></tr>
+      <tr><td><strong>Voice call</strong></td><td>Automated phone call — for critical Severity 0 alerts requiring immediate response</td></tr>
+      <tr><td><strong>Webhook</strong></td><td>HTTP POST to any endpoint — integrates with PagerDuty, OpsGenie, Slack, etc.</td></tr>
+      <tr><td><strong>Logic App</strong></td><td>Trigger a Logic App workflow — complex orchestration, conditional logic, multi-step remediation</td></tr>
+      <tr><td><strong>Azure Function</strong></td><td>Run a serverless function — custom remediation code (e.g. auto-scale, restart a service)</td></tr>
+      <tr><td><strong>Automation Runbook</strong></td><td>Run an Azure Automation runbook — remediation workflows (e.g. remediate disk space, restart VM)</td></tr>
+      <tr><td><strong>ITSM connector</strong></td><td>Create a ticket in ServiceNow, JIRA Service Management, etc.</td></tr>
+      <tr><td><strong>Event Hub</strong></td><td>Stream alert data to an Event Hub for downstream processing</td></tr>
+    </tbody>
+  </table>
+
+  <div class="callout callout-success">
+    <strong>Action Groups are reusable — this is the exam point</strong>
+    Create one Action Group called "Critical-On-Call" with email, SMS, and PagerDuty webhook configured. Attach this single Action Group to all Severity 0 and Severity 1 alert rules across all resources and subscriptions. When the on-call rotation changes, update the Action Group in one place and all alert rules are automatically updated.
+  </div>
+
+  <div class="callout callout-warn">
+    <strong>Action Group rate limits</strong>
+    Each Action Group has rate limits to prevent alert storms from flooding notification channels. Email: 100 emails/hour. SMS: 1 per 5 minutes per phone number. Webhook: 10 per minute. If alerts fire faster than these limits, some notifications may be suppressed. Use Smart Groups to reduce alert volume before it reaches Action Groups.
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     9. SMART GROUPS AND WORKBOOKS
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>9. Smart Groups and Workbooks</h2>
+
+  <h3>Smart Groups</h3>
+  <p>When a widespread issue occurs (e.g. a networking outage affecting 50 VMs), Azure Monitor can fire 50 separate CPU alerts and 50 separate disk alerts — creating 100 notifications for what is essentially one problem. <strong>Smart Groups</strong> use ML to automatically correlate related alerts into a single Smart Group, reducing alert noise and enabling engineers to triage the root cause rather than processing individual alert instances.</p>
+
+  <div class="callout callout-info">
+    <strong>Smart Groups do not replace alert rules</strong>
+    Smart Groups operate on fired alerts — they are a presentation and management layer on top of existing alerts. You still need well-configured alert rules. Smart Groups just ensure that when 50 alerts fire due to the same root cause, the on-call engineer sees one Smart Group to investigate, not 50 separate alert notifications.
+  </div>
+
+  <h3>Azure Monitor Workbooks</h3>
+  <p>Workbooks are interactive, parameterised reports in the Azure portal that combine metrics, logs (KQL queries), rich text, and interactive controls (dropdowns, time range pickers) into a single reusable document. They are ideal for:</p>
+  <ul>
+    <li>Executive-level dashboards showing SLA compliance, availability, and cost trends</li>
+    <li>Operational runbooks — a Workbook can both show diagnostic data and link to remediation steps</li>
+    <li>Cross-resource analysis — combine metrics from VMs, databases, and load balancers on one canvas</li>
+    <li>Shared team views — Workbooks can be saved to a Resource Group and shared via RBAC</li>
+  </ul>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     10. APPLICATION INSIGHTS
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>10. Application Insights (Overview)</h2>
+  <p><strong>Application Insights</strong> is the application performance monitoring (APM) component of Azure Monitor. It provides code-level telemetry: request rates, response times, exception rates, dependency tracking (calls to databases, external APIs), distributed tracing, and user behaviour analytics.</p>
+
+  <p>For the AZ-104 exam, Application Insights is in scope at a high level. You need to understand what it does without deep configuration knowledge (which is more relevant to AZ-204 Developer exam):</p>
+
+  <ul>
+    <li>Application Insights requires an SDK or auto-instrumentation to be added to the application code (or App Service can enable auto-instrumentation without code changes).</li>
+    <li>Data is stored in a Log Analytics workspace (workspace-based Application Insights) or in a classic Application Insights resource.</li>
+    <li>Use Application Insights for <em>application-level</em> metrics (failed requests, exceptions, custom events) — use platform metrics for <em>infrastructure-level</em> data (CPU, disk).</li>
+    <li>Smart Detection: automatic anomaly detection for application metrics (e.g. sudden spike in failure rate).</li>
+  </ul>
+
+  <div class="callout callout-info">
+    <strong>AZ-104 exam scope for Application Insights</strong>
+    You are unlikely to be tested on SDK instrumentation or Application Map configuration. However, you may see questions asking: which Azure Monitor component monitors application-level performance? The answer is Application Insights. What component monitors VM OS performance? The answer is Azure Monitor Agent with Data Collection Rules.
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     QUIZ
+═══════════════════════════════════════════════ -->
+<section class="quiz">
+  <h2>Check Your Understanding</h2>
+  <p>Click any option to see immediate feedback. Answers reflect real Azure Monitor behaviour.</p>
+
+  <!-- Q1 -->
+  <div class="quiz-question" data-correct="b">
+    <p>1. You deploy a new Azure Virtual Machine. Without any additional configuration, which of the following metrics are automatically available in Azure Monitor Metric Explorer?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q1"> No metrics — VM metrics require the Azure Monitor Agent to be installed first</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q1"> Platform metrics (CPU%, Network In/Out, Disk Read/Write Bytes) are automatically collected at no cost and available immediately — no agent or diagnostic setting required</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q1"> CPU% is available automatically, but disk and network metrics require a diagnostic setting to be configured</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q1"> All metrics are available but only after 5 minutes of initial data collection warm-up from a diagnostic setting</label>
+    </div>
+    <div class="quiz-feedback">Platform metrics (CPU%, Network In/Out, Disk Read/Write Bytes, etc.) are automatically collected from Azure VMs by the Azure hypervisor and are available in Metric Explorer immediately with no agent, no diagnostic setting, and no cost. They are stored for 93 days. The Azure Monitor Agent is needed for OS-level data (Windows Event Logs, Syslog, performance counters inside the OS) — not for platform metrics.</div>
+  </div>
+
+  <!-- Q2 -->
+  <div class="quiz-question" data-correct="c">
+    <p>2. You need to collect Windows Security Event Logs from 50 Azure VMs and send them to a central Log Analytics workspace for KQL querying and alerting. What is the correct configuration?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q2"> Configure a diagnostic setting on each VM pointing to the Log Analytics workspace</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q2"> Enable the Activity Log diagnostic setting at the subscription level and filter for Security events</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q2"> Install the Azure Monitor Agent on all VMs and create a Data Collection Rule specifying the Security event log channel and the Log Analytics workspace as destination</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q2"> Enable Microsoft Defender for Cloud on the subscription — it automatically collects Security Event Logs from all VMs</label>
+    </div>
+    <div class="quiz-feedback">Windows Event Logs are OS-level data inside the VM — they require an agent. The Azure Monitor Agent (AMA) is the current recommended agent. A Data Collection Rule (DCR) specifies what to collect (in this case, the Windows Security event log channel) and where to send it (the Log Analytics workspace). The DCR can target all 50 VMs simultaneously. Diagnostic settings on a VM only route VM-level platform metrics and Azure resource logs — not OS-level event logs.</div>
+  </div>
+
+  <!-- Q3 -->
+  <div class="quiz-question" data-correct="a">
+    <p>3. Your security team needs all Azure Key Vault access logs routed to a Log Analytics workspace for KQL-based threat hunting, archived to a Storage Account for 3-year compliance retention, and streamed to an Event Hub for real-time Splunk ingestion. Is this possible with a single diagnostic setting?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q3"> Yes — a single diagnostic setting can route to up to 5 destinations simultaneously, including a Log Analytics workspace, Storage Account, and Event Hub in combination</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q3"> No — each destination type requires a separate diagnostic setting; you need three settings for three destinations</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q3"> No — a diagnostic setting can only have one destination; create three diagnostic settings with different destinations</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q3"> Yes — but only if all three destinations are in the same Azure region as the Key Vault</label>
+    </div>
+    <div class="quiz-feedback">A single diagnostic setting on an Azure resource can route to multiple destinations simultaneously: one or more Log Analytics workspaces, a Storage Account, an Event Hub, and a partner solution — up to 5 destinations in total. You do not need separate diagnostic settings per destination. All three destinations (Log Analytics workspace for KQL, Storage Account for archiving, Event Hub for Splunk) can be configured in one diagnostic setting on the Key Vault.</div>
+  </div>
+
+  <!-- Q4 -->
+  <div class="quiz-question" data-correct="d">
+    <p>4. An engineer deletes a production storage account by mistake. You need to determine exactly who deleted it, when, and from which IP address. What is the correct Azure Monitor tool to use?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q4"> Azure Monitor Metrics — the Delete metric for the storage account shows who deleted it</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q4"> Azure Monitor Resource Logs (diagnostic setting logs) for the storage account</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q4"> Log Analytics workspace query against the StorageBlobLogs table</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q4"> Activity Log — it records all subscription-level control-plane operations including resource deletions, with identity, timestamp, and source IP</label>
+    </div>
+    <div class="quiz-feedback">Resource deletion is a control-plane operation — it goes through Azure Resource Manager, not through the storage account's data plane. The Activity Log records all ARM control-plane operations: who performed the operation (identity), what operation (Microsoft.Storage/storageAccounts/delete), when, the result, and the caller's IP address. Platform metrics do not record who performed an operation. Resource Logs capture data-plane operations within a resource (e.g. blob read/write) — not control-plane deletions of the resource itself.</div>
+  </div>
+
+  <!-- Q5 -->
+  <div class="quiz-question" data-correct="b">
+    <p>5. You have 15 different alert rules across VMs, databases, and load balancers — all requiring the same response: email the on-call team, send a PagerDuty webhook, and create a ServiceNow ticket. What is the most operationally correct approach?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q5"> Configure email, PagerDuty webhook, and ServiceNow actions directly on each of the 15 alert rules individually</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q5"> Create a single Action Group with email, PagerDuty webhook, and ServiceNow ITSM actions configured, then reference this Action Group in all 15 alert rules</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q5"> Create a Logic App that is triggered by Azure Monitor alerts and routes to PagerDuty and ServiceNow — attach the Logic App action to all 15 rules</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q5"> Use Azure Automation to poll for fired alerts every minute and trigger the required notifications</label>
+    </div>
+    <div class="quiz-feedback">Action Groups are designed exactly for this scenario: create one reusable Action Group ("Critical-On-Call") with all required actions, then attach it to all 15 (or 150) alert rules. When the on-call engineer changes, update the Action Group once — all 15 rules are automatically updated. Configuring actions on each alert rule individually multiplies maintenance burden by 15 and increases the risk of configuration drift.</div>
+  </div>
+
+  <!-- Q6 -->
+  <div class="quiz-question" data-correct="c">
+    <p>6. You configure a CPU metric alert with a static threshold of 80% on a web application VM. The alert fires every Monday morning at 9am when the batch processing job runs, even though this is expected and normal behaviour. What alert type should you switch to in order to reduce these false positives?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q6"> Log search alert — query CPU metrics from Log Analytics instead of using Metric Explorer</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q6"> Increase the static threshold to 95% so Monday morning peaks no longer trigger it</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q6"> Dynamic threshold alert — uses ML to learn the normal weekly CPU pattern (including Monday peaks) and only fires when CPU deviates abnormally from the learned baseline</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q6"> Activity log alert — monitors when the batch processing job starts to suppress the CPU alert during that window</label>
+    </div>
+    <div class="quiz-feedback">Dynamic thresholds use machine learning to analyse the metric's historical behaviour and learn its normal patterns — including daily and weekly seasonality like Monday morning CPU peaks. Once learned, the dynamic threshold alert only fires when the metric deviates abnormally from its expected pattern. Increasing the static threshold would mask genuinely abnormal CPU spikes on other days. Dynamic thresholds provide the right balance between sensitivity and false-positive reduction for metrics with predictable patterns.</div>
+  </div>
+
+  <div class="quiz-score"></div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     PRIMARY SOURCE
+═══════════════════════════════════════════════ -->
+<div class="primary-source">
+  <strong>Primary source for this lesson</strong>
+  <a href="https://learn.microsoft.com/en-us/azure/azure-monitor/overview" target="_blank">
+    Azure Monitor overview — Microsoft Learn
+  </a>
+  <p style="margin-top:0.5rem;font-size:0.9rem;color:#deecf9;">Also read: Azure Monitor Agent overview, Data Collection Rules, Diagnostic settings overview, and the Alert rules documentation. The Activity Log documentation is particularly important — read the section on sending Activity Log to a Log Analytics workspace for long-term retention.</p>
+</div>
+
+<!-- ═══════════════════════════════════════════════
+     ASK YOUR TEACHER
+═══════════════════════════════════════════════ -->
+<div class="ask-teacher">
+  <strong>Questions for your teacher (the AI agent)</strong><br>
+  This lesson covered Azure Monitor's data collection, alerting, and action architecture. Dig deeper:
+  <ul style="margin-top:0.5rem;">
+    <li>Walk me through creating a complete Azure Monitor alert with a dynamic threshold, Action Group, and ITSM integration using Bicep.</li>
+    <li>What is the difference between a Log Analytics workspace and an Azure Monitor workspace, and when would I use each?</li>
+    <li>How do Data Collection Rules work with transformations — show me an example that drops verbose debug events before ingestion.</li>
+    <li>How do I set up Microsoft Sentinel on top of a Log Analytics workspace and what built-in analytics rules cover common attack patterns?</li>
+  </ul>
+</div>
+
+<!-- ═══════════════════════════════════════════════
+     NEXT LESSON PREVIEW
+═══════════════════════════════════════════════ -->
+<div class="callout callout-info">
+  <strong>Coming up: Lesson 20 — KQL and Log Analytics</strong>
+  You have configured Azure Monitor to collect logs into a Log Analytics workspace. The next lesson teaches you to query them. Kusto Query Language (KQL) is how you extract insight from the data — filtering, aggregating, joining tables, and building alert queries. KQL competency directly translates to troubleshooting speed and exam performance.
+</div>
+
+<!-- ═══════════════════════════════════════════════
+     NAVIGATION
+═══════════════════════════════════════════════ -->
+<nav class="lesson-nav">
+  <a href="0018-load-balancing.html">← Lesson 18 — Load Balancing in Azure</a>
+  <a href="0020-kql-log-analytics.html">Lesson 20 — KQL and Log Analytics →</a>
+</nav>
+
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

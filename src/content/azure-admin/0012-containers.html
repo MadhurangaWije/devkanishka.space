@@ -1,0 +1,438 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lesson 12 — Containers: ACI, Container Apps &amp; AKS</title>
+  <link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<!-- ═══════════════════════════════════════════════
+     HEADER
+═══════════════════════════════════════════════ -->
+<header class="lesson-header">
+  <h1>Lesson 12 — Containers: ACI, Container Apps &amp; AKS</h1>
+  <div class="lesson-meta">
+    <span class="badge badge-domain">Domain 3 — Compute</span>
+    <span class="badge badge-exam">AZ-104: 20–25%</span>
+    <span class="badge badge-time">~35 min</span>
+    <span class="badge badge-prereq">Prereq: Lesson 11</span>
+  </div>
+</header>
+
+<!-- ═══════════════════════════════════════════════
+     WHY THIS MATTERS
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Four Ways to Run a Container in Azure</h2>
+  <p>Azure has multiple container services because no single product is optimal for every workload. The AZ-104 exam tests your ability to select the right service for a given scenario — not deep Kubernetes internals. What you need to understand is the operational characteristics, scale behaviour, networking model, and the decision criteria that distinguish each service.</p>
+  <p>The four container-capable services you need to know are: <strong>Azure Container Registry</strong> (the image store), <strong>Azure Container Instances</strong> (simplest possible container execution), <strong>Azure Container Apps</strong> (serverless microservices platform), and <strong>Azure Kubernetes Service</strong> (full managed Kubernetes). You will also encounter App Service as a fifth option when PaaS features like deployment slots and Easy Auth are priorities.</p>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     AZURE CONTAINER REGISTRY
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Azure Container Registry (ACR)</h2>
+  <p><strong>Azure Container Registry</strong> is Azure's managed private container image registry. It stores and serves Docker images, OCI artifacts, and Helm charts. Every container deployment in Azure should pull from ACR rather than public registries in production — it gives you control over what images are deployed, enables vulnerability scanning, and keeps image pulls on the Azure backbone (faster, no egress charges).</p>
+
+  <h3>ACR SKUs</h3>
+  <table>
+    <thead>
+      <tr><th>SKU</th><th>Storage</th><th>Geo-Replication</th><th>Private Link</th><th>Content Trust</th><th>Use Case</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>Basic</strong></td>
+        <td>10 GiB</td>
+        <td>No</td>
+        <td>No</td>
+        <td>No</td>
+        <td>Development and testing</td>
+      </tr>
+      <tr>
+        <td><strong>Standard</strong></td>
+        <td>100 GiB</td>
+        <td>No</td>
+        <td>No</td>
+        <td>No</td>
+        <td>Most production workloads</td>
+      </tr>
+      <tr>
+        <td><strong>Premium</strong></td>
+        <td>500 GiB</td>
+        <td>Yes</td>
+        <td>Yes</td>
+        <td>Yes</td>
+        <td>Enterprise, multi-region, compliance</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>Authentication methods</h3>
+  <ul>
+    <li><strong>Admin account</strong>: a username/password credential for the registry. Simple but not recommended — shared credentials, not tied to identity, no per-user audit trail.</li>
+    <li><strong>Entra ID service principal</strong>: assign the AcrPull or AcrPush role to a service principal. Recommended for CI/CD pipelines.</li>
+    <li><strong>Managed identity</strong>: assign AcrPull to the managed identity of an AKS cluster, ACI container group, or App Service app. No credential management — the preferred method for Azure-to-ACR pulls.</li>
+    <li><strong>ACR token</strong>: repository-scoped token with configurable expiry. Useful for giving a vendor pull-only access to a specific repository without exposing the full registry.</li>
+  </ul>
+
+  <div class="callout callout-warn">
+    <strong>Disable the admin account in production</strong>
+    The ACR admin account is a single shared credential with no expiry and no user binding. If it leaks, anyone can push or pull any image. Use managed identities or service principals with Entra ID RBAC instead. Most security baselines require the admin account to be disabled.
+  </div>
+
+  <h3>Geo-replication (Premium only)</h3>
+  <p>Geo-replication creates replica registries in additional Azure regions. Image layers are replicated automatically. Clients pulling from the closest replica get faster pulls and don't cross region boundaries. From the client's perspective, the registry URL stays the same — Azure routes pulls to the nearest replica. This also provides registry redundancy if one region goes down.</p>
+
+  <h3>ACR Tasks</h3>
+  <p>ACR Tasks is a built-in CI capability: build, test, and patch container images in the cloud without a local Docker daemon or a separate build server. You can trigger builds on git push (source code commit), on base image updates (keep your images patched when the base image updates), or on a schedule. ACR Tasks run inside ACR's own compute infrastructure.</p>
+
+  <h3>Image vulnerability scanning</h3>
+  <p>When <strong>Microsoft Defender for Containers</strong> is enabled, it integrates with ACR to scan images for known CVEs on push and on schedule. Findings appear in Microsoft Defender for Cloud. This is the recommended approach for supply chain security — catch vulnerabilities before images reach production clusters.</p>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     AZURE CONTAINER INSTANCES
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Azure Container Instances (ACI)</h2>
+  <p><strong>Azure Container Instances</strong> is the simplest way to run a container in Azure. You provide an image, specify vCPU and memory, and Azure starts the container in seconds — no cluster, no node provisioning, no orchestrator to manage. You are billed per second for the vCPU and memory you requested while the container is running.</p>
+
+  <h3>Container groups</h3>
+  <p>The deployment unit in ACI is the <strong>container group</strong> — equivalent to a Kubernetes Pod. A container group is a collection of containers that share the same network namespace (same IP address, same port space) and the same storage volumes. All containers in a group are scheduled on the same host machine and can reach each other over localhost.</p>
+
+  <h3>Restart policies</h3>
+  <table>
+    <thead>
+      <tr><th>Policy</th><th>Behaviour</th><th>Best For</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>Always</strong></td>
+        <td>Container is always restarted if it exits, regardless of exit code</td>
+        <td>Long-running services that should stay up</td>
+      </tr>
+      <tr>
+        <td><strong>Never</strong></td>
+        <td>Container is not restarted after it exits — group is terminated</td>
+        <td>One-shot batch jobs that run once and stop</td>
+      </tr>
+      <tr>
+        <td><strong>OnFailure</strong></td>
+        <td>Container is restarted only if it exits with a non-zero exit code</td>
+        <td>Batch jobs that should retry on error but stop cleanly on success</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>Persistent storage</h3>
+  <p>ACI containers are stateless by default — any data written to the container filesystem is lost when the container exits. For persistent storage, mount an <strong>Azure Files</strong> share as a volume into the container group. Azure Files provides SMB-based shared storage that persists independently of the container lifecycle.</p>
+
+  <h3>Networking options</h3>
+  <ul>
+    <li><strong>Public IP</strong>: ACI assigns a public IP to the container group. Expose specific ports to the internet. Simple, no VNet required.</li>
+    <li><strong>VNet injection</strong>: deploy the container group into a dedicated subnet in your VNet. The container group gets a private IP and can reach other VNet resources without public exposure. Required for containers that need to access private databases or internal services.</li>
+  </ul>
+
+  <div class="callout callout-info">
+    <strong>ACI use cases and limitations</strong>
+    ACI is ideal for: one-off batch jobs, CI/CD pipeline steps, event-triggered workloads, dev/test, and simple microservices that don't need orchestration. Its key limitations are: no built-in autoscaling (you must create/delete container groups yourself), no health-based restart of individual containers within a group, no service discovery, and no persistent state without external storage. For anything that needs scale-to-zero or event-driven scaling, Azure Container Apps is the better choice.
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     AZURE CONTAINER APPS
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Azure Container Apps</h2>
+  <p><strong>Azure Container Apps</strong> is a serverless container platform built on Kubernetes (AKS), KEDA (Kubernetes Event-Driven Autoscaling), and Dapr (Distributed Application Runtime). It provides the power of Kubernetes without any Kubernetes knowledge requirements — Azure manages the control plane, cluster upgrades, and node pools entirely. You interact with Container Apps through a higher-level abstraction.</p>
+
+  <h3>Container Apps Environment</h3>
+  <p>The <strong>Container Apps Environment</strong> is the isolation boundary — a shared VNet, a shared Log Analytics workspace, and a shared managed Kubernetes cluster. All Container Apps in the same environment can communicate with each other using internal service discovery (DNS). Environments are billed for their dedicated workload profile or consumption-based resources.</p>
+
+  <h3>Scaling: the key differentiator</h3>
+  <p>Container Apps supports true <strong>scale to zero</strong> — when there is no traffic or no queue messages, the app scales to zero instances and costs nothing. This is the fundamental difference from AKS (minimum node count applies) and ACI (you must stop containers manually).</p>
+  <ul>
+    <li><strong>HTTP scaling</strong>: scales based on concurrent HTTP requests. Scales to zero when no requests arrive.</li>
+    <li><strong>CPU/memory scaling</strong>: scales based on resource utilisation.</li>
+    <li><strong>KEDA event sources</strong>: scales based on external event sources — Azure Service Bus queue depth, Azure Storage Queue message count, Kafka topic lag, and many more. This is what makes Container Apps ideal for event-driven workers.</li>
+  </ul>
+
+  <h3>Revisions</h3>
+  <p>When you update a Container App (new image, new environment variables, new resource limits), Container Apps creates a new <strong>revision</strong> — an immutable snapshot of the full application configuration. Previous revisions remain available. You can route traffic between revisions using percentage splits:</p>
+  <ul>
+    <li><strong>Blue/green deployment</strong>: shift 100% traffic from the old revision to the new revision atomically.</li>
+    <li><strong>Canary deployment</strong>: route 10% to the new revision, monitor, then increase if healthy.</li>
+    <li>Old revisions can be deactivated (zero instances) while remaining available for instant rollback by re-activating them.</li>
+  </ul>
+
+  <h3>Ingress</h3>
+  <p>Container Apps supports two ingress modes:</p>
+  <ul>
+    <li><strong>External ingress</strong>: the app is reachable from the public internet via an automatically provisioned HTTPS endpoint with a managed TLS certificate. Azure handles certificate provisioning and renewal.</li>
+    <li><strong>Internal ingress</strong>: the app is only reachable from within the same Container Apps Environment (or connected networks). No public endpoint is created.</li>
+  </ul>
+
+  <h3>Dapr integration</h3>
+  <p><strong>Dapr</strong> (Distributed Application Runtime) is an optional sidecar that Container Apps can attach to each app. Dapr provides portable building blocks for microservice patterns: service-to-service calls with retries, pub/sub messaging, state management, secret access, and distributed tracing — all via a standardised API regardless of the underlying infrastructure. Enable Dapr with a checkbox in the Container App configuration; no code changes are required to activate the sidecar.</p>
+
+  <div class="callout callout-info">
+    <strong>Container Apps is the sweet spot</strong>
+    Container Apps occupies the ideal middle ground: simpler than AKS (no cluster management, no YAML manifests for cluster components, no upgrade coordination), more powerful than ACI (event-driven scaling, service discovery, traffic splitting, Dapr). For most new microservice and event-driven workloads, Container Apps is the right starting point.
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     AKS BASICS
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Azure Kubernetes Service (AKS) — AZ-104 Essentials</h2>
+  <p>AKS is Azure's managed Kubernetes service. Azure manages the Kubernetes control plane (API server, scheduler, etcd) at no charge — you pay only for the agent (worker) nodes. AZ-104 does not test deep Kubernetes internals, but you need to understand the AKS architecture, node pools, networking models, and the integration touchpoints with other Azure services.</p>
+
+  <h3>Node pools</h3>
+  <p>AKS clusters are composed of one or more <strong>node pools</strong>. Each node pool is a set of VMs with the same size and configuration:</p>
+  <ul>
+    <li><strong>System node pool</strong>: required in every AKS cluster. Runs AKS system components: CoreDNS, kube-proxy, metrics-server, and other critical add-ons. Must have at least one node. Best practice: taint the system pool with <code>CriticalAddonsOnly=true:NoSchedule</code> to prevent user application pods from being scheduled there.</li>
+    <li><strong>User node pools</strong>: optional additional pools for application workloads. You can have multiple user pools with different VM sizes (e.g. a GPU pool for ML workloads, a high-memory pool for data processing).</li>
+  </ul>
+
+  <div class="callout callout-warn">
+    <strong>Why taint the system node pool?</strong>
+    If your application pods land on system nodes and consume all resources, AKS system components starve and the cluster becomes unstable — this is a production incident waiting to happen. Tainting the system pool forces application pods onto dedicated user nodes, providing resource isolation between cluster infrastructure and your workloads.
+  </div>
+
+  <h3>Cluster autoscaler</h3>
+  <p>The cluster autoscaler monitors pods that cannot be scheduled due to insufficient node capacity. When unschedulable pods are detected, it adds nodes to the pool (up to the configured maximum). When nodes are underutilised and their pods can be evicted, it removes nodes (down to the minimum). This is different from Horizontal Pod Autoscaler (HPA), which scales pod replicas, not nodes.</p>
+
+  <h3>Cluster and node upgrades</h3>
+  <ul>
+    <li><strong>Cluster upgrade</strong>: upgrades the Kubernetes version. Control plane is upgraded first, then each node pool is cordoned and drained, upgraded, and uncordoned. Plan for brief disruption during node upgrades.</li>
+    <li><strong>Node image upgrade</strong>: upgrades the OS image on nodes without changing the Kubernetes version. This is how you apply OS security patches. Can be automated via maintenance windows.</li>
+  </ul>
+
+  <h3>Networking models</h3>
+  <table>
+    <thead>
+      <tr><th>Model</th><th>Pod IP Source</th><th>Network Policy</th><th>Max Nodes/Cluster</th><th>Use Case</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>Kubenet</strong></td>
+        <td>Pod-only overlay (NATed via node IP)</td>
+        <td>Calico only</td>
+        <td>400 nodes</td>
+        <td>Small clusters, simplified networking</td>
+      </tr>
+      <tr>
+        <td><strong>Azure CNI</strong></td>
+        <td>Real VNet IPs — pods are first-class VNet citizens</td>
+        <td>Azure or Calico</td>
+        <td>Large-scale</td>
+        <td>Production, VNet integration, private link</td>
+      </tr>
+      <tr>
+        <td><strong>Azure CNI Overlay</strong></td>
+        <td>Pod overlay IPs (no VNet IP exhaustion)</td>
+        <td>Azure or Calico</td>
+        <td>Large-scale</td>
+        <td>Large clusters where VNet IP space is limited</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>Key AKS integrations for AZ-104</h3>
+  <ul>
+    <li><strong>ACR integration</strong>: attach an ACR to an AKS cluster with one command. AKS nodes get the <code>AcrPull</code> role on the registry automatically — no imagePullSecrets needed. Images pull without credential configuration.</li>
+    <li><strong>Entra ID integration</strong>: enable AKS Entra integration to map Entra groups to Kubernetes RBAC roles. Cluster operators log in with their Entra credentials; access is controlled through standard Azure group membership management.</li>
+    <li><strong>Azure Monitor / Container Insights</strong>: enable Container Insights to collect node and pod metrics, logs, and container stdout/stderr into a Log Analytics workspace. Standard monitoring for production AKS clusters.</li>
+  </ul>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     DECISION MATRIX
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Decision Matrix: Choosing the Right Container Service</h2>
+  <p>Use this table when a scenario describes a container workload and asks which Azure service to use. The decision depends on complexity, scaling requirements, operational overhead tolerance, and feature needs.</p>
+
+  <table>
+    <thead>
+      <tr>
+        <th>Scenario</th>
+        <th>Best Choice</th>
+        <th>Why</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>Run a one-off batch job on a schedule, no persistent state needed</td>
+        <td><strong>ACI</strong></td>
+        <td>Simplest option — spin up, run, terminate. Pay only for execution time. OnFailure restart policy for retries.</td>
+      </tr>
+      <tr>
+        <td>Background worker that processes Azure Service Bus messages and should scale to zero when idle</td>
+        <td><strong>Container Apps</strong></td>
+        <td>KEDA Service Bus scaler provides native queue-depth-based scaling including scale-to-zero.</td>
+      </tr>
+      <tr>
+        <td>Microservices architecture with HTTP APIs, event-driven communication, and Dapr patterns</td>
+        <td><strong>Container Apps</strong></td>
+        <td>Dapr integration, HTTP ingress, revision traffic splitting, and scale-to-zero are built in. No Kubernetes expertise needed.</td>
+      </tr>
+      <tr>
+        <td>Web app that needs deployment slots, Easy Auth, and managed TLS certificates for a custom domain</td>
+        <td><strong>App Service (containers)</strong></td>
+        <td>PaaS features like slots, Easy Auth, and managed certs are App Service features, not available natively in ACI/Container Apps.</td>
+      </tr>
+      <tr>
+        <td>Large-scale production platform with custom CRDs, Kubernetes operators, GPU workloads, or complex networking policies</td>
+        <td><strong>AKS</strong></td>
+        <td>Full Kubernetes control surface — operators, CRDs, advanced networking (CNI), node pool customisation.</td>
+      </tr>
+      <tr>
+        <td>CI/CD pipeline step that needs to compile code in a clean container environment</td>
+        <td><strong>ACI</strong></td>
+        <td>Cheap, fast, isolated — ideal for ephemeral build/test steps. No cluster management overhead.</td>
+      </tr>
+      <tr>
+        <td>Compliance requirement for fully isolated Kubernetes cluster in your own VNet</td>
+        <td><strong>AKS (private cluster)</strong></td>
+        <td>AKS private cluster with private API server endpoint. Container Apps environments offer VNet integration but not full Kubernetes cluster isolation.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="callout callout-info">
+    <strong>The escalation ladder</strong>
+    Think of the container services as an escalation ladder from simple to complex: ACI (no orchestration) → Container Apps (managed Kubernetes, event-driven) → AKS (full Kubernetes control). Start at ACI for disposable workloads, Container Apps for microservices, and only escalate to AKS when you need full control of the Kubernetes API surface.
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     QUIZ
+═══════════════════════════════════════════════ -->
+<section class="quiz">
+  <h2>Check Your Understanding</h2>
+  <p>Click any option to see immediate feedback. Answers represent correct behaviour in a real Azure environment.</p>
+
+  <!-- Q1 -->
+  <div class="quiz-question" data-correct="c">
+    <p>1. Your organisation's security policy requires container images to be replicated across three Azure regions for redundancy and to minimise pull latency. Which ACR SKU is required?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q1"> Basic — all ACR SKUs support geo-replication; it's just disabled by default</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q1"> Standard — geo-replication is available from Standard tier upwards</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q1"> Premium — geo-replication is a Premium-only feature that replicates images to additional Azure regions</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q1"> Any SKU — use ACR Tasks to manually push images to registries in each region</label>
+    </div>
+    <div class="quiz-feedback">ACR geo-replication is exclusive to the Premium SKU. It automatically replicates image layers to configured replica regions so pulls are served from the nearest replica. Basic and Standard SKUs are single-region only. ACR Tasks can build images but is not a replication mechanism.</div>
+  </div>
+
+  <!-- Q2 -->
+  <div class="quiz-question" data-correct="a">
+    <p>2. Which of the following is a key scaling capability of Azure Container Apps that distinguishes it from Azure Container Instances?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q2"> Container Apps can scale to zero instances when there is no HTTP traffic — ACI container groups remain running until explicitly stopped</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q2"> Container Apps uses faster VM provisioning, allowing new instances to start in under one second — ACI takes minutes to start</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q2"> Container Apps automatically patches and updates running container images — ACI containers run the image version they were started with</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q2"> Container Apps provides dedicated GPU node pools for machine learning workloads — ACI only supports CPU workloads</label>
+    </div>
+    <div class="quiz-feedback">Scale to zero is the defining Container Apps capability for cost optimisation. When HTTP-based scaling is configured and no requests are incoming, Container Apps reduces the replica count to zero — you pay nothing. ACI container groups run continuously until you delete or stop them; there is no automatic scale-to-zero. KEDA event-based scaling in Container Apps also supports scale-to-zero for queue-based triggers.</div>
+  </div>
+
+  <!-- Q3 -->
+  <div class="quiz-question" data-correct="d">
+    <p>3. You are running a data migration job in ACI. The job processes a file and exits with code 0 on success, or code 1 on failure (and should retry). Which restart policy should you configure?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q3"> Always — ensures the container will always restart regardless of outcome, guaranteeing the job completes eventually</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q3"> Never — use an external orchestrator to detect failure and re-launch the container group manually</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q3"> Scheduled — configure a cron restart that re-runs the container every 5 minutes until success</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q3"> OnFailure — the container restarts only if it exits with a non-zero code (failure); on exit code 0 (success) the container group terminates cleanly</label>
+    </div>
+    <div class="quiz-feedback">OnFailure is the correct policy for batch jobs that should retry on error but stop cleanly on success. "Always" would restart the container even after a successful completion, causing it to loop indefinitely. "Never" would not retry failures. "Scheduled" is not an ACI restart policy.</div>
+  </div>
+
+  <!-- Q4 -->
+  <div class="quiz-question" data-correct="b">
+    <p>4. When configuring an AKS cluster, what is the purpose of the system node pool and why is it recommended to taint it?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q4"> The system node pool stores persistent volume data for stateful workloads — tainting it prevents accidental deletion of persistent volumes by user workloads</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q4"> The system node pool runs AKS control plane components like CoreDNS and kube-proxy — tainting it prevents application pods from consuming system node resources and starving cluster infrastructure</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q4"> The system node pool provides the public IP addresses for LoadBalancer services — tainting it reserves IPs exclusively for ingress controllers</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q4"> The system node pool is where the Kubernetes API server runs — tainting it prevents SSH access to control plane VMs by application teams</label>
+    </div>
+    <div class="quiz-feedback">The system node pool runs critical AKS components: CoreDNS, kube-proxy, metrics-server, and other cluster add-ons. It must have at least one node. Tainting it with CriticalAddonsOnly=true:NoSchedule forces application pods to schedule on user node pools, preventing resource contention between cluster infrastructure and user workloads — a common production stability practice.</div>
+  </div>
+
+  <!-- Q5 -->
+  <div class="quiz-question" data-correct="c">
+    <p>5. You update a Container App with a new image version. A colleague asks how to roll back if the new version has a bug. What is the correct approach?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q5"> Delete the Container App and redeploy from the old image tag — Container Apps does not retain previous configuration</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q5"> Use the Container App's built-in rollback button in the Azure portal — it automatically reverts to the previous image with one click</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q5"> Activate the previous revision and shift 100% of traffic back to it — Container Apps keeps old revisions as inactive snapshots available for instant rollback</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q5"> Push a new image with the old code to create revision v3 — Container Apps does not support backward traffic routing to older revisions</label>
+    </div>
+    <div class="quiz-feedback">Container App revisions are immutable snapshots of the full application configuration (image, environment variables, scale rules, etc.). When you deploy a new version, a new revision is created and old revisions remain available. To roll back, activate the previous revision and shift traffic allocation to 100% on it. This is instant — no redeployment needed. This is one of the key advantages of the revision model.</div>
+  </div>
+
+  <!-- Q6 -->
+  <div class="quiz-question" data-correct="a">
+    <p>6. You need to deploy a background worker that consumes messages from an Azure Service Bus queue and should automatically scale to zero when the queue is empty. Which Azure service is the best fit?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q6"> Azure Container Apps with KEDA — natively supports Service Bus queue-depth-based scaling including scale-to-zero</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q6"> Azure Container Instances with a restart policy of Always — ACI will automatically scale based on queue depth</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q6"> AKS with Horizontal Pod Autoscaler — HPA monitors queue depth and scales pods to zero automatically</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q6"> App Service with a WebJob — WebJobs support Service Bus triggers and scale with the App Service Plan autoscale rules</label>
+    </div>
+    <div class="quiz-feedback">Azure Container Apps with KEDA is the optimal choice. KEDA has a native Azure Service Bus scaler that reads queue message counts directly and scales Container App replicas accordingly — including scaling to zero when the queue is empty. ACI does not autoscale. AKS HPA does not scale to zero by default (requires KEDA separately). WebJobs scale with the App Service Plan but do not natively scale to zero based on queue depth.</div>
+  </div>
+
+  <div class="quiz-score"></div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     PRIMARY SOURCE
+═══════════════════════════════════════════════ -->
+<div class="primary-source">
+  <strong>Primary source for this lesson</strong>
+  <a href="https://learn.microsoft.com/en-us/azure/container-apps/overview" target="_blank">
+    Azure Container Apps overview — Microsoft Learn
+  </a>
+  <p style="margin-top:0.5rem;font-size:0.9rem;color:#deecf9;">Also read the ACI overview and the AKS concepts documentation. The decision matrix for container service selection is covered in the "Choose an Azure container service" guidance on Microsoft Learn.</p>
+</div>
+
+<!-- ═══════════════════════════════════════════════
+     ASK YOUR TEACHER
+═══════════════════════════════════════════════ -->
+<div class="ask-teacher">
+  <strong>Questions for your teacher (the AI agent)</strong><br>
+  This lesson covered the breadth of Azure container services. Go deeper on these topics:
+  <ul style="margin-top:0.5rem;">
+    <li>Walk me through setting up ACR geo-replication and attaching it to an AKS cluster using managed identity authentication.</li>
+    <li>How does Dapr state management work in Container Apps, and what state store backends does it support?</li>
+    <li>What is the difference between AKS cluster autoscaler and Horizontal Pod Autoscaler — when do you need both?</li>
+    <li>How does Container Apps Environment VNet integration differ from AKS private cluster networking?</li>
+  </ul>
+</div>
+
+<!-- ═══════════════════════════════════════════════
+     NEXT LESSON PREVIEW
+═══════════════════════════════════════════════ -->
+<div class="callout callout-info">
+  <strong>Coming up: Lesson 13 — Infrastructure as Code: ARM Templates &amp; Bicep</strong>
+  Deploying containers and App Services manually through the portal does not scale. Lesson 13 covers Azure Resource Manager templates and Bicep — the native IaC languages for Azure. You will learn the ARM template structure, Bicep syntax, deployment modes (incremental vs. complete), what-if previews, and how to manage infrastructure as versioned, repeatable code.
+</div>
+
+<!-- ═══════════════════════════════════════════════
+     NAVIGATION
+═══════════════════════════════════════════════ -->
+<nav class="lesson-nav">
+  <a href="0011-app-service.html">← Lesson 11 — App Service</a>
+  <a href="0013-bicep-arm.html">Lesson 13 — ARM &amp; Bicep →</a>
+</nav>
+
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

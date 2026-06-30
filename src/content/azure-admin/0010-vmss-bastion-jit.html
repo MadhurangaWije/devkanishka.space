@@ -1,0 +1,540 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lesson 10 — VM Scale Sets, Azure Bastion &amp; JIT Access</title>
+  <link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<!-- ═══════════════════════════════════════════════
+     HEADER
+═══════════════════════════════════════════════ -->
+<header class="lesson-header">
+  <h1>Lesson 10 — VM Scale Sets, Azure Bastion &amp; JIT Access</h1>
+  <div class="lesson-meta">
+    <span class="badge badge-domain">Domain 3 — Compute</span>
+    <span class="badge badge-exam">AZ-104: 20–25%</span>
+    <span class="badge badge-time">~25 min</span>
+    <span class="badge badge-prereq">Prereq: Lesson 09 — Virtual Machines</span>
+  </div>
+</header>
+
+<!-- ═══════════════════════════════════════════════
+     WHY THIS MATTERS
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Why This Lesson Completes the Compute Domain</h2>
+  <p>Lesson 09 covered individual VM configuration. This lesson covers the three capabilities that matter most once you have VMs running in production: <strong>scaling them</strong> (VM Scale Sets), <strong>accessing them securely without exposing attack surface</strong> (Azure Bastion), and <strong>controlling emergency access to management ports</strong> (Just-In-Time VM Access). Together, these are the difference between a VM deployment that works and one that is production-grade.</p>
+  <p>On AZ-104, VMSS questions focus on orchestration modes and autoscale policies. Bastion questions focus on subnet requirements and SKU differences. JIT questions focus on the NSG mechanics. All three are regularly tested in scenario-based questions — know the operational details, not just the names.</p>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     VM SCALE SETS OVERVIEW
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>VM Scale Sets — Overview</h2>
+  <p>A <strong>VM Scale Set (VMSS)</strong> is an Azure resource that lets you deploy and manage a group of load-balanced VMs as a single unit. Scale sets solve the problem of manual fleet management: instead of deploying individual VMs, configuring them, and wiring them to a load balancer manually, a scale set handles instance provisioning, configuration, distribution across fault domains and availability zones, health monitoring, and autoscaling as a first-class feature.</p>
+
+  <ul>
+    <li>All instances in a scale set are created from the same base image and configuration (Uniform mode) or from a model with per-instance overrides (Flexible mode).</li>
+    <li>Scale sets integrate natively with Azure Load Balancer (Layer 4) and Application Gateway (Layer 7) backend pools.</li>
+    <li>Scale sets support Availability Zones — instances can be distributed across zones for high availability with no extra configuration.</li>
+  </ul>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     ORCHESTRATION MODES
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Orchestration Modes: Uniform vs. Flexible</h2>
+  <p>This is one of the most commonly tested VMSS topics on AZ-104. The two orchestration modes represent fundamentally different philosophies.</p>
+
+  <table>
+    <thead>
+      <tr><th>Aspect</th><th>Uniform Mode</th><th>Flexible Mode</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>Instance uniformity</strong></td>
+        <td>All instances are identical — same OS image, same VM size, same configuration. Azure manages instance profiles directly.</td>
+        <td>Instances can have different configurations and sizes. Each instance is a full first-class VM resource.</td>
+      </tr>
+      <tr>
+        <td><strong>AZ distribution</strong></td>
+        <td>Supports zone spanning, but limited to a single zone or zone balancing.</td>
+        <td>Full Availability Zone mixing within the same scale set — instances can be in Zone 1, 2, and 3 simultaneously with fine-grained control.</td>
+      </tr>
+      <tr>
+        <td><strong>Autoscale</strong></td>
+        <td>Supported.</td>
+        <td>Supported.</td>
+      </tr>
+      <tr>
+        <td><strong>Maximum instances</strong></td>
+        <td>1,000 (with Azure platform images); 600 (with custom images)</td>
+        <td>1,000</td>
+      </tr>
+      <tr>
+        <td><strong>Instance visibility in portal</strong></td>
+        <td>Instances appear as scale set instances — partial VM resource visibility</td>
+        <td>Each instance appears as a full independent VM in the portal and ARM — full VM resource lifecycle</td>
+      </tr>
+      <tr>
+        <td><strong>Microsoft recommendation</strong></td>
+        <td>Legacy — still supported for existing deployments</td>
+        <td>Preferred for all new deployments</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="callout callout-info">
+    <strong>Flexible mode is the future</strong>
+    Microsoft has been converging new VMSS features onto Flexible orchestration mode. For new deployments, always choose Flexible unless you have a specific reason to use Uniform. Flexible gives you the autoscaling and fleet management of a scale set with the full VM resource model of individual VMs — the best of both worlds.
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     SCALING POLICIES
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Scaling Policies</h2>
+  <p>VMSS supports four distinct scaling approaches, which can be combined in a single scale set configuration:</p>
+
+  <h3>1. Manual Scaling</h3>
+  <p>Set the instance count explicitly via the portal, CLI, or API. No automation — you directly control the fleet size. Useful for predictable workloads or initial deployment.</p>
+
+  <h3>2. Custom Autoscale (Metric-Based)</h3>
+  <p>Define scale-out and scale-in rules based on metrics. A complete autoscale profile consists of:</p>
+  <ul>
+    <li><strong>Scale-out rule</strong>: When metric X exceeds threshold Y for Z minutes, add N instances.</li>
+    <li><strong>Scale-in rule</strong>: When metric X falls below threshold W for Z minutes, remove N instances.</li>
+    <li><strong>Cooldown period</strong>: A waiting period after a scaling operation before another can trigger — prevents thrashing (rapid scale-in/scale-out cycles). Typical values: 5–10 minutes.</li>
+    <li><strong>Min/Max bounds</strong>: Hard floor and ceiling on instance count.</li>
+  </ul>
+
+  <table>
+    <thead>
+      <tr><th>Metric Source</th><th>Examples</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>VM host metrics</td>
+        <td>CPU percentage, network in/out, disk I/O</td>
+      </tr>
+      <tr>
+        <td>Azure Monitor custom metrics</td>
+        <td>Application-emitted metrics (request queue depth, active sessions)</td>
+      </tr>
+      <tr>
+        <td>Storage Queue messages</td>
+        <td>Scale based on queue depth — useful for background worker patterns</td>
+      </tr>
+      <tr>
+        <td>Service Bus queue/topic</td>
+        <td>Scale based on active message count</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>3. Schedule-Based Scaling</h3>
+  <p>Increase or decrease capacity on a defined schedule — for example, scale to 20 instances at 08:00 Monday–Friday and scale back to 5 at 18:00. Useful for predictable business-hours load patterns.</p>
+
+  <h3>4. Predictive Autoscale</h3>
+  <p><strong>Predictive autoscale</strong> uses Azure Machine Learning to analyse CPU usage history and predict future demand. Instead of reacting to a metric breach, it <em>pre-provisions</em> capacity before the demand spike hits — eliminating the latency gap between load increase and new instance readiness that standard reactive autoscale cannot avoid.</p>
+
+  <div class="callout callout-info">
+    <strong>Predictive autoscale — how it works</strong>
+    Predictive autoscale trains on at least 7 days of historical CPU patterns (ideally 15+ days). It runs as a parallel recommendation layer on top of your reactive autoscale rules — it never scales in below your reactive rules' minimum. If the ML model predicts a load spike at 09:00 based on the previous Monday's pattern, it begins adding instances at 08:45. This makes scale sets feel more responsive without tuning cooldown periods. Available for CPU-based scaling only.
+  </div>
+
+  <h3>Scale-In Policy</h3>
+  <p>When a scale-in event fires, Azure must decide which VM instances to delete. The scale-in policy controls this:</p>
+  <ul>
+    <li><strong>Default</strong>: Balances instance removal across Availability Zones and Fault Domains first, then deletes the VM with the highest instance ID. This is the safest option for AZ-balanced deployments.</li>
+    <li><strong>NewestVM</strong>: Deletes the most recently created instances first — good for immutable infrastructure patterns where newer instances are less likely to have in-flight work.</li>
+    <li><strong>OldestVM</strong>: Deletes the oldest instances first — good for patching workflows where older instances may be running older software versions.</li>
+  </ul>
+
+  <h3>Instance Protection</h3>
+  <p>You can mark specific VMSS instances as protected to prevent them from being deleted during scale-in or from receiving model updates (OS upgrades, configuration changes). Useful for instances running long-running batch jobs that should not be interrupted mid-job.</p>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     ROLLING UPGRADES AND HEALTH
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Updates, Health Probes &amp; Rolling Upgrades</h2>
+  <p>Keeping a VMSS fleet updated without downtime requires understanding the upgrade mode and health probe configuration:</p>
+
+  <table>
+    <thead>
+      <tr><th>Upgrade Mode</th><th>Behaviour</th><th>Risk</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>Manual</strong></td>
+        <td>New VMSS model changes do not automatically apply to existing instances. You must manually trigger an upgrade per instance.</td>
+        <td>Low (you control when)</td>
+      </tr>
+      <tr>
+        <td><strong>Automatic</strong></td>
+        <td>Azure immediately applies new model changes to all instances. Can cause simultaneous reboots if not configured carefully.</td>
+        <td>High if health probes not configured</td>
+      </tr>
+      <tr>
+        <td><strong>Rolling</strong></td>
+        <td>Azure upgrades instances in batches (configurable batch size and pause duration). Waits for health probes to pass before proceeding to the next batch.</td>
+        <td>Low — zero-downtime rolling update</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <p>For zero-downtime updates, configure a <strong>health probe</strong> (via Application Health Extension or Load Balancer probe) so Azure knows whether an instance is healthy before upgrading the next batch. Automatic OS image upgrades can also be enabled to automatically replace instances with the latest OS image version on a rolling basis.</p>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     AZURE BASTION
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Azure Bastion</h2>
+  <p>Azure Bastion solves a fundamental enterprise security problem: how do you remotely administer VMs over RDP or SSH without exposing those ports to the public internet?</p>
+
+  <h3>The Problem Without Bastion</h3>
+  <p>Traditional approaches all have serious flaws:</p>
+  <ul>
+    <li>Assign a public IP to the VM and open port 3389/22 in the NSG — exposes the VM directly to internet scanning and brute force attacks.</li>
+    <li>Use a jump box VM with a public IP — you still have a publicly exposed attack surface (the jump box itself).</li>
+    <li>Use a VPN — requires VPN infrastructure, client software distribution, and ongoing management overhead.</li>
+  </ul>
+
+  <h3>How Azure Bastion Works</h3>
+  <p>Azure Bastion is a <strong>fully managed PaaS service</strong> that proxies RDP and SSH connections through the Azure infrastructure, entirely within Azure's backbone network:</p>
+
+  <div class="hierarchy">
+<span class="hier-tenant">User's Browser / Native Client</span>
+<span class="hier-mgmt">  │  (HTTPS on port 443 — no special client software needed for browser)</span>
+<span class="hier-sub">  ▼</span>
+<span class="hier-sub">Azure Bastion  (deployed in AzureBastionSubnet in your VNet)</span>
+<span class="hier-sub">  │  (Azure internal network — no public internet traversal)</span>
+<span class="hier-rg">  ▼</span>
+<span class="hier-rg">Target VM's Private IP  (RDP 3389 or SSH 22)</span>
+<span class="hier-resource">  └─ VM has NO public IP, NSG has NO inbound 3389/22 from internet</span>
+  </div>
+
+  <h3>Azure Bastion SKUs</h3>
+
+  <table>
+    <thead>
+      <tr><th>SKU</th><th>Connection Method</th><th>Peered VNets</th><th>Key Features</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>Basic</strong></td>
+        <td>Browser-based (Azure portal HTML5 client)</td>
+        <td>No</td>
+        <td>Core RDP/SSH. No native client support. Only VMs in the same VNet.</td>
+      </tr>
+      <tr>
+        <td><strong>Standard</strong></td>
+        <td>Browser-based + Native client (RDP/SSH apps)</td>
+        <td>Yes (peered VNets)</td>
+        <td>Native client (full RDP/SSH feature set), IP-based connection (connect by private IP without Azure resource ID), shareable links, tunneling, file transfer, custom port support.</td>
+      </tr>
+      <tr>
+        <td><strong>Premium</strong></td>
+        <td>Browser-based + Native client</td>
+        <td>Yes</td>
+        <td>All Standard features plus: session recording, private-only deployment (no public IP on Bastion itself), enhanced security features.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>Deployment Requirements</h3>
+  <p>Azure Bastion has specific infrastructure requirements that are frequently tested:</p>
+
+  <div class="hierarchy">
+<span class="hier-tenant">VNet requirements for Azure Bastion</span>
+<span class="hier-mgmt">  ├─ Subnet name: must be exactly  AzureBastionSubnet  (case-sensitive)</span>
+<span class="hier-mgmt">  ├─ Subnet CIDR: minimum /26 (64 addresses)</span>
+<span class="hier-mgmt">  ├─ No other resources in AzureBastionSubnet  (Bastion-only subnet)</span>
+<span class="hier-sub">  ├─ Standard Public IP required  (static, Standard SKU)</span>
+<span class="hier-resource">  └─ NSG on AzureBastionSubnet: specific inbound/outbound rules required</span>
+  </div>
+
+  <div class="callout callout-danger">
+    <strong>AzureBastionSubnet — exact name required, no exceptions</strong>
+    The subnet hosting Azure Bastion must be named <strong>exactly</strong> <code>AzureBastionSubnet</code> — not "bastion-subnet", not "AzureBastion", not "BastionSubnet". If the name is wrong, Bastion deployment will fail. The CIDR must be at minimum <strong>/26</strong> (64 addresses) because Bastion provisions multiple instances internally for availability — a /27 is too small and will be rejected. No other resources (VMs, NVAs, etc.) may be deployed into this subnet.
+  </div>
+
+  <div class="callout callout-warn">
+    <strong>Basic SKU does not support peered VNets</strong>
+    Azure Bastion Basic SKU can only connect to VMs in the same VNet where Bastion is deployed. To connect to VMs in peered VNets (e.g., in a hub-and-spoke topology where Bastion is in the hub VNet and VMs are in spoke VNets), you must use Bastion Standard SKU or higher. This is a common architecture exam trap — do not assume Basic SKU covers all VMs in a hub-and-spoke topology.
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     JUST IN TIME
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Just-In-Time (JIT) VM Access</h2>
+  <p>Just-In-Time VM Access is a feature of <strong>Microsoft Defender for Servers</strong> (Plan 1 or Plan 2 required). It solves the persistent management port exposure problem using a different mechanism than Bastion.</p>
+
+  <h3>The Problem JIT Solves</h3>
+  <p>Even with disciplined NSG management, many teams leave RDP (3389) or SSH (22) open permanently in their NSGs — because removing access means re-adding it every time someone needs to do maintenance, which creates operational friction. Permanently open management ports are a significant attack surface: every IP on the internet can attempt brute-force or vulnerability attacks against them continuously.</p>
+
+  <h3>How JIT Works — NSG Mechanics</h3>
+
+  <div class="hierarchy">
+<span class="hier-tenant">Step 1 — JIT baseline: Deny rule added to NSG for management ports (3389, 22, 5985/5986)</span>
+<span class="hier-mgmt">  └─ Ports are permanently closed by default at a high-priority Deny rule</span>
+
+<span class="hier-tenant" style="display:block;margin-top:0.6rem;">Step 2 — User requests access via Defender for Cloud (portal / CLI / API)</span>
+<span class="hier-mgmt">  └─ Specifies: source IP (own public IP or a range), duration (max 3 hours), port</span>
+
+<span class="hier-tenant" style="display:block;margin-top:0.6rem;">Step 3 — Azure evaluates the request (RBAC + approval if configured)</span>
+<span class="hier-sub">  └─ Azure temporarily adds a high-priority Allow rule to the NSG</span>
+<span class="hier-sub">       for source IP: &lt;requester's IP&gt;, port: 3389, duration: &lt;requested&gt;</span>
+
+<span class="hier-tenant" style="display:block;margin-top:0.6rem;">Step 4 — Timer expires: Azure automatically removes the Allow rule</span>
+<span class="hier-resource">  └─ Port is sealed again — no manual cleanup required</span>
+  </div>
+
+  <table>
+    <thead>
+      <tr><th>Aspect</th><th>Details</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>Requires</strong></td>
+        <td>Microsoft Defender for Servers Plan 1 or Plan 2 enabled on the subscription or VM resource group</td>
+      </tr>
+      <tr>
+        <td><strong>Max access duration</strong></td>
+        <td>3 hours per JIT request</td>
+      </tr>
+      <tr>
+        <td><strong>Source IP</strong></td>
+        <td>Requester can specify their own public IP (most secure) or a CIDR range</td>
+      </tr>
+      <tr>
+        <td><strong>Audit trail</strong></td>
+        <td>All requests and approvals logged in Azure Activity Log and Defender for Cloud</td>
+      </tr>
+      <tr>
+        <td><strong>Supported ports</strong></td>
+        <td>Configurable — defaults cover RDP (3389), SSH (22), WinRM (5985, 5986)</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>Bastion vs. JIT — Which to Use?</h3>
+  <p>Both Azure Bastion and JIT VM Access address the same problem (secure management access) but through fundamentally different mechanisms. Understanding when to recommend each is important:</p>
+
+  <table>
+    <thead>
+      <tr><th>Aspect</th><th>Azure Bastion</th><th>JIT VM Access</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>VM public IP required?</strong></td>
+        <td>No — VM needs no public IP</td>
+        <td>Yes (for direct connectivity) or accessible via VPN/ExpressRoute</td>
+      </tr>
+      <tr>
+        <td><strong>Port 3389/22 open in NSG?</strong></td>
+        <td>No — VM NSG does not need RDP/SSH open from internet</td>
+        <td>Temporarily opened for requester's IP only, then closed</td>
+      </tr>
+      <tr>
+        <td><strong>Requires separate service?</strong></td>
+        <td>Yes — Azure Bastion PaaS deployed in VNet</td>
+        <td>Yes — Microsoft Defender for Servers</td>
+      </tr>
+      <tr>
+        <td><strong>Connection method</strong></td>
+        <td>Azure portal or native client via HTTPS to Bastion endpoint</td>
+        <td>Direct RDP/SSH client to VM public IP (after JIT access granted)</td>
+      </tr>
+      <tr>
+        <td><strong>Modern recommendation</strong></td>
+        <td>Yes — preferred for zero-public-IP architectures</td>
+        <td>Yes — for scenarios requiring direct IP connectivity (legacy tools, scripted access)</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="callout callout-info">
+    <strong>Enterprise pattern: Bastion + JIT together</strong>
+    In mature enterprise environments, you typically see both deployed. Azure Bastion covers interactive admin access for most users (zero public IP needed). JIT is configured on all VMs as a defence-in-depth control to ensure management ports are never permanently open — even for VMs in private subnets, which might have accidental NSG misconfigurations. JIT also provides an audit trail of who requested access to which VM at what time.
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     SERIAL CONSOLE
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Azure Serial Console</h2>
+  <p>Azure Serial Console is an emergency access mechanism that provides a <strong>text-only, browser-based terminal</strong> connected to a VM's serial port — bypassing all network connectivity entirely. It is your last resort when everything else is broken.</p>
+
+  <table>
+    <thead>
+      <tr><th>Aspect</th><th>Details</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>Access method</strong></td>
+        <td>Azure portal → VM → Serial Console (under Support + Troubleshooting)</td>
+      </tr>
+      <tr>
+        <td><strong>Network dependency</strong></td>
+        <td>None — connects via Azure management plane, not VM's NIC or public IP</td>
+      </tr>
+      <tr>
+        <td><strong>Requires</strong></td>
+        <td>Boot diagnostics enabled on the VM (requires a storage account or Azure Managed Boot Diagnostics)</td>
+      </tr>
+      <tr>
+        <td><strong>OS access</strong></td>
+        <td>Text-mode console at the OS level — can access boot menus (GRUB on Linux), SAC (Special Administration Console on Windows), emergency shell</td>
+      </tr>
+      <tr>
+        <td><strong>Use cases</strong></td>
+        <td>Fix broken network configuration, recover from failed OS updates, reset passwords via single-user mode, diagnose VMs stuck in boot loop, access Linux rescue shell</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="callout callout-warn">
+    <strong>Serial Console limitations</strong>
+    Serial Console is text-only — no GUI, no file browser, no clipboard paste of large content. It only works if the VM's OS has reached a state where it can accept serial input (some kernel panics or Windows blue screens may prevent even serial access). Enable boot diagnostics on every production VM proactively — you cannot enable it after the VM is stuck in a boot loop without first stopping it.
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     QUIZ
+═══════════════════════════════════════════════ -->
+<section class="quiz">
+  <h2>Check Your Understanding</h2>
+  <p>Click any option to see immediate feedback. Answers represent correct behaviour in a real Azure environment.</p>
+
+  <!-- Q1 -->
+  <div class="quiz-question" data-correct="b">
+    <p>1. You are creating a new VM Scale Set for a stateless web tier that requires Availability Zone distribution, mixed VM configurations per instance, and standard autoscaling. Which orchestration mode should you choose?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q1"> Uniform mode — it is required for autoscaling and is the only mode that supports Availability Zone distribution</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q1"> Flexible mode — it is the current Microsoft recommendation for new VMSS deployments, supports mixed VM configurations, full AZ distribution, and standard autoscaling</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q1"> Uniform mode — it supports mixed VM sizes and configurations within the same scale set</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q1"> Flexible mode does not support load balancer integration and cannot be used for web tier workloads</label>
+    </div>
+    <div class="quiz-feedback">Flexible orchestration mode is the correct and current Microsoft recommendation for all new VMSS deployments. It supports full Availability Zone distribution across zones within a single scale set, allows per-instance configuration differences, supports autoscaling (both metric-based and schedule-based), and integrates with Standard Load Balancer and Application Gateway. Uniform mode is the legacy choice — it has restrictions on per-instance customisation and AZ mixing that Flexible mode removes.</div>
+  </div>
+
+  <!-- Q2 -->
+  <div class="quiz-question" data-correct="c">
+    <p>2. You are deploying Azure Bastion into an existing VNet. The VNet has a subnet named "bastion-hosts" with a /27 CIDR block. You attempt to deploy Bastion into this subnet but the deployment fails. What are the two issues?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q2"> The subnet must be tagged with <code>bastion=true</code>, and a /27 is acceptable for up to 25 concurrent sessions</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q2"> A /27 is too small; use /26 — the subnet name can be anything as long as it contains "bastion"</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q2"> The subnet must be named exactly <code>AzureBastionSubnet</code> (case-sensitive) and the CIDR must be at minimum /26 (64 addresses) — both conditions must be met simultaneously</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q2"> The subnet must be in a separate VNet from the VMs being managed — you cannot deploy Bastion into the same VNet as production VMs</label>
+    </div>
+    <div class="quiz-feedback">Both issues are present. First, the subnet name must be exactly <code>AzureBastionSubnet</code> — Azure performs a strict string match; "bastion-hosts" will fail. Second, the subnet must be at minimum /26 (64 addresses). A /27 provides only 32 addresses, which is insufficient for Bastion's internal multi-instance deployment. Both conditions must be corrected before the deployment will succeed. The subnet must be in the same VNet as the VMs (for Basic SKU) or in a VNet peered to the target VNets (for Standard/Premium SKU).</div>
+  </div>
+
+  <!-- Q3 -->
+  <div class="quiz-question" data-correct="a">
+    <p>3. A security engineer asks how JIT VM Access prevents unauthorised access to management ports between approved access windows. What is the technically accurate description?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q3"> JIT configures a high-priority Deny rule in the VM's NSG for management ports; when access is requested, Azure adds a time-limited Allow rule for the requester's specific source IP only, then automatically removes it when the duration expires</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q3"> JIT creates a new Network Security Group and temporarily attaches it to the VM's NIC, replacing the existing NSG during the access window</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q3"> JIT uses Azure Bastion internally to proxy all RDP and SSH connections — it does not directly modify any NSG rules</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q3"> JIT requires a VPN connection to be established first; the JIT access rule is then added to the VPN gateway's access control list rather than the NSG</label>
+    </div>
+    <div class="quiz-feedback">JIT works entirely through NSG rule manipulation. When you configure JIT for a VM, Defender for Cloud adds high-priority Deny rules to the VM's NSG for the covered management ports (3389, 22, 5985, 5986). These rules ensure the ports are sealed by default. When a user requests access, Azure adds a high-priority Allow rule scoped to the requester's specific source IP for the requested duration. Once the timer expires, Azure removes the Allow rule automatically — the Deny rule remains and the port is sealed again. The entire operation is logged in Activity Log.</div>
+  </div>
+
+  <!-- Q4 -->
+  <div class="quiz-question" data-correct="d">
+    <p>4. Your organisation uses a hub-and-spoke VNet topology. Azure Bastion is deployed in the hub VNet. Spoke VNet A and Spoke VNet B are both peered to the hub. You need to connect to VMs in Spoke VNet A using Bastion. What SKU is required?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q4"> Azure Bastion covers all VMs across all peered VNets by default regardless of SKU</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q4"> Bastion requires a separate deployment in each spoke VNet to manage VMs in that spoke</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q4"> VNet peering is not supported with Azure Bastion in any SKU — Bastion only manages VMs in its own VNet</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q4"> Azure Bastion Standard SKU (or Premium) is required to connect to VMs in peered VNets — Basic SKU only covers the VNet where Bastion is deployed</label>
+    </div>
+    <div class="quiz-feedback">Standard SKU (or Premium) is required for peered VNet coverage. This is a critical architectural distinction for hub-and-spoke deployments. With Basic SKU, Bastion can only manage VMs in the same VNet it is deployed in — it cannot traverse VNet peering. Standard SKU enables Bastion to connect to VMs in all VNets peered with the Bastion VNet, which is the correct and cost-effective architecture: one Bastion deployment in the hub VNet manages all spoke VMs.</div>
+  </div>
+
+  <!-- Q5 -->
+  <div class="quiz-question" data-correct="b">
+    <p>5. Your VMSS-based web tier experiences daily CPU spikes at 09:00 as business hours begin. Standard metric-based autoscale takes 5–8 minutes to respond, during which users experience degraded performance. What feature eliminates this latency gap?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q5"> Predictive autoscale reacts to CPU spikes faster than standard metric-based autoscale by polling metrics every 30 seconds instead of every 1 minute</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q5"> Predictive autoscale uses Machine Learning on historical CPU patterns to pre-provision capacity before the spike arrives — new instances are ready before load hits, eliminating the reactive latency gap</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q5"> Predictive autoscale only works as a fallback for schedule-based scaling rules when the schedule prediction is insufficient</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q5"> Predictive autoscale requires a minimum of 100 running instances to generate enough historical data for the ML model to function</label>
+    </div>
+    <div class="quiz-feedback">Predictive autoscale uses Azure Machine Learning trained on at least 7 days of historical CPU patterns to predict future demand. For a workload with a consistent 09:00 spike pattern, predictive autoscale will begin adding instances at (say) 08:45, so that new instances are warm and healthy by 09:00 when load arrives. This is fundamentally different from reactive autoscale, which can only respond after a breach is detected and sustained for the configured duration. Predictive autoscale works independently of instance count minimums.</div>
+  </div>
+
+  <!-- Q6 -->
+  <div class="quiz-question" data-correct="c">
+    <p>6. A Linux VM in a production VNet has a broken network interface configuration — the NIC IP address was changed incorrectly, and SSH is unreachable. No public IP is attached. No Azure Bastion is deployed. What is the correct Azure-native emergency access method?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q6"> Attach a public IP to the VM temporarily and use the Azure VM Run Command to restore the NIC configuration over HTTPS</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q6"> Serial Console requires a public IP on the VM to initiate the serial connection — without a public IP, console access is unavailable</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q6"> Use Azure Serial Console — it provides text-based access to the VM's serial port via the Azure portal with no network connectivity to the VM required; boot diagnostics must be enabled</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q6"> Serial Console requires Azure Bastion Standard SKU to be deployed in the same VNet — without Bastion, Serial Console is unavailable</label>
+    </div>
+    <div class="quiz-feedback">Azure Serial Console is the correct answer. It connects to the VM's serial port via the Azure management plane — completely bypassing the VM's NIC, networking configuration, and public IP. This means it works even when the VM's network is entirely misconfigured. The only requirement is that boot diagnostics is enabled on the VM (which must be configured beforehand — you cannot enable it while the network is broken without first stopping the VM). From the serial console, you can access the Linux emergency shell (GRUB recovery mode) to fix the network configuration.</div>
+  </div>
+
+  <div class="quiz-score"></div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     PRIMARY SOURCE
+═══════════════════════════════════════════════ -->
+<div class="primary-source">
+  <strong>Primary source for this lesson</strong>
+  <a href="https://learn.microsoft.com/en-us/azure/virtual-machine-scale-sets/overview" target="_blank">
+    What are Virtual Machine Scale Sets? — Microsoft Learn
+  </a>
+  <p style="margin-top:0.5rem;font-size:0.9rem;color:#deecf9;">Also read the Azure Bastion documentation and the JIT VM Access documentation under Microsoft Defender for Cloud. The Bastion FAQ and the JIT "how it works" page are particularly useful for exam preparation.</p>
+</div>
+
+<!-- ═══════════════════════════════════════════════
+     ASK YOUR TEACHER
+═══════════════════════════════════════════════ -->
+<div class="ask-teacher">
+  <strong>Questions for your teacher (the AI agent)</strong><br>
+  This lesson covered VMSS, Bastion, and JIT. Go deeper with any of these:
+  <ul style="margin-top:0.5rem;">
+    <li>Walk me through configuring a VMSS with predictive autoscale, a custom scale-out rule based on queue depth, and a rolling upgrade policy.</li>
+    <li>How does Azure Bastion native client mode work — what ports and protocols does it use on the client machine?</li>
+    <li>What are the RBAC permissions required to approve a JIT access request, vs. to configure JIT policy on a VM?</li>
+    <li>How do you use Azure Serial Console to recover a Linux VM with a corrupted GRUB bootloader configuration?</li>
+  </ul>
+</div>
+
+<!-- ═══════════════════════════════════════════════
+     NEXT LESSON PREVIEW
+═══════════════════════════════════════════════ -->
+<div class="callout callout-info">
+  <strong>Coming up: Lesson 11 — Azure App Service</strong>
+  With VMs and scale sets covered, Lesson 11 moves into PaaS compute with Azure App Service — hosting web applications without managing the underlying infrastructure. We'll cover App Service Plans, deployment slots, scaling, custom domains, TLS, and the key differences between PaaS and IaaS that drive architectural choices in the exam.
+</div>
+
+<!-- ═══════════════════════════════════════════════
+     NAVIGATION
+═══════════════════════════════════════════════ -->
+<nav class="lesson-nav">
+  <a href="0009-virtual-machines.html">← Lesson 09 — Virtual Machines</a>
+  <a href="0011-app-service.html">Lesson 11 — App Service →</a>
+</nav>
+
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

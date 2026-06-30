@@ -1,0 +1,569 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lesson 18 — Load Balancing in Azure</title>
+  <link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<!-- ═══════════════════════════════════════════════
+     HEADER
+═══════════════════════════════════════════════ -->
+<header class="lesson-header">
+  <h1>Lesson 18 — Load Balancing in Azure</h1>
+  <div class="lesson-meta">
+    <span class="badge badge-domain">Domain 4 — Networking</span>
+    <span class="badge badge-exam">AZ-104: 15–20%</span>
+    <span class="badge badge-time">~35 min</span>
+    <span class="badge badge-prereq">Prereq: VNets, NSGs, DNS</span>
+  </div>
+</header>
+
+<!-- ═══════════════════════════════════════════════
+     WHY THIS MATTERS
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Why Load Balancing Is Always in the Exam</h2>
+  <p>Azure has four distinct load balancing products: Azure Load Balancer, Application Gateway, Azure Front Door, and Traffic Manager. They are not interchangeable — each solves a specific problem at a specific OSI layer, with different geographic scope. The AZ-104 exam consistently tests whether you can pick the right product for a given scenario, and whether you understand how they can be layered together.</p>
+  <p>Senior engineers in real Azure environments face this decision constantly. A mistake here — using a Basic Load Balancer instead of Standard, or an Application Gateway when Traffic Manager is needed — can mean production downtime, security exposure, or failed availability zone redundancy. This lesson gives you the complete decision model.</p>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     1. OVERVIEW — FOUR PRODUCTS
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>1. The Four Load Balancing Services</h2>
+  <p>Each Azure load balancing service addresses a different combination of OSI layer, geographic scope, and protocol support:</p>
+
+  <table>
+    <thead>
+      <tr><th>Service</th><th>OSI Layer</th><th>Scope</th><th>Protocol</th><th>WAF</th><th>SSL Termination</th><th>Primary Use Case</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>Azure Load Balancer</strong></td>
+        <td>Layer 4 (TCP/UDP)</td>
+        <td>Regional</td>
+        <td>TCP, UDP</td>
+        <td>No</td>
+        <td>No</td>
+        <td>VM / VMSS traffic distribution within a region</td>
+      </tr>
+      <tr>
+        <td><strong>Application Gateway</strong></td>
+        <td>Layer 7 (HTTP/S)</td>
+        <td>Regional</td>
+        <td>HTTP, HTTPS, HTTP/2, WebSocket</td>
+        <td>Yes (WAF_v2)</td>
+        <td>Yes</td>
+        <td>Web apps needing URL routing, WAF, SSL offload</td>
+      </tr>
+      <tr>
+        <td><strong>Azure Front Door</strong></td>
+        <td>Layer 7 (HTTP/S)</td>
+        <td>Global</td>
+        <td>HTTP, HTTPS</td>
+        <td>Yes (Premium)</td>
+        <td>Yes</td>
+        <td>Global web apps with CDN, anycast routing, WAF</td>
+      </tr>
+      <tr>
+        <td><strong>Traffic Manager</strong></td>
+        <td>DNS-based (L3/4)</td>
+        <td>Global</td>
+        <td>Any (DNS only)</td>
+        <td>No</td>
+        <td>No</td>
+        <td>Global HA and failover including non-HTTP services</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="callout callout-info">
+    <strong>The quick decision rule</strong>
+    L4 regional → Azure Load Balancer. L7 regional with WAF → Application Gateway. L7 global with CDN → Azure Front Door. DNS-based global / non-HTTP global → Traffic Manager. When in doubt: can these services be layered? Yes — Traffic Manager → Application Gateway → Load Balancer is a common production pattern.
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     2. AZURE LOAD BALANCER
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>2. Azure Load Balancer</h2>
+  <p>Azure Load Balancer operates at <strong>Layer 4</strong>. It distributes inbound TCP and UDP flows across backend pool members based on a configurable hash algorithm. It does not inspect, decrypt, or modify the packet payload — it only sees IP addresses and ports.</p>
+
+  <h3>SKUs — Standard vs. Basic</h3>
+  <table>
+    <thead>
+      <tr><th>Feature</th><th>Standard SKU</th><th>Basic SKU</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Availability Zones</td><td>Zone-redundant and zonal frontends supported</td><td>Not supported</td></tr>
+      <tr><td>VMSS support</td><td>Yes</td><td>Yes (limited)</td></tr>
+      <tr><td>Backend pool size</td><td>Up to 1,000 instances</td><td>Up to 300 instances</td></tr>
+      <tr><td>Health probe protocols</td><td>TCP, HTTP, HTTPS</td><td>TCP, HTTP only</td></tr>
+      <tr><td>Secure by default (NSG required)</td><td>Yes — inbound blocked by default</td><td>No — open by default</td></tr>
+      <tr><td>SLA</td><td>99.99%</td><td>No SLA</td></tr>
+      <tr><td>Status</td><td>Current — use this</td><td><strong>Retiring September 2025</strong></td></tr>
+    </tbody>
+  </table>
+
+  <div class="callout callout-danger">
+    <strong>Basic Load Balancer is retiring — know this for the exam</strong>
+    Microsoft announced the retirement of Azure Basic Load Balancer in September 2025. The exam may still reference it as a wrong answer or comparison point. Always choose Standard SKU for new deployments. Standard LB requires NSG rules to allow traffic — traffic is denied by default, unlike Basic.
+  </div>
+
+  <h3>Core components</h3>
+
+  <table>
+    <thead>
+      <tr><th>Component</th><th>Description</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>Frontend IP configuration</strong></td>
+        <td>Public IP (internet-facing) or private IP (internal load balancer). A Standard LB can have multiple frontends.</td>
+      </tr>
+      <tr>
+        <td><strong>Backend pool</strong></td>
+        <td>Set of VMs or VMSS instances that receive distributed traffic. Can span Availability Zones (Standard SKU).</td>
+      </tr>
+      <tr>
+        <td><strong>Health probes</strong></td>
+        <td>Periodic checks to determine if a backend is healthy. Unhealthy backends are removed from rotation. Probe source IP is always <code>168.63.129.16</code> — must be allowed in backend NSGs.</td>
+      </tr>
+      <tr>
+        <td><strong>Load balancing rules</strong></td>
+        <td>Map a frontend IP:port to a backend pool:port using a distribution algorithm (5-tuple hash by default).</td>
+      </tr>
+      <tr>
+        <td><strong>Inbound NAT rules</strong></td>
+        <td>Forward specific ports on the frontend IP to specific VMs — used for RDP/SSH access to individual backend VMs.</td>
+      </tr>
+      <tr>
+        <td><strong>Outbound rules</strong></td>
+        <td>Configure SNAT for backend pool VMs to reach the internet through the Load Balancer's public IP. Controls SNAT port allocation.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>Session persistence (sticky sessions)</h3>
+  <p>By default, Azure Load Balancer uses a 5-tuple hash (source IP, source port, destination IP, destination port, protocol) to distribute traffic. For stateful applications that need a client to always hit the same backend:</p>
+
+  <table>
+    <thead>
+      <tr><th>Mode</th><th>Hash inputs</th><th>Use case</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><strong>None</strong> (default)</td><td>5-tuple hash</td><td>Stateless workloads — best distribution</td></tr>
+      <tr><td><strong>Client IP</strong></td><td>Source IP (2-tuple)</td><td>Same client IP always hits same backend</td></tr>
+      <tr><td><strong>Client IP and Protocol</strong></td><td>Source IP + protocol (3-tuple)</td><td>Client with multiple protocols still sticky per protocol</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Internal Load Balancer (ILB)</h3>
+  <p>When the frontend IP is a private IP within a VNet, the Load Balancer is an <strong>Internal Load Balancer</strong>. Use this to distribute traffic between tiers within a VNet — for example, from an application tier to a database tier, or in front of NVAs (Network Virtual Appliances) in a hub-spoke topology.</p>
+
+  <h3>HA Ports rule</h3>
+  <p>A special load balancing rule that balances all TCP/UDP ports simultaneously. Only available on Internal Load Balancers with Standard SKU. Used when NVAs must inspect traffic on all ports — configure an ILB with an HA Ports rule in front of a cluster of NVA VMs.</p>
+
+  <div class="callout callout-info">
+    <strong>Health probe source IP</strong>
+    Azure Load Balancer health probes always originate from <code>168.63.129.16</code>. If your backend VMs have NSGs that do not allow inbound from this IP (or from the <code>AzureLoadBalancer</code> service tag), the health probe will fail and the backend will be marked unhealthy — it will receive no traffic even if the application is running perfectly. This is a very common misconfiguration.
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     3. APPLICATION GATEWAY
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>3. Application Gateway</h2>
+  <p>Application Gateway is a <strong>Layer 7</strong> load balancer that understands HTTP and HTTPS. It can inspect the full HTTP request — URL path, host headers, query strings, cookies — and make routing decisions based on that content. This makes it dramatically more powerful than Azure Load Balancer for web application workloads.</p>
+
+  <h3>Core components</h3>
+  <table>
+    <thead>
+      <tr><th>Component</th><th>Description</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>Frontend IP</strong></td>
+        <td>Public or private IP. The entry point for all incoming requests.</td>
+      </tr>
+      <tr>
+        <td><strong>Listeners</strong></td>
+        <td>Define port, protocol (HTTP/HTTPS), and optionally hostname (for multi-site hosting). A <em>basic listener</em> accepts all traffic on a port; a <em>multi-site listener</em> routes based on Host header.</td>
+      </tr>
+      <tr>
+        <td><strong>Rules</strong></td>
+        <td><em>Basic rule</em>: maps a listener to a single backend pool. <em>Path-based rule</em>: routes different URL paths (<code>/api/*</code>, <code>/images/*</code>) to different backend pools.</td>
+      </tr>
+      <tr>
+        <td><strong>Backend pools</strong></td>
+        <td>VMs, VMSS, App Service instances, IP addresses, or FQDNs. Different pools for different URL paths or hostnames.</td>
+      </tr>
+      <tr>
+        <td><strong>HTTP settings</strong></td>
+        <td>Protocol and port to use when forwarding to backends, cookie-based session affinity, connection draining, custom health probe configuration, request/response headers.</td>
+      </tr>
+      <tr>
+        <td><strong>Health probes</strong></td>
+        <td>HTTP/HTTPS probes that check backend health. Default probe uses the HTTP settings protocol/port; custom probes allow specific URL paths, status codes, and intervals.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>SSL/TLS handling modes</h3>
+  <table>
+    <thead>
+      <tr><th>Mode</th><th>Description</th><th>Use case</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>SSL termination</strong></td>
+        <td>HTTPS decrypted at the gateway; traffic forwarded to backends over HTTP (unencrypted inside VNet)</td>
+        <td>Reduces CPU load on backends; certificate management centralised at gateway</td>
+      </tr>
+      <tr>
+        <td><strong>End-to-end SSL</strong></td>
+        <td>HTTPS decrypted at gateway, re-encrypted for backend communication</td>
+        <td>Compliance requirements that mandate encryption in transit throughout</td>
+      </tr>
+      <tr>
+        <td><strong>SSL passthrough</strong></td>
+        <td>TLS connection passed directly to backend — gateway does not decrypt</td>
+        <td>When the backend must see the original client certificate</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>WAF — Web Application Firewall</h3>
+  <p>Application Gateway WAF_v2 SKU includes an integrated WAF that inspects HTTP/S requests against <strong>OWASP Core Rule Sets (CRS)</strong>. The WAF protects against the OWASP Top 10 vulnerabilities including SQL injection, cross-site scripting (XSS), and remote code execution attacks.</p>
+  <ul>
+    <li><strong>Detection mode</strong>: logs violations but does not block traffic. Use for initial tuning.</li>
+    <li><strong>Prevention mode</strong>: actively blocks requests that match WAF rules.</li>
+    <li>Custom rules: allow or deny based on IP ranges, geo-location, HTTP variables, or rate limits.</li>
+    <li>Bot protection: built-in ruleset for known malicious bots.</li>
+  </ul>
+
+  <h3>SKUs</h3>
+  <table>
+    <thead>
+      <tr><th>SKU</th><th>WAF</th><th>Autoscaling</th><th>Zone redundancy</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><strong>Standard_v2</strong></td><td>No</td><td>Yes</td><td>Yes</td></tr>
+      <tr><td><strong>WAF_v2</strong></td><td>Yes (OWASP CRS + custom rules)</td><td>Yes</td><td>Yes</td></tr>
+      <tr><td>Standard_v1 / WAF_v1</td><td>Limited (v1 only)</td><td>No</td><td>No</td></tr>
+    </tbody>
+  </table>
+
+  <div class="callout callout-warn">
+    <strong>v1 is deprecated</strong>
+    Application Gateway v1 SKUs (Standard and WAF) are deprecated. All new deployments must use v2. The v2 SKU is autoscaling and zone-redundant — no manual scaling or availability set configuration needed.
+  </div>
+
+  <h3>Path-based routing example</h3>
+  <pre><code>Listener: HTTPS on port 443 for "app.contoso.com"
+  │
+  ├─ /api/*         → backend-pool-api     (API VMs, port 8080)
+  ├─ /images/*      → backend-pool-storage (Azure Blob / CDN)
+  ├─ /admin/*       → backend-pool-admin   (Admin VMs, with WAF custom rule)
+  └─ /* (default)   → backend-pool-web     (Web frontend VMs, port 80)</code></pre>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     4. AZURE FRONT DOOR
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>4. Azure Front Door</h2>
+  <p>Azure Front Door is Microsoft's <strong>global</strong> Layer 7 load balancing service. It operates on Microsoft's global anycast network — users worldwide are routed to the nearest Microsoft PoP (Point of Presence), which then proxies the request to the origin. This dramatically reduces latency for geographically distributed users.</p>
+
+  <h3>Key capabilities</h3>
+  <ul>
+    <li><strong>Global anycast routing</strong>: users connect to the nearest of Microsoft's 200+ edge PoPs globally</li>
+    <li><strong>L7 load balancing</strong>: HTTP/S routing to multiple regional backend origins</li>
+    <li><strong>SSL offload</strong>: TLS termination at the edge PoP, reducing latency</li>
+    <li><strong>WAF</strong>: OWASP CRS-based protection at global scale (Standard and Premium SKUs)</li>
+    <li><strong>Caching (CDN)</strong>: static content cached at PoPs, reducing origin load</li>
+    <li><strong>Health probes to origins</strong>: detects unhealthy origins and routes around them</li>
+    <li><strong>URL rewrite and redirect</strong>: HTTP → HTTPS redirect, path manipulation</li>
+  </ul>
+
+  <h3>SKUs</h3>
+  <table>
+    <thead>
+      <tr><th>SKU</th><th>CDN</th><th>WAF</th><th>Private Link to Origins</th><th>Security Analytics</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><strong>Standard</strong></td><td>Yes</td><td>Yes (OWASP)</td><td>No</td><td>No</td></tr>
+      <tr><td><strong>Premium</strong></td><td>Yes</td><td>Yes (advanced + managed rulesets)</td><td>Yes</td><td>Yes</td></tr>
+    </tbody>
+  </table>
+
+  <div class="callout callout-info">
+    <strong>Front Door Premium: Private Link to origins</strong>
+    With the Premium SKU, you can connect Azure Front Door to backend origins using Private Link — the origin (e.g. an App Service or Storage Account) does not need a public IP. Traffic flows from Microsoft's edge network to the origin over Microsoft's backbone, never over the public internet.
+  </div>
+
+  <h3>Front Door vs. Application Gateway</h3>
+  <p>Both are L7 load balancers with WAF. The key difference is <strong>scope</strong>:</p>
+  <ul>
+    <li>Application Gateway is <strong>regional</strong> — deploy one per region, routes traffic within that region.</li>
+    <li>Front Door is <strong>global</strong> — single deployment routes users worldwide to the nearest regional backend (which may itself be behind an Application Gateway).</li>
+  </ul>
+
+  <div class="callout callout-success">
+    <strong>Typical production combination</strong>
+    Azure Front Door (global edge, WAF, CDN) → Application Gateway (regional L7 routing, per-app WAF rules) → Azure Load Balancer (internal L4, VM distribution) → VMs. Each layer handles what it is optimised for.
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     5. TRAFFIC MANAGER
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>5. Traffic Manager</h2>
+  <p>Traffic Manager is fundamentally different from the other three services. It does <strong>not proxy traffic</strong> — it only controls <strong>DNS resolution</strong>. When a client queries a Traffic Manager profile, Traffic Manager returns the IP of the "best" endpoint based on the configured routing method. The client then connects <em>directly</em> to that endpoint.</p>
+
+  <div class="callout callout-danger">
+    <strong>Traffic Manager does NOT inspect or proxy HTTP traffic</strong>
+    Because Traffic Manager is DNS-based, it has no visibility into the HTTP request, cannot decrypt TLS, and cannot provide WAF functionality. It is purely a DNS routing mechanism. Failover detection is also limited by DNS TTL — if the TTL is 300 seconds, a failed endpoint may still receive traffic for up to 5 minutes after failure detection.
+  </div>
+
+  <h3>Routing methods</h3>
+  <table>
+    <thead>
+      <tr><th>Routing Method</th><th>Behaviour</th><th>Use Case</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>Priority</strong></td>
+        <td>Route all traffic to the primary endpoint; fail over to secondary only if primary is unhealthy</td>
+        <td>Active/passive disaster recovery between regions</td>
+      </tr>
+      <tr>
+        <td><strong>Weighted</strong></td>
+        <td>Distribute traffic proportionally by weight (e.g. 90/10 or 50/50)</td>
+        <td>A/B testing, gradual migration, blue-green deployments</td>
+      </tr>
+      <tr>
+        <td><strong>Performance</strong></td>
+        <td>Route to the endpoint with the lowest latency to the client (based on client IP geolocation)</td>
+        <td>Global app — route each user to the nearest region for lowest latency</td>
+      </tr>
+      <tr>
+        <td><strong>Geographic</strong></td>
+        <td>Route traffic from specific countries, regions, or continents to designated endpoints</td>
+        <td>Data residency compliance — European users must be served from EU region</td>
+      </tr>
+      <tr>
+        <td><strong>Multivalue</strong></td>
+        <td>Return multiple healthy endpoints in a single DNS response</td>
+        <td>Client-side load balancing for IPv4/IPv6 endpoints</td>
+      </tr>
+      <tr>
+        <td><strong>Subnet</strong></td>
+        <td>Map specific client IP address ranges to specific endpoints</td>
+        <td>Serve different content to different network segments (e.g. corporate vs. consumer)</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>Health probes</h3>
+  <p>Traffic Manager continuously probes endpoint health using HTTP, HTTPS, or TCP checks. When an endpoint fails its health probe, Traffic Manager stops returning its IP in DNS responses — clients are routed to a healthy endpoint instead.</p>
+
+  <div class="callout callout-warn">
+    <strong>Traffic Manager and HTTPS endpoints</strong>
+    Traffic Manager health probes can check HTTPS endpoints, but Traffic Manager itself never terminates TLS — it is purely DNS. Endpoints must be publicly reachable for Traffic Manager health probes to work. This makes Traffic Manager unsuitable for purely internal (VNet-only) endpoints.
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     6. DECISION GUIDE
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>6. Decision Guide — Which Service to Use</h2>
+  <p>The AZ-104 exam tests this decision tree repeatedly. Memorise the key differentiators:</p>
+
+  <div class="hierarchy">
+<span class="hier-tenant">Is the workload HTTP/HTTPS only, or does it include other protocols (TCP/UDP, non-HTTP)?</span>
+<span class="hier-mgmt">  │</span>
+<span class="hier-mgmt">  ├─ Non-HTTP or mixed protocols → consider Traffic Manager (DNS) or Azure Load Balancer (L4)</span>
+<span class="hier-mgmt">  │</span>
+<span class="hier-sub">  └─ HTTP/HTTPS</span>
+<span class="hier-sub">       │</span>
+<span class="hier-sub">       ├─ Is the requirement GLOBAL (multiple regions)?</span>
+<span class="hier-resource">       │    YES → Azure Front Door (L7 + CDN + WAF at edge)</span>
+<span class="hier-resource">       │          or Traffic Manager (DNS-based, non-HTTP compatible, no proxy)</span>
+<span class="hier-sub">       │</span>
+<span class="hier-sub">       └─ REGIONAL only?</span>
+<span class="hier-resource">            ├─ Need URL path routing or WAF? → Application Gateway (WAF_v2)</span>
+<span class="hier-resource">            └─ Pure L4 TCP/UDP distribution? → Azure Load Balancer (Standard)</span>
+  </div>
+
+  <h3>Layering services — the enterprise pattern</h3>
+  <p>These services are designed to be combined. A fully resilient global web application might use all four:</p>
+
+  <table>
+    <thead>
+      <tr><th>Layer</th><th>Service</th><th>Responsibility</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>1 (outermost)</td>
+        <td>Traffic Manager</td>
+        <td>Global DNS failover: route all traffic to East US; if East US is down, redirect to West Europe</td>
+      </tr>
+      <tr>
+        <td>2</td>
+        <td>Application Gateway (per region)</td>
+        <td>Regional L7 routing: URL-path routing to microservices, WAF protection, SSL offload</td>
+      </tr>
+      <tr>
+        <td>3</td>
+        <td>Azure Load Balancer (internal)</td>
+        <td>Internal L4 distribution: spread HTTP traffic across a pool of backend VMs behind Application Gateway</td>
+      </tr>
+      <tr>
+        <td>4 (innermost)</td>
+        <td>VMs / VMSS</td>
+        <td>Application workload</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="callout callout-info">
+    <strong>When to combine Front Door with Application Gateway</strong>
+    Azure Front Door handles global routing and edge WAF. Application Gateway handles regional URL routing and per-application WAF rule customisation. Use Front Door at the edge for global scale, and Application Gateway regionally when you need per-path routing or application-specific WAF tuning that is too granular for Front Door's global policies.
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     QUIZ
+═══════════════════════════════════════════════ -->
+<section class="quiz">
+  <h2>Check Your Understanding</h2>
+  <p>Click any option to see immediate feedback. Answers reflect real Azure load balancing behaviour.</p>
+
+  <!-- Q1 -->
+  <div class="quiz-question" data-correct="b">
+    <p>1. You are deploying a Virtual Machine Scale Set (VMSS) in a region with Availability Zones. You need the load balancer to distribute traffic across VMs in all three zones, with a 99.99% SLA and secure-by-default traffic rules. Which load balancer configuration is correct?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q1"> Azure Load Balancer Basic SKU — it supports VMSS and is available in all regions</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q1"> Azure Load Balancer Standard SKU — zone-redundant, supports Availability Zones, required for VMSS with full AZ support, and blocks all inbound traffic by default</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q1"> Azure Load Balancer Basic SKU with zone-redundant option enabled in the advanced settings</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q1"> Application Gateway Standard_v2 — it is the only Azure LB product with an SLA covering VMSS</label>
+    </div>
+    <div class="quiz-feedback">Standard SKU is the only choice here: it is zone-redundant, supports Availability Zones for backend pools, carries a 99.99% SLA, and requires NSG rules to allow inbound traffic (secure by default). Basic SKU does not support AZs and is being retired. Application Gateway is a Layer 7 load balancer — appropriate for HTTP routing, not for VM-level TCP/UDP distribution.</div>
+  </div>
+
+  <!-- Q2 -->
+  <div class="quiz-question" data-correct="c">
+    <p>2. Your web application is deployed in a single Azure region. You need to route HTTP requests for <code>/api/*</code> to a pool of API VMs, and requests for <code>/static/*</code> to a storage-backed pool. You also need WAF protection. Which Azure service should you use?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q2"> Azure Load Balancer Standard — configure port-based rules for <code>/api</code> and <code>/static</code></label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q2"> Traffic Manager with Performance routing — it can inspect URL paths and redirect to different endpoints</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q2"> Application Gateway WAF_v2 with path-based routing rules — routes to different backend pools based on URL path and includes WAF protection</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q2"> Azure Front Door Premium — required for any URL path routing with WAF</label>
+    </div>
+    <div class="quiz-feedback">Application Gateway (WAF_v2 SKU) is exactly the right tool: it operates at Layer 7, supports path-based routing rules to direct different URL paths to different backend pools, and includes integrated WAF (OWASP CRS + custom rules). Azure Load Balancer operates at Layer 4 only — it has no concept of URL paths. Traffic Manager is DNS-based and cannot inspect HTTP URLs. Front Door is global — not needed for a single-region scenario.</div>
+  </div>
+
+  <!-- Q3 -->
+  <div class="quiz-question" data-correct="a">
+    <p>3. You deploy Traffic Manager with Priority routing. The primary endpoint is in East US and the secondary is in West Europe. An engineer asks whether clients will instantly fail over when East US goes down. What is the accurate answer?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q3"> No — Traffic Manager is DNS-based and does not proxy traffic. Failover speed is limited by the DNS TTL and client-side DNS caching. During the TTL window, clients may still connect to the failed endpoint.</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q3"> Yes — Traffic Manager continuously monitors TCP connections and instantly redirects active sessions when a failure is detected</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q3"> Yes — Traffic Manager uses anycast routing, so the same IP automatically routes to West Europe when East US is unhealthy</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q3"> No — Traffic Manager requires manual intervention to update the priority and trigger a failover</label>
+    </div>
+    <div class="quiz-feedback">Traffic Manager does not proxy traffic — it only controls DNS resolution. Once a client receives the East US IP via DNS, it connects directly there. Traffic Manager health probes will detect the failure and stop returning the East US IP in new DNS responses, but existing client connections and DNS caches will not be affected until TTL expires. This is the fundamental architectural limitation of DNS-based load balancing.</div>
+  </div>
+
+  <!-- Q4 -->
+  <div class="quiz-question" data-correct="d">
+    <p>4. You deploy a Standard Azure Load Balancer with a backend pool of three VMs. One VM consistently appears unhealthy in the load balancer's backend health view, but you can verify that the application is running normally on that VM by connecting directly. The VM's NSG allows inbound on port 80 from the internet. What is the most likely cause?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q4"> The VM is in a different Availability Zone than the Load Balancer frontend</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q4"> Standard Load Balancer requires that all backend VMs have public IP addresses for health probes to reach them</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q4"> The application on the VM is responding with an HTTP 404, which the health probe interprets as unhealthy</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q4"> The VM's NSG blocks inbound traffic from 168.63.129.16 (the Azure Load Balancer health probe source IP) or from the AzureLoadBalancer service tag</label>
+    </div>
+    <div class="quiz-feedback">Azure Load Balancer health probes always originate from the virtual IP <code>168.63.129.16</code>. If the VM's NSG does not have an inbound rule allowing this source IP (or the <code>AzureLoadBalancer</code> service tag), the health probe packets are dropped. The VM never responds, the Load Balancer marks it unhealthy, and it receives no traffic. The NSG rule must explicitly permit inbound from <code>AzureLoadBalancer</code> service tag on the probe port.</div>
+  </div>
+
+  <!-- Q5 -->
+  <div class="quiz-question" data-correct="b">
+    <p>5. Your company runs a global e-commerce platform with regional backends in East US, West Europe, and Southeast Asia. Users worldwide complain of high latency. You need to route each user to the nearest regional backend, provide DDoS + WAF protection at the edge, cache static assets globally, and avoid managing multiple CDN deployments. Which single Azure service best addresses all of these requirements?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q5"> Traffic Manager with Performance routing — routes users to the nearest regional endpoint via DNS</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q5"> Azure Front Door Standard or Premium — global anycast routing to nearest PoP, WAF at the edge, integrated CDN caching, and SSL offload</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q5"> Three regional Application Gateways with WAF, combined with Azure CDN profiles, and Traffic Manager in front</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q5"> Azure Load Balancer with geo-redundant frontend IPs and integrated CDN support</label>
+    </div>
+    <div class="quiz-feedback">Azure Front Door is purpose-built for this exact scenario: it operates on Microsoft's global anycast network for lowest latency, provides WAF protection at the edge, includes integrated CDN caching, and can route to multiple regional origins with health-probe-based failover — all in a single service. Traffic Manager alone cannot provide WAF, CDN, or SSL offload. The multi-service architecture in option C works but requires managing more resources — Front Door consolidates this.</div>
+  </div>
+
+  <!-- Q6 -->
+  <div class="quiz-question" data-correct="c">
+    <p>6. Your company operates in the EU and is subject to GDPR data residency requirements: European users must have their requests processed only by EU-region backends, and North American users must only hit North American backends. Which Traffic Manager routing method satisfies this requirement?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q6"> Performance routing — routes users to the lowest-latency endpoint, which is usually geographically close</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q6"> Weighted routing — distribute 50% of traffic to EU and 50% to North America</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q6"> Geographic routing — explicitly maps EU countries to the EU endpoint and North American countries to the NA endpoint, ensuring strict data residency</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q6"> Priority routing — set EU as priority 1 for European users and NA as priority 1 for North American users via separate profiles</label>
+    </div>
+    <div class="quiz-feedback">Geographic routing is the only routing method that provides deterministic, compliance-grade routing guarantees. Performance routing routes to the lowest-latency endpoint, which is usually geographic but not guaranteed — a European user might route to a North American endpoint if it has lower measured latency. Geographic routing explicitly maps countries, regions, and continents to endpoints, satisfying GDPR and similar data residency requirements.</div>
+  </div>
+
+  <div class="quiz-score"></div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     PRIMARY SOURCE
+═══════════════════════════════════════════════ -->
+<div class="primary-source">
+  <strong>Primary source for this lesson</strong>
+  <a href="https://learn.microsoft.com/en-us/azure/load-balancer/load-balancer-overview" target="_blank">
+    Azure Load Balancer overview — Microsoft Learn
+  </a>
+  <p style="margin-top:0.5rem;font-size:0.9rem;color:#deecf9;">Also read: Application Gateway overview, Azure Front Door overview, and Traffic Manager routing methods. The load balancing decision guide at learn.microsoft.com/en-us/azure/architecture/guide/technology-choices/load-balancing-overview is the definitive reference for the decision tree.</p>
+</div>
+
+<!-- ═══════════════════════════════════════════════
+     ASK YOUR TEACHER
+═══════════════════════════════════════════════ -->
+<div class="ask-teacher">
+  <strong>Questions for your teacher (the AI agent)</strong><br>
+  This lesson covered the four Azure load balancing services. Explore the architecture further:
+  <ul style="margin-top:0.5rem;">
+    <li>Walk me through configuring Application Gateway path-based routing with a WAF policy using Bicep.</li>
+    <li>How does Azure Front Door handle origin failover, and what are the health probe configuration options?</li>
+    <li>What is SNAT port exhaustion on Azure Load Balancer and how do outbound rules help prevent it?</li>
+    <li>How do you migrate from Azure Basic Load Balancer to Standard Load Balancer without downtime?</li>
+  </ul>
+</div>
+
+<!-- ═══════════════════════════════════════════════
+     NEXT LESSON PREVIEW
+═══════════════════════════════════════════════ -->
+<div class="callout callout-info">
+  <strong>Coming up: Lesson 19 — Azure Monitor: Metrics, Logs &amp; Alerts</strong>
+  Having built out your network layer, the next domain shift covers observability. Azure Monitor is the unified monitoring platform for all Azure resources — covering metrics, logs, alerts, and the Azure Monitor Agent. You will learn how to route diagnostic data, configure alert rules, and understand the difference between platform metrics (free, automatic) and resource logs (requires configuration). This is a 10–15% exam domain.
+</div>
+
+<!-- ═══════════════════════════════════════════════
+     NAVIGATION
+═══════════════════════════════════════════════ -->
+<nav class="lesson-nav">
+  <a href="0017-dns.html">← Lesson 17 — DNS in Azure</a>
+  <a href="0019-azure-monitor.html">Lesson 19 — Azure Monitor →</a>
+</nav>
+
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

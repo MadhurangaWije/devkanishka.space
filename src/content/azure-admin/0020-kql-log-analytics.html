@@ -1,0 +1,578 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lesson 20 — Log Analytics &amp; KQL</title>
+  <link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<!-- ═══════════════════════════════════════════════
+     HEADER
+═══════════════════════════════════════════════ -->
+<header class="lesson-header">
+  <h1>Lesson 20 — Log Analytics &amp; KQL</h1>
+  <div class="lesson-meta">
+    <span class="badge badge-domain">Domain 5 — Monitor &amp; Maintain</span>
+    <span class="badge badge-exam">AZ-104: 10–15%</span>
+    <span class="badge badge-time">~35 min</span>
+    <span class="badge badge-prereq">Prereq: Lesson 19 — Azure Monitor</span>
+  </div>
+</header>
+
+<!-- ═══════════════════════════════════════════════
+     WHY THIS MATTERS
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Why You Need This</h2>
+  <p>Azure Monitor collects metrics and logs from every layer of your infrastructure, but that data is only useful if you can query it. Log Analytics and KQL (Kusto Query Language) are how you turn raw telemetry into actionable intelligence — finding the engineer who deleted a production VM, charting CPU utilisation over time, or proving that your VMs have been sending heartbeats continuously for the past 30 days.</p>
+  <p>On the AZ-104 exam, KQL questions test whether you understand the operator pipeline, time functions, and which Azure tables to query for which scenarios. In production, writing KQL is a daily skill — every alert, workbook, and compliance report runs on it.</p>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     LOG ANALYTICS WORKSPACE
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Log Analytics Workspace</h2>
+  <p>A <strong>Log Analytics workspace</strong> is the storage and query container for log data in Azure Monitor. Think of it as a database: it holds named tables, you query it with KQL, and you pay for what you ingest and retain.</p>
+
+  <h3>Key tables you must know</h3>
+  <table>
+    <thead>
+      <tr><th>Table</th><th>What it contains</th><th>Common use</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>AzureActivity</code></td>
+        <td>All control-plane operations in the subscription — create, delete, modify resource</td>
+        <td>Who did what? Who deleted the VM?</td>
+      </tr>
+      <tr>
+        <td><code>SecurityEvent</code></td>
+        <td>Windows Security event log (logon events, privilege use, etc.) from monitored VMs</td>
+        <td>Failed logons, account lockouts, privilege escalation</td>
+      </tr>
+      <tr>
+        <td><code>Perf</code></td>
+        <td>Performance counters from Windows/Linux VMs (CPU, memory, disk, network)</td>
+        <td>Resource utilisation trending and alerting</td>
+      </tr>
+      <tr>
+        <td><code>Heartbeat</code></td>
+        <td>One record per minute from each VM running the Log Analytics agent</td>
+        <td>Is the agent alive? VM connectivity health</td>
+      </tr>
+      <tr>
+        <td><code>SigninLogs</code></td>
+        <td>Microsoft Entra ID interactive sign-in events (requires Entra diagnostic settings)</td>
+        <td>Failed authentication, MFA patterns, risky sign-ins</td>
+      </tr>
+      <tr>
+        <td><code>AzureDiagnostics</code></td>
+        <td>Diagnostic logs from many Azure services (Key Vault, NSG, App Service, etc.)</td>
+        <td>Service-level troubleshooting across multiple resource types</td>
+      </tr>
+      <tr>
+        <td><code>ContainerLog</code></td>
+        <td>stdout/stderr from containers in AKS</td>
+        <td>Application log analysis in Kubernetes workloads</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>Workspace costs</h3>
+  <p>Log Analytics pricing has two components:</p>
+  <ul>
+    <li><strong>Data ingestion:</strong> approximately $2.76 per GB ingested (Pay-As-You-Go). Commitment tiers (100 GB/day, 200 GB/day, etc.) provide significant discounts at scale.</li>
+    <li><strong>Data retention:</strong> first 30 days of retention is included in the ingestion price. Beyond 30 days, you pay approximately $0.12 per GB per month. The maximum interactive retention is 730 days (2 years). Archival tier extends to 12 years at a lower cost.</li>
+  </ul>
+
+  <div class="callout callout-warn">
+    <strong>Cost trap</strong>
+    Verbose diagnostic categories (e.g. <code>AzureDiagnostics</code> from a busy Application Gateway) can generate gigabytes of logs per day. Always audit ingestion volumes before enabling diagnostics at scale. Use the <em>Log Analytics workspace usage and estimated costs</em> blade to identify the most expensive data sources before your first bill arrives.
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     KQL BASICS
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>KQL Basics — The Pipe Syntax</h2>
+  <p>KQL (Kusto Query Language) uses a <strong>left-to-right pipe model</strong>: you start with a table, then chain operators with <code>|</code> (pipe). Each operator receives the output of the previous one and passes its own output to the next. This makes queries read like a sentence.</p>
+
+  <pre><code>TableName
+| operator1 arguments
+| operator2 arguments
+| operator3 arguments</code></pre>
+
+  <div class="callout callout-info">
+    <strong>Case sensitivity rules</strong>
+    Column names and string comparisons are <strong>case-sensitive</strong>. Operator keywords (<code>where</code>, <code>project</code>, <code>summarize</code>) are <strong>case-insensitive</strong>. In practice, write operators lowercase for readability and always match column name capitalisation exactly — a common source of zero-result queries.
+  </div>
+
+  <h3>Core operators</h3>
+
+  <h3 style="margin-top:1.2rem;">where — filter rows</h3>
+  <p>The most-used operator. Reduces the row set to those matching a condition. Always apply <code>where</code> as early in the pipeline as possible to minimise the data processed by later operators.</p>
+  <pre><code>AzureActivity
+| where TimeGenerated > ago(24h)
+| where ResourceGroup == "rg-payments-prod"</code></pre>
+
+  <h3>project — select and rename columns</h3>
+  <p>Reduces the column set to only those you need. This is the equivalent of <code>SELECT col1, col2</code> in SQL. Columns not named in <code>project</code> are dropped from the output.</p>
+  <pre><code>AzureActivity
+| where TimeGenerated > ago(24h)
+| project TimeGenerated, Caller, OperationNameValue, ResourceGroup, Level</code></pre>
+
+  <h3>summarize — aggregate</h3>
+  <p>Groups rows and computes aggregates. The <code>by</code> clause defines the grouping keys. Built-in aggregate functions: <code>count()</code>, <code>sum()</code>, <code>avg()</code>, <code>min()</code>, <code>max()</code>, <code>dcount()</code> (distinct count), <code>make_set()</code>.</p>
+  <pre><code>Perf
+| where TimeGenerated > ago(1h)
+| where ObjectName == "Processor" and CounterName == "% Processor Time"
+| summarize avg(CounterValue) by Computer, bin(TimeGenerated, 5m)</code></pre>
+
+  <h3>order by / sort by — sort results</h3>
+  <p><code>order by</code> and <code>sort by</code> are synonyms. Use <code>desc</code> for descending (most recent first is typical for timestamps).</p>
+  <pre><code>AzureActivity
+| where TimeGenerated > ago(7d)
+| order by TimeGenerated desc</code></pre>
+
+  <h3>take / limit — sample rows</h3>
+  <p>Returns the specified number of rows without a guaranteed order. Use for exploration, not for production reporting.</p>
+  <pre><code>AzureActivity
+| take 10</code></pre>
+
+  <h3>extend — add a computed column</h3>
+  <p>Adds a new column derived from existing columns. The original columns are preserved.</p>
+  <pre><code>Heartbeat
+| extend UpperComputer = toupper(Computer)
+| project Computer, UpperComputer, OSType, TimeGenerated</code></pre>
+
+  <h3>join — combine two tables</h3>
+  <p>Joins two tables on a common field. The <code>kind</code> parameter controls join semantics — <code>inner</code> (rows matching in both), <code>leftouter</code> (all rows from left, nulls if no match), <code>rightouter</code>, <code>fullouter</code>.</p>
+  <pre><code>Heartbeat
+| summarize LastHeartbeat = max(TimeGenerated) by Computer
+| join kind=inner (
+    Perf
+    | where TimeGenerated > ago(1h)
+    | where CounterName == "% Processor Time"
+    | summarize AvgCPU = avg(CounterValue) by Computer
+) on Computer</code></pre>
+
+  <h3>union — combine row sets</h3>
+  <p>Appends rows from multiple tables (or workspaces) into a single result set. Use when different tables hold the same schema of data.</p>
+  <pre><code>union SecurityEvent, WindowsEvent
+| where TimeGenerated > ago(1h)
+| where EventID == 4625</code></pre>
+
+  <h3>render — visualise</h3>
+  <p>Instructs the Log Analytics UI to render the result as a chart. Common types: <code>timechart</code>, <code>barchart</code>, <code>piechart</code>, <code>table</code>. This operator only affects the UI rendering — it does not change query results when used programmatically.</p>
+  <pre><code>Perf
+| where TimeGenerated > ago(1h)
+| where CounterName == "% Processor Time"
+| summarize avg(CounterValue) by Computer, bin(TimeGenerated, 5m)
+| render timechart</code></pre>
+
+  <h3>parse — extract fields from unstructured strings</h3>
+  <p>Extracts named fields from a string column using a pattern. Useful for application logs where data is embedded in a message field.</p>
+  <pre><code>AzureDiagnostics
+| where ResourceType == "APPLICATIONGATEWAYS"
+| parse requestUri_s with Protocol "://" Host "/" Path
+| project TimeGenerated, Protocol, Host, Path, httpStatus_d</code></pre>
+
+  <h3>mv-expand — expand multi-value fields</h3>
+  <p>Turns a single row containing a dynamic array or property bag into multiple rows, one per element. Used when a column contains a JSON array.</p>
+  <pre><code>AzureActivity
+| where Properties has "policies"
+| mv-expand policies = todynamic(Properties).policies
+| project TimeGenerated, Caller, policies</code></pre>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     TIME FUNCTIONS
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Time Functions</h2>
+  <p>Time expressions in KQL are relative to query execution time. This is critical for scheduled alerts — the query re-evaluates the time window each time it runs.</p>
+
+  <table>
+    <thead>
+      <tr><th>Expression</th><th>Meaning</th><th>Typical use</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>ago(1h)</code></td>
+        <td>1 hour before now</td>
+        <td><code>where TimeGenerated &gt; ago(1h)</code></td>
+      </tr>
+      <tr>
+        <td><code>ago(7d)</code></td>
+        <td>7 days before now</td>
+        <td>Week-over-week reporting</td>
+      </tr>
+      <tr>
+        <td><code>now()</code></td>
+        <td>Current UTC timestamp</td>
+        <td>Computing age of events</td>
+      </tr>
+      <tr>
+        <td><code>datetime('2026-06-01')</code></td>
+        <td>Absolute timestamp</td>
+        <td>Fixed date range queries</td>
+      </tr>
+      <tr>
+        <td><code>bin(TimeGenerated, 1h)</code></td>
+        <td>Rounds TimeGenerated down to nearest hour boundary</td>
+        <td>Creates time buckets for <code>summarize</code> — required for <code>render timechart</code></td>
+      </tr>
+      <tr>
+        <td><code>startofday(now())</code></td>
+        <td>Midnight UTC of current day</td>
+        <td>Today's data from midnight</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="callout callout-info">
+    <strong>bin() is required for timecharts</strong>
+    If you want to <code>render timechart</code>, you must use <code>bin(TimeGenerated, interval)</code> in your <code>summarize by</code> clause. Without it, each unique timestamp creates its own bucket, producing a chart with thousands of individual points instead of smooth aggregated lines.
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     STRING FUNCTIONS
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>String Functions</h2>
+  <p>KQL has a rich set of string operators. The most important ones for AZ-104 scenarios:</p>
+
+  <table>
+    <thead>
+      <tr><th>Function / Operator</th><th>Example</th><th>Notes</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>contains</code></td>
+        <td><code>where OperationNameValue contains "delete"</code></td>
+        <td>Case-insensitive substring match</td>
+      </tr>
+      <tr>
+        <td><code>startswith</code></td>
+        <td><code>where Computer startswith "vm-web"</code></td>
+        <td>Prefix match, case-insensitive</td>
+      </tr>
+      <tr>
+        <td><code>endswith</code></td>
+        <td><code>where OperationNameValue endswith "delete"</code></td>
+        <td>Suffix match</td>
+      </tr>
+      <tr>
+        <td><code>matches regex</code></td>
+        <td><code>where Computer matches regex "^vm-prod-[0-9]+"</code></td>
+        <td>Full RE2 regex syntax</td>
+      </tr>
+      <tr>
+        <td><code>toupper()</code></td>
+        <td><code>extend Upper = toupper(Computer)</code></td>
+        <td>Uppercase conversion</td>
+      </tr>
+      <tr>
+        <td><code>tolower()</code></td>
+        <td><code>extend Lower = tolower(UserPrincipalName)</code></td>
+        <td>Lowercase — normalise email addresses</td>
+      </tr>
+      <tr>
+        <td><code>strcat()</code></td>
+        <td><code>extend Full = strcat(Computer, " / ", OSType)</code></td>
+        <td>Concatenate strings</td>
+      </tr>
+      <tr>
+        <td><code>split()</code></td>
+        <td><code>extend Parts = split(ResourceId, "/")</code></td>
+        <td>Returns dynamic array of substrings</td>
+      </tr>
+      <tr>
+        <td><code>indexof()</code></td>
+        <td><code>where indexof(Message, "Error") &gt;= 0</code></td>
+        <td>Position of first occurrence (-1 if not found)</td>
+      </tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     PRODUCTION QUERIES
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Production Queries for AZ-104 Scenarios</h2>
+  <p>These are the exact query patterns you should be able to write from scratch in the exam and in production. Study each one until the logic is intuitive, not memorised.</p>
+
+  <h3>Find all Azure resource deployments in the last 7 days</h3>
+  <p>Uses the <code>AzureActivity</code> table which captures every ARM control-plane operation. The <code>contains</code> filter picks up both write and delete operations across all resource types.</p>
+  <pre><code>AzureActivity
+| where TimeGenerated > ago(7d)
+| where OperationNameValue contains "write" or OperationNameValue contains "delete"
+| project TimeGenerated, Caller, OperationNameValue, ResourceGroup, Level
+| order by TimeGenerated desc</code></pre>
+
+  <h3>VM CPU average over last hour (with time chart)</h3>
+  <p>The <code>Perf</code> table stores Windows and Linux performance counters. <code>ObjectName == "Processor"</code> selects the CPU object; <code>CounterName == "% Processor Time"</code> picks total CPU. <code>bin(TimeGenerated, 5m)</code> creates 5-minute buckets. <code>render timechart</code> draws the line chart in the portal.</p>
+  <pre><code>Perf
+| where TimeGenerated > ago(1h)
+| where ObjectName == "Processor" and CounterName == "% Processor Time"
+| summarize avg(CounterValue) by Computer, bin(TimeGenerated, 5m)
+| render timechart</code></pre>
+
+  <h3>Failed sign-in attempts ranked by failure count</h3>
+  <p>Requires <code>SigninLogs</code> routing to the workspace via Entra ID diagnostic settings. <code>ResultType != "0"</code> captures all non-success codes. Grouping by user and IP reveals brute-force or spray patterns.</p>
+  <pre><code>SigninLogs
+| where TimeGenerated > ago(1d)
+| where ResultType != "0"
+| summarize FailureCount = count() by UserPrincipalName, IPAddress, ResultDescription
+| order by FailureCount desc</code></pre>
+
+  <h3>Agent heartbeat — find VMs that have stopped reporting</h3>
+  <p>The Heartbeat table gets one record per minute from each monitored VM. This query finds machines whose last heartbeat is older than 5 minutes — indicating the agent is down or the VM is off.</p>
+  <pre><code>Heartbeat
+| where TimeGenerated > ago(5m)
+| summarize LastHeartbeat = max(TimeGenerated) by Computer
+| where LastHeartbeat < ago(5m)</code></pre>
+
+  <div class="callout callout-warn">
+    <strong>Heartbeat logic subtlety</strong>
+    The outer <code>where TimeGenerated &gt; ago(5m)</code> restricts the initial scan window. The inner <code>where LastHeartbeat &lt; ago(5m)</code> then filters out any machine whose most recent heartbeat <em>within</em> that window is still older than 5 minutes. For machines that have been silent for longer, you may need to remove the outer filter or widen it.
+  </div>
+
+  <h3>Find who deleted a resource</h3>
+  <p>Filter <code>AzureActivity</code> for successful delete operations. The <code>Caller</code> field contains the UPN of a user or the service principal appID that performed the action.</p>
+  <pre><code>AzureActivity
+| where OperationNameValue endswith "delete"
+| where ActivityStatusValue == "Success"
+| project TimeGenerated, Caller, OperationNameValue, ResourceGroup, _ResourceId
+| order by TimeGenerated desc</code></pre>
+
+  <div class="callout callout-info">
+    <strong>Exam scenario</strong>
+    "A production VM was deleted. Find out who did it." — the answer is always: query <code>AzureActivity</code>, filter by <code>OperationNameValue endswith "delete"</code> and <code>ActivityStatusValue == "Success"</code>, then read the <code>Caller</code> field. Memorise this pattern.
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     WORKSPACE DESIGN
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Log Analytics Workspace Design</h2>
+  <p>At enterprise scale, how you design your workspace topology significantly impacts cost, query experience, and compliance posture.</p>
+
+  <h3>Centralised vs. decentralised</h3>
+  <p><strong>Centralised (recommended):</strong> 1–2 workspaces per environment (Production, Non-Production). All resources route logs to one place. Advantages: simpler cross-resource correlation, single RBAC boundary for log access, lower workspace overhead.</p>
+  <p><strong>Decentralised (antipattern at scale):</strong> one workspace per application or team. Creates proliferation — 50 workspaces means 50 separate query contexts, 50 sets of access controls, and cross-workspace queries everywhere.</p>
+  <p>Microsoft's recommendation: start with a centralised model. Add a second workspace only when you have a hard compliance boundary (e.g. a PCI environment that must isolate its logs from the general workspace).</p>
+
+  <h3>Cross-workspace queries</h3>
+  <p>When data <em>is</em> split across workspaces, use the <code>workspace()</code> function to include remote workspaces in a query. You can reference them by name, resource ID, or workspace GUID.</p>
+  <pre><code>union
+    workspace("prod-la-workspace").AzureActivity,
+    workspace("staging-la-workspace").AzureActivity
+| where TimeGenerated > ago(7d)
+| where Caller contains "alice@contoso.com"
+| order by TimeGenerated desc</code></pre>
+
+  <h3>Dedicated clusters</h3>
+  <p>For workspaces ingesting more than <strong>500 GB/day</strong>, a dedicated Log Analytics cluster provides:</p>
+  <ul>
+    <li>Commitment tier pricing (significant cost savings vs. Pay-As-You-Go above this threshold)</li>
+    <li>Customer-managed encryption keys (CMK) — required for some compliance frameworks</li>
+    <li>Availability zone support</li>
+    <li>Multiple workspaces can be linked to a single cluster and share the commitment tier</li>
+  </ul>
+
+  <div class="callout callout-danger">
+    <strong>Workspace deletion is irreversible</strong>
+    Deleting a Log Analytics workspace deletes all ingested data permanently. There is a 14-day soft-delete period during which the workspace can be recovered, but after that the data is gone. Protect workspaces with resource locks (<code>CanNotDelete</code>) in production environments.
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     WORKBOOKS AND ALERTS
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Workbooks and Log Search Alerts</h2>
+
+  <h3>Workbooks</h3>
+  <p><strong>Azure Monitor Workbooks</strong> are interactive, parameterised reports built on KQL. A workbook can contain multiple queries, text sections, charts, and grids — all driven by user-selectable time ranges, subscription filters, or resource scopes. Microsoft provides dozens of gallery templates for common scenarios (VM health, Security overview, Cost analysis).</p>
+  <p>Workbooks are the correct answer when the exam asks about "interactive reports" or "parameterised dashboards" — as opposed to static dashboards which are pinned chart tiles.</p>
+
+  <h3>Log search alerts</h3>
+  <p>A <strong>log search alert</strong> runs a KQL query on a schedule and fires an alert rule when the result meets a threshold condition. Key configuration parameters:</p>
+  <table>
+    <thead>
+      <tr><th>Parameter</th><th>Meaning</th><th>Example</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>KQL query</td>
+        <td>The query that runs on schedule</td>
+        <td>Count failed sign-ins per user</td>
+      </tr>
+      <tr>
+        <td>Measurement</td>
+        <td>Table rows (count) vs. aggregate column value</td>
+        <td>Count rows = number of events; aggregate = e.g. avg CPU value</td>
+      </tr>
+      <tr>
+        <td>Threshold</td>
+        <td>The condition that triggers the alert</td>
+        <td>Greater than 10 failures</td>
+      </tr>
+      <tr>
+        <td>Frequency</td>
+        <td>How often the query runs</td>
+        <td>Every 5 minutes</td>
+      </tr>
+      <tr>
+        <td>Evaluation window</td>
+        <td>The time range the query covers each run</td>
+        <td>Last 15 minutes (window should be ≥ frequency)</td>
+      </tr>
+      <tr>
+        <td>Action group</td>
+        <td>What to do when alert fires</td>
+        <td>Email, SMS, webhook, ITSM ticket</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="callout callout-info">
+    <strong>Frequency vs. evaluation window</strong>
+    The evaluation window must be equal to or greater than the frequency. If a query runs every 5 minutes but the window is only 3 minutes, you will have a 2-minute blind spot between runs. Set the window to at least the frequency, typically 2–3x the frequency for overlap.
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     QUIZ
+═══════════════════════════════════════════════ -->
+<section class="quiz">
+  <h2>Check Your Understanding</h2>
+  <p>Click any option to see immediate feedback.</p>
+
+  <!-- Q1 -->
+  <div class="quiz-question" data-correct="c">
+    <p>1. What does this query do? <code>AzureActivity | where TimeGenerated &gt; ago(1d) | summarize count() by Caller</code></p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q1"> Returns all AzureActivity rows from the last day with a count column appended</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q1"> Returns one row per day showing how many callers operated that day</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q1"> Filters AzureActivity to the last 24 hours, then returns one row per unique Caller showing how many operations each one performed</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q1"> Sorts AzureActivity by Caller name and counts the total rows</label>
+    </div>
+    <div class="quiz-feedback">The pipe symbol passes the output of one operator as input to the next. <code>where</code> filters rows to the last 24 hours. <code>summarize count() by Caller</code> then groups the filtered rows by Caller and counts each group — returning one row per unique Caller with their operation count.</div>
+  </div>
+
+  <!-- Q2 -->
+  <div class="quiz-question" data-correct="a">
+    <p>2. You want to produce a time-series chart of average CPU usage per VM in 1-hour buckets. Which KQL combination achieves this?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q2"> <code>summarize avg(CounterValue) by Computer, bin(TimeGenerated, 1h) | render timechart</code></label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q2"> <code>summarize avg(CounterValue) by Computer | render timechart</code></label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q2"> <code>summarize avg(CounterValue) by Computer, TimeGenerated | render barchart</code></label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q2"> <code>project CounterValue, Computer, TimeGenerated | render timechart</code></label>
+    </div>
+    <div class="quiz-feedback"><code>bin(TimeGenerated, 1h)</code> rounds each timestamp down to the nearest hour boundary, creating the hourly buckets for aggregation. Combined with <code>render timechart</code>, this produces a time-series line chart. Without <code>bin()</code>, each unique timestamp would be its own bucket, producing thousands of isolated points instead of a smooth trend line.</div>
+  </div>
+
+  <!-- Q3 -->
+  <div class="quiz-question" data-correct="d">
+    <p>3. What does <code>ago(7d)</code> evaluate to when a log search alert query runs on Monday at 09:00 UTC?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q3"> The previous Monday at 09:00 UTC — a static timestamp set when the alert was created</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q3"> 7 calendar days before the current month starts</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q3"> The most recent Sunday at midnight UTC</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q3"> Monday at 09:00 UTC minus exactly 7 days — recalculated fresh each time the query executes</label>
+    </div>
+    <div class="quiz-feedback"><code>ago(7d)</code> is a relative time expression evaluated at query execution time. Every time the alert runs, it recalculates 7 days before <em>now</em>. This means the query always covers a rolling 7-day window, not a fixed historical period. This is the correct behaviour for continuous monitoring.</div>
+  </div>
+
+  <!-- Q4 -->
+  <div class="quiz-question" data-correct="b">
+    <p>4. You use <code>join kind=inner</code> to combine a Heartbeat summary with a Perf summary on the Computer field. A VM appears in Perf but has no recent Heartbeat record. What happens to that VM in the output?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q4"> It appears with null values for the Heartbeat columns</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q4"> It is excluded from the output — inner join returns only rows that match in both tables</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q4"> It appears in the output with a warning flag column</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q4"> The query fails with an error because the Computer field is missing in one table</label>
+    </div>
+    <div class="quiz-feedback"><code>kind=inner</code> returns only rows where the join key (Computer) exists in <em>both</em> tables — identical to SQL INNER JOIN. A VM present in Perf but absent from Heartbeat will be silently dropped from the results. Use <code>kind=leftouter</code> if you want all VMs from the left table (Heartbeat summary) regardless of whether they appear in Perf.</div>
+  </div>
+
+  <!-- Q5 -->
+  <div class="quiz-question" data-correct="c">
+    <p>5. An attacker deleted all backup items in your Recovery Services Vault. You need to find which account performed the deletion. What query approach should you use?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q5"> Query <code>SecurityEvent</code> for EventID 4663 (object deletion)</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q5"> Query <code>AzureDiagnostics</code> filtered to the Recovery Services Vault resource</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q5"> Query <code>AzureActivity</code> filtered by <code>OperationNameValue endswith "delete"</code> and <code>ActivityStatusValue == "Success"</code>, then read the <code>Caller</code> field</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q5"> Query <code>Heartbeat</code> to find which VMs stopped reporting after the incident</label>
+    </div>
+    <div class="quiz-feedback">All Azure control-plane operations — including deleting backup items — are recorded in <code>AzureActivity</code>. Filtering by <code>endswith "delete"</code> and <code>ActivityStatusValue == "Success"</code> narrows to successful deletions. The <code>Caller</code> field contains the UPN of the user or service principal that performed the action. This is the canonical pattern for Azure activity attribution.</div>
+  </div>
+
+  <!-- Q6 -->
+  <div class="quiz-question" data-correct="a">
+    <p>6. You need to query <code>AzureActivity</code> from two different Log Analytics workspaces in a single query. What is the correct KQL syntax?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q6"> <code>union workspace("workspace-prod").AzureActivity, AzureActivity</code></label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q6"> <code>join workspace("workspace-prod").AzureActivity on TimeGenerated</code></label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q6"> <code>AzureActivity | import workspace("workspace-prod")</code></label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q6"> <code>AzureActivity | cross-workspace("workspace-prod")</code></label>
+    </div>
+    <div class="quiz-feedback">Cross-workspace queries use the <code>workspace()</code> function with the workspace name, resource ID, or GUID. <code>union workspace("workspace-prod").AzureActivity, AzureActivity</code> appends rows from the remote workspace's <code>AzureActivity</code> table to the local workspace's <code>AzureActivity</code> table, giving you a combined result set for queries that span multiple workspaces.</div>
+  </div>
+
+  <div class="quiz-score"></div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     PRIMARY SOURCE
+═══════════════════════════════════════════════ -->
+<div class="primary-source">
+  <strong>Primary source for this lesson</strong>
+  <a href="https://learn.microsoft.com/en-us/azure/data-explorer/kusto/query/" target="_blank">
+    Kusto Query Language (KQL) overview — Microsoft Learn
+  </a>
+  <p style="margin-top:0.5rem;font-size:0.9rem;color:#deecf9;">Work through the KQL tutorial and the log queries samples in the Log Analytics portal. Real fluency comes from writing queries against live data — use the Log Analytics demo workspace at portal.azure.com if you do not have a subscription with significant log data yet.</p>
+</div>
+
+<!-- ═══════════════════════════════════════════════
+     ASK YOUR TEACHER
+═══════════════════════════════════════════════ -->
+<div class="ask-teacher">
+  <strong>Questions for your teacher (the AI agent)</strong><br>
+  This lesson covered the core KQL operators and common AZ-104 query patterns. Go deeper on:
+  <ul style="margin-top:0.5rem;">
+    <li>Walk me through building a workbook that tracks VM CPU, memory, and disk across multiple subscriptions with a time-range parameter.</li>
+    <li>How do I write a log search alert that fires only when the same source IP fails sign-in more than 10 times in 5 minutes?</li>
+    <li>What is the difference between <code>contains</code>, <code>has</code>, and <code>matches regex</code> for string filtering — and which is most performant?</li>
+    <li>How do I use <code>parse</code> and <code>mv-expand</code> together to extract structured data from JSON embedded in a message field?</li>
+  </ul>
+</div>
+
+<!-- ═══════════════════════════════════════════════
+     NEXT LESSON PREVIEW
+═══════════════════════════════════════════════ -->
+<div class="callout callout-info">
+  <strong>Coming up: Lesson 21 — Azure Backup &amp; Recovery Services Vault</strong>
+  Now that you can monitor and query your infrastructure, the next lesson covers protecting it. Azure Backup is the first layer of resilience — daily snapshots, application-consistent backups, soft delete, and the Recovery Services Vault that holds it all. We'll cover everything from backup policy design to the exact restore options you'll need on the exam.
+</div>
+
+<!-- ═══════════════════════════════════════════════
+     NAVIGATION
+═══════════════════════════════════════════════ -->
+<nav class="lesson-nav">
+  <a href="0019-azure-monitor.html">← Lesson 19 — Azure Monitor</a>
+  <a href="0021-azure-backup.html">Lesson 21 — Azure Backup →</a>
+</nav>
+
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

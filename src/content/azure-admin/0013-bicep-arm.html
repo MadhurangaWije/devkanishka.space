@@ -1,0 +1,588 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lesson 13 — Infrastructure as Code: ARM Templates &amp; Bicep</title>
+  <link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<!-- ═══════════════════════════════════════════════
+     HEADER
+═══════════════════════════════════════════════ -->
+<header class="lesson-header">
+  <h1>Lesson 13 — Infrastructure as Code: ARM Templates &amp; Bicep</h1>
+  <div class="lesson-meta">
+    <span class="badge badge-domain">Domain 3 — Compute</span>
+    <span class="badge badge-exam">AZ-104: 20–25%</span>
+    <span class="badge badge-time">~35 min</span>
+    <span class="badge badge-prereq">Prereq: Lessons 01–12</span>
+  </div>
+</header>
+
+<!-- ═══════════════════════════════════════════════
+     WHY THIS MATTERS
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Why Infrastructure as Code Is Non-Negotiable</h2>
+  <p>Every resource you have deployed through the Azure portal can be deleted, misconfigured, or drift from its intended state. In production environments at any serious scale, manual portal operations are an audit failure, a reliability risk, and a velocity bottleneck. Infrastructure as Code (IaC) solves this by encoding your infrastructure in files that can be version-controlled, peer-reviewed, tested, and deployed repeatably — the same way application code is developed.</p>
+  <p>Azure's native IaC system is built on the <strong>Azure Resource Manager (ARM)</strong> API. ARM is the control plane that every Azure operation goes through — the portal, the Azure CLI, PowerShell, and REST APIs all translate their requests into ARM API calls. ARM templates and Bicep are declarative languages that describe what resources you want; ARM figures out how to create or update them.</p>
+
+  <div class="callout callout-info">
+    <strong>ARM is already everywhere</strong>
+    When you create a resource in the portal, Azure is executing an ARM API call on your behalf. In the portal, every resource has an "Export template" option that shows you the ARM JSON for the deployed resource. This is a useful technique for learning ARM syntax: create something in the portal, export the template, and study the structure.
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     ARM TEMPLATE STRUCTURE
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>ARM Template Structure (JSON)</h2>
+  <p>An ARM template is a JSON file with a defined schema. Every valid ARM template must contain <code>$schema</code>, <code>contentVersion</code>, and <code>resources</code>. The other sections are optional but frequently used.</p>
+
+  <table>
+    <thead>
+      <tr><th>Section</th><th>Required</th><th>Purpose</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>$schema</code></td>
+        <td>Yes</td>
+        <td>URL to the ARM template schema. Tells tools which schema version to validate against. Different schemas exist for subscription vs. resource group deployments.</td>
+      </tr>
+      <tr>
+        <td><code>contentVersion</code></td>
+        <td>Yes</td>
+        <td>Your version string for the template (e.g. <code>"1.0.0.0"</code>). Purely informational — ARM does not interpret it.</td>
+      </tr>
+      <tr>
+        <td><code>parameters</code></td>
+        <td>No</td>
+        <td>User-supplied inputs at deploy time. Each parameter has a type, optional default value, allowed values, and description. Decouple template from environment-specific values.</td>
+      </tr>
+      <tr>
+        <td><code>variables</code></td>
+        <td>No</td>
+        <td>Computed values derived from parameters or template functions. Reduce repetition — define a naming convention once, reference it everywhere.</td>
+      </tr>
+      <tr>
+        <td><code>resources</code></td>
+        <td>Yes</td>
+        <td>Array of resource definitions. Each entry specifies <code>type</code>, <code>apiVersion</code>, <code>name</code>, <code>location</code>, and <code>properties</code>.</td>
+      </tr>
+      <tr>
+        <td><code>outputs</code></td>
+        <td>No</td>
+        <td>Values returned after deployment completes. Use to surface resource IDs, connection strings, or other outputs for downstream pipeline steps.</td>
+      </tr>
+      <tr>
+        <td><code>functions</code></td>
+        <td>No</td>
+        <td>Custom template functions (user-defined). Rarely used — Bicep is preferred for complex logic.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>ARM template key functions</h3>
+  <p>ARM templates have a rich built-in function library. These are the ones you must know for the exam and for daily use:</p>
+
+  <table>
+    <thead>
+      <tr><th>Function</th><th>Returns</th><th>Common Use</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>resourceGroup().location</code></td>
+        <td>String</td>
+        <td>Deploy resources to the same region as the resource group without hardcoding a location</td>
+      </tr>
+      <tr>
+        <td><code>subscription().subscriptionId</code></td>
+        <td>String</td>
+        <td>Build resource IDs that reference resources in the current subscription</td>
+      </tr>
+      <tr>
+        <td><code>parameters('name')</code></td>
+        <td>Any</td>
+        <td>Reference a parameter value anywhere in the template</td>
+      </tr>
+      <tr>
+        <td><code>variables('name')</code></td>
+        <td>Any</td>
+        <td>Reference a computed variable</td>
+      </tr>
+      <tr>
+        <td><code>concat('a', 'b', 'c')</code></td>
+        <td>String / Array</td>
+        <td>Build resource names from multiple parts</td>
+      </tr>
+      <tr>
+        <td><code>uniqueString(seed)</code></td>
+        <td>13-char string</td>
+        <td>Generate a deterministic unique suffix for globally unique names (e.g. storage accounts). Same seed always returns same string.</td>
+      </tr>
+      <tr>
+        <td><code>format('{0}-{1}', a, b)</code></td>
+        <td>String</td>
+        <td>String formatting — cleaner than nested <code>concat()</code> calls</td>
+      </tr>
+      <tr>
+        <td><code>reference('resourceName')</code></td>
+        <td>Object</td>
+        <td>Get a runtime property of another resource in the template (e.g. a storage account's primary endpoint). Implicitly creates a dependency.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="callout callout-info">
+    <strong>uniqueString() is deterministic, not random</strong>
+    <code>uniqueString(resourceGroup().id)</code> always returns the same 13-character hash for the same resource group. This is by design — idempotent deployments produce the same resource names on repeat runs. It is a hash, not a random value. Two deployments to the same resource group will always generate the same string.
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     DEPENDENCIES
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Resource Dependencies</h2>
+  <p>ARM deploys resources in parallel by default for speed. When one resource must be created before another, you declare a dependency. There are two mechanisms:</p>
+
+  <h3>Explicit dependencies — dependsOn</h3>
+  <p>The <code>dependsOn</code> array lists resources by name or resource ID that must be deployed successfully before this resource is started. Use when you need to force ordering but there is no property reference between resources.</p>
+
+  <h3>Implicit dependencies — reference()</h3>
+  <p>When you use the <code>reference()</code> function to read a property from another resource, ARM automatically infers a dependency — it knows it must deploy the referenced resource first. Implicit dependencies via <code>reference()</code> are preferred when applicable: they make the dependency self-documenting and are less fragile than string-based <code>dependsOn</code>.</p>
+
+  <table>
+    <thead>
+      <tr><th>Method</th><th>How It Works</th><th>When to Use</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>dependsOn</strong></td>
+        <td>Explicit array of resource names or IDs to wait for before deploying this resource</td>
+        <td>When no property reference exists but ordering is required (e.g. a script that must run after a VM is created)</td>
+      </tr>
+      <tr>
+        <td><strong>reference()</strong></td>
+        <td>ARM reads the referenced resource's runtime state — implicitly waits for the resource to exist</td>
+        <td>When you need a property value from another resource (e.g. a storage account's connection string to inject into a web app's config)</td>
+      </tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     DEPLOYMENT MODES
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Deployment Modes: Incremental vs. Complete</h2>
+  <p>Every ARM deployment has a mode that controls what ARM does with resources in the resource group that are <em>not</em> in the template.</p>
+
+  <h3>Incremental mode (default)</h3>
+  <p>ARM deploys the resources in the template. Resources in the resource group that are <em>not</em> in the template are <strong>left unchanged</strong>. This is the safe default — you can deploy a partial template without risk of deleting resources that are managed by other templates or were created manually.</p>
+
+  <h3>Complete mode</h3>
+  <p>ARM deploys the resources in the template, then <strong>deletes any resources in the resource group that are NOT in the template</strong>. Complete mode enforces the desired state — the resource group will exactly match what the template describes after deployment.</p>
+
+  <div class="callout callout-danger">
+    <strong>Complete mode will silently delete resources</strong>
+    If you run a Complete mode deployment with a template that is missing resources (because you forgot to include them, or you have resources created outside IaC), those resources will be permanently deleted with no warning prompt in automated pipelines. Always run a <strong>what-if</strong> preview before any Complete mode deployment. This is the most dangerous ARM operation available to a standard administrator.
+  </div>
+
+  <table>
+    <thead>
+      <tr><th>Mode</th><th>Resources in template</th><th>Resources NOT in template</th><th>Safe to run partially?</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>Incremental</strong></td>
+        <td>Created or updated</td>
+        <td>Left unchanged</td>
+        <td>Yes</td>
+      </tr>
+      <tr>
+        <td><strong>Complete</strong></td>
+        <td>Created or updated</td>
+        <td><strong>Deleted</strong></td>
+        <td>No — only run with a full template and after what-if</td>
+      </tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     WHAT-IF
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>What-If Deployment</h2>
+  <p>The <strong>what-if</strong> operation previews what changes an ARM deployment would make without executing any of them. It shows each resource that would be created, modified, deleted, or remain unchanged. Think of it as a dry run.</p>
+
+  <p>Running what-if from Azure CLI:</p>
+  <pre><code>az deployment group what-if \
+  --resource-group rg-example-prod \
+  --template-file main.bicep \
+  --parameters @params.prod.json</code></pre>
+
+  <p>The output classifies each resource into one of four categories:</p>
+  <ul>
+    <li><strong>Create</strong>: resource does not exist and will be created</li>
+    <li><strong>Modify</strong>: resource exists and one or more properties will change. Shows the before/after property diff.</li>
+    <li><strong>Delete</strong>: resource exists but is not in the template — will be deleted (Complete mode only)</li>
+    <li><strong>No change</strong>: resource exists and template matches current state exactly</li>
+    <li><strong>Ignore</strong>: resource exists but ARM will not manage it (e.g. extension resources)</li>
+  </ul>
+
+  <div class="callout callout-warn">
+    <strong>What-if is not always 100% accurate</strong>
+    What-if relies on Azure resource providers returning accurate current state and change predictions. Some resource providers have known inaccuracies (they may show "Modify" for a property that won't actually change, or miss a property change). Treat what-if output as a strong signal, not a guarantee. Always review it critically before a Complete mode deployment.
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     BICEP
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Bicep: The Preferred IaC Authoring Language for Azure</h2>
+  <p><strong>Bicep</strong> is Microsoft's domain-specific language for Azure infrastructure. It compiles directly to ARM JSON — it is not a wrapper or an abstraction over ARM, it IS ARM, with a much cleaner syntax. Bicep is the recommended authoring experience; ARM JSON is the wire format that gets sent to the ARM API.</p>
+
+  <h3>Why Bicep instead of ARM JSON?</h3>
+  <ul>
+    <li>No <code>$schema</code> declarations, no quotation marks around identifiers, no explicit <code>dependsOn</code> when using symbolic references.</li>
+    <li>Native type system with IntelliSense in VS Code (Bicep extension).</li>
+    <li>String interpolation: <code>'${prefix}-${uniqueString(resourceGroup().id)}'</code> instead of <code>concat(parameters('prefix'), '-', uniqueString(resourceGroup().id))</code>.</li>
+    <li>Modules: reusable Bicep files with inputs and outputs. Compose large deployments from smaller, tested units.</li>
+    <li>Loops and conditional deployment with clean syntax.</li>
+    <li>Compile to ARM JSON for sharing with teams not using Bicep.</li>
+  </ul>
+
+  <h3>Bicep keywords</h3>
+  <table>
+    <thead>
+      <tr><th>Keyword</th><th>Purpose</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>param</code></td><td>Declare a parameter (user input). Supports types, defaults, decorators like <code>@description</code> and <code>@allowed</code>.</td></tr>
+      <tr><td><code>var</code></td><td>Declare a computed variable (not user input).</td></tr>
+      <tr><td><code>resource</code></td><td>Declare an Azure resource with a symbolic name, type, and API version.</td></tr>
+      <tr><td><code>module</code></td><td>Reference a reusable Bicep file, passing parameters and receiving outputs.</td></tr>
+      <tr><td><code>output</code></td><td>Return a value from the deployment (or module) to the caller.</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Symbolic references replace reference()</h3>
+  <p>In ARM JSON, accessing a property of another resource requires the verbose <code>reference('resourceName').properties.xxx</code> function call. In Bicep, you use the resource's symbolic name directly: <code>storageAccount.properties.primaryEndpoints.blob</code>. Bicep infers the dependency automatically — no <code>dependsOn</code> required.</p>
+
+  <h3>Conditional deployment</h3>
+  <p>Deploy a resource only if a condition is true:</p>
+  <pre><code>param deployStorage bool = true
+
+resource storageAccount 'Microsoft.Storage/storageAccounts@2023-01-01' = if (deployStorage) {
+  name: 'mystorage${uniqueString(resourceGroup().id)}'
+  location: resourceGroup().location
+  sku: { name: 'Standard_LRS' }
+  kind: 'StorageV2'
+}</code></pre>
+
+  <h3>Loops</h3>
+  <p>Deploy multiple resources from a single definition:</p>
+  <pre><code>param storageNames array = ['logs', 'data', 'archive']
+
+resource storageAccounts 'Microsoft.Storage/storageAccounts@2023-01-01' = [for name in storageNames: {
+  name: '${name}${uniqueString(resourceGroup().id)}'
+  location: resourceGroup().location
+  sku: { name: 'Standard_LRS' }
+  kind: 'StorageV2'
+}]</code></pre>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     CODE EXAMPLES
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Side-by-Side: Bicep vs. ARM JSON</h2>
+  <p>Both of the following examples deploy a storage account with a configurable name prefix and SKU. They are functionally identical — the Bicep compiles to ARM JSON that is nearly identical to the handwritten ARM JSON version.</p>
+
+  <h3>Bicep — minimal storage account module</h3>
+  <pre><code>@description('Prefix for the storage account name')
+param namePrefix string = 'contoso'
+
+@description('Storage SKU')
+@allowed(['Standard_LRS', 'Standard_GRS', 'Standard_ZRS', 'Premium_LRS'])
+param storageSku string = 'Standard_LRS'
+
+var storageAccountName = '${toLower(namePrefix)}${uniqueString(resourceGroup().id)}'
+
+resource storageAccount 'Microsoft.Storage/storageAccounts@2023-01-01' = {
+  name: storageAccountName
+  location: resourceGroup().location
+  sku: {
+    name: storageSku
+  }
+  kind: 'StorageV2'
+  properties: {
+    minimumTlsVersion: 'TLS1_2'
+    allowBlobPublicAccess: false
+    supportsHttpsTrafficOnly: true
+  }
+}
+
+output storageAccountId string = storageAccount.id
+output blobEndpoint string = storageAccount.properties.primaryEndpoints.blob</code></pre>
+
+  <h3>ARM JSON — equivalent template</h3>
+  <pre><code>{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "namePrefix": {
+      "type": "string",
+      "defaultValue": "contoso",
+      "metadata": { "description": "Prefix for the storage account name" }
+    },
+    "storageSku": {
+      "type": "string",
+      "defaultValue": "Standard_LRS",
+      "allowedValues": ["Standard_LRS", "Standard_GRS", "Standard_ZRS", "Premium_LRS"],
+      "metadata": { "description": "Storage SKU" }
+    }
+  },
+  "variables": {
+    "storageAccountName": "[concat(toLower(parameters('namePrefix')), uniqueString(resourceGroup().id))]"
+  },
+  "resources": [
+    {
+      "type": "Microsoft.Storage/storageAccounts",
+      "apiVersion": "2023-01-01",
+      "name": "[variables('storageAccountName')]",
+      "location": "[resourceGroup().location]",
+      "sku": { "name": "[parameters('storageSku')]" },
+      "kind": "StorageV2",
+      "properties": {
+        "minimumTlsVersion": "TLS1_2",
+        "allowBlobPublicAccess": false,
+        "supportsHttpsTrafficOnly": true
+      }
+    }
+  ],
+  "outputs": {
+    "storageAccountId": {
+      "type": "string",
+      "value": "[resourceId('Microsoft.Storage/storageAccounts', variables('storageAccountName'))]"
+    },
+    "blobEndpoint": {
+      "type": "string",
+      "value": "[reference(variables('storageAccountName')).primaryEndpoints.blob]"
+    }
+  }
+}</code></pre>
+
+  <div class="callout callout-info">
+    <strong>Bicep is less code for the same result</strong>
+    The Bicep version is approximately 25 lines; the ARM JSON equivalent is approximately 50 lines. For complex infrastructure with dozens of resources, this difference compounds significantly. Bicep also has compile-time type checking and IDE validation — ARM JSON errors are often caught only at deployment time.
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     MODULES
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Bicep Modules</h2>
+  <p>A <strong>Bicep module</strong> is a reusable Bicep file that accepts parameters and returns outputs. Modules are the primary mechanism for composing large deployments from smaller, tested components — a platform team can publish a "blessed" storage module that enforces corporate defaults (TLS 1.2, no public access, soft delete enabled) and application teams consume it without needing to know or replicate those settings.</p>
+
+  <p>Calling a module from a parent Bicep file:</p>
+  <pre><code>module storage './modules/storage.bicep' = {
+  name: 'storageDeployment'
+  params: {
+    namePrefix: 'payments'
+    storageSku: 'Standard_GRS'
+  }
+}
+
+// Consume the module's output
+output blobUri string = storage.outputs.blobEndpoint</code></pre>
+
+  <p>Modules can also be referenced from a <strong>Bicep Registry</strong> (a private module registry hosted in ACR) or the public Bicep Registry on GitHub — enabling teams to share vetted modules across the organisation.</p>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     TEMPLATE SPECS & DEPLOYMENT STACKS
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Template Specs and Azure Deployment Stacks</h2>
+
+  <h3>Template Specs</h3>
+  <p><strong>Template Specs</strong> store versioned ARM templates or compiled Bicep files as first-class Azure resources with their own resource ID. They live in a resource group and support RBAC — you can give a team permission to deploy a Template Spec without giving them access to the source code in your Git repository.</p>
+  <p>Benefits: versioned history of approved templates, RBAC-controlled access for deployment, no local file needed to deploy (reference the spec by resource ID), deployable from the portal, CLI, or pipelines.</p>
+
+  <h3>Azure Deployment Stacks</h3>
+  <p><strong>Azure Deployment Stacks</strong> are a newer mechanism that groups related resources (potentially across multiple resource groups or subscriptions) into a managed unit with a lifecycle. Key capabilities:</p>
+  <ul>
+    <li><strong>Unified lifecycle</strong>: create, update, and delete all managed resources together as a stack.</li>
+    <li><strong>Deny settings</strong>: the stack can apply a deny assignment to prevent modification of managed resources outside the IaC pipeline — ensuring infrastructure drift is impossible without going through the approved deployment process.</li>
+    <li><strong>Detach or delete on update</strong>: when a resource is removed from the stack template, you can configure whether it is deleted or simply detached (unmanaged but not deleted).</li>
+    <li>Deployment Stacks are the strategic replacement for Azure Blueprints, which is deprecated.</li>
+  </ul>
+
+  <div class="callout callout-warn">
+    <strong>Azure Blueprints is deprecated — use Deployment Stacks</strong>
+    Azure Blueprints was the previous mechanism for packaging policies, role assignments, and ARM templates for environment bootstrapping. It has been deprecated in favour of a combination of Azure Policy, Azure RBAC, and Deployment Stacks. If you see Blueprint-related content in study materials, confirm whether it is still current exam content.
+  </div>
+
+  <table>
+    <thead>
+      <tr><th>Feature</th><th>Template Specs</th><th>Deployment Stacks</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>Primary purpose</strong></td>
+        <td>Store and version ARM/Bicep templates as Azure resources</td>
+        <td>Manage a group of resources as a lifecycle unit</td>
+      </tr>
+      <tr>
+        <td><strong>Drift prevention</strong></td>
+        <td>No — just stores the template</td>
+        <td>Yes — deny assignments prevent out-of-band changes</td>
+      </tr>
+      <tr>
+        <td><strong>Cross-scope resources</strong></td>
+        <td>Depends on template scope</td>
+        <td>Yes — stack can span resource groups and subscriptions</td>
+      </tr>
+      <tr>
+        <td><strong>RBAC for deployment</strong></td>
+        <td>Yes — assign Reader/Contributor to the spec resource</td>
+        <td>Via standard Azure RBAC on the stack resource</td>
+      </tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     QUIZ
+═══════════════════════════════════════════════ -->
+<section class="quiz">
+  <h2>Check Your Understanding</h2>
+  <p>Click any option to see immediate feedback. Answers represent correct behaviour in a real Azure environment.</p>
+
+  <!-- Q1 -->
+  <div class="quiz-question" data-correct="b">
+    <p>1. You run an ARM deployment in Complete mode against a resource group that contains resources A, B, and C. Your template only defines resources A and B. What happens to resource C?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q1"> Resource C is left unchanged — Complete mode only applies to resources listed in the template</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q1"> Resource C is deleted — Complete mode deletes any resource in the resource group not defined in the template</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q1"> Resource C is moved to a quarantine resource group — Azure retains it for 30 days before permanent deletion</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q1"> The deployment fails — Complete mode requires all existing resources to be defined in the template before proceeding</label>
+    </div>
+    <div class="quiz-feedback">Complete mode enforces desired state: after deployment, the resource group contains exactly and only what the template defines. Resource C is permanently deleted. This is why Complete mode is dangerous with partial templates, and why running a what-if preview first is mandatory practice. Incremental mode (the default) would leave C untouched.</div>
+  </div>
+
+  <!-- Q2 -->
+  <div class="quiz-question" data-correct="c">
+    <p>2. You use <code>uniqueString(resourceGroup().id)</code> as part of a storage account name in your ARM template. A colleague asks whether the storage account will get a different name each time the template is deployed. What is the correct answer?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q2"> Yes — <code>uniqueString()</code> generates a cryptographically random string on every deployment to ensure uniqueness</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q2"> Yes — the function uses the current timestamp as part of the seed, so each deployment produces a unique name</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q2"> No — <code>uniqueString()</code> is deterministic: the same seed always produces the same 13-character hash. The name will be identical on every deployment to the same resource group.</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q2"> No — but only if you pass <code>resourceGroup().id</code> as the seed. Using a parameter as the seed would produce random results.</label>
+    </div>
+    <div class="quiz-feedback"><code>uniqueString()</code> is a deterministic hash function, not a random generator. Given the same input string (seed), it always returns the same 13-character base-58 string. Using <code>resourceGroup().id</code> ensures idempotent naming — re-running the template against the same resource group always generates the same storage account name, which ARM then finds already exists and either updates or leaves unchanged.</div>
+  </div>
+
+  <!-- Q3 -->
+  <div class="quiz-question" data-correct="a">
+    <p>3. A platform engineering team publishes a "blessed" Bicep storage module that enforces organisational security defaults. Application teams need to deploy storage accounts using this module. What is the correct mechanism for sharing and consuming the module?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q3"> Publish the module to a Bicep Registry (private registry in ACR or public registry) — application teams reference the module by registry path and receive updates when the platform team publishes new versions</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q3"> Copy the module Bicep file into each application team's repository — modules cannot be referenced remotely, only locally within the same directory structure</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q3"> Convert the module to ARM JSON and publish it as a Template Spec — Bicep modules cannot be used directly, they must be compiled first</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q3"> Store the module in an Azure Blob container — application teams download it at pipeline runtime before running their Bicep deployments</label>
+    </div>
+    <div class="quiz-feedback">Bicep modules can be published to and consumed from a Bicep Registry — either a private registry hosted in Azure Container Registry (ACR) or the public Bicep Registry. Teams reference the module with a registry path like <code>br:myregistry.azurecr.io/modules/storage:1.0</code>. This enables version management, controlled updates, and centralised governance without copying files. Template Specs also support this pattern but are for ARM JSON, not Bicep module composition.</div>
+  </div>
+
+  <!-- Q4 -->
+  <div class="quiz-question" data-correct="d">
+    <p>4. Before running a Complete mode deployment against a production resource group, what operation should always be performed first?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q4"> Export the current resource group as an ARM template to compare manually against the new template</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q4"> Enable soft-delete on all resources in the resource group to allow recovery if deletions occur</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q4"> Apply a resource lock to the resource group to prevent the deployment from proceeding if any deletions would occur</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q4"> Run a what-if deployment to preview exactly which resources would be created, modified, or deleted — this is mandatory before any Complete mode operation</label>
+    </div>
+    <div class="quiz-feedback">What-if is the correct and standard practice before Complete mode deployments. It shows precisely which resources would be created, modified, or deleted without actually making any changes. This lets you catch any resources that were accidentally omitted from the template before they are permanently deleted. Resource locks would block the deployment entirely rather than previewing it; soft-delete is not universally available; and manually comparing exported templates is error-prone and does not show the actual deployment impact.</div>
+  </div>
+
+  <!-- Q5 -->
+  <div class="quiz-question" data-correct="b">
+    <p>5. You need ARM to deploy resource B only after resource A is fully created, but you don't need any property from resource A. Which approach should you use?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q5"> Use <code>reference('resourceA')</code> in resource B's properties — this is the only way to create a dependency in ARM</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q5"> Add <code>dependsOn: ['resourceA']</code> to resource B — this explicitly tells ARM to wait for resource A before starting resource B</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q5"> Deploy resource A in a separate template first — ARM cannot sequence resources within the same template</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q5"> Use the <code>after()</code> function — it specifies a resource that must complete before the current resource starts deployment</label>
+    </div>
+    <div class="quiz-feedback"><code>dependsOn</code> creates an explicit ordering dependency. It tells ARM to deploy resource A to completion before starting resource B. Use <code>dependsOn</code> when you need ordering but do not have a property reference — for example, a deployment script that must run after a VM is provisioned. When you <em>do</em> need a property value, prefer <code>reference()</code> which creates an implicit dependency that is self-documenting. There is no <code>after()</code> function in ARM.</div>
+  </div>
+
+  <!-- Q6 -->
+  <div class="quiz-question" data-correct="c">
+    <p>6. A platform team wants to publish approved ARM templates for application teams to deploy, with RBAC controlling who can deploy which template — without exposing the source template files in source control. What Azure feature enables this?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q6"> Azure Blueprints — store and version templates with RBAC-controlled deployment access</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q6"> Azure DevOps variable groups — store template JSON as a secure variable accessible to specific pipelines</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q6"> Template Specs — store versioned ARM/Bicep templates as Azure resources with RBAC, deployable by teams without access to source files</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q6"> Azure Policy initiatives — bundle multiple policy definitions with ARM deployments for governed deployment patterns</label>
+    </div>
+    <div class="quiz-feedback">Template Specs store versioned ARM or Bicep templates as Azure resources with a resource ID. Access is controlled via Azure RBAC — you can give an application team <code>Template Spec Contributor</code> or <code>Reader</code> + deploy permission on the spec resource without giving them access to the platform team's Git repository. Teams deploy directly from the Template Spec by referencing its resource ID. Azure Blueprints is deprecated. DevOps variable groups are not designed for this purpose. Policy initiatives are governance, not deployment mechanisms.</div>
+  </div>
+
+  <div class="quiz-score"></div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     PRIMARY SOURCE
+═══════════════════════════════════════════════ -->
+<div class="primary-source">
+  <strong>Primary source for this lesson</strong>
+  <a href="https://learn.microsoft.com/en-us/azure/azure-resource-manager/bicep/overview" target="_blank">
+    What is Bicep? — Azure Resource Manager (Microsoft Learn)
+  </a>
+  <p style="margin-top:0.5rem;font-size:0.9rem;color:#deecf9;">Also read the ARM template structure documentation and the what-if deployment guide. The Bicep Playground at aka.ms/bicepdemo lets you write Bicep and see the compiled ARM JSON in real time — essential for building intuition about how the two relate.</p>
+</div>
+
+<!-- ═══════════════════════════════════════════════
+     ASK YOUR TEACHER
+═══════════════════════════════════════════════ -->
+<div class="ask-teacher">
+  <strong>Questions for your teacher (the AI agent)</strong><br>
+  This lesson covered the IaC fundamentals for Azure. Go deeper on these topics:
+  <ul style="margin-top:0.5rem;">
+    <li>Walk me through a complete Bicep module design for deploying a web application stack (App Service + Storage + Key Vault) with proper outputs and cross-module references.</li>
+    <li>How do Deployment Stacks compare to Terraform when managing Azure infrastructure — what are the trade-offs?</li>
+    <li>What is the difference between resource-group-scoped, subscription-scoped, and management-group-scoped ARM deployments, and when would I use each?</li>
+    <li>How do I handle secrets (database connection strings, API keys) in Bicep deployments without putting them in plain text in template parameters?</li>
+  </ul>
+</div>
+
+<!-- ═══════════════════════════════════════════════
+     NEXT LESSON PREVIEW
+═══════════════════════════════════════════════ -->
+<div class="callout callout-info">
+  <strong>Coming up: Lesson 14 — Virtual Networks</strong>
+  Now that you can deploy infrastructure as code, Lesson 14 moves into the networking domain — the plumbing that connects everything. Virtual Networks, subnets, Network Security Groups, route tables, and peering are the foundation for every Azure networking architecture. These are among the highest-weight topics in the AZ-104 exam.
+</div>
+
+<!-- ═══════════════════════════════════════════════
+     NAVIGATION
+═══════════════════════════════════════════════ -->
+<nav class="lesson-nav">
+  <a href="0012-containers.html">← Lesson 12 — Containers</a>
+  <a href="0014-virtual-networks.html">Lesson 14 — Virtual Networks →</a>
+</nav>
+
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

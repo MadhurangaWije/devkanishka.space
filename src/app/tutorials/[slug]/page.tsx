@@ -9,7 +9,7 @@ type Props = {
 };
 
 // These slugs have their own static folder routes and must be excluded
-const STATIC_COURSE_SLUGS = ['backend-engineering-with-nodejs', 'ml-and-dl-mastery'];
+const STATIC_COURSE_SLUGS = ['backend-engineering-with-nodejs', 'ml-and-dl-mastery', 'azure-administration'];
 
 export async function generateStaticParams() {
   return tutorials

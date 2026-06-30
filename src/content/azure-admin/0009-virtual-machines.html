@@ -1,0 +1,604 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lesson 09 — Virtual Machines: Configuration, Sizing &amp; Availability</title>
+  <link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<!-- ═══════════════════════════════════════════════
+     HEADER
+═══════════════════════════════════════════════ -->
+<header class="lesson-header">
+  <h1>Lesson 09 — Virtual Machines: Configuration, Sizing &amp; Availability</h1>
+  <div class="lesson-meta">
+    <span class="badge badge-domain">Domain 3 — Compute</span>
+    <span class="badge badge-exam">AZ-104: 20–25%</span>
+    <span class="badge badge-time">~40 min</span>
+    <span class="badge badge-prereq">Prereq: Lesson 08 — Azure Files</span>
+  </div>
+</header>
+
+<!-- ═══════════════════════════════════════════════
+     WHY THIS MATTERS
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Compute Is the Heart of the AZ-104 Exam</h2>
+  <p>At 20–25% exam weight, the compute domain is the largest single domain in AZ-104. Virtual machines are where most Azure administrators spend the majority of their day: provisioning, resizing, configuring disks, managing availability, deploying extensions, and troubleshooting. The exam tests both theoretical knowledge (which SLA does an availability zone give you?) and operational judgment (when should you use a spot VM? what disk type for a database?)</p>
+  <p>This lesson covers every major VM concept you need: VM families, the disk ecosystem, the four availability layers, proximity placement groups, spot VMs, extensions, images, and hybrid licensing. Master this and you have locked in over a fifth of your exam score before the next domain.</p>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     VM FAMILIES AND NAMING
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>VM Families and the Naming Convention</h2>
+  <p>Azure has dozens of VM series, each optimised for a specific workload class. The AZ-104 exam does not require memorising every series, but you must know the major families and be able to decode the VM size naming convention.</p>
+
+  <table>
+    <thead>
+      <tr><th>Family</th><th>Optimised For</th><th>Example Sizes</th><th>Typical Use Cases</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>D-series</strong></td>
+        <td>General purpose (balanced CPU/RAM)</td>
+        <td>Standard_D4s_v5, Standard_D8as_v5</td>
+        <td>Web servers, app servers, small databases, dev/test</td>
+      </tr>
+      <tr>
+        <td><strong>E-series</strong></td>
+        <td>Memory optimised (high RAM:vCPU ratio)</td>
+        <td>Standard_E8s_v5, Standard_E64s_v5</td>
+        <td>In-memory databases (SAP HANA, Redis), large caches</td>
+      </tr>
+      <tr>
+        <td><strong>F-series</strong></td>
+        <td>Compute optimised (high vCPU:RAM ratio)</td>
+        <td>Standard_F4s_v2, Standard_F72s_v2</td>
+        <td>Batch processing, web frontends, game servers</td>
+      </tr>
+      <tr>
+        <td><strong>L-series</strong></td>
+        <td>Storage optimised (high local NVMe throughput)</td>
+        <td>Standard_L8s_v3, Standard_L80s_v3</td>
+        <td>NoSQL databases, Elasticsearch, data warehousing</td>
+      </tr>
+      <tr>
+        <td><strong>N-series</strong></td>
+        <td>GPU compute and visualisation</td>
+        <td>Standard_NC6s_v3, Standard_NV12s_v3</td>
+        <td>AI/ML training (NC), remote visualisation and rendering (NV)</td>
+      </tr>
+      <tr>
+        <td><strong>B-series</strong></td>
+        <td>Burstable (CPU credit model)</td>
+        <td>Standard_B2s, Standard_B4ms</td>
+        <td>Dev/test, low-traffic web servers, small CI/CD agents</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>Decoding the VM Size Name</h3>
+  <p>Understanding the naming convention is a practical skill and sometimes tested directly. The format is:</p>
+
+  <div class="hierarchy">
+<span class="hier-tenant">Standard_D4s_v5</span>
+<span class="hier-mgmt">  │</span>
+<span class="hier-sub">  Standard  →  Pricing tier (Standard = production; Basic = legacy, deprecated)</span>
+<span class="hier-sub">  D         →  VM family  (D = general purpose)</span>
+<span class="hier-sub">  4         →  vCPU count</span>
+<span class="hier-sub">  s         →  Premium Storage capable  (can use Premium SSD)</span>
+<span class="hier-sub">  _v5       →  Version 5 of the D-series hardware generation</span>
+  </div>
+
+  <p>Additional letter modifiers you may encounter: <code>a</code> = AMD processor, <code>d</code> = local temp disk included, <code>i</code> = isolated (dedicated physical host), <code>l</code> = low memory variant, <code>m</code> = memory optimised variant within the family.</p>
+
+  <div class="callout callout-warn">
+    <strong>B-series burstable — CPU credits</strong>
+    B-series VMs accumulate CPU credits when running below baseline CPU utilisation, and spend those credits when bursting above baseline. If a B-series VM exhausts its CPU credits, performance is throttled to baseline — which can be as low as 10–20% CPU. Never deploy latency-sensitive or always-busy production workloads on B-series.
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     VM CREATION COMPONENTS
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>VM Creation Components</h2>
+  <p>Deploying a VM is not a single-resource operation. A VM deployment touches multiple Azure resources, each with its own lifecycle and configuration options:</p>
+
+  <ul>
+    <li><strong>OS Disk</strong>: Managed disk containing the operating system. Sourced from a marketplace image, a custom image, or an uploaded VHD. Type must be selected at creation (Standard HDD/SSD, Premium SSD v1/v2, Ultra).</li>
+    <li><strong>Data Disks</strong>: Additional managed disks attached for application data. A VM can have multiple data disks (limit depends on VM size). Each has independently configurable disk type and caching.</li>
+    <li><strong>NIC (Network Interface Card)</strong>: Every VM has at least one NIC with a private IP in a VNet subnet. A public IP can be attached. NSGs can be associated at NIC or subnet level.</li>
+    <li><strong>Admin Credentials</strong>: Windows VMs use username/password. Linux VMs should always use SSH key pairs — password authentication on Linux should be disabled.</li>
+    <li><strong>Availability Configuration</strong>: Availability set, availability zone, or none. Must be configured at VM creation time — you cannot move a deployed VM into an availability set or change its zone later.</li>
+    <li><strong>Extensions</strong>: Agents and scripts installed post-deployment for monitoring, encryption, configuration management.</li>
+  </ul>
+
+  <div class="callout callout-warn">
+    <strong>Availability cannot be changed post-deployment</strong>
+    You cannot add a VM to an availability set after it has been deployed, and you cannot change a VM's availability zone after deployment. If you make the wrong availability choice at creation time, you must delete and redeploy the VM. Plan this carefully before deployment — especially in IaC pipelines where this could trigger unintended downtime.
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     OS IMAGES
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>OS Image Types</h2>
+  <p>Azure VMs are deployed from images. Understanding image types is important for VM fleet management at scale.</p>
+
+  <table>
+    <thead>
+      <tr><th>Image Type</th><th>Description</th><th>Use Case</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>Marketplace image</strong></td>
+        <td>Pre-built images from Microsoft and third-party publishers (Windows Server, Ubuntu, RHEL, SQL Server, etc.). Always up to date.</td>
+        <td>Standard deployments where the base OS is sufficient</td>
+      </tr>
+      <tr>
+        <td><strong>Custom image (generalised)</strong></td>
+        <td>Created by Sysprep-ing (Windows) or running waagent -deprovision (Linux) on a VM, then capturing it. All machine-specific data removed.</td>
+        <td>Golden images with pre-installed software, custom configuration. Safe to deploy multiple VMs from.</td>
+      </tr>
+      <tr>
+        <td><strong>Custom image (specialised)</strong></td>
+        <td>A snapshot of a VM without Sysprep/deprovision — retains machine identity, hostname, SIDs.</td>
+        <td>Disaster recovery restore, one-off migrations. Not safe for multi-VM deployment.</td>
+      </tr>
+      <tr>
+        <td><strong>Azure Compute Gallery image</strong></td>
+        <td>Versioned images stored in a gallery (formerly Shared Image Gallery). Can replicate across regions and share across subscriptions.</td>
+        <td>Enterprise image management for large VM fleets</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>Azure Compute Gallery</h3>
+  <p>The Azure Compute Gallery (formerly Shared Image Gallery) provides enterprise-grade image management:</p>
+  <ul>
+    <li><strong>Image definitions</strong>: Metadata container specifying OS type (Windows/Linux), publisher, offer, SKU, and generation (Gen1/Gen2).</li>
+    <li><strong>Image versions</strong>: Actual image artifacts with version numbers (e.g. 1.0.0, 1.1.0). Each version can be replicated to multiple Azure regions for performance.</li>
+    <li><strong>RBAC sharing</strong>: Share images with specific subscriptions, tenants, or make them publicly available.</li>
+    <li><strong>Regional replication</strong>: Azure replicates image versions to chosen regions automatically, reducing deployment time for VM scale sets and large fleets.</li>
+  </ul>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     MANAGED DISKS
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Managed Disks</h2>
+  <p>Always use <strong>managed disks</strong>. Unmanaged disks (page blobs stored in a customer-managed storage account) are a legacy concept — you have to manage the storage accounts yourself, availability set placement is limited, and Azure Backup integration is poor. Managed disks are standalone Azure resources with their own resource ID, independent lifecycle, and first-class Azure feature support.</p>
+
+  <h3>Disk Types Compared</h3>
+
+  <table>
+    <thead>
+      <tr><th>Disk Type</th><th>Media</th><th>IOPS (max)</th><th>Throughput</th><th>Latency</th><th>Best For</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>Standard HDD</strong></td>
+        <td>HDD (magnetic)</td>
+        <td>500 IOPS/disk</td>
+        <td>60 MB/s</td>
+        <td>High (ms)</td>
+        <td>Dev/test, infrequently accessed data, backups</td>
+      </tr>
+      <tr>
+        <td><strong>Standard SSD</strong></td>
+        <td>SSD</td>
+        <td>6,000 IOPS/disk</td>
+        <td>750 MB/s</td>
+        <td>Medium</td>
+        <td>Production workloads with moderate IOPS, web servers</td>
+      </tr>
+      <tr>
+        <td><strong>Premium SSD v1</strong></td>
+        <td>SSD (NVMe)</td>
+        <td>Up to 20,000 IOPS/disk (P50)</td>
+        <td>Up to 900 MB/s</td>
+        <td>Low (single-digit ms)</td>
+        <td>Production databases, enterprise apps; IOPS/throughput tied to disk size tier</td>
+      </tr>
+      <tr>
+        <td><strong>Premium SSD v2</strong></td>
+        <td>SSD (NVMe)</td>
+        <td>Up to 80,000 IOPS/disk</td>
+        <td>Up to 1,200 MB/s</td>
+        <td>Sub-ms</td>
+        <td>High-performance databases; IOPS/throughput configurable independently of size</td>
+      </tr>
+      <tr>
+        <td><strong>Ultra Disk</strong></td>
+        <td>SSD (NVMe)</td>
+        <td>Up to 160,000 IOPS/disk</td>
+        <td>Up to 4,000 MB/s</td>
+        <td>Sub-ms (&lt;1 ms)</td>
+        <td>Most demanding I/O: SQL Server, SAP HANA, Oracle. Must be in same AZ as VM.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="callout callout-warn">
+    <strong>Premium SSD v1 IOPS are size-tiered</strong>
+    On Premium SSD v1, IOPS and throughput are determined by the disk size tier (P-series), not by what you pay independently. A P10 (128 GiB) gives 500 IOPS; a P30 (1 TiB) gives 5,000 IOPS. If you need more IOPS, you must provision a larger disk — even if you don't need the extra storage. Premium SSD v2 solves this by allowing you to set IOPS independently of size.
+  </div>
+
+  <div class="callout callout-warn">
+    <strong>Ultra Disk constraints</strong>
+    Ultra Disk is only available in specific regions and Availability Zones. The VM must be in the same Availability Zone as the Ultra Disk — which means Ultra Disk deployments always require AZ-aware placement. Ultra Disk also cannot be used as an OS disk (data disks only) and does not support snapshots or Azure Backup. Plan your architecture accordingly before committing to Ultra Disk.
+  </div>
+
+  <h3>Disk Caching</h3>
+  <p>Each managed disk has a configurable caching mode, which determines how the host server's RAM and CPU are used to buffer I/O before it reaches the actual disk:</p>
+
+  <table>
+    <thead>
+      <tr><th>Cache Mode</th><th>Behaviour</th><th>Default On</th><th>When to Use</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>None</strong></td>
+        <td>I/O goes directly to disk. No host cache involved.</td>
+        <td>Data disks (Ultra, Premium SSD v2)</td>
+        <td>Write-heavy workloads; databases where application-level write-ahead logging already handles durability</td>
+      </tr>
+      <tr>
+        <td><strong>ReadOnly</strong></td>
+        <td>Reads are served from host cache (RAM). Writes go directly to disk. Cache is populated on read.</td>
+        <td>—</td>
+        <td>Read-heavy data disks: OS images, reference data, read-only databases</td>
+      </tr>
+      <tr>
+        <td><strong>ReadWrite</strong></td>
+        <td>Both reads and writes are buffered in host cache before being committed to disk.</td>
+        <td>OS disk</td>
+        <td>Only the OS disk. Never use on database data disks.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="callout callout-danger">
+    <strong>ReadWrite cache on database data disks = data loss risk</strong>
+    If a VM is deallocated, rebooted, or crashes while ReadWrite cache has pending writes that have not been flushed to the managed disk, those writes are <strong>permanently lost</strong>. This causes database corruption in transactional workloads (SQL Server, MySQL, PostgreSQL). Always use <code>None</code> or <code>ReadOnly</code> on data disks running databases. This is a critical operations mistake that appears regularly on the exam and in real-world incidents.
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     AVAILABILITY
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Availability: Four Levels of Protection</h2>
+  <p>Azure's availability model is layered. The level of protection you need — and the SLA you can claim — depends on which option you use. These concepts are tested heavily on AZ-104 because the exam loves questions that distinguish between the options and their specific SLA percentages.</p>
+
+  <h3>Fault Domains and Update Domains</h3>
+  <p>These are the building blocks of Availability Sets:</p>
+  <ul>
+    <li><strong>Fault Domain (FD)</strong>: A physical rack in a datacenter that shares a power source and network switch. VMs in different fault domains will not be simultaneously affected by a rack power failure or network switch failure. Availability sets use 2–3 fault domains.</li>
+    <li><strong>Update Domain (UD)</strong>: A logical grouping of VMs that Azure reboots together during planned maintenance. Azure guarantees it will only reboot one update domain at a time. Default: 5 UDs per availability set. Azure waits 30 minutes between UDs during maintenance.</li>
+  </ul>
+
+  <h3>Availability Comparison</h3>
+
+  <table>
+    <thead>
+      <tr><th>Option</th><th>Protects Against</th><th>Does NOT Protect Against</th><th>SLA</th><th>Key Constraint</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>No availability config</strong></td>
+        <td>Nothing beyond Azure's internal host maintenance</td>
+        <td>Host failure, rack failure, datacenter failure</td>
+        <td>99.9% (single VM with Premium SSD)</td>
+        <td>—</td>
+      </tr>
+      <tr>
+        <td><strong>Availability Set</strong></td>
+        <td>Rack power/network failure (FDs); planned maintenance reboots (UDs)</td>
+        <td>Datacenter failure, regional failure</td>
+        <td>99.95%</td>
+        <td>All VMs in same datacenter. Must be set at VM creation.</td>
+      </tr>
+      <tr>
+        <td><strong>Availability Zone</strong></td>
+        <td>Datacenter failure (zone failure); rack and power failures within zone</td>
+        <td>Regional failure (both regions of a region pair)</td>
+        <td>99.99%</td>
+        <td>VMs in different physical datacenters in same region. Must be set at VM creation.</td>
+      </tr>
+      <tr>
+        <td><strong>Azure Site Recovery (cross-region)</strong></td>
+        <td>Regional failure</td>
+        <td>—</td>
+        <td>Based on RPO/RTO targets (not a VM SLA)</td>
+        <td>Separate service; DR, not HA</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="callout callout-info">
+    <strong>Availability Zones — the 99.99% answer</strong>
+    Whenever an exam question asks how to achieve 99.99% VM SLA, the answer is Availability Zones. Deploying two or more VMs in different zones within the same region gives you 99.99% uptime SLA from Microsoft. The zones are physically separate datacenters with independent power, cooling, and networking — a failure in one zone does not affect the others.
+  </div>
+
+  <h3>Proximity Placement Groups</h3>
+  <p>Proximity Placement Groups (PPGs) instruct Azure to co-locate VMs as physically close as possible — in the same datacenter, on the same compute cluster. This minimises network latency between VMs, which is critical for tightly coupled workloads like HPC clusters or multi-tier apps with microsecond latency requirements.</p>
+  <p><strong>The trade-off</strong>: PPGs reduce fault tolerance. If the underlying host cluster or datacenter experiences a failure, all VMs in the PPG may be affected simultaneously. PPGs and full availability zone isolation are inherently in tension — you must choose based on your workload's latency vs. resilience requirements.</p>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     SPOT VMs
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Azure Spot VMs</h2>
+  <p>Spot VMs allow you to use Azure's unused compute capacity at up to <strong>90% discount</strong> compared to pay-as-you-go pricing. The catch: Azure can <strong>evict</strong> a spot VM at any time — with only <strong>30 seconds notice</strong> — when Azure needs the capacity back for standard-priority workloads.</p>
+
+  <table>
+    <thead>
+      <tr><th>Aspect</th><th>Details</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>Eviction policy</strong></td>
+        <td>Stop/Deallocate (VM is stopped and deallocated but disk preserved) or Delete (VM and disk deleted on eviction)</td>
+      </tr>
+      <tr>
+        <td><strong>Eviction notice</strong></td>
+        <td>30-second notice via Azure Metadata Service or Azure Scheduled Events</td>
+      </tr>
+      <tr>
+        <td><strong>Max price</strong></td>
+        <td>Optionally set a maximum price you're willing to pay per hour; eviction occurs if spot price exceeds max</td>
+      </tr>
+      <tr>
+        <td><strong>Suitable workloads</strong></td>
+        <td>Batch processing, data analytics, CI/CD agents, development environments, stateless web tiers with graceful shutdown</td>
+      </tr>
+      <tr>
+        <td><strong>Unsuitable workloads</strong></td>
+        <td>Databases, stateful apps, production user-facing services, anything requiring guaranteed availability</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="callout callout-warn">
+    <strong>Spot VMs and VMSS</strong>
+    Spot VMs are commonly combined with VM Scale Sets using a mixed instance policy (some standard instances + some spot instances). This lets you run the majority of capacity on cheap spot while maintaining a baseline of standard instances that won't be evicted. This pattern is common in large-scale batch and ML workloads.
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     VM EXTENSIONS
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>VM Extensions</h2>
+  <p>VM extensions are small agent packages that run inside the VM to provide post-deployment automation and integration with Azure services. They run under the Azure VM Guest Agent, which must be running on the VM.</p>
+
+  <table>
+    <thead>
+      <tr><th>Extension</th><th>Purpose</th><th>Key Points</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>Custom Script Extension (CSE)</strong></td>
+        <td>Runs a shell script (Windows: PowerShell/CMD; Linux: bash) on the VM at deployment or on-demand</td>
+        <td>One-shot execution — not idempotent by design. Re-running requires updating the script version. Download script from Azure Storage, GitHub, or embed in extension JSON.</td>
+      </tr>
+      <tr>
+        <td><strong>Azure Monitor Agent (AMA)</strong></td>
+        <td>Collects performance metrics, event logs, syslog from the VM and sends to Log Analytics Workspace</td>
+        <td>Replaces legacy Log Analytics Agent (MMA/OMS) and Azure Diagnostics extension. Required for VM Insights, Change Tracking, Update Manager in 2026. Uses Data Collection Rules (DCRs) for fine-grained data collection configuration.</td>
+      </tr>
+      <tr>
+        <td><strong>Azure Disk Encryption (ADE)</strong></td>
+        <td>Encrypts OS and data disks at the volume level</td>
+        <td>Windows: BitLocker; Linux: dm-crypt. Encryption keys stored in Azure Key Vault. Requires Key Vault to be in same subscription. Distinct from SSE (Server-Side Encryption) which is Azure-managed and always on.</td>
+      </tr>
+      <tr>
+        <td><strong>PowerShell DSC</strong></td>
+        <td>PowerShell Desired State Configuration for declarative Windows configuration management</td>
+        <td>Good for enforcing OS configuration state (installed roles, services, registry keys). Idempotent. Can integrate with Azure Automation State Configuration.</td>
+      </tr>
+      <tr>
+        <td><strong>VM Access Extension</strong></td>
+        <td>Reset admin passwords, SSH keys, or network configuration on a locked-out VM</td>
+        <td>Emergency use. Allows recovery without console access when SSH/RDP is broken.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="callout callout-info">
+    <strong>AMA replaces MMA — retirement timeline</strong>
+    The legacy Log Analytics Agent (MMA, also called OMS agent) was deprecated and retired in 2024. All VMs should now use the Azure Monitor Agent (AMA) with Data Collection Rules. If you still see exam or scenario content referencing MMA/OMS, treat AMA as the correct modern answer. Key difference: AMA uses DCRs for configuration rather than Log Analytics workspace settings, enabling more granular and cost-efficient data collection.
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     SNAPSHOTS AND BACKUP
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>VM Snapshots vs. Azure Backup</h2>
+  <p>There are two ways to create point-in-time recovery points for a VM's disks. Understanding when to use each is important for both the exam and production operations.</p>
+
+  <table>
+    <thead>
+      <tr><th>Method</th><th>Mechanism</th><th>Application Consistent?</th><th>Use Case</th><th>Cost</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>Managed Disk Snapshot</strong></td>
+        <td>Full or incremental copy of a single managed disk, stored in Azure</td>
+        <td>Crash-consistent only (unless VM is quiesced)</td>
+        <td>Pre-change safety copy before risky disk operations; ad-hoc disk restore</td>
+        <td>Storage cost for snapshot data (incremental after first)</td>
+      </tr>
+      <tr>
+        <td><strong>Azure Backup for VMs</strong></td>
+        <td>VSS-coordinated (Windows) or fsfreeze (Linux) snapshot of all VM disks via Recovery Services Vault</td>
+        <td>Yes — application-consistent for most workloads</td>
+        <td>Scheduled, policy-driven backup with long-term retention; BCDR</td>
+        <td>Vault storage + backup instance fee</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="callout callout-warn">
+    <strong>Disk snapshots are not VM backups</strong>
+    A managed disk snapshot is a copy of a single disk at a point in time. A VM typically has an OS disk and one or more data disks. If you snapshot each disk separately (not simultaneously), there is no consistency guarantee across them — a database transaction could be split across the OS disk and data disk snapshot timestamps. Use Azure Backup for VM-level consistent recovery. Use snapshots for quick, single-disk, pre-change safety nets.
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     AZURE HYBRID BENEFIT AND RESIZE
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Azure Hybrid Benefit</h2>
+  <p>Azure Hybrid Benefit (AHB) allows you to apply existing on-premises <strong>Windows Server licenses with Software Assurance</strong> to Azure VMs — paying Linux pricing for Windows VMs. The savings can reach <strong>up to 49%</strong> on Windows VM compute costs.</p>
+  <p>AHB can also be applied to SQL Server licences (avoiding SQL license charges on Azure VMs) and to Azure Stack HCI licensing. For Windows VMs, AHB is toggled at VM creation time or applied to existing VMs without downtime — it is purely a billing flag.</p>
+
+  <h2>Resizing VMs</h2>
+  <p>VM resize behaviour depends on whether the target size is available on the same physical host cluster as the current VM:</p>
+  <ul>
+    <li><strong>Same family, nearby sizes</strong>: Azure can often resize without deallocating the VM — brief reboot but no full deallocation. Example: D4s_v5 → D8s_v5.</li>
+    <li><strong>Cross-family resize</strong>: Requires VM deallocation (the VM is stopped and its compute allocation released). The VM is reassigned to a different host cluster that supports the target family. This causes downtime. Example: D4s_v5 → E8s_v5.</li>
+  </ul>
+
+  <div class="callout callout-info">
+    <strong>Resize and availability sets</strong>
+    If a VM is in an availability set, all VMs in the same availability set must support the target size — because they share the same physical host cluster. If you try to resize to a size not available on that cluster, the resize will fail. You may need to stop all VMs in the availability set first to allow Azure to reallocate them to a different cluster that supports the target size.
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     QUIZ
+═══════════════════════════════════════════════ -->
+<section class="quiz">
+  <h2>Check Your Understanding</h2>
+  <p>Click any option to see immediate feedback. Answers represent correct behaviour in a real Azure environment.</p>
+
+  <!-- Q1 -->
+  <div class="quiz-question" data-correct="c">
+    <p>1. You are deploying a two-VM application tier and need to achieve a 99.99% SLA for the tier's uptime. What deployment configuration achieves this?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q1"> Deploy both VMs in the same Availability Set with 2 Fault Domains</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q1"> Deploy both VMs in the same Availability Zone with Premium SSD disks attached</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q1"> Deploy the two VMs in different Availability Zones within the same Azure region</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q1"> Enable Azure Site Recovery for automatic failover between the two VMs</label>
+    </div>
+    <div class="quiz-feedback">Deploying VMs in different Availability Zones gives you the 99.99% multi-VM SLA. Availability Zones are physically separate datacenters with independent power, cooling, and networking — a zone failure only affects VMs in that zone. An Availability Set provides 99.95% SLA (same datacenter, different racks), which doesn't protect against datacenter failures. Azure Site Recovery is a DR tool (not an HA solution) and has no SLA for VM uptime continuity.</div>
+  </div>
+
+  <!-- Q2 -->
+  <div class="quiz-question" data-correct="a">
+    <p>2. You need a 2 TiB data disk that supports 50,000 IOPS and 600 MB/s throughput, configurable independently of the disk size. Which Azure managed disk type meets this requirement?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q2"> Premium SSD v2 — it allows independent configuration of disk size, IOPS, and throughput, unlike v1 which ties IOPS to size tier</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q2"> Standard SSD — it supports configurable IOPS independently of disk size at this performance level</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q2"> Ultra Disk and Premium SSD v1 both support independent IOPS configuration — either would work here</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q2"> Disk performance in Azure is always proportional to disk size; no disk type supports independent IOPS configuration</label>
+    </div>
+    <div class="quiz-feedback">Premium SSD v2 is the correct answer. It allows you to independently set disk size, IOPS, and throughput — you can have a 2 TiB disk with exactly the IOPS and throughput your workload needs, without over-provisioning storage. Premium SSD v1 ties IOPS and throughput to the P-series size tier (P50 = 2 TiB = 7,500 IOPS, which is less than the required 50,000). Ultra Disk also supports independent configuration but requires an Availability Zone deployment and is more expensive; it cannot be used as an OS disk.</div>
+  </div>
+
+  <!-- Q3 -->
+  <div class="quiz-question" data-correct="d">
+    <p>3. A database team configures ReadWrite disk caching on the data disks of their SQL Server VM for maximum write performance. What risk have they introduced?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q3"> ReadWrite cache maximises database write performance and is always recommended for SQL Server data disks — there is no additional risk</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q3"> ReadOnly cache should be avoided on all disks including OS disks — only None is safe for production VMs</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q3"> None (no cache) should only be used for Ultra Disks; ReadWrite is the appropriate choice for all Premium SSD v1 disks</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q3"> If the VM crashes or is restarted while writes are buffered in the host cache, those buffered writes will be permanently lost — causing database corruption in the transactional log and data files</label>
+    </div>
+    <div class="quiz-feedback">ReadWrite cache buffers writes in the host server's RAM before committing them to the managed disk. If the VM (or the host) crashes before the cached writes are flushed, the data in the host cache is permanently lost — it never reached the durable storage. For SQL Server data and log disks, this means transaction log records or data pages could be missing after a crash recovery, leaving the database in a corrupted state. Always use None for database data disks. ReadOnly cache is safe for data disks that are read-heavy (e.g. OS disks, reference data).</div>
+  </div>
+
+  <!-- Q4 -->
+  <div class="quiz-question" data-correct="b">
+    <p>4. You have two VMs in an Availability Set with 2 Fault Domains. The rack hosting Fault Domain 0 loses power. What is the expected outcome?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q4"> An availability set with 2 VMs guarantees both remain running during any Azure-initiated failure event</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q4"> The VM on Fault Domain 0 goes down; the VM on Fault Domain 1 continues running — the rack failure only affects one fault domain, and both VMs are in the same datacenter</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q4"> Availability Zones and Availability Sets provide the same protection level against rack-level failures</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q4"> Both VMs share the same physical host to reduce latency, so both would go down in this scenario</label>
+    </div>
+    <div class="quiz-feedback">Correct. The availability set ensures that the two VMs are on different physical racks (fault domains), so a single rack power failure only takes down one VM. The surviving VM (on FD 1) continues running. However, both VMs are in the same datacenter — so a full datacenter failure (fire, flooding, major power failure) would take down both. For datacenter-level protection, you need Availability Zones.</div>
+  </div>
+
+  <!-- Q5 -->
+  <div class="quiz-question" data-correct="c">
+    <p>5. A developer wants to use Azure Spot VMs for a production API that handles user-facing requests. You need to explain why this is inappropriate. What is the primary technical risk?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q5"> Spot VMs can only be evicted during Azure planned maintenance windows with at least 24 hours notice</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q5"> Spot VMs are automatically evicted after exactly 7 days regardless of capacity availability</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q5"> Spot VMs can be evicted by Azure with only 30 seconds notice at any time when capacity is reclaimed for standard-priority workloads — making them unsuitable for stateful or latency-sensitive production services</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q5"> Spot VMs cannot be deployed with NSGs or public IPs, making them unsuitable for internet-facing production workloads</label>
+    </div>
+    <div class="quiz-feedback">The critical issue with Spot VMs is the 30-second eviction notice. Azure can reclaim spot capacity at any moment when demand from standard-priority customers increases. A user-facing production API would experience immediate downtime with no meaningful recovery window. 30 seconds is only enough time to signal an eviction handler to do a very fast graceful shutdown — sufficient for a batch job to checkpoint, but not for a stateful API to drain connections and hand off work. Spot VMs are excellent for batch, CI/CD, ML training, and other interruptible workloads.</div>
+  </div>
+
+  <!-- Q6 -->
+  <div class="quiz-question" data-correct="a">
+    <p>6. An architect asks which VM monitoring agent you should deploy on new Azure VMs in 2026 for metric collection, log forwarding to a Log Analytics workspace, and VM Insights. What is the correct answer?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q6"> The Azure Monitor Agent (AMA) — it is the current replacement for both the Log Analytics Agent (MMA) and the Diagnostics extension, supports Data Collection Rules, and is required for VM Insights, Change Tracking, and Update Manager</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q6"> The Log Analytics Agent (MMA/OMS) — it is the current recommended agent; AMA is only in preview and not production-ready</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q6"> Both the Log Analytics Agent and AMA must be installed simultaneously for complete monitoring coverage</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q6"> The Azure Diagnostics extension and AMA serve different purposes and both are required for all monitoring scenarios</label>
+    </div>
+    <div class="quiz-feedback">The Azure Monitor Agent (AMA) is the correct and current answer. The legacy Log Analytics Agent (MMA/OMS) was retired in 2024 — do not install it on new VMs. AMA collects metrics, Windows Event Logs, Performance Counters, and Linux Syslog via Data Collection Rules (DCRs), which give you fine-grained control over what data is collected and where it is sent. It is required for VM Insights (the VM monitoring feature in Azure Monitor), Change Tracking, and Azure Update Manager in 2026.</div>
+  </div>
+
+  <div class="quiz-score"></div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     PRIMARY SOURCE
+═══════════════════════════════════════════════ -->
+<div class="primary-source">
+  <strong>Primary source for this lesson</strong>
+  <a href="https://learn.microsoft.com/en-us/azure/virtual-machines/overview" target="_blank">
+    Virtual machines in Azure — Overview (Microsoft Learn)
+  </a>
+  <p style="margin-top:0.5rem;font-size:0.9rem;color:#deecf9;">Follow the linked articles on managed disk types, availability options, and VM extensions. The managed disks overview and the availability options comparison page are essential reading before your exam.</p>
+</div>
+
+<!-- ═══════════════════════════════════════════════
+     ASK YOUR TEACHER
+═══════════════════════════════════════════════ -->
+<div class="ask-teacher">
+  <strong>Questions for your teacher (the AI agent)</strong><br>
+  This lesson covered VM fundamentals at depth. Explore further with any of these:
+  <ul style="margin-top:0.5rem;">
+    <li>Walk me through creating a generalised Windows Server image using Sysprep and storing it in an Azure Compute Gallery with regional replication.</li>
+    <li>How do I configure Azure Disk Encryption (ADE) on an existing VM — what Key Vault settings are required?</li>
+    <li>Explain the difference between Azure Disk Encryption (ADE), Server-Side Encryption (SSE), and host-based encryption — when would you use each?</li>
+    <li>How do Proximity Placement Groups interact with Availability Zones — can you use both simultaneously?</li>
+  </ul>
+</div>
+
+<!-- ═══════════════════════════════════════════════
+     NEXT LESSON PREVIEW
+═══════════════════════════════════════════════ -->
+<div class="callout callout-info">
+  <strong>Coming up: Lesson 10 — VM Scale Sets, Azure Bastion &amp; JIT Access</strong>
+  Lesson 10 builds on VM fundamentals to cover fleet management (VMSS), and the two most important secure access patterns for VMs in enterprise environments: Azure Bastion (no public IP, browser-based RDP/SSH) and Just-In-Time access (time-limited NSG rules). Both are heavily tested on AZ-104.
+</div>
+
+<!-- ═══════════════════════════════════════════════
+     NAVIGATION
+═══════════════════════════════════════════════ -->
+<nav class="lesson-nav">
+  <a href="0008-azure-files.html">← Lesson 08 — Azure Files</a>
+  <a href="0010-vmss-bastion-jit.html">Lesson 10 — VM Scale Sets, Bastion &amp; JIT →</a>
+</nav>
+
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

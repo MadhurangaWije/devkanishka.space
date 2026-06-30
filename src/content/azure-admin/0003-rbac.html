@@ -1,0 +1,476 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lesson 03 — Role-Based Access Control (RBAC)</title>
+  <link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<!-- ═══════════════════════════════════════════════
+     HEADER
+═══════════════════════════════════════════════ -->
+<header class="lesson-header">
+  <h1>Lesson 03 — Role-Based Access Control (RBAC)</h1>
+  <div class="lesson-meta">
+    <span class="badge badge-domain">Domain 1 — Identity &amp; Governance</span>
+    <span class="badge badge-exam">AZ-104: 20–25%</span>
+    <span class="badge badge-time">~30 min</span>
+    <span class="badge badge-prereq">Prereq: Lessons 01–02</span>
+  </div>
+</header>
+
+<!-- ═══════════════════════════════════════════════
+     WHY THIS MATTERS
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Why RBAC is the Cornerstone of Azure Security</h2>
+  <p>Azure RBAC is the mechanism that answers: <em>"Can this identity perform this action at this scope?"</em> Every API call to Azure Resource Manager (ARM) is evaluated against RBAC before the operation is executed. Every mistake in RBAC — a role assigned at too broad a scope, a permanent privileged assignment instead of a just-in-time one, a misconfigured custom role — creates real security risk that compounds over time as an environment grows.</p>
+  <p>In the AZ-104 exam, RBAC questions are among the most common and the most nuanced. The exam tests not just what roles exist, but the precise mechanics of how permissions are evaluated: inheritance, additive accumulation, NotActions semantics, and the interaction between RBAC and Azure Policy.</p>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     FOUR COMPONENTS
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>The Four Components of a Role Assignment</h2>
+  <p>Every Azure RBAC role assignment is the combination of exactly four things:</p>
+
+  <div class="hierarchy">
+<span class="hier-tenant">🔐 Role Assignment</span>
+<span class="hier-mgmt">  ├─ 👤 Security Principal   — WHO: user, group, service principal, managed identity</span>
+<span class="hier-mgmt">  ├─ 📋 Role Definition      — WHAT: the set of allowed (and excluded) actions</span>
+<span class="hier-sub">  ├─ 🎯 Scope                — WHERE: MG / Subscription / Resource Group / Resource</span>
+<span class="hier-rg">  └─ 📌 Assignment           — the binding record that connects the three above</span>
+  </div>
+
+  <h3>Who can create role assignments?</h3>
+  <p>Only two built-in roles can create role assignments:</p>
+  <ul>
+    <li><strong>Owner</strong> — full resource access plus the ability to manage access</li>
+    <li><strong>User Access Administrator</strong> — can manage access only, with no resource permissions of their own</li>
+  </ul>
+
+  <div class="callout callout-warn">
+    <strong>The additive model: permissions accumulate</strong>
+    Azure RBAC is additive. If a user has the Reader role on a subscription <em>and</em> the Contributor role on a specific resource group, they have Contributor-level access within that resource group and Reader access everywhere else. Multiple role assignments stack — you never "cancel out" permissions with a lower-scoped role (unless a Deny assignment is involved — see later in this lesson).
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     ROLE DEFINITIONS
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Role Definitions: Structure and Semantics</h2>
+  <p>A role definition is a JSON document containing five top-level fields. You must understand each — they appear in exam questions and in production custom role authoring.</p>
+
+  <pre><code>{
+  "Name": "Custom VM Operator",
+  "Description": "Start, stop, and restart VMs. Cannot create or delete.",
+  "Actions": [
+    "Microsoft.Compute/virtualMachines/start/action",
+    "Microsoft.Compute/virtualMachines/deallocate/action",
+    "Microsoft.Compute/virtualMachines/restart/action",
+    "Microsoft.Compute/virtualMachines/read",
+    "Microsoft.Resources/subscriptions/resourceGroups/read"
+  ],
+  "NotActions": [],
+  "DataActions": [],
+  "NotDataActions": [],
+  "AssignableScopes": [
+    "/subscriptions/a1b2c3d4-1234-5678-abcd-ef1234567890"
+  ]
+}</code></pre>
+
+  <h3>Actions vs. DataActions — the most important distinction</h3>
+  <table>
+    <thead>
+      <tr><th>Field</th><th>What it controls</th><th>Evaluated by</th><th>Examples</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>Actions</strong></td>
+        <td>Azure Resource Manager (ARM) management plane operations — creating, deleting, and configuring resources</td>
+        <td>ARM / RBAC engine</td>
+        <td><code>Microsoft.Storage/storageAccounts/write</code><br><code>Microsoft.KeyVault/vaults/deploy/action</code></td>
+      </tr>
+      <tr>
+        <td><strong>DataActions</strong></td>
+        <td>Data plane operations — reading/writing data <em>within</em> a resource (blob data, Key Vault secret values, queue messages)</td>
+        <td>The individual service's data plane, delegated from RBAC</td>
+        <td><code>Microsoft.Storage/storageAccounts/blobServices/containers/blobs/read</code><br><code>Microsoft.KeyVault/vaults/secrets/getSecret/action</code></td>
+      </tr>
+      <tr>
+        <td><strong>NotActions</strong></td>
+        <td>Subtracted from a wildcard <code>*</code> in Actions — does NOT mean deny</td>
+        <td>ARM / RBAC engine</td>
+        <td><code>Microsoft.Authorization/*/Delete</code></td>
+      </tr>
+      <tr>
+        <td><strong>NotDataActions</strong></td>
+        <td>Subtracted from a wildcard in DataActions — same semantics as NotActions but for data plane</td>
+        <td>Service data plane</td>
+        <td><code>Microsoft.Storage/storageAccounts/blobServices/containers/blobs/delete</code></td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="callout callout-danger">
+    <strong>NotActions is NOT a deny — this is the most common RBAC misconception</strong>
+    <code>NotActions: ["Microsoft.Authorization/*/Delete"]</code> does not prevent a user from deleting role assignments. It only means "exclude this from the wildcard in my Actions list." If a second role assignment grants <code>Microsoft.Authorization/*/Delete</code> explicitly, the user <em>can</em> perform that action. The only way to prevent an action unconditionally is a <strong>Deny assignment</strong> — which you cannot create directly via RBAC (see the Deny Assignments section below).
+  </div>
+
+  <div class="callout callout-warn">
+    <strong>Why Actions vs. DataActions matters for Key Vault and Storage</strong>
+    The Contributor role has <code>Actions: ["*"]</code> which includes all management plane operations on Key Vault and Storage. But Contributor has no DataActions — meaning a Contributor can create a Key Vault but cannot read the secrets inside it. To read secrets, you need <strong>Key Vault Secrets User</strong> (a data plane role). This separation of management plane and data plane is critical for zero-trust architecture.
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     BUILT-IN ROLES
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Built-In Roles to Memorise</h2>
+  <p>There are over 100 built-in roles in Azure. The exam tests a specific subset. Memorise these precisely.</p>
+
+  <h3>General-purpose roles</h3>
+  <table>
+    <thead>
+      <tr><th>Role</th><th>What it can do</th><th>What it cannot do</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>Owner</strong></td>
+        <td>Full access to all resources <em>and</em> can manage access (create role assignments)</td>
+        <td>Cannot override Azure Policy Deny assignments</td>
+      </tr>
+      <tr>
+        <td><strong>Contributor</strong></td>
+        <td>Full access to create, update, delete all resources</td>
+        <td>Cannot manage access (no role assignment creation). Cannot grant access to others.</td>
+      </tr>
+      <tr>
+        <td><strong>Reader</strong></td>
+        <td>View all resources</td>
+        <td>Cannot make any changes, cannot read secrets/data plane</td>
+      </tr>
+      <tr>
+        <td><strong>User Access Administrator</strong></td>
+        <td>Manage user access (create role assignments) at the assigned scope</td>
+        <td>Cannot manage resources themselves — no compute, network, or storage actions</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>Service-specific roles (exam-relevant)</h3>
+  <table>
+    <thead>
+      <tr><th>Role</th><th>Purpose</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><strong>Storage Blob Data Contributor</strong></td><td>Read, write, delete blob data (DataActions). Does not grant management plane access to storage accounts.</td></tr>
+      <tr><td><strong>Storage Blob Data Reader</strong></td><td>Read blob data only. Common for application identities needing read-only storage access.</td></tr>
+      <tr><td><strong>Key Vault Secrets Officer</strong></td><td>Manage secrets in Key Vault (create, update, delete, list). Also a DataActions role.</td></tr>
+      <tr><td><strong>Key Vault Secrets User</strong></td><td>Read (get) secret values only. Minimum required role for applications reading secrets.</td></tr>
+      <tr><td><strong>Network Contributor</strong></td><td>Manage virtual networks, NSGs, load balancers, route tables. Cannot manage VMs or subscriptions.</td></tr>
+      <tr><td><strong>Virtual Machine Contributor</strong></td><td>Create and manage VMs. Does not include access to VNets, Storage, or Key Vaults — those require separate assignments.</td></tr>
+      <tr><td><strong>Monitoring Contributor</strong></td><td>Read monitoring data and edit monitoring settings. Required for policy remediation tasks that deploy diagnostic settings.</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     CUSTOM ROLES
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Custom Role Definitions</h2>
+  <p>When no built-in role matches your least-privilege requirement precisely, you create a <strong>custom role</strong>. Custom roles are defined at the tenant level but are scoped to specific subscriptions or management groups via <code>AssignableScopes</code>.</p>
+
+  <h3>Key facts about custom roles</h3>
+  <ul>
+    <li>Maximum of <strong>5,000 custom role definitions per tenant</strong> (a hard limit).</li>
+    <li>Custom roles are stored in the tenant but can only be <em>assigned</em> within the scopes listed in <code>AssignableScopes</code>.</li>
+    <li>You can update a custom role definition at any time — existing assignments automatically reflect the updated permissions.</li>
+    <li>Custom roles can be created via the portal, Azure CLI, PowerShell, ARM/Bicep templates, or Terraform.</li>
+  </ul>
+
+  <h3>AssignableScopes — a common exam source of confusion</h3>
+  <p>AssignableScopes defines <em>where the role can be assigned</em>, not where it applies. Setting AssignableScopes to <code>/subscriptions/sub-A</code> means an administrator in sub-B cannot assign this role in their subscription — even though the role definition technically lives in the shared tenant. This is a tenant-level definition with a subscription-level assignment restriction.</p>
+
+  <pre><code>"AssignableScopes": [
+  "/subscriptions/a1b2c3d4-1234-5678-abcd-ef1234567890",
+  "/subscriptions/b2c3d4e5-2345-6789-bcde-fg2345678901"
+]
+
+# Or scoped to the entire tenant (management group root):
+"AssignableScopes": [
+  "/providers/Microsoft.Management/managementGroups/tenant-root-group"
+]</code></pre>
+
+  <div class="callout callout-info">
+    <strong>Best practice: start from the closest built-in role</strong>
+    When creating a custom role, start from the JSON of the closest built-in role and modify it. Use <code>az role definition list --name "Contributor" --output json</code> to export the definition. This ensures you don't accidentally miss a required action that the built-in role includes through a wildcard.
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     PIM
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Privileged Identity Management (PIM)</h2>
+  <p><strong>Privileged Identity Management</strong> is the Entra ID P2 feature that converts permanent ("standing") privileged access into time-bounded, auditable, just-in-time access. It is not optional in any enterprise environment — it is the control that makes privileged access manageable at scale without accepting permanent standing risk.</p>
+
+  <h3>Active vs. Eligible assignments</h3>
+  <table>
+    <thead>
+      <tr><th>Assignment Type</th><th>What it means</th><th>When to use</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>Active assignment</strong></td>
+        <td>The principal has the role right now, continuously, without any activation step</td>
+        <td>Break-glass accounts, automation service accounts, read-only monitoring roles. Never for Owner, Contributor, or any privileged role.</td>
+      </tr>
+      <tr>
+        <td><strong>Eligible assignment</strong></td>
+        <td>The principal has the <em>ability</em> to activate the role, but it is not active until they request activation through PIM</td>
+        <td>All privileged roles in production. Engineers activate when they need to perform privileged work, with a business justification, and the activation expires.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>PIM activation workflow</h3>
+  <div class="hierarchy">
+<span class="hier-mgmt">1. Engineer opens PIM portal → "My roles" → selects Eligible role</span>
+<span class="hier-mgmt">2. Engineer provides business justification, optionally an incident ticket number</span>
+<span class="hier-mgmt">3. If approval required: approver receives notification and must approve</span>
+<span class="hier-sub">4. Role becomes Active for the configured duration (e.g. 4 hours maximum)</span>
+<span class="hier-rg">5. Engineer performs privileged work within the activation window</span>
+<span class="hier-resource">6. Role expires automatically — or engineer deactivates it early</span>
+  </div>
+
+  <div class="callout callout-info">
+    <strong>PIM for Azure Resources vs. PIM for Entra ID roles</strong>
+    PIM covers two distinct domains. <strong>PIM for Azure Resources</strong> manages Azure RBAC roles (Owner, Contributor, etc.) scoped to subscriptions, resource groups, and resources. <strong>PIM for Entra ID roles</strong> manages Entra directory roles (Global Administrator, Privileged Role Administrator, etc.). Both require Entra P2, but they are configured in different blades within the PIM interface.
+  </div>
+
+  <div class="callout callout-danger">
+    <strong>Permanent Owner assignments in production are a compliance failure</strong>
+    In any regulated environment (SOC 2, ISO 27001, PCI-DSS, HIPAA), a finding of "permanent standing Owner or Contributor assignments on production subscriptions" will result in an audit finding. The correct implementation is: remove all permanent privileged assignments; configure Eligible assignments in PIM with approval workflows, MFA enforcement on activation, and maximum 4-hour windows. This is not a recommendation — it is an expectation.
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     DENY ASSIGNMENTS
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Deny Assignments</h2>
+  <p>A <strong>deny assignment</strong> blocks a security principal from performing specific actions, even if a role assignment would otherwise allow those actions. Deny takes absolute precedence over allow.</p>
+
+  <h3>How deny assignments are created</h3>
+  <p>You <strong>cannot create deny assignments directly via the Azure RBAC interface</strong>. They are created by specific Azure mechanisms:</p>
+  <ul>
+    <li><strong>Azure Blueprints</strong> (now deprecated — being replaced by Deployment Stacks) — could lock down resources deployed by the blueprint</li>
+    <li><strong>Managed Applications</strong> — the managed resource group managed by a publisher has deny assignments to prevent the consumer from modifying the managed resources</li>
+    <li><strong>Azure Deployment Stacks</strong> — the modern replacement for Blueprints; deny assignments protect stack-managed resources from out-of-band changes</li>
+  </ul>
+
+  <div class="callout callout-warn">
+    <strong>Exam trap: deny assignment exemptions</strong>
+    Even with a deny assignment in place, there is always an exemption: the principal that created the deny assignment (or the assignment's designated "exempt principals" list) is not blocked by it. This prevents a lockout scenario. Also: deny assignments do not apply to actions performed as a Global Administrator who has elevated to User Access Administrator at the root management group scope.
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     CLASSIC ADMINS (DEPRECATED)
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Classic Administrator Roles (Deprecated — Know for the Exam)</h2>
+  <p>Azure has a legacy model from the pre-RBAC era with three classic administrator roles. These have been fully deprecated and removed from new subscriptions, but the exam may still reference them. Know what they were:</p>
+  <table>
+    <thead>
+      <tr><th>Classic Role</th><th>What it was equivalent to</th><th>Status</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><strong>Account Administrator</strong></td><td>Billing owner of the subscription (the person who signed up)</td><td>Deprecated; replaced by billing roles in MCA/EA</td></tr>
+      <tr><td><strong>Service Administrator</strong></td><td>Equivalent to Owner at subscription scope</td><td>Deprecated; replaced by RBAC Owner</td></tr>
+      <tr><td><strong>Co-Administrator</strong></td><td>Equivalent to Owner at subscription scope (up to 200 per subscription)</td><td>Deprecated; replaced by RBAC Owner assignments</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     BEST PRACTICES
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>RBAC Best Practices for Enterprise Environments</h2>
+
+  <ol>
+    <li><strong>Assign roles to groups, not individual users.</strong> When a user leaves and is disabled, their individual role assignments linger until cleaned up. Group-based assignments are removed automatically when the user is removed from the group.</li>
+    <li><strong>Use PIM for all privileged roles.</strong> Any role that can create, modify, or delete resources or manage access should be Eligible in PIM, not Active.</li>
+    <li><strong>Apply least privilege — start with Reader, escalate with justification.</strong> The default access posture for any new team member should be Reader at the subscription scope. Escalation to Contributor or above requires documented justification.</li>
+    <li><strong>Never use Owner at subscription scope for day-to-day operations.</strong> Owner at subscription scope is appropriate only for break-glass accounts (held in PIM as Eligible) and automation that specifically requires access management.</li>
+    <li><strong>Conduct regular access reviews.</strong> Entra ID P2 provides Access Reviews. Schedule quarterly reviews for privileged role holders. Remove access that hasn't been used in 90+ days (detectable via Entra sign-in and audit logs).</li>
+    <li><strong>Prefer resource-group-scoped assignments over subscription-scoped.</strong> Narrower scope = smaller blast radius. Assign roles at the most specific scope that satisfies the requirement.</li>
+  </ol>
+
+  <div class="callout callout-success">
+    <strong>The governance test: can you answer these questions?</strong>
+    For any Azure environment, you should be able to answer: Who can create role assignments? Who has standing Owner access? When was each privileged assignment last used? If you cannot answer these quickly, your RBAC posture needs work — start with PIM and Access Reviews.
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     HANDS-ON
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Hands-On: Inspect and Author RBAC in the Portal</h2>
+
+  <ol>
+    <li>
+      <strong>Check your effective access</strong>: Open any subscription or resource group → <em>Access control (IAM) → View my access</em>. This shows all role assignments that apply to you at this scope — including inherited assignments from parent scopes. Note the "Inherited from" column.
+    </li>
+    <li>
+      <strong>Inspect a built-in role definition</strong>: In <em>Access control (IAM) → Roles</em>, find <em>Contributor</em> and click the three-dot menu → View. Examine the JSON definition. Note <code>Actions: ["*"]</code>, the <code>NotActions</code> list (which includes <code>Microsoft.Authorization/*/Write</code> and <code>Microsoft.Authorization/*/Delete</code> — this is why Contributor cannot manage access), and the empty <code>DataActions</code>.
+    </li>
+    <li>
+      <strong>Create a custom role via JSON</strong>: In <em>Access control (IAM) → Add → Add custom role</em>. Start from scratch. Name it <code>VM-StartStop-Operator</code>. On the JSON tab, paste a definition that includes only <code>Microsoft.Compute/virtualMachines/start/action</code>, <code>Microsoft.Compute/virtualMachines/deallocate/action</code>, <code>Microsoft.Compute/virtualMachines/restart/action</code>, and <code>Microsoft.Compute/virtualMachines/read</code>. Set AssignableScopes to your subscription. Review and create.
+    </li>
+    <li>
+      <strong>Verify scope inheritance</strong>: Assign the <em>Reader</em> role to any user at the subscription scope. Then navigate to any resource group inside that subscription → <em>Access control (IAM) → Role assignments</em>. You will see the Reader assignment appear here, labelled as "Inherited" — this demonstrates the scope inheritance model.
+    </li>
+  </ol>
+
+  <div class="callout callout-success">
+    <strong>Checkpoint</strong>
+    You should be able to read any role assignment in the portal and explain: what principal has what actions, at what scope, and whether those permissions are inherited or directly assigned.
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     QUIZ
+═══════════════════════════════════════════════ -->
+<section class="quiz">
+  <h2>Check Your Understanding</h2>
+  <p>Click any option to see immediate feedback. These questions reflect real exam reasoning and production decision-making.</p>
+
+  <!-- Q1 -->
+  <div class="quiz-question" data-correct="a">
+    <p>1. A user has the Contributor role on a resource group. They try to assign the Reader role to a colleague on that same resource group. What happens?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q1"> The operation fails — Contributor does not include <code>Microsoft.Authorization/*/Write</code>; User Access Administrator or Owner is required to create role assignments</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q1"> The operation succeeds — Contributor includes full resource management, which includes access management within their scope</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q1"> The operation succeeds only if the colleague is a member user in the same Entra tenant</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q1"> The operation succeeds only if no deny assignments exist on the resource group</label>
+    </div>
+    <div class="quiz-feedback">Contributor's built-in definition explicitly excludes <code>Microsoft.Authorization/*/Write</code> and <code>Microsoft.Authorization/*/Delete</code> in its NotActions. Role assignment creation is an authorization action — it requires Owner or User Access Administrator. This is a deliberate design: giving someone the ability to manage resources does not imply the ability to grant others access to those resources. This separation of duties is fundamental to the RBAC model.</div>
+  </div>
+
+  <!-- Q2 -->
+  <div class="quiz-question" data-correct="b">
+    <p>2. What is the correct distinction between Actions and DataActions in an Azure role definition?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q2"> Actions are for read operations; DataActions are for write operations on the same resource</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q2"> Actions control the Azure management plane (ARM operations like create/delete/configure resources); DataActions control the data plane (reading blob content, reading Key Vault secrets, sending queue messages)</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q2"> Actions apply to resource group scope and above; DataActions apply only at the individual resource scope</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q2"> Actions are evaluated by RBAC; DataActions are evaluated by the resource's own ACL system, independent of RBAC</label>
+    </div>
+    <div class="quiz-feedback">Actions and DataActions distinguish between the management plane and the data plane. A Contributor can create a Storage Account (Actions) but cannot read the blobs inside it (DataActions). Similarly, a Contributor can deploy a Key Vault but cannot read secret values — that requires Key Vault Secrets User. This separation enables zero-trust patterns where infrastructure administrators cannot access application data, even though they manage the infrastructure hosting it.</div>
+  </div>
+
+  <!-- Q3 -->
+  <div class="quiz-question" data-correct="c">
+    <p>3. A custom role has <code>AssignableScopes</code> set to <code>/subscriptions/sub-A</code>. A colleague who administers subscription sub-B (in the same tenant) wants to assign this role in sub-B. What is true?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q3"> The custom role is available tenant-wide — AssignableScopes only affects inheritance, not visibility</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q3"> The role definition can be copied to sub-B automatically by any Owner of sub-B</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q3"> No — the custom role definition exists in the tenant but can only be <em>assigned</em> within the scopes listed in AssignableScopes; sub-B is not in scope</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q3"> No — custom role definitions are subscription-specific and cannot be shared between any subscriptions in the same tenant</label>
+    </div>
+    <div class="quiz-feedback">Custom role definitions are tenant-scoped objects — they exist once in the tenant. However, AssignableScopes restricts where they can be <em>assigned</em>. If sub-B is not in AssignableScopes, an admin of sub-B cannot use this role. To make it available in sub-B, a Privileged Role Administrator or Owner can update the role definition to add sub-B to AssignableScopes. Option D is wrong — custom roles can absolutely be shared across subscriptions by adding multiple scopes to AssignableScopes.</div>
+  </div>
+
+  <!-- Q4 -->
+  <div class="quiz-question" data-correct="b">
+    <p>4. Role definition X has <code>NotActions: ["Microsoft.Authorization/*/Delete"]</code>. Role definition Y has <code>Actions: ["Microsoft.Authorization/*/Delete"]</code>. A user is assigned both Role X and Role Y at the same scope. Can the user delete role assignments?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q4"> No — NotActions creates an explicit deny that no other role assignment can override at the same scope</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q4"> Yes — NotActions only excludes an action from a wildcard within its own role definition; it does not prevent another role from explicitly granting that action</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q4"> It depends on which role was assigned first — later assignments can be blocked by earlier NotActions</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q4"> Only a Global Administrator can override NotActions restrictions set by a role definition</label>
+    </div>
+    <div class="quiz-feedback">NotActions is not a deny mechanism — it is a wildcard exclusion within a single role definition. Role X's wildcard (<code>Actions: ["*"]</code>) minus the NotActions exclusion means Role X alone does not grant delete. But Role Y explicitly grants it. Since RBAC is additive, the user has the effective permissions from both roles combined — and since Role Y explicitly includes the action, the user can delete role assignments. To actually deny an action unconditionally, you need a Deny Assignment, which cannot be created directly.</div>
+  </div>
+
+  <!-- Q5 -->
+  <div class="quiz-question" data-correct="c">
+    <p>5. What Entra ID license is required to use Privileged Identity Management (PIM) for Azure resource roles?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q5"> Microsoft Entra ID P1 — PIM is a Premium feature included in P1</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q5"> No license required — PIM is included with all Azure subscriptions as a security baseline feature</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q5"> Microsoft Entra ID P2 — PIM requires P2 for both Entra ID directory roles and Azure resource roles</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q5"> Microsoft 365 E5 only — PIM is bundled exclusively with the E5 suite</label>
+    </div>
+    <div class="quiz-feedback">PIM requires Entra ID P2 — every user who is assigned an eligible role via PIM must have a P2 license. P1 includes Conditional Access and dynamic groups, but not PIM. P2 adds PIM, Identity Protection, and Access Reviews. M365 E5 does include P2, but the feature requirement is P2 — not specifically E5. Many organisations purchase P2 standalone or as part of Microsoft 365 F5 Security add-on.</div>
+  </div>
+
+  <!-- Q6 -->
+  <div class="quiz-question" data-correct="a">
+    <p>6. Your security team requires that no engineer permanently holds the Owner role on production subscriptions. What is the correct implementation?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q6"> Remove all permanent Owner assignments on production subscriptions; configure engineers as Eligible for Owner in PIM with an approval workflow and a maximum 4-hour activation window</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q6"> Assign Owner to a security group and tightly control group membership so only approved engineers are members</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q6"> Use Conditional Access policies to block Owner-level operations unless the user is on a compliant device in a specific location</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q6"> Use Azure Policy to audit when Owner role assignments are used and trigger alerts in Microsoft Sentinel</label>
+    </div>
+    <div class="quiz-feedback">The correct answer is PIM with Eligible assignments. Option B reduces the attack surface but still involves permanent standing access — if the group is compromised, all members immediately have Owner. Conditional Access (C) adds authentication controls but does not prevent an attacker with valid credentials from using the Owner role continuously. Policy auditing (D) detects usage after the fact but doesn't prevent standing access. PIM with Eligible assignments ensures the role is <em>not active</em> until explicitly requested, justified, and approved — with a hard time limit that cannot be extended without re-approval.</div>
+  </div>
+
+  <div class="quiz-score"></div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     PRIMARY SOURCE
+═══════════════════════════════════════════════ -->
+<div class="primary-source">
+  <strong>Primary source for this lesson</strong>
+  <a href="https://learn.microsoft.com/en-us/azure/role-based-access-control/overview" target="_blank">
+    What is Azure role-based access control (Azure RBAC)? — Microsoft Learn
+  </a>
+  <p style="margin-top:0.5rem;font-size:0.9rem;color:#deecf9;">Also read: <a href="https://learn.microsoft.com/en-us/azure/role-based-access-control/role-definitions" target="_blank" style="color:#90caf9;">Understand Azure role definitions</a> and <a href="https://learn.microsoft.com/en-us/entra/id-governance/privileged-identity-management/pim-configure" target="_blank" style="color:#90caf9;">Configure PIM for Azure resources</a>. The role definitions article covering Actions vs. DataActions is the most-tested technical distinction in this domain.</p>
+</div>
+
+<!-- ═══════════════════════════════════════════════
+     ASK YOUR TEACHER
+═══════════════════════════════════════════════ -->
+<div class="ask-teacher">
+  <strong>Questions for your teacher (the AI agent)</strong><br>
+  This lesson covered the mechanics of RBAC. There is significant depth to explore — ask your teacher to go deeper on any of these:
+  <ul style="margin-top:0.5rem;">
+    <li>Walk me through authoring a custom role JSON definition for a "read-only Key Vault auditor" who can list secrets but not read their values.</li>
+    <li>How does Azure RBAC evaluation order work when a user has multiple role assignments at different scopes — what is the exact resolution algorithm?</li>
+    <li>How do Deployment Stacks deny assignments work differently from Blueprint deny assignments, and why are Stacks the better choice?</li>
+    <li>What happens to PIM eligible assignments when a user's Entra P2 license is removed — do they immediately lose access?</li>
+  </ul>
+</div>
+
+<!-- ═══════════════════════════════════════════════
+     NEXT LESSON PREVIEW
+═══════════════════════════════════════════════ -->
+<div class="callout callout-info">
+  <strong>Coming up: Lesson 04 — Azure Policy: Governance at Scale</strong>
+  RBAC controls <em>who</em> can act. Azure Policy controls <em>what configurations are allowed</em> — regardless of who is asking. In the next lesson, we cover the complete policy effect model (Audit, Deny, Modify, DeployIfNotExists, and more), policy initiatives for compliance frameworks, remediation tasks, and the difference between exemptions and exclusions. Policy is what makes governance operate at thousands-of-resources scale.
+</div>
+
+<!-- ═══════════════════════════════════════════════
+     NAVIGATION
+═══════════════════════════════════════════════ -->
+<nav class="lesson-nav">
+  <a href="0002-entra-id-users-groups.html">← Lesson 02 — Microsoft Entra ID</a>
+  <a href="0004-azure-policy.html">Lesson 04 — Azure Policy →</a>
+</nav>
+
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

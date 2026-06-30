@@ -1,0 +1,371 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lesson 05 — Resource Locks, Tags &amp; Cost Management</title>
+  <link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<!-- ═══════════════════════════════════════════════
+     HEADER
+═══════════════════════════════════════════════ -->
+<header class="lesson-header">
+  <h1>Lesson 05 — Resource Locks, Tags &amp; Cost Management</h1>
+  <div class="lesson-meta">
+    <span class="badge badge-domain">Domain 1 — Identity &amp; Governance</span>
+    <span class="badge badge-exam">AZ-104: 20–25%</span>
+    <span class="badge badge-time">~25 min</span>
+    <span class="badge badge-prereq">Prereq: Lesson 04 — Azure Policy</span>
+  </div>
+</header>
+
+<!-- ═══════════════════════════════════════════════
+     WHY THIS MATTERS
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Why This Matters in Production</h2>
+  <p>Every Azure administrator has a story about a production resource being accidentally deleted. Resource locks exist specifically to prevent that story from being yours. But locks are a blunt instrument with real operational side effects — applying the wrong lock type to the wrong resource breaks applications in subtle ways that can take hours to debug.</p>
+  <p>Tags are the foundation of every cost allocation model and almost every automation script in a mature Azure environment. Without them, you are flying blind on spend and you cannot run targeted runbooks. With them, and with governance policy enforcing them, you have the data layer that cost and operations teams depend on.</p>
+  <p>Cost Management closes the loop: knowing how to read costs, set budgets, interpret Advisor recommendations, and choose between Reserved Instances and Savings Plans is a recurring topic in every enterprise Azure role — and in the AZ-104 exam.</p>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     RESOURCE LOCKS
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Resource Locks</h2>
+  <p>A resource lock is a control-plane protection layer that operates independently of RBAC. Even a user with the Owner role cannot delete or modify a locked resource unless they first remove the lock — and removing the lock itself requires specific roles.</p>
+
+  <h3>The Two Lock Types</h3>
+  <table>
+    <thead>
+      <tr><th>Lock Type</th><th>Read</th><th>Modify</th><th>Delete</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>CanNotDelete</strong></td>
+        <td>✓ Allowed</td>
+        <td>✓ Allowed</td>
+        <td>✗ Blocked</td>
+      </tr>
+      <tr>
+        <td><strong>ReadOnly</strong></td>
+        <td>✓ Allowed</td>
+        <td>✗ Blocked</td>
+        <td>✗ Blocked</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="callout callout-danger">
+    <strong>ReadOnly on certain resources breaks applications</strong>
+    ReadOnly on a Storage Account prevents listing storage access keys. Listing keys is a POST operation on the management plane — and ReadOnly blocks all write-class management operations, not just data writes. Any application using key-based authentication will fail immediately. Similarly: ReadOnly on an App Service Plan prevents scaling, and ReadOnly on a Virtual Network prevents adding subnets.
+  </div>
+
+  <h3>Lock Inheritance</h3>
+  <p>Locks follow the same downward inheritance model as RBAC and Policy:</p>
+
+  <div class="hierarchy">
+<span class="hier-sub">📋 Subscription lock → applies to all resource groups and resources</span>
+<span class="hier-rg">  └─ 📁 Resource Group lock → applies to all resources inside the RG</span>
+<span class="hier-resource">       └─ ⚙️  Resource lock → applies to that single resource only</span>
+  </div>
+
+  <p>The effective lock on a resource is the most restrictive lock anywhere in its ancestry. A CanNotDelete on the resource group, combined with a ReadOnly on the resource itself, results in ReadOnly behaviour (both delete and modify blocked).</p>
+
+  <h3>Who Can Manage Locks</h3>
+  <p>This is an exam-tested fact: only the <strong>Owner</strong> and <strong>User Access Administrator</strong> built-in roles have the <code>Microsoft.Authorization/locks/*</code> permission required to create or delete locks. <strong>Contributor cannot manage locks</strong> — a Contributor can create any resource but cannot protect or unprotect one.</p>
+
+  <div class="callout callout-warn">
+    <strong>Exam trap: RBAC role vs lock interaction</strong>
+    A user with Owner role on a resource group still cannot delete a resource inside it if a CanNotDelete lock is applied — at either the resource group or resource level. The lock check happens before the RBAC check is applied to the destructive operation. The user must first remove the lock (which requires Owner/UAA), then delete the resource.
+  </div>
+
+  <h3>Platform Operations and Locks</h3>
+  <p>Azure platform background processes — such as Azure Backup writing recovery point metadata, or Azure Site Recovery replicating disk data — are <strong>not blocked</strong> by resource locks. Platform operations bypass customer-applied locks. This is intentional: you don't want a lock on a VM to prevent Azure Backup from functioning.</p>
+
+  <h3>Production Lock Pattern</h3>
+  <p>Apply <strong>CanNotDelete</strong> to all production resource groups and to individual critical resources (Key Vaults, hub VNets, storage accounts hosting application state). This is the minimum recommended posture:</p>
+  <ul>
+    <li>Lock the production resource group: blocks accidental deletion of any resource inside it.</li>
+    <li>Lock individual Key Vaults separately: even if the RG lock is removed, the vault stays protected.</li>
+    <li>Avoid ReadOnly in production unless you have tested all management-plane operations against the lock — the side effects are rarely worth it.</li>
+  </ul>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     TAGS
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Tags</h2>
+  <p>Tags are key-value metadata pairs attached to Azure resources, resource groups, and subscriptions. They are the primary mechanism for cost allocation, automation targeting, security classification, and ITSM integration.</p>
+
+  <h3>Tag Limits and Constraints</h3>
+  <table>
+    <thead>
+      <tr><th>Constraint</th><th>Value</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Max tags per resource / RG / subscription</td><td>50</td></tr>
+      <tr><td>Max key length</td><td>512 characters (128 for storage accounts)</td></tr>
+      <tr><td>Max value length</td><td>256 characters</td></tr>
+      <tr><td>Case sensitivity</td><td>Keys are case-insensitive for matching; values preserve case</td></tr>
+      <tr><td>Classic resources</td><td>Do not support tags</td></tr>
+    </tbody>
+  </table>
+
+  <div class="callout callout-danger">
+    <strong>Tags do NOT inherit from resource group to child resources</strong>
+    This is the most tested tag fact in AZ-104. If you tag a resource group <code>Environment: Production</code>, resources deployed into that group have <em>zero tags</em> by default. Tags on a resource group are metadata about the group, not inherited properties. Many real deployments have broken cost allocation models because someone assumed inheritance existed.
+  </div>
+
+  <h3>Enforcing Tag Inheritance with Azure Policy</h3>
+  <p>To propagate tags from a resource group to its resources automatically, assign the Azure Policy built-in: <em>"Inherit a tag from the resource group if missing"</em>. This uses the <strong>Modify</strong> effect, which adds the tag to newly created or updated resources that lack it. Combined with a remediation task, you can backfill existing resources.</p>
+
+  <div class="callout callout-info">
+    <strong>Modify vs. DeployIfNotExists</strong>
+    The Modify effect changes existing resource properties (like tags) without deploying a new resource. DeployIfNotExists is for creating associated resources (like diagnostic settings). For tag enforcement, always use Modify.
+  </div>
+
+  <h3>Tag Governance Pattern</h3>
+  <p>A mature tagging governance model uses two policy layers working together:</p>
+  <ol>
+    <li><strong>Deny</strong> deployments that lack mandatory tags (e.g. <code>CostCenter</code>, <code>Environment</code>, <code>Owner</code>). This enforces tags at creation time.</li>
+    <li><strong>Modify</strong> to auto-apply tags where the value can be inferred (e.g. inherit <code>Environment</code> from the resource group). This reduces friction for developers.</li>
+  </ol>
+  <p>Common mandatory tags in enterprise environments:</p>
+  <table>
+    <thead>
+      <tr><th>Tag</th><th>Purpose</th><th>Example values</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>CostCenter</code></td><td>Finance billing allocation</td><td><code>CC-1042</code>, <code>PLATFORM-ENG</code></td></tr>
+      <tr><td><code>Environment</code></td><td>Lifecycle and automation targeting</td><td><code>prod</code>, <code>staging</code>, <code>dev</code></td></tr>
+      <tr><td><code>Owner</code></td><td>Accountability and incident routing</td><td><code>payments-team@corp.com</code></td></tr>
+      <tr><td><code>DataClassification</code></td><td>Security and compliance controls</td><td><code>confidential</code>, <code>internal</code>, <code>public</code></td></tr>
+      <tr><td><code>AutoShutdown</code></td><td>Dev/test automation trigger</td><td><code>true</code>, <code>false</code></td></tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     COST MANAGEMENT
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Azure Cost Management + Billing</h2>
+  <p>Azure Cost Management is the built-in FinOps platform. Every Azure administrator needs to be proficient in it — not just for the exam, but because cost overruns are one of the most common ways an Azure admin's credibility gets damaged with business stakeholders.</p>
+
+  <h3>Cost Analysis Views</h3>
+  <p>The Cost Analysis blade (under Subscriptions or Resource Groups) offers several pre-built views:</p>
+  <ul>
+    <li><strong>Accumulated cost</strong>: running total for the billing period — shows your trajectory against budget.</li>
+    <li><strong>Daily cost</strong>: day-by-day bar chart — useful for spotting anomalies and identifying when a spike started.</li>
+    <li><strong>Cost by service</strong>: breakdown by Azure service type — identifies your biggest spend categories.</li>
+    <li><strong>Cost by tag</strong>: requires tags to exist; shows spend per team/project/environment when tags are properly governed.</li>
+  </ul>
+
+  <h3>Budgets and Alerts</h3>
+  <p>A <strong>Budget</strong> defines a spending limit at a specific scope (subscription, resource group, or management group) and triggers alerts when thresholds are crossed. Budgets do not stop spending — they alert.</p>
+
+  <table>
+    <thead>
+      <tr><th>Budget property</th><th>Detail</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Scope</td><td>Subscription, Resource Group, or Management Group</td></tr>
+      <tr><td>Amount</td><td>Monthly, quarterly, or annual dollar limit</td></tr>
+      <tr><td>Alert threshold</td><td>% of budget (e.g. 80%, 100%, 120%)</td></tr>
+      <tr><td>Alert type: Actual</td><td>Triggers when real spend crosses the threshold</td></tr>
+      <tr><td>Alert type: Forecast</td><td>Triggers when projected end-of-period spend will cross the threshold — alerts before the fact</td></tr>
+      <tr><td>Action group</td><td>Email, SMS, webhook, Logic App, or Automation runbook on alert</td></tr>
+    </tbody>
+  </table>
+
+  <div class="callout callout-info">
+    <strong>Forecast alerts are an underused feature</strong>
+    Actual-cost alerts fire when the damage is already done. Forecast alerts fire when Azure's spend model predicts you will exceed budget by end of period — giving you time to act. In production, configure both: an actual alert at 80% and a forecast alert at 100%.
+  </div>
+
+  <h3>Azure Advisor Cost Recommendations</h3>
+  <p>Azure Advisor analyses your subscription and produces four categories of recommendations. The Cost category includes:</p>
+  <ul>
+    <li><strong>Right-size underutilised VMs</strong>: Advisor identifies VMs with low CPU utilisation and recommends a smaller SKU.</li>
+    <li><strong>Delete idle resources</strong>: unattached disks, idle public IPs, empty load balancers.</li>
+    <li><strong>Reserved Instance recommendations</strong>: based on your 7-day or 30-day usage history, recommends RI purchases with projected savings.</li>
+    <li><strong>Azure Hybrid Benefit eligibility</strong>: flags VMs running Windows Server that could be covered by AHUB licences.</li>
+  </ul>
+
+  <h3>Cost Optimisation Tools</h3>
+  <table>
+    <thead>
+      <tr><th>Tool / Option</th><th>Discount mechanism</th><th>Commitment</th><th>Flexibility</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>Reserved Instances (RI)</strong></td>
+        <td>Up to 72% off pay-as-you-go. For VMs, SQL, Cosmos DB, and more.</td>
+        <td>1-year or 3-year</td>
+        <td>Can exchange or cancel (with fee). Scope: single subscription or shared across EA</td>
+      </tr>
+      <tr>
+        <td><strong>Azure Savings Plans</strong></td>
+        <td>Up to 65% off. Commit to an hourly dollar spend on compute — discount applies across VM families, regions, and OS.</td>
+        <td>1-year or 3-year</td>
+        <td>More flexible than RIs — no commitment to specific VM size/region</td>
+      </tr>
+      <tr>
+        <td><strong>Azure Hybrid Benefit (AHUB)</strong></td>
+        <td>Bring your own Windows Server or SQL Server licences with Software Assurance. Up to 85% savings on those licence components.</td>
+        <td>Existing SA licences</td>
+        <td>Apply/remove at any time without VM restart</td>
+      </tr>
+      <tr>
+        <td><strong>Dev/Test subscriptions</strong></td>
+        <td>Discounted rates for non-production workloads. No Windows OS licence charges. Must not run production SLAs.</td>
+        <td>None (monthly)</td>
+        <td>Full flexibility — PAYG discounted rates</td>
+      </tr>
+      <tr>
+        <td><strong>Spot VMs</strong></td>
+        <td>Up to 90% off. Uses Azure's spare compute capacity. Can be evicted with 30 seconds notice.</td>
+        <td>None</td>
+        <td>For interruptible, fault-tolerant workloads only</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="callout callout-warn">
+    <strong>RI vs. Savings Plan: which to choose?</strong>
+    For a stable, predictable workload running a fixed VM SKU in a fixed region for 3 years, a 3-year Reserved Instance gives the maximum discount (up to 72%). Savings Plans offer less maximum discount but reward you with flexibility across compute types — better for organisations still migrating or running diverse compute. RIs are the right answer for the exam when the scenario describes known, committed, long-running workloads.
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     QUIZ
+═══════════════════════════════════════════════ -->
+<section class="quiz">
+  <h2>Check Your Understanding</h2>
+  <p>Click any option to see immediate feedback. Answers represent correct behaviour in a real Azure environment.</p>
+
+  <!-- Q1 -->
+  <div class="quiz-question" data-correct="a">
+    <p>1. You apply a ReadOnly lock to a storage account. A developer tries to list the storage account access keys via the portal. What happens?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q1"> The operation fails — listing access keys is a write operation (POST) on the management plane, which ReadOnly locks prevent</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q1"> The operation succeeds — ReadOnly only prevents data deletion and does not block key listing</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q1"> The operation succeeds — key listing is always allowed for any user with the Owner role</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q1"> The operation fails — but only if the developer lacks the Storage Account Contributor role assignment</label>
+    </div>
+    <div class="quiz-feedback">Listing storage account access keys uses a POST request to the management plane (<code>listKeys</code> action). ReadOnly locks block all management-plane operations that are classified as write or action — not just deletes. This breaks any application or operator task that relies on key authentication. It's one of the most dangerous ReadOnly lock side effects.</div>
+  </div>
+
+  <!-- Q2 -->
+  <div class="quiz-question" data-correct="a">
+    <p>2. A resource group has a CanNotDelete lock. An operator with Owner role tries to delete a virtual machine inside it. What is the result?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q2"> The deletion fails — CanNotDelete locks on a resource group prevent deletion of any resources within it, regardless of the user's RBAC role</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q2"> The deletion succeeds — the Owner role always supersedes any resource lock on child resources</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q2"> The deletion succeeds — deleting the VM does not delete the resource group itself, so the lock is irrelevant</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q2"> The deletion fails — but only if the virtual machine also has its own individual lock applied</label>
+    </div>
+    <div class="quiz-feedback">Lock inheritance means a CanNotDelete lock on a resource group protects every resource inside it, including all VMs, storage accounts, and NICs. No RBAC role — not even Owner — can override a resource lock. The operator must first remove the lock (which requires Owner or User Access Administrator), and then delete the VM.</div>
+  </div>
+
+  <!-- Q3 -->
+  <div class="quiz-question" data-correct="a">
+    <p>3. A resource group is tagged with <code>Environment: Production</code>. You deploy a new storage account into it. What tags does the storage account have?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q3"> No tags by default — tags are not inherited from the resource group unless an Azure Policy with Modify effect enforces inheritance</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q3"> Environment: Production — tags automatically propagate down to all child resources in the group</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q3"> It depends on the resource type — some resources inherit tags and others do not</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q3"> The storage account inherits the tag — but only if the deployer holds the Tag Contributor role</label>
+    </div>
+    <div class="quiz-feedback">Tags on a resource group are metadata about the group itself — they do not flow down to child resources. This is a deliberate Azure design decision. To enforce tag inheritance, you need an Azure Policy assignment using the built-in "Inherit a tag from the resource group if missing" definition with the Modify effect.</div>
+  </div>
+
+  <!-- Q4 -->
+  <div class="quiz-question" data-correct="a">
+    <p>4. You need to alert your finance team when subscription spend reaches 80% of the monthly $10,000 budget before the month ends. What feature implements this?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q4"> A Budget in Azure Cost Management at subscription scope, with an Actual cost alert at 80% targeting an action group that emails the finance team</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q4"> An Azure Monitor metric alert configured on the subscription's cost metric threshold value</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q4"> An Azure Advisor cost recommendation configured to notify stakeholders on threshold breach</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q4"> A diagnostic setting routing billing data to Log Analytics with a threshold query alert rule</label>
+    </div>
+    <div class="quiz-feedback">Budgets in Azure Cost Management are the correct tool. You set a budget amount ($10,000), configure an alert threshold (80%), choose alert type (Actual), and attach an action group with the finance team's email addresses. Azure Monitor metric alerts do not surface billing cost as a native metric — Cost Management budgets are the dedicated billing alert mechanism.</div>
+  </div>
+
+  <!-- Q5 -->
+  <div class="quiz-question" data-correct="a">
+    <p>5. Your company runs 20 VMs continuously with fixed SKUs for 3 years. What pricing option gives the maximum discount compared to pay-as-you-go?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q5"> 3-year Reserved Instances — provide up to 72% discount for committing to a specific VM size, region, and OS for three years</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q5"> Azure Savings Plans — more flexible across compute types but deliver a lower maximum discount than RIs</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q5"> Pay-as-you-go with Azure Hybrid Benefit — applies existing licences but does not address compute cost</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q5"> 1-year Reserved Instances — shorter commitment with slightly less discount than 3-year terms</label>
+    </div>
+    <div class="quiz-feedback">For a stable, fixed, committed workload (same VM SKU, same region, 3 years), a 3-year Reserved Instance is the highest-discount option — up to 72% off PAYG rates. Azure Savings Plans are more flexible but cap at around 65% for compute. The scenario is specifically designed to match the RI use case.</div>
+  </div>
+
+  <!-- Q6 -->
+  <div class="quiz-question" data-correct="a">
+    <p>6. A Deny policy requires a CostCenter tag on all deployments. A developer needs a temporary exception for sandbox testing. What is the proper governance mechanism?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q6"> Create a Policy Exemption on the sandbox resource group with a Waiver category, expiry date, and documented justification</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q6"> Temporarily disable the policy assignment at the subscription scope for all users in the tenant</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q6"> Remove the developer's CostCenter tag requirement by modifying the policy definition directly</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q6"> Ask a Global Administrator to delete the lock blocking the developer's deployment attempt</label>
+    </div>
+    <div class="quiz-feedback">Azure Policy Exemptions are the correct mechanism for granting scoped, time-limited exceptions to policy assignments. A Waiver exemption acknowledges the resource is non-compliant but provides a justified exception. The exemption scope is limited to the sandbox resource group, it has an expiry date, and it preserves an audit trail — none of which apply to disabling or modifying the policy.</div>
+  </div>
+
+  <div class="quiz-score"></div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     PRIMARY SOURCE
+═══════════════════════════════════════════════ -->
+<div class="primary-source">
+  <strong>Primary source for this lesson</strong>
+  <a href="https://learn.microsoft.com/en-us/azure/azure-resource-manager/management/lock-resources" target="_blank">
+    Lock your Azure resources to protect your infrastructure (Microsoft Learn)
+  </a>
+  <p style="margin-top:0.5rem;font-size:0.9rem;color:#deecf9;">Also read the Cost Management documentation: <a href="https://learn.microsoft.com/en-us/azure/cost-management-billing/costs/tutorial-acm-create-budgets" target="_blank" style="color:#90caf9;">Create and manage Azure budgets</a> and the <a href="https://learn.microsoft.com/en-us/azure/cost-management-billing/reservations/save-compute-costs-reservations" target="_blank" style="color:#90caf9;">Reserved Instances overview</a>.</p>
+</div>
+
+<!-- ═══════════════════════════════════════════════
+     ASK YOUR TEACHER
+═══════════════════════════════════════════════ -->
+<div class="ask-teacher">
+  <strong>Questions for your teacher (the AI agent)</strong><br>
+  This lesson covered the operational mechanics of locks, tags, and cost tools. Go deeper on:
+  <ul style="margin-top:0.5rem;">
+    <li>Walk me through the exact steps to apply a CanNotDelete lock to an entire subscription via Azure CLI.</li>
+    <li>How do I implement a full tagging governance policy initiative with Deny and Modify effects?</li>
+    <li>What is the difference between a Waiver and a Mitigated policy exemption category?</li>
+    <li>How does RI scope work — when would I use shared scope vs. single subscription scope?</li>
+    <li>Can Azure Automation runbooks automatically delete resources when a budget alert fires?</li>
+  </ul>
+</div>
+
+<!-- ═══════════════════════════════════════════════
+     NEXT LESSON PREVIEW
+═══════════════════════════════════════════════ -->
+<div class="callout callout-info">
+  <strong>Coming up: Lesson 06 — Storage Accounts: Configuration &amp; Redundancy</strong>
+  Governance done, we shift into Domain 2 — Storage. Storage accounts are Azure's foundational data layer. The next lesson covers every redundancy option (LRS through RA-GZRS), access tiers, security configuration, and what happens to replication state after a manual failover. The redundancy comparison table alone is worth memorising before the exam.
+</div>
+
+<!-- ═══════════════════════════════════════════════
+     NAVIGATION
+═══════════════════════════════════════════════ -->
+<nav class="lesson-nav">
+  <a href="0004-azure-policy.html">← Lesson 04 — Azure Policy</a>
+  <a href="0006-storage-accounts.html">Lesson 06 — Storage Accounts →</a>
+</nav>
+
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

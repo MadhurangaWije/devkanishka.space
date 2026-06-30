@@ -1,0 +1,459 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lesson 02 — Microsoft Entra ID: Users, Groups &amp; Identities</title>
+  <link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<!-- ═══════════════════════════════════════════════
+     HEADER
+═══════════════════════════════════════════════ -->
+<header class="lesson-header">
+  <h1>Lesson 02 — Microsoft Entra ID: Users, Groups &amp; Identities</h1>
+  <div class="lesson-meta">
+    <span class="badge badge-domain">Domain 1 — Identity &amp; Governance</span>
+    <span class="badge badge-exam">AZ-104: 20–25%</span>
+    <span class="badge badge-time">~30 min</span>
+    <span class="badge badge-prereq">Prereq: Lesson 01</span>
+  </div>
+</header>
+
+<!-- ═══════════════════════════════════════════════
+     WHY THIS MATTERS
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Why You Need to Understand This</h2>
+  <p>Every RBAC role assignment, every managed identity, every service calling the Azure API — all of it resolves against <strong>Microsoft Entra ID</strong> (formerly Azure Active Directory). Entra ID is not just a directory; it is the <em>authentication and identity plane</em> for the entire Azure control surface. RBAC says what a principal can do; Entra ID determines <em>who the principal is</em>.</p>
+  <p>In the exam, roughly half of all identity questions hinge on knowing the difference between identity object types: member user vs. guest, service principal vs. managed identity, app registration vs. enterprise application. In production, conflating these leads to over-privileged service accounts, unrotated secrets, and hybrid sync failures that take hours to diagnose.</p>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     TENANT AS IDENTITY BOUNDARY
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>The Tenant as an Identity Boundary</h2>
+  <p>Recall from Lesson 01 that a <strong>tenant</strong> is the top-level container. From an identity perspective, the tenant is the <em>trust boundary</em>: every identity object (user, group, service principal, managed identity) has exactly one home tenant. Authentication decisions made by Entra ID are always relative to a tenant.</p>
+
+  <div class="hierarchy">
+<span class="hier-tenant">🏢 Tenant (Entra ID instance — your identity plane)</span>
+<span class="hier-mgmt">  ├─ 👤 User objects         (members + guests)</span>
+<span class="hier-mgmt">  ├─ 👥 Group objects        (security + M365)</span>
+<span class="hier-mgmt">  ├─ 🤖 Service Principals   (application identities)</span>
+<span class="hier-mgmt">  └─ 🔑 Managed Identities   (resource-bound identities)</span>
+  </div>
+
+  <div class="callout callout-info">
+    <strong>One Entra ID, many subscriptions</strong>
+    A single Entra ID tenant can be the identity provider for dozens or hundreds of Azure subscriptions. Subscriptions trust <em>exactly one tenant</em> for authentication, but a tenant can back many subscriptions. This is why enterprise governance starts at the tenant, not the subscription.
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     USER TYPES
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>User Types: Members, Guests, and Hybrid Accounts</h2>
+
+  <h3>Member users vs. Guest users</h3>
+  <table>
+    <thead>
+      <tr><th>Property</th><th>Member User</th><th>Guest User (B2B)</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Home tenant</td><td>This tenant — the object was created here</td><td>Another tenant or external IdP — invited via B2B</td></tr>
+      <tr><td>Default permissions</td><td>Can read directory objects (users, groups) by default</td><td>Highly restricted directory read permissions by default</td></tr>
+      <tr><td>UPN format</td><td><code>user@contoso.com</code></td><td><code>user_externaldomain.com#EXT#@contoso.onmicrosoft.com</code></td></tr>
+      <tr><td>Licensing</td><td>Requires a license in this tenant</td><td>5:1 external guest ratio — 5 guests per P1/P2 license</td></tr>
+      <tr><td>Typical use case</td><td>Employees, internal service accounts</td><td>Contractors, partners, vendor access to Azure resources</td></tr>
+    </tbody>
+  </table>
+
+  <h3>UPN vs. email address — a critical distinction</h3>
+  <p>The <strong>User Principal Name (UPN)</strong> is the login identifier Entra ID uses for authentication. It looks like an email address (<code>jsmith@contoso.com</code>) but it is <em>not necessarily the same as the user's email address</em>. When users sign into the Azure portal or any Microsoft service, they authenticate with their UPN — the email address in Exchange may differ. This distinction becomes critical in hybrid environments.</p>
+
+  <div class="callout callout-warn">
+    <strong>Non-routable UPN suffixes in hybrid environments</strong>
+    In many on-premises Active Directory deployments, the internal domain is non-routable: <code>corp.local</code>, <code>contoso.internal</code>. These cannot be used as UPNs in Entra ID because they are not verifiable internet domains. Before syncing users from on-prem AD, you must either add a routable UPN suffix (e.g. <code>contoso.com</code>) to the on-prem forest and update user accounts, or configure Alternate Login ID so users sign in with their email attribute instead of UPN. Failing to do this is one of the most common hybrid identity deployment mistakes.
+  </div>
+
+  <h3>On-premises sync: Entra Connect Sync</h3>
+  <p><strong>Microsoft Entra Connect Sync</strong> (formerly Azure AD Connect) is the agent installed on a domain-joined Windows Server that synchronises identities from on-prem Active Directory to Entra ID. Understanding the sync model is essential for hybrid environments.</p>
+
+  <table>
+    <thead>
+      <tr><th>Authentication Method</th><th>How it works</th><th>When to use</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>Password Hash Sync (PHS)</strong></td>
+        <td>Hash of the password hash is synced to Entra ID. Auth happens in the cloud — no on-prem dependency for sign-in.</td>
+        <td>Default and recommended for most organisations. Provides leaked credential detection via Identity Protection.</td>
+      </tr>
+      <tr>
+        <td><strong>Pass-Through Authentication (PTA)</strong></td>
+        <td>Entra ID passes credentials to an on-prem PTA agent for validation. Password never leaves on-prem.</td>
+        <td>Organisations with strict policy that passwords must not leave on-premises, but no ADFS infrastructure.</td>
+      </tr>
+      <tr>
+        <td><strong>Federation (ADFS)</strong></td>
+        <td>Entra ID trusts an on-prem ADFS farm as the authentication authority. Entra ID defers auth entirely to ADFS.</td>
+        <td>Complex claims requirements, smartcard auth, organisations already invested in ADFS. Highest complexity, highest risk of outage.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="callout callout-info">
+    <strong>Cloud-only vs. synced accounts</strong>
+    Cloud-only accounts are created directly in Entra ID and have no on-prem counterpart. Synced accounts originate in on-prem AD and are written to Entra ID by Connect Sync — certain attributes are <em>mastered in AD</em> and cannot be edited in the cloud (the portal will grey them out). This matters operationally: if you need to change a synced user's UPN, you must change it in on-prem AD and wait for the sync cycle, not in the Azure portal.
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     GROUPS
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Groups: Security, Microsoft 365, and Dynamic Membership</h2>
+
+  <h3>Security groups vs. Microsoft 365 groups</h3>
+  <table>
+    <thead>
+      <tr><th>Property</th><th>Security Group</th><th>Microsoft 365 Group</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Purpose</td><td>RBAC role assignments, policy targeting, app assignments, group-based licensing</td><td>Collaboration: shared mailbox, calendar, Teams, SharePoint site</td></tr>
+      <tr><td>Can be used for Azure RBAC?</td><td>Yes — the primary group type for RBAC</td><td>Yes — but only when the group is mail-enabled security type or the M365 group is used directly</td></tr>
+      <tr><td>Can contain guest users?</td><td>Yes</td><td>Yes</td></tr>
+      <tr><td>Can be nested in other groups?</td><td>Yes — Azure RBAC respects nested group inheritance</td><td>No — M365 groups cannot be nested</td></tr>
+      <tr><td>Dynamic membership</td><td>Yes (requires P1)</td><td>Yes (requires P1)</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Assigned vs. Dynamic membership</h3>
+  <p><strong>Assigned membership</strong> means group members are added and removed manually by an administrator or group owner. Simple, but operationally expensive at scale.</p>
+  <p><strong>Dynamic membership</strong> uses a rule expression to automatically add or remove users (or devices, for device groups) based on their Entra ID attributes. The group membership is continuously evaluated and updated — no manual intervention required.</p>
+
+  <p>Dynamic rule syntax examples:</p>
+  <pre><code># All Finance department members (not guests)
+(user.department -eq "Finance") -and (user.userType -eq "Member")
+
+# All users with a US usage location who have a job title containing "Engineer"
+(user.usageLocation -eq "US") -and (user.jobTitle -contains "Engineer")
+
+# All enabled accounts in the Sales department
+(user.department -eq "Sales") -and (user.accountEnabled -eq true)
+
+# Device rule: all Windows 10/11 devices enrolled via Intune
+(device.deviceOSType -eq "Windows") -and (device.managementType -eq "MDM")</code></pre>
+
+  <div class="callout callout-warn">
+    <strong>Dynamic groups require Entra ID P1</strong>
+    Dynamic membership rules are a Premium feature. If the P1 license expires or is removed, existing dynamic groups freeze — membership stops updating. Members at the time of license removal remain, but the rule stops being evaluated. This is a critical operational fact for cost management decisions.
+  </div>
+
+  <h3>Nested groups and Azure RBAC</h3>
+  <p>Azure RBAC <em>does</em> evaluate nested group membership. If Group A is a member of Group B, and Group B has the Contributor role on a subscription, then users in Group A are effective Contributors on that subscription through transitive membership. This is the correct behaviour and differs from some other systems (e.g., on-prem AD RBAC evaluation varies by application).</p>
+
+  <div class="callout callout-info">
+    <strong>Group-based licensing</strong>
+    Security groups (including dynamic groups) can be used to assign Microsoft 365 and Entra ID licenses automatically. When a user joins a dynamic group that has a license assigned, they receive that license automatically. This is the scalable alternative to per-user license assignment in large organisations.
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     SERVICE PRINCIPALS
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Service Principals: Application Identities</h2>
+  <p>A <strong>service principal</strong> is an identity for an application or service in your Entra ID tenant. When an application needs to call Azure APIs, Microsoft Graph, or any Entra-protected resource, it authenticates as a service principal — not as a human user.</p>
+
+  <h3>App Registration vs. Enterprise Application</h3>
+  <p>This is one of the most confusing conceptual distinctions in Entra ID, and it appears on the exam:</p>
+
+  <div class="hierarchy">
+<span class="hier-tenant">📋 App Registration  (the definition — lives in your tenant or a partner tenant)</span>
+<span class="hier-mgmt">    ↓ creates automatically</span>
+<span class="hier-sub">🏭 Enterprise Application / Service Principal  (the instance — the identity used for auth)</span>
+  </div>
+
+  <table>
+    <thead>
+      <tr><th>Object</th><th>What it is</th><th>Where it lives</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>App Registration</strong></td>
+        <td>The application definition — defines what the app is, what permissions it requests, redirect URIs, token lifetimes</td>
+        <td>The tenant where the app is registered (the developer's tenant)</td>
+      </tr>
+      <tr>
+        <td><strong>Enterprise Application (Service Principal)</strong></td>
+        <td>The instantiation of the app in a specific tenant — this is what is actually used for authentication and permission grants</td>
+        <td>Every tenant where the app is consented to. A multi-tenant app has one App Registration but an Enterprise Application in every tenant that uses it.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>Client credentials: secret vs. certificate</h3>
+  <table>
+    <thead>
+      <tr><th>Credential Type</th><th>How it works</th><th>Production recommendation</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>Client Secret</strong></td>
+        <td>A generated string value, like a password. Sent directly in the token request. Has an expiry (max 24 months).</td>
+        <td>Avoid in production. Secrets leak into logs, environment variables, and source code. Requires active rotation management.</td>
+      </tr>
+      <tr>
+        <td><strong>Client Certificate</strong></td>
+        <td>The app signs the token request with a private key; Entra ID validates using the registered public key. The private key never leaves the application environment.</td>
+        <td>Preferred when service principals must be used. Store the certificate in Azure Key Vault and use the Key Vault reference in your application.</td>
+      </tr>
+      <tr>
+        <td><strong>Federated Credential (OIDC)</strong></td>
+        <td>No credential at all — an external identity provider's token (e.g. GitHub Actions OIDC token) is exchanged for an Entra ID access token via Workload Identity Federation.</td>
+        <td>Best practice for CI/CD pipelines. Zero long-lived credentials. No rotation required.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="callout callout-danger">
+    <strong>Service principal secrets in source control</strong>
+    A client secret committed to a Git repository, even briefly, should be treated as permanently compromised. Entra ID Workload Identity Federation (federated credentials) eliminates this risk entirely for CI/CD scenarios — use it whenever your pipeline supports OIDC token issuance (GitHub Actions, Azure DevOps, GitLab CI all support this natively).
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     MANAGED IDENTITIES
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Managed Identities: The Right Way to Authenticate Azure Resources</h2>
+  <p>A <strong>managed identity</strong> is a service principal whose lifecycle and credentials are fully managed by Azure. You never see the credential. You cannot export it. Azure rotates it automatically. This eliminates the entire credential management problem.</p>
+
+  <h3>System-assigned vs. User-assigned</h3>
+  <table>
+    <thead>
+      <tr><th>Property</th><th>System-assigned</th><th>User-assigned</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Creation</td><td>Enabled directly on an Azure resource (VM, Function App, etc.)</td><td>Created as a standalone Azure resource first, then assigned to one or more resources</td></tr>
+      <tr><td>Lifecycle</td><td>Tied to the resource — deleted when the resource is deleted</td><td>Independent lifecycle — deleting the resource does not delete the identity</td></tr>
+      <tr><td>Scope of use</td><td>One resource only — cannot be shared</td><td>Can be assigned to multiple resources simultaneously</td></tr>
+      <tr><td>Entra ID object</td><td>Creates a service principal in the tenant, auto-deleted with resource</td><td>Creates a service principal in the tenant, persists until the managed identity resource is deleted</td></tr>
+      <tr><td>Best for</td><td>Single VM or App Service with a unique identity requirement</td><td>Multiple resources sharing the same identity (e.g. a fleet of VMs needing Key Vault access)</td></tr>
+    </tbody>
+  </table>
+
+  <h3>How managed identity authentication works (IMDS)</h3>
+  <p>When code running on an Azure resource (VM, App Service, Function App, AKS pod) needs an access token, it calls the <strong>Azure Instance Metadata Service (IMDS)</strong> — a non-routable REST endpoint available from within every Azure resource:</p>
+
+  <pre><code>GET http://169.254.169.254/metadata/identity/oauth2/token
+    ?api-version=2018-02-01
+    &resource=https://vault.azure.net
+    Metadata: true</code></pre>
+
+  <p>IMDS returns an access token for the managed identity's service principal. The application uses this token to authenticate to Key Vault, Storage, or any other Entra-protected resource — with <em>zero credentials</em> in the application code or configuration.</p>
+
+  <div class="callout callout-success">
+    <strong>Why managed identities are always preferred over service principals with secrets</strong>
+    No credential to store. No credential to rotate. No credential to leak. No expiry to miss. The access token is scoped and short-lived. Entra ID handles the cryptographic key material entirely. In any design review, if you see a service principal with a client secret used where a managed identity would work, flag it as a finding.
+  </div>
+
+  <div class="callout callout-info">
+    <strong>Supported resources</strong>
+    Managed identities are supported on VMs, Virtual Machine Scale Sets, App Service, Azure Functions, Logic Apps, Container Instances, AKS (workload identity), Service Bus consumers, and many more. Check the <a href="https://learn.microsoft.com/en-us/entra/identity/managed-identities-azure-resources/managed-identities-status" target="_blank">current support list</a> — it grows with nearly every Azure release cycle.
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     LICENSE TIERS
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Entra ID License Tiers and What Each Unlocks</h2>
+  <p>Understanding the license tier gates is essential both for the exam and for production architecture decisions. Many governance features require Premium licensing.</p>
+
+  <table>
+    <thead>
+      <tr><th>Feature</th><th>Free</th><th>P1</th><th>P2</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>User and group management</td><td>✓</td><td>✓</td><td>✓</td></tr>
+      <tr><td>SSO (up to 10 apps)</td><td>✓</td><td>✓</td><td>✓</td></tr>
+      <tr><td>MFA per-user (basic)</td><td>✓</td><td>✓</td><td>✓</td></tr>
+      <tr><td>Dynamic group membership</td><td>✗</td><td>✓</td><td>✓</td></tr>
+      <tr><td>Conditional Access policies</td><td>✗</td><td>✓</td><td>✓</td></tr>
+      <tr><td>Group-based application assignment</td><td>✗</td><td>✓</td><td>✓</td></tr>
+      <tr><td>Self-service password reset (hybrid)</td><td>✗</td><td>✓</td><td>✓</td></tr>
+      <tr><td>Identity Protection (risky sign-in policies)</td><td>✗</td><td>✗</td><td>✓</td></tr>
+      <tr><td>Privileged Identity Management (PIM)</td><td>✗</td><td>✗</td><td>✓</td></tr>
+      <tr><td>Access Reviews</td><td>✗</td><td>✗</td><td>✓</td></tr>
+      <tr><td>Entitlement Management</td><td>✗</td><td>✗</td><td>✓</td></tr>
+    </tbody>
+  </table>
+
+  <div class="callout callout-warn">
+    <strong>P2 is required for PIM — which is required for enterprise compliance</strong>
+    Any enterprise environment handling sensitive workloads needs Privileged Identity Management. PIM provides just-in-time role activation, approval workflows, and audit trails for privileged access. It requires Entra ID P2 per privileged user. Budget accordingly — the cost of P2 is trivially small compared to the compliance, audit, and breach risk of permanent standing access.
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     HANDS-ON
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Hands-On: Create, Inspect, and Assign Identities</h2>
+  <p>Work through these steps in <a href="https://portal.azure.com" target="_blank">portal.azure.com</a>. Use a non-production tenant or a Visual Studio subscription if available.</p>
+
+  <ol>
+    <li>
+      <strong>Create a member user</strong>: Navigate to <em>Microsoft Entra ID → Users → New user → Create new user</em>. Set a UPN, display name, and temporary password. Note the UPN format — it uses your tenant's verified domain. Assign no roles.
+    </li>
+    <li>
+      <strong>Create a dynamic security group</strong>: Go to <em>Groups → New group</em>. Select Security type and Dynamic User membership type. Add the rule: <code>(user.department -eq "Engineering")</code>. Save and observe that the member list shows "No members" until user department attributes are set — this is intentional and expected behaviour.
+    </li>
+    <li>
+      <strong>Create an App Registration</strong>: Navigate to <em>App registrations → New registration</em>. Give it a name (e.g. <code>app-demo-01</code>). Accept defaults. After creation, note the Application (client) ID and Directory (tenant) ID. Go to <em>Certificates &amp; secrets → New client secret</em> — add one with a short expiry. Then go to <em>Enterprise applications</em> and find the corresponding Enterprise Application that was auto-created. This is the service principal object.
+    </li>
+    <li>
+      <strong>Assign a system-assigned managed identity to a VM</strong>: Open a VM → <em>Security → Identity → System assigned</em>. Toggle the Status to <em>On</em> and Save. Azure creates a service principal in Entra ID with the same name as the VM. Verify by going to <em>Entra ID → Enterprise applications → All applications</em> and searching for the VM name — the managed identity service principal will appear there.
+    </li>
+    <li>
+      <strong>Grant the managed identity Key Vault access</strong>: Navigate to a Key Vault → <em>Access control (IAM) → Add role assignment</em>. Select <em>Key Vault Secrets User</em>. In the Members step, choose Managed identity and select your VM's identity. The VM can now read secrets from Key Vault using the IMDS endpoint — no stored credentials anywhere.
+    </li>
+  </ol>
+
+  <div class="callout callout-success">
+    <strong>Checkpoint</strong>
+    You should now be able to explain the difference between all four identity object types in Entra ID, know which license tier unlocks which governance features, and understand why managed identities should be the default choice for Azure resource authentication.
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     QUIZ
+═══════════════════════════════════════════════ -->
+<section class="quiz">
+  <h2>Check Your Understanding</h2>
+  <p>Click any option to see immediate feedback. These questions reflect real exam reasoning and production decision-making.</p>
+
+  <!-- Q1 -->
+  <div class="quiz-question" data-correct="c">
+    <p>1. A service running on a VM needs to read secrets from Azure Key Vault. What identity approach should you use?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q1"> Service principal with a client secret stored in an environment variable on the VM</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q1"> Hard-coded access key in the application configuration file</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q1"> User-assigned managed identity assigned to the VM, with Key Vault Secrets User role on the vault</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q1"> Service principal with a certificate stored on the VM's local disk</label>
+    </div>
+    <div class="quiz-feedback">Managed identity is always the correct answer when a resource on Azure needs to authenticate to another Azure service. There are no credentials to manage, rotate, or accidentally expose. The IMDS endpoint provides short-lived tokens on demand. Options A and D both involve credentials that must be managed, stored, and rotated. Option B is never acceptable for secrets. A user-assigned identity is preferred over system-assigned here because it can be pre-configured with the right RBAC before VM creation.</div>
+  </div>
+
+  <!-- Q2 -->
+  <div class="quiz-question" data-correct="b">
+    <p>2. Your on-prem AD syncs users to Entra ID via Entra Connect. A user's UPN in on-prem AD is <code>jsmith@corp.local</code> (a non-routable domain). What must you configure for this user to sign into Azure?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q2"> Nothing — Azure automatically resolves non-routable UPN suffixes to the tenant's default domain</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q2"> Configure a routable UPN suffix (e.g. <code>contoso.com</code>) in on-prem AD and update the user's UPN before sync, or enable Alternate Login ID</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q2"> Create a separate cloud-only shadow account for the user with a routable UPN</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q2"> Disable UPN sync in Entra Connect and use the mail attribute for sign-in instead</label>
+    </div>
+    <div class="quiz-feedback">Entra ID requires a verifiable (routable) domain for UPNs. A <code>.local</code> domain cannot be verified, so Entra Connect cannot sync the UPN as-is. The correct fix is to add a routable suffix (e.g. <code>contoso.com</code>) to the on-prem AD forest, update user UPNs in AD, and allow Connect to sync them — or enable Alternate Login ID so users authenticate with their email attribute. Creating shadow accounts (C) creates a management nightmare with two identities per person.</div>
+  </div>
+
+  <!-- Q3 -->
+  <div class="quiz-question" data-correct="a">
+    <p>3. What is the fundamental difference between a system-assigned and user-assigned managed identity?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q3"> System-assigned is tied to one resource's lifecycle and deleted with it; user-assigned is a standalone Azure resource that can be assigned to multiple resources simultaneously</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q3"> System-assigned managed identities support more Azure services than user-assigned</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q3"> User-assigned managed identities require a Microsoft Entra ID P2 license</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q3"> System-assigned managed identities can be simultaneously assigned to multiple VMs in a scale set</label>
+    </div>
+    <div class="quiz-feedback">The lifecycle and shareability distinction is the core difference. System-assigned: enabled on a single resource, the service principal is deleted when the resource is deleted — simple but inflexible. User-assigned: a standalone resource in a resource group, can be pre-provisioned with RBAC, then assigned to multiple compute resources — the right choice at scale or when you want to pre-stage permissions before resource creation. Neither type requires P2 licensing.</div>
+  </div>
+
+  <!-- Q4 -->
+  <div class="quiz-question" data-correct="b">
+    <p>4. You need to control Azure resource access for 500 developers using dynamic group membership based on their department attribute. What license tier is required?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q4"> No license required — dynamic groups are a free feature of Entra ID</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q4"> Microsoft Entra ID P1 — dynamic group membership rules require at least a P1 license per member</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q4"> Microsoft Entra ID P2 only — dynamic groups are a governance feature in the P2 tier</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q4"> Microsoft 365 E3 — dynamic groups are bundled only with M365 E3 and above</label>
+    </div>
+    <div class="quiz-feedback">Dynamic group membership is a P1 feature. Every user who will be managed by dynamic group rules (i.e., who could be a member) must have a P1 license assigned in the tenant. P2 is not required for dynamic groups alone — P2 is required for PIM, Identity Protection, and Access Reviews. M365 E3 includes Entra P1, but the feature requirement is P1, not specifically E3.</div>
+  </div>
+
+  <!-- Q5 -->
+  <div class="quiz-question" data-correct="c">
+    <p>5. You register an application in Entra ID so it can call Microsoft Graph API. What objects are created in the tenant?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q5"> Only an App Registration object — it contains everything the application needs to authenticate</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q5"> Only a Service Principal / Enterprise Application object is needed for API access</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q5"> Both an App Registration (the definition) and an Enterprise Application / Service Principal (the instance used for auth) are created automatically</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q5"> A Managed Identity is automatically created for applications registered in Entra ID</label>
+    </div>
+    <div class="quiz-feedback">Registering an application always creates two objects: the App Registration (in your tenant's App registrations blade, defines scopes, redirect URIs, credentials) and an Enterprise Application (in Enterprise applications blade, which is the service principal — the actual identity used when the app authenticates). The Enterprise Application is auto-created in your tenant as soon as you complete the registration. Managed identities are for Azure resources, not for app registrations.</div>
+  </div>
+
+  <!-- Q6 -->
+  <div class="quiz-question" data-correct="a">
+    <p>6. You want a CI/CD pipeline to authenticate to Azure without storing any long-lived credentials. What is the recommended approach in 2026?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q6"> Workload Identity Federation — configure a federated credential on the App Registration, allowing the pipeline's OIDC token to be exchanged for an Entra ID token with no stored secrets</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q6"> Store a client secret in the pipeline's secret store and implement automated rotation every 90 days</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q6"> Assign a managed identity to the build agent pool VM so the pipeline authenticates via IMDS</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q6"> Store a client certificate in Azure Key Vault and have the pipeline retrieve it before each run</label>
+    </div>
+    <div class="quiz-feedback">Workload Identity Federation is the current best practice for CI/CD pipelines. GitHub Actions, Azure DevOps, and GitLab CI all issue OIDC tokens per job. You configure a federated credential on the App Registration that trusts tokens from your pipeline's OIDC issuer — no secret or certificate ever exists. Option B improves on plaintext secrets but still has a long-lived credential. Option C works only if your build agent is an Azure VM with that managed identity assigned — not always the case with hosted agents. Option D still requires a credential (the cert private key) to be retrievable.</div>
+  </div>
+
+  <div class="quiz-score"></div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     PRIMARY SOURCE
+═══════════════════════════════════════════════ -->
+<div class="primary-source">
+  <strong>Primary source for this lesson</strong>
+  <a href="https://learn.microsoft.com/en-us/entra/identity/users/directory-overview-user-model" target="_blank">
+    Overview of the user, group, and application objects — Microsoft Entra ID (Microsoft Learn)
+  </a>
+  <p style="margin-top:0.5rem;font-size:0.9rem;color:#deecf9;">Also read: <a href="https://learn.microsoft.com/en-us/entra/identity/managed-identities-azure-resources/overview" target="_blank" style="color:#90caf9;">Managed identities for Azure resources overview</a> and <a href="https://learn.microsoft.com/en-us/entra/workload-id/workload-identity-federation" target="_blank" style="color:#90caf9;">Workload Identity Federation</a>. These three articles cover 80% of the identity questions in AZ-104.</p>
+</div>
+
+<!-- ═══════════════════════════════════════════════
+     ASK YOUR TEACHER
+═══════════════════════════════════════════════ -->
+<div class="ask-teacher">
+  <strong>Questions for your teacher (the AI agent)</strong><br>
+  This lesson covered the identity object model. There is much more to explore — ask your teacher to go deeper on any of these:
+  <ul style="margin-top:0.5rem;">
+    <li>Walk me through configuring Workload Identity Federation for a GitHub Actions pipeline end-to-end.</li>
+    <li>What happens to a synced user's attributes if the Entra Connect sync service goes offline for 3 days?</li>
+    <li>How does Entra ID B2B differ from B2C — and when would you use each for a partner access scenario?</li>
+    <li>Explain how Conditional Access policies interact with managed identities — can you apply CA to a managed identity?</li>
+  </ul>
+</div>
+
+<!-- ═══════════════════════════════════════════════
+     NEXT LESSON PREVIEW
+═══════════════════════════════════════════════ -->
+<div class="callout callout-info">
+  <strong>Coming up: Lesson 03 — Role-Based Access Control (RBAC)</strong>
+  You now know the four types of security principals in Entra ID. Next, we cover the mechanism that grants those principals permissions: RBAC. We will go deep on role definition structure, the critical Actions vs. DataActions distinction, custom roles, scope inheritance, and Privileged Identity Management — the control that turns permanent standing access into auditable just-in-time activation.
+</div>
+
+<!-- ═══════════════════════════════════════════════
+     NAVIGATION
+═══════════════════════════════════════════════ -->
+<nav class="lesson-nav">
+  <a href="0001-azure-resource-hierarchy.html">← Lesson 01 — Azure Resource Hierarchy</a>
+  <a href="0003-rbac.html">Lesson 03 — RBAC →</a>
+</nav>
+
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

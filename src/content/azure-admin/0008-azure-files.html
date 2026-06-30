@@ -1,0 +1,481 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lesson 08 — Azure Files &amp; Azure File Sync</title>
+  <link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<!-- ═══════════════════════════════════════════════
+     HEADER
+═══════════════════════════════════════════════ -->
+<header class="lesson-header">
+  <h1>Lesson 08 — Azure Files &amp; Azure File Sync</h1>
+  <div class="lesson-meta">
+    <span class="badge badge-domain">Domain 2 — Storage</span>
+    <span class="badge badge-exam">AZ-104: 15–20%</span>
+    <span class="badge badge-time">~25 min</span>
+    <span class="badge badge-prereq">Prereq: Lesson 07 — Blob Storage</span>
+  </div>
+</header>
+
+<!-- ═══════════════════════════════════════════════
+     WHY THIS MATTERS
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Why Azure Files Deserves Serious Attention</h2>
+  <p>Every enterprise has legacy workloads built around shared file systems — SMB shares, home drives, departmental file servers, application configuration mounts. Azure Files is Microsoft's answer to lifting those workloads to the cloud without re-architecting them. It is not just "storage you can mount"; it is a fully managed file service with enterprise-grade identity integration, snapshot capabilities, and a hybrid synchronisation agent (Azure File Sync) that makes on-premises-to-cloud migration genuinely practical.</p>
+  <p>For the AZ-104 exam, Azure Files is tested primarily on: authentication models (especially the differences between AD DS, Entra Domain Services, and Entra Kerberos), protocol requirements (SMB vs NFS), Azure File Sync architecture, and the gotchas around large file shares and port 445. Get these right and this section is easy marks.</p>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     OVERVIEW AND PROTOCOLS
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Azure Files Overview &amp; Protocol Support</h2>
+  <p>Azure Files provides <strong>fully managed cloud file shares</strong> that are accessible via industry-standard protocols. You access them the same way you would a traditional file server — with a drive letter on Windows or a mount point on Linux — but all the infrastructure is managed by Azure.</p>
+
+  <table>
+    <thead>
+      <tr><th>Protocol</th><th>Supported Versions</th><th>OS Support</th><th>Identity Auth</th><th>Notes</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>SMB</strong></td>
+        <td>2.1, 3.0, 3.1.1</td>
+        <td>Windows &amp; Linux</td>
+        <td>Yes (AD DS, Entra DS, Entra Kerberos)</td>
+        <td>Requires port 445 outbound. SMB 3.0+ adds encryption in transit.</td>
+      </tr>
+      <tr>
+        <td><strong>NFS</strong></td>
+        <td>4.1</td>
+        <td>Linux only</td>
+        <td>No (network-level only)</td>
+        <td>Premium tier only. No public endpoint — requires VNet integration (private endpoint or service endpoint). HNS must be disabled.</td>
+      </tr>
+      <tr>
+        <td><strong>REST API</strong></td>
+        <td>—</td>
+        <td>Any</td>
+        <td>Storage account key / SAS</td>
+        <td>Used for management operations, AzCopy, Azure portal. Not a mount protocol.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="callout callout-warn">
+    <strong>NFS 4.1 requirements — exam trap</strong>
+    NFS 4.1 is Linux-only and requires a <strong>Premium File Shares</strong> storage account. It does <em>not</em> support the public endpoint — you must use a private endpoint or VNet service endpoint. Hierarchical namespace (HNS) must be <em>disabled</em> on the storage account (NFS on Azure Files is not ADLS Gen2). There is no identity-based authentication for NFS shares in Azure Files.
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     STORAGE ACCOUNT REQUIREMENTS
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Storage Account Requirements</h2>
+  <p>The storage account type you choose determines the performance tier available for your Azure file shares. This is a critical architecture decision because changing tier later is disruptive.</p>
+
+  <table>
+    <thead>
+      <tr><th>Account Type</th><th>Performance Tier</th><th>Media</th><th>Use Case</th><th>Max Share Size</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>Standard GPv2</strong></td>
+        <td>Standard</td>
+        <td>HDD (magnetic)</td>
+        <td>General purpose, less latency-sensitive workloads</td>
+        <td>5 TiB by default; 100 TiB with large file shares enabled</td>
+      </tr>
+      <tr>
+        <td><strong>Premium File Shares</strong></td>
+        <td>Premium</td>
+        <td>SSD (NVMe)</td>
+        <td>Low-latency, high-IOPS workloads; NFS 4.1</td>
+        <td>100 TiB</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>Large File Shares on Standard GPv2</h3>
+  <p>By default, Standard GPv2 file shares are capped at 5 TiB. You can enable <strong>large file shares</strong> at the storage account level to increase this to 100 TiB.</p>
+
+  <div class="callout callout-danger">
+    <strong>Large file shares enablement is irreversible</strong>
+    Once you enable large file shares on a Standard GPv2 storage account, you <strong>cannot reverse it</strong>. Additionally, once enabled, you can no longer use geo-redundant storage (GRS or GZRS) on that account — it is limited to LRS or ZRS. Plan this carefully before enabling. If you need both large shares and geo-redundancy, this combination is not supported on Standard tier.
+  </div>
+
+  <h3>Share Quotas: Soft vs. Hard Limits</h3>
+  <p>Each Azure file share has a configurable quota. Understand the difference between how quotas work for billing vs. enforcement:</p>
+  <ul>
+    <li><strong>Soft limit (Standard tier)</strong>: The quota is a warning threshold. When reached, you receive alerts, but writes are not blocked. You are billed for actual usage.</li>
+    <li><strong>Hard limit (Premium tier)</strong>: The quota is enforced — once the share reaches the quota size, writes are refused. You are billed for the provisioned quota, not actual usage.</li>
+  </ul>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     AUTHENTICATION
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Authentication for Azure Files (SMB)</h2>
+  <p>Azure Files supports four authentication methods for SMB. Choosing the wrong one for your environment is a common architectural mistake — the right answer depends on your identity topology.</p>
+
+  <table>
+    <thead>
+      <tr><th>Authentication Method</th><th>Identity Source</th><th>Best For</th><th>Requires</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>Storage Account Key</strong></td>
+        <td>None (key-based)</td>
+        <td>Emergency access, service accounts with no AD</td>
+        <td>Nothing extra</td>
+      </tr>
+      <tr>
+        <td><strong>On-premises AD DS (Kerberos)</strong></td>
+        <td>On-prem Active Directory</td>
+        <td>Enterprises with on-prem AD and domain-joined machines</td>
+        <td>Storage account joined to on-prem AD domain; line-of-sight or DC sync</td>
+      </tr>
+      <tr>
+        <td><strong>Microsoft Entra Domain Services</strong></td>
+        <td>Azure-managed AD (cloud)</td>
+        <td>Cloud-only environments; Azure VMs not joined to on-prem AD</td>
+        <td>Entra DS tenant deployed; VMs domain-joined to Entra DS</td>
+      </tr>
+      <tr>
+        <td><strong>Microsoft Entra Kerberos</strong></td>
+        <td>Microsoft Entra ID (hybrid/cloud-native)</td>
+        <td>Hybrid-joined or Entra-joined Windows 10/11 devices (newest, preferred)</td>
+        <td>Windows 10 21H1+ or Windows 11; Entra ID; no on-prem AD required</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="callout callout-warn">
+    <strong>Storage account key = root access</strong>
+    The storage account key grants <strong>full, unrestricted access</strong> to all data in the storage account. It is the equivalent of a root password. Never use it as a day-to-day authentication mechanism for Azure Files. Rotate keys regularly, store them in Key Vault, and use identity-based authentication wherever possible.
+  </div>
+
+  <h3>Microsoft Entra Kerberos — The Modern Choice</h3>
+  <p>Microsoft Entra Kerberos is the newest and preferred authentication path for Azure Files. It works with:</p>
+  <ul>
+    <li>Hybrid Azure AD-joined devices (joined to both on-prem AD and Entra ID)</li>
+    <li>Entra ID-joined devices (cloud-native, no on-prem AD needed)</li>
+    <li>It does <em>not</em> require deploying or managing Entra Domain Services or maintaining on-prem AD connectivity</li>
+  </ul>
+  <p>The key technical distinction: Entra Kerberos uses Entra ID identities and issues Kerberos tickets via Entra ID itself, eliminating the dependency on a traditional domain controller for the ticket-granting process.</p>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     PERMISSIONS MODEL
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Share-Level Permissions vs. File/Directory ACLs</h2>
+  <p>Azure Files uses a two-layer permissions model when identity-based authentication is configured. Both layers must grant access for a user to read or write a file.</p>
+
+  <div class="hierarchy">
+<span class="hier-tenant">Share-Level Permissions (RBAC — Azure Resource Manager plane)</span>
+<span class="hier-mgmt">  └─ Controls who can access the share at all</span>
+<span class="hier-mgmt">  └─ Three built-in roles:</span>
+<span class="hier-sub">       Storage File Data SMB Share Reader          (read-only)</span>
+<span class="hier-sub">       Storage File Data SMB Share Contributor      (read/write/delete)</span>
+<span class="hier-sub">       Storage File Data SMB Share Elevated Contributor  (modify ACLs)</span>
+
+<span class="hier-tenant" style="margin-top:0.8rem;display:block;">File/Directory ACLs (NTFS-style — file system plane)</span>
+<span class="hier-mgmt">  └─ Controls per-file and per-directory permissions</span>
+<span class="hier-mgmt">  └─ Set via Windows File Explorer, icacls, or PowerShell</span>
+<span class="hier-resource">  └─ Standard Windows NTFS ACE entries: Full Control, Modify, Read, Write, Execute</span>
+  </div>
+
+  <div class="callout callout-info">
+    <strong>Both layers evaluated independently</strong>
+    A user must pass BOTH the share-level RBAC check AND the NTFS ACL check to access a file. Being a Storage File Data SMB Share Contributor does not override a Deny ACL on a specific folder. Conversely, having Full Control NTFS ACLs on a file is irrelevant if share-level access has not been granted. This is identical in concept to traditional Windows SMB share permissions + NTFS ACLs.
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     MOUNTING
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Mounting Azure File Shares</h2>
+  <h3>Windows</h3>
+  <p>Azure file shares are mounted on Windows using standard <code>net use</code> commands or the persistent drive mapping via File Explorer. The Azure portal provides a ready-made PowerShell script under each share's "Connect" blade.</p>
+
+  <pre><code># Mount using storage account key (for testing — use identity auth in production)
+net use Z: \\storageaccountname.file.core.windows.net\sharename /user:Azure\storageaccountname storageaccountkey
+
+# Persistent mount — survives reboot
+cmdkey /add:storageaccountname.file.core.windows.net /user:Azure\storageaccountname /pass:storageaccountkey
+net use Z: \\storageaccountname.file.core.windows.net\sharename /persistent:yes</code></pre>
+
+  <h3>Linux</h3>
+  <p>Linux mounts use the <strong>cifs-utils</strong> package to mount SMB shares. NFS 4.1 shares use standard NFS mount tooling.</p>
+
+  <pre><code># Install cifs-utils
+sudo apt-get install cifs-utils
+
+# Mount SMB share
+sudo mount -t cifs //storageaccountname.file.core.windows.net/sharename /mnt/azurefiles \
+  -o vers=3.0,username=storageaccountname,password=&lt;key&gt;,dir_mode=0777,file_mode=0777</code></pre>
+
+  <div class="callout callout-danger">
+    <strong>Port 445 — the enterprise blocker</strong>
+    SMB traffic uses <strong>TCP port 445</strong> outbound. Many ISPs and corporate firewalls block this port as a legacy security measure (MS17-010 / WannaCry era). If you cannot open port 445, you <strong>cannot directly mount Azure Files from on-premises</strong>. The architectural solution is <strong>Azure File Sync</strong>, which caches the share locally on a Windows Server — the server makes outbound HTTPS (port 443) connections to Azure, eliminating the port 445 requirement from the network boundary.
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     AZURE FILE SYNC
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Azure File Sync</h2>
+  <p>Azure File Sync is a service that caches Azure file shares on one or more Windows Server machines — either on-premises or in Azure VMs. It solves the port 445 problem, enables multi-site file sharing, and provides a migration path for retiring physical file servers while keeping users' drive-letter access.</p>
+
+  <h3>Architecture Components</h3>
+
+  <div class="hierarchy">
+<span class="hier-tenant">Storage Sync Service  (Azure resource — top-level AFS resource)</span>
+<span class="hier-mgmt">  └─ Sync Group  (defines what stays in sync together)</span>
+<span class="hier-sub">       ├─ Cloud Endpoint  (exactly ONE — the Azure file share)</span>
+<span class="hier-sub">       └─ Server Endpoints  (one or more — paths on registered Windows Servers)</span>
+<span class="hier-rg">                 e.g. D:\Data  on FILESERVER-LONDON</span>
+<span class="hier-rg">                 e.g. E:\Shares  on FILESERVER-NEWYORK</span>
+<span class="hier-resource">                      └─ Azure File Sync Agent (installed on each Windows Server)</span>
+  </div>
+
+  <table>
+    <thead>
+      <tr><th>Component</th><th>Role</th><th>Cardinality per Sync Group</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>Storage Sync Service</strong></td>
+        <td>Top-level Azure resource. Registers servers and owns sync groups.</td>
+        <td>1 per deployment (can span multiple sync groups)</td>
+      </tr>
+      <tr>
+        <td><strong>Sync Group</strong></td>
+        <td>Defines a synchronisation topology — which servers sync with which cloud share.</td>
+        <td>Multiple per Storage Sync Service</td>
+      </tr>
+      <tr>
+        <td><strong>Cloud Endpoint</strong></td>
+        <td>The Azure file share that is the source of truth for the sync group.</td>
+        <td>Exactly 1 per sync group</td>
+      </tr>
+      <tr>
+        <td><strong>Server Endpoint</strong></td>
+        <td>A path on a registered Windows Server that participates in sync.</td>
+        <td>Multiple per sync group</td>
+      </tr>
+      <tr>
+        <td><strong>Registered Server</strong></td>
+        <td>A Windows Server (2012 R2+) with the AFS agent installed and registered.</td>
+        <td>Multiple per Storage Sync Service</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>Synchronisation Behaviour</h3>
+  <p>Sync is <strong>bidirectional</strong>. Changes made in Azure (directly to the cloud endpoint) propagate to all server endpoints in the sync group. Changes made on any server endpoint propagate to the cloud endpoint and from there to all other server endpoints. This makes Azure File Sync a practical replacement for DFS-R (Distributed File System Replication) in multi-site scenarios.</p>
+
+  <div class="callout callout-info">
+    <strong>Conflict resolution</strong>
+    When the same file is modified on two server endpoints simultaneously (before sync converges), Azure File Sync creates a conflict file. The most recently modified version becomes the canonical file; the other is renamed with a conflict suffix. This is similar to OneDrive conflict behaviour.
+  </div>
+
+  <h3>Cloud Tiering</h3>
+  <p>Cloud tiering is one of the most powerful — and most misunderstood — features of Azure File Sync. When enabled on a server endpoint, files that have not been accessed recently are replaced on the local server with a <strong>reparse point</strong> (a tiny pointer file). The actual file data remains in the Azure file share. When a user or application opens the tiered file, the Azure File Sync agent transparently recalls it from Azure on demand.</p>
+
+  <table>
+    <thead>
+      <tr><th>Tiering Policy</th><th>What it controls</th><th>Example</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>Volume free space policy</strong></td>
+        <td>Ensures the server volume maintains a minimum percentage of free space. Azure File Sync tiers oldest files first to maintain this free space percentage.</td>
+        <td>Keep 20% free on D: — when D: hits 80% capacity, start tiering</td>
+      </tr>
+      <tr>
+        <td><strong>Date policy</strong></td>
+        <td>Files not accessed within N days are tiered, regardless of disk space.</td>
+        <td>Tier any file not opened in the last 30 days</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="callout callout-warn">
+    <strong>Cloud tiering and backups</strong>
+    Standard backup agents (VSS-based, file-level) will attempt to recall tiered files during backup, potentially pulling gigabytes from Azure over your WAN link. Configure backup policies to use <strong>VSS-aware backup</strong> or use Azure Backup directly for Azure Files. Also note: cloud tiering requires at least a /26 subnet free from VSS compatibility concerns.
+  </div>
+
+  <h3>Pre-Seeding with Robocopy</h3>
+  <p>When migrating large datasets to Azure File Sync, uploading all data from scratch over the internet is impractical. The recommended approach is <strong>pre-seeding</strong>:</p>
+  <ol>
+    <li>Use <strong>Robocopy</strong> (or AzCopy) to copy data directly to the Azure file share — often via ExpressRoute or Azure Data Box for large datasets.</li>
+    <li>After data is in Azure, create the sync group and add server endpoints.</li>
+    <li>Azure File Sync performs a <strong>namespace reconciliation</strong> — it matches what's on the server against what's in Azure and syncs only the differences. This is far faster than re-uploading everything.</li>
+  </ol>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     SNAPSHOTS AND BACKUP
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Snapshots and Azure Backup for Azure Files</h2>
+  <h3>Share Snapshots</h3>
+  <p>Azure file shares support <strong>point-in-time share snapshots</strong>. A snapshot captures the state of the entire file share at the moment it is taken. Snapshots are incremental — only the changes since the last snapshot are stored — but from the user's perspective each snapshot appears as a full copy.</p>
+  <ul>
+    <li>Snapshots are <strong>read-only</strong> and are stored within the same storage account as the file share.</li>
+    <li>You can restore individual files from a snapshot (via the "Previous Versions" tab in Windows, or via portal/CLI) or restore the entire share.</li>
+    <li>Snapshots do not protect against accidental deletion of the storage account itself — that requires soft delete or Azure Backup.</li>
+    <li>Maximum 200 snapshots per share.</li>
+  </ul>
+
+  <h3>Azure Backup for Azure Files</h3>
+  <p>Azure Backup integrates with Azure Files to create scheduled snapshots via a <strong>Recovery Services Vault</strong>. This provides:</p>
+  <ul>
+    <li>Policy-driven snapshot schedules (daily, weekly, monthly, yearly retention)</li>
+    <li>Centralised management across all file shares in a subscription</li>
+    <li>Integration with <strong>soft delete</strong> — deleted snapshots are retained for a configurable period before being permanently removed</li>
+    <li>Instant restore — individual files can be restored in seconds from any snapshot</li>
+  </ul>
+
+  <div class="callout callout-info">
+    <strong>Soft delete for Azure Files</strong>
+    Soft delete, when enabled on a storage account, retains deleted file shares and their snapshots for a configurable period (1–365 days). This protects against accidental deletion by administrators. Soft delete is separate from snapshot retention — enable both for a defence-in-depth backup posture.
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     QUIZ
+═══════════════════════════════════════════════ -->
+<section class="quiz">
+  <h2>Check Your Understanding</h2>
+  <p>Click any option to see immediate feedback. Answers represent correct behaviour in a real Azure environment.</p>
+
+  <!-- Q1 -->
+  <div class="quiz-question" data-correct="b">
+    <p>1. Your organisation cannot open TCP port 445 outbound from the corporate network to the internet. You need on-premises users to access an Azure file share using their normal drive-letter mapping. What is the correct architectural solution?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q1"> Deploy an Azure VPN Gateway and mount the Azure file share over SMB via the IPSec tunnel</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q1"> Deploy Azure File Sync on a Windows Server inside the corporate network; the server connects outbound on HTTPS (443) and caches the share — users map a drive to the local server, not directly to Azure</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q1"> Create an Azure Private DNS Zone that resolves the file share endpoint to a private IP, bypassing the port 445 requirement</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q1"> Provision an ExpressRoute circuit with private peering; SMB traffic will route over the private circuit without traversing the internet firewall</label>
+    </div>
+    <div class="quiz-feedback">Azure File Sync is the correct solution here. The sync agent on the Windows Server connects outbound to Azure on HTTPS (port 443), which is universally available. Users map a drive to the local Windows Server path — they never connect directly to Azure on port 445. ExpressRoute and VPN are valid for direct mount scenarios but both still require port 445 to be open at the SMB endpoint level, and neither bypasses the port 445 requirement from the client to the file share endpoint.</div>
+  </div>
+
+  <!-- Q2 -->
+  <div class="quiz-question" data-correct="c">
+    <p>2. Your organisation is deploying cloud-native Windows 11 devices that are Entra ID-joined only (no on-premises AD). You want users to authenticate to Azure Files using their Entra ID credentials (Kerberos). Which authentication method should you configure?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q2"> Storage account key authentication — the most compatible option across all device types</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q2"> NFS 4.1 protocol — it provides identity-based access for Linux and Windows clients in cloud environments</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q2"> Microsoft Entra Kerberos authentication — the modern option designed for hybrid-joined and Entra ID-joined Windows devices with no on-prem AD dependency</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q2"> SMB with guest access enabled on the share — Entra ID-joined devices cannot participate in Kerberos without a domain controller</label>
+    </div>
+    <div class="quiz-feedback">Microsoft Entra Kerberos is the correct answer. It was specifically designed for this scenario: Entra ID-joined (cloud-native) and hybrid-joined Windows 10/11 devices accessing Azure Files using their Entra ID identities, without requiring on-premises AD DS or Entra Domain Services. NFS 4.1 is Linux-only and has no identity-based authentication. Storage account keys provide no per-user identity context.</div>
+  </div>
+
+  <!-- Q3 -->
+  <div class="quiz-question" data-correct="a">
+    <p>3. A Windows Server participating in Azure File Sync has cloud tiering enabled. A user opens a file that has been tiered. What happens on the server?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q3"> The Azure File Sync agent transparently recalls the file data from the Azure file share on demand; a reparse point (placeholder) on the server is replaced with the full file content during the recall</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q3"> The file is decompressed from a .zip archive stored locally on the server — no Azure retrieval is required once a file is tiered</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q3"> The file is permanently deleted from the server; the user must download a fresh copy from the Azure portal manually</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q3"> Only the file's last-accessed date metadata is stored on the server; the file name is displayed but the content cannot be retrieved without manually running a sync command</label>
+    </div>
+    <div class="quiz-feedback">Cloud tiering replaces file content with a reparse point — a tiny placeholder that looks like the original file (same name, size metadata, timestamps). When a user or application opens the tiered file, the Azure File Sync agent intercepts the I/O request via a filter driver and transparently recalls the file data from the Azure file share. The recall is transparent to the application — it just sees a brief delay during opening. No manual steps are required.</div>
+  </div>
+
+  <!-- Q4 -->
+  <div class="quiz-question" data-correct="d">
+    <p>4. You need to replicate a single Azure file share to three Windows Server locations in different offices, so that all three offices can read and write the same files. How does Azure File Sync handle this topology?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q4"> Each sync group maps one server endpoint to one cloud endpoint one-to-one; you would need three separate sync groups and three separate Azure file shares</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q4"> A sync group can have multiple cloud endpoints; you create three cloud endpoints pointing to three separate Azure file shares that replicate between themselves</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q4"> Cloud endpoints are read-only — the Azure file share is the only place writes are accepted; server endpoints can only read from it</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q4"> One sync group has one cloud endpoint (the single Azure file share) and three server endpoints (one per office server); all endpoints sync bidirectionally — writes at any location propagate to all others via Azure</label>
+    </div>
+    <div class="quiz-feedback">This is the correct multi-site topology for Azure File Sync. One sync group contains one cloud endpoint (the Azure file share, which acts as the hub) and multiple server endpoints — one per Windows Server location. Sync is bidirectional: writes at any server endpoint flow to the cloud endpoint and then propagate to all other server endpoints. This makes Azure File Sync a modern replacement for DFS-R in multi-site file replication scenarios.</div>
+  </div>
+
+  <!-- Q5 -->
+  <div class="quiz-question" data-correct="b">
+    <p>5. You need to store files larger than 5 TiB in an Azure Files standard (HDD) share. You enable large file shares on the storage account. What constraint must you accept?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q5"> Large file shares require a Premium File Shares account type and can be disabled later to revert to Standard pricing</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q5"> Enabling large file shares on a Standard GPv2 account is irreversible, and the account can no longer use geo-redundant storage (GRS or GZRS) — only LRS or ZRS are available after enablement</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q5"> Enabling large file shares on a Standard GPv2 account automatically migrates the account to ZRS replication for data durability</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q5"> There is no special enablement required — all Azure Files shares support 100 TiB by default regardless of account type</label>
+    </div>
+    <div class="quiz-feedback">Correct. Large file shares must be explicitly enabled at the storage account level on Standard GPv2, and this action is irreversible — you cannot downgrade. The critical trade-off is that GRS and GZRS become unavailable after enablement; only LRS and ZRS remain as redundancy options. If your workload requires both large shares and geographic redundancy, use a Premium File Shares account (which supports 100 TiB natively without this restriction, though Premium only supports LRS and ZRS).</div>
+  </div>
+
+  <!-- Q6 -->
+  <div class="quiz-question" data-correct="c">
+    <p>6. A user is a member of the Storage File Data SMB Share Contributor RBAC role on an Azure file share. However, the user reports they cannot write to a specific folder within the share. Assuming the share is using AD DS Kerberos authentication, what is the most likely cause?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q6"> The Storage File Data SMB Share Contributor role supersedes all NTFS ACLs — if this role is assigned correctly, all writes should be permitted and the issue must be a DNS resolution problem</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q6"> NTFS ACLs are not enforced on cloud-hosted Azure Files shares — only share-level RBAC is evaluated</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q6"> The NTFS ACL on the specific folder denies Write access for the user's identity — share-level RBAC and NTFS ACLs are both evaluated, and the more restrictive result applies</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q6"> Only users holding the Storage account key can read or modify NTFS ACLs on Azure Files shares</label>
+    </div>
+    <div class="quiz-feedback">Both layers are evaluated independently. The Storage File Data SMB Share Contributor role grants share-level access (allows entry to the share at all), but NTFS ACLs on individual files and directories are also enforced by Azure Files. If a Deny ACL — or simply a missing Allow ACE — exists on the target folder for that user or group, the write will be blocked even though share-level RBAC is satisfied. Use icacls or Windows File Explorer from a machine with appropriate permissions (Storage File Data SMB Share Elevated Contributor) to inspect and correct the NTFS ACLs.</div>
+  </div>
+
+  <div class="quiz-score"></div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     PRIMARY SOURCE
+═══════════════════════════════════════════════ -->
+<div class="primary-source">
+  <strong>Primary source for this lesson</strong>
+  <a href="https://learn.microsoft.com/en-us/azure/storage/files/storage-files-introduction" target="_blank">
+    Introduction to Azure Files — Microsoft Learn
+  </a>
+  <p style="margin-top:0.5rem;font-size:0.9rem;color:#deecf9;">Read the full introduction and follow the linked articles on identity-based authentication, Azure File Sync deployment, and cloud tiering. The Azure File Sync deployment guide is especially important for exam scenarios involving hybrid file sharing.</p>
+</div>
+
+<!-- ═══════════════════════════════════════════════
+     ASK YOUR TEACHER
+═══════════════════════════════════════════════ -->
+<div class="ask-teacher">
+  <strong>Questions for your teacher (the AI agent)</strong><br>
+  This lesson covered Azure Files architecture and Azure File Sync. Go deeper on any of these:
+  <ul style="margin-top:0.5rem;">
+    <li>Walk me through setting up Azure File Sync from scratch, including registering a Windows Server and configuring cloud tiering.</li>
+    <li>How do you migrate an existing on-premises file server to Azure Files using the Azure File Sync pre-seeding workflow?</li>
+    <li>What are the exact steps to configure AD DS Kerberos authentication for Azure Files — what gets created in Active Directory?</li>
+    <li>How does Azure Files pricing work for Premium vs Standard, and when does the IOPS-to-cost ratio favour Premium over Standard?</li>
+  </ul>
+</div>
+
+<!-- ═══════════════════════════════════════════════
+     NEXT LESSON PREVIEW
+═══════════════════════════════════════════════ -->
+<div class="callout callout-info">
+  <strong>Coming up: Lesson 09 — Virtual Machines: Configuration, Sizing &amp; Availability</strong>
+  With storage covered, we move to compute. Lesson 09 is one of the highest-weighted topics on AZ-104 — VM families, managed disks, disk caching, availability sets vs availability zones, VM extensions, and more. Expect exam questions that distinguish between 99.95% and 99.99% SLA guarantees.
+</div>
+
+<!-- ═══════════════════════════════════════════════
+     NAVIGATION
+═══════════════════════════════════════════════ -->
+<nav class="lesson-nav">
+  <a href="0007-blob-storage.html">← Lesson 07 — Blob Storage</a>
+  <a href="0009-virtual-machines.html">Lesson 09 — Virtual Machines →</a>
+</nav>
+
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

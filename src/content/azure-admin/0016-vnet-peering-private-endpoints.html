@@ -1,0 +1,442 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lesson 16 — VNet Peering, Service Endpoints &amp; Private Endpoints</title>
+  <link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<!-- ═══════════════════════════════════════════════
+     HEADER
+═══════════════════════════════════════════════ -->
+<header class="lesson-header">
+  <h1>Lesson 16 — VNet Peering, Service Endpoints &amp; Private Endpoints</h1>
+  <div class="lesson-meta">
+    <span class="badge badge-domain">Domain 4 — Networking</span>
+    <span class="badge badge-exam">AZ-104: 15–20%</span>
+    <span class="badge badge-time">~35 min</span>
+    <span class="badge badge-prereq">Prereq: Lessons 14–15</span>
+  </div>
+</header>
+
+<!-- ═══════════════════════════════════════════════
+     WHY THIS MATTERS
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Why You Need to Understand This</h2>
+  <p>No workload lives in complete isolation. Applications need to communicate across VNets. Databases and storage accounts need to be reachable from VMs without exposing them to the internet. These connectivity patterns — peering, service endpoints, and private endpoints — are among the most commonly tested AZ-104 topics, and they are also the most common sources of real-world misconfiguration in production Azure environments.</p>
+  <p>The concepts in this lesson are deceptively simple to state but require careful reasoning to apply correctly. VNet peering's non-transitivity trips up experienced engineers. Private endpoint DNS is a surprisingly deep topic. Pay close attention to the details — they are what distinguish a correct exam answer from a plausible-sounding wrong one.</p>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     VNET PEERING
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>VNet Peering</h2>
+  <p><strong>VNet Peering</strong> connects two VNets so their resources can communicate using private IP addresses over the Azure backbone network — never over the public internet. Traffic between peered VNets stays within Microsoft's network, providing low latency and high bandwidth.</p>
+
+  <h3>Regional vs Global peering</h3>
+  <table>
+    <thead>
+      <tr><th>Type</th><th>Scope</th><th>Latency</th><th>Cost</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><strong>Regional peering</strong></td><td>Both VNets in the same Azure region</td><td>Sub-millisecond (same DC fabric)</td><td>Per-GB data transfer (low)</td></tr>
+      <tr><td><strong>Global peering</strong></td><td>VNets in different Azure regions</td><td>Higher (cross-region backbone)</td><td>Per-GB data transfer (higher than regional)</td></tr>
+    </tbody>
+  </table>
+
+  <div class="callout callout-info">
+    <strong>Regional peering ingress is not free</strong>
+    A common misconception: VNet peering data transfer is not free. Both regional and global peering incur per-GB charges on both sides (ingress and egress). Regional peering rates are lower than global peering. This is different from intra-VNet communication (within the same VNet), which is free.
+  </div>
+
+  <h3>Critical peering properties</h3>
+  <ul>
+    <li><strong>Peering is bidirectional but must be configured in both directions:</strong> when you create a peering from VNet A to VNet B, you must also create a peering from VNet B to VNet A. Creating only one direction means VNet A can reach VNet B, but VNet B cannot reach VNet A. The portal can create both sides simultaneously as a convenience.</li>
+    <li><strong>Address spaces cannot overlap:</strong> peered VNets must have non-overlapping CIDR ranges. Azure refuses to create the peering if they overlap.</li>
+    <li><strong>Peering is not inheritable:</strong> resources in peered VNets can only access each other's immediate peers. A VNet cannot access resources through a peer's other peers.</li>
+  </ul>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     NON-TRANSITIVITY
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Non-Transitive Peering — The Most Important Peering Fact</h2>
+  <p>VNet peering is <strong>non-transitive</strong>. This is the most tested and most misunderstood property of peering.</p>
+
+  <div class="hierarchy">
+<span class="hier-tenant">VNet A  ←──── peering ────→  VNet B  ←──── peering ────→  VNet C</span>
+<span class="hier-sub"></span>
+<span class="hier-rg">   VNet A  ✗  CANNOT directly communicate with  ✗  VNet C</span>
+<span class="hier-resource">   (even though both are peered to VNet B)</span>
+  </div>
+
+  <p>To allow A↔C communication, you have two options:</p>
+  <ol>
+    <li><strong>Create a direct A↔C peering</strong> — simple but does not scale; in a large spoke topology you'd need O(n²) peerings.</li>
+    <li><strong>Route A→C traffic through an NVA (Azure Firewall) in VNet B</strong> — using UDRs in VNet A and VNet C that point to the Firewall in VNet B. This is the hub-spoke pattern and scales to any number of spokes.</li>
+  </ol>
+
+  <div class="callout callout-danger">
+    <strong>Exam trap — transitive routing</strong>
+    A common exam scenario: "VNet A is peered to VNet B. VNet B is peered to VNet C. A VM in VNet A cannot reach a VM in VNet C. Why?" The answer is always non-transitivity. The fix is either a direct A↔C peering or routing through an NVA. Do not confuse this with gateway transit (which is about on-premises connectivity via VPN/ExpressRoute, not spoke-to-spoke traffic).
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     PEERING PROPERTIES
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Peering Configuration Properties</h2>
+  <p>Each peering link has settings that control how traffic behaves. These are configured independently on each side of the peering.</p>
+
+  <table>
+    <thead>
+      <tr><th>Setting</th><th>Where configured</th><th>Effect</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>Allow Virtual Network Access</strong></td>
+        <td>Both sides</td>
+        <td>Enables IP communication between resources in the peered VNets. Default: on. Turning this off makes the peering configuration exist but no traffic flows.</td>
+      </tr>
+      <tr>
+        <td><strong>Allow Forwarded Traffic</strong></td>
+        <td>Both sides</td>
+        <td>Allows traffic that was forwarded through this VNet (i.e. originated elsewhere) to pass. Required in NVA/hub scenarios where the hub's Firewall forwards spoke-to-spoke traffic.</td>
+      </tr>
+      <tr>
+        <td><strong>Allow Gateway Transit</strong></td>
+        <td>Hub side (the VNet that has the gateway)</td>
+        <td>Permits the peered VNet to use this VNet's VPN Gateway or ExpressRoute Gateway for on-premises connectivity. Must be enabled on the hub for spoke gateway transit to work.</td>
+      </tr>
+      <tr>
+        <td><strong>Use Remote Gateways</strong></td>
+        <td>Spoke side (the VNet that will use the gateway)</td>
+        <td>Tells the spoke to use the gateway in the peered (hub) VNet. Requires <em>Allow Gateway Transit</em> to be enabled on the hub side. Cannot be enabled if the spoke already has its own gateway.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="callout callout-warn">
+    <strong>Gateway transit — both sides must be configured</strong>
+    For a spoke VNet to use the hub's VPN Gateway: enable <em>Allow Gateway Transit</em> on the hub's peering settings AND enable <em>Use Remote Gateways</em> on the spoke's peering settings. Both must be set. If either is missing, the spoke uses its own default route for internet/on-premises traffic and does not traverse the hub gateway.
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     HUB-SPOKE TOPOLOGY
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Hub-Spoke Topology</h2>
+  <p>The <strong>hub-spoke topology</strong> is the dominant enterprise network architecture in Azure. It uses peering to create a centrally-managed connectivity hub that shared services (firewall, VPN, DNS) live in, while application workloads live in isolated spoke VNets.</p>
+
+  <div class="hierarchy">
+<span class="hier-tenant">Hub VNet (10.10.0.0/16) — East US</span>
+<span class="hier-sub">  ├─ AzureFirewallSubnet (10.10.0.0/26) — Azure Firewall</span>
+<span class="hier-sub">  ├─ GatewaySubnet (10.10.1.0/27)       — VPN Gateway / ExpressRoute</span>
+<span class="hier-sub">  └─ ManagementSubnet (10.10.2.0/24)     — Bastion, DNS, monitoring VMs</span>
+<span class="hier-rg">         │</span>
+<span class="hier-rg">   ┌─────┼──────────────────────────────────────┐</span>
+<span class="hier-rg">   │     │                                          │</span>
+<span class="hier-mgmt">Spoke A    Spoke B                             Spoke C</span>
+<span class="hier-resource">(Prod)    (Dev)                              (Shared Services)</span>
+  </div>
+
+  <h3>Key design rules for hub-spoke</h3>
+  <ul>
+    <li>Spoke VNets peer to the hub — they do <strong>not</strong> peer with each other directly.</li>
+    <li>Spoke-to-spoke traffic is routed <em>through</em> the Azure Firewall in the hub, providing centralised inspection and logging.</li>
+    <li>UDRs in each spoke point 0.0.0.0/0 (and spoke CIDR ranges) to the Azure Firewall's private IP in the hub.</li>
+    <li>Hub has <em>Allow Gateway Transit</em> enabled; spokes have <em>Use Remote Gateways</em> enabled to share the hub's VPN/ExpressRoute gateway.</li>
+    <li>DNS: either an Azure DNS Private Resolver in the hub or DNS forwarder VMs — spoke VMs use this for hybrid DNS.</li>
+  </ul>
+
+  <div class="callout callout-info">
+    <strong>Transitive routing through the Firewall</strong>
+    Spoke A VMs send traffic destined for Spoke B. Their UDR routes this to the Azure Firewall in the hub. The Firewall evaluates network/application rules and, if permitted, routes the traffic to Spoke B. This is how non-transitive peering is overcome without direct spoke-to-spoke peerings — traffic traverses the hub's Firewall, gaining inspection and audit logging for all east-west traffic.
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     SERVICE ENDPOINTS
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Service Endpoints</h2>
+  <p><strong>Service endpoints</strong> extend your VNet's identity to an Azure PaaS service. When enabled on a subnet for a specific service (e.g. <code>Microsoft.Storage</code>), traffic from that subnet to the service is routed through the Azure backbone instead of the internet — and the service sees the traffic's source as your VNet private IP range rather than a public IP.</p>
+
+  <h3>How service endpoints work</h3>
+  <ol>
+    <li>Enable the service endpoint on the subnet (e.g. <code>Microsoft.Storage</code> on the AppTier subnet).</li>
+    <li>On the PaaS service (e.g. Storage Account), configure the firewall to allow traffic from that specific subnet/VNet.</li>
+    <li>Azure adds a more-specific route to the subnet's routing table directing traffic for the service's IP ranges through the Azure backbone instead of the default internet gateway.</li>
+    <li>The PaaS service uses the source VNet identity for access control — the storage account can allow only the specified VNet subnet and block everything else (including other Azure services and the internet).</li>
+  </ol>
+
+  <div class="callout callout-warn">
+    <strong>Service endpoints do NOT create private IPs</strong>
+    The PaaS service still has a public IP address. Traffic from your subnet routes to that public IP via the Azure backbone (not the internet) — but the service is still publicly addressed. If you also want to block all internet access to the service, you must explicitly disable public network access on the service. Without that, the service is still reachable from the internet; your subnet just gets preferential backbone routing.
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     PRIVATE ENDPOINTS
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Private Endpoints</h2>
+  <p>A <strong>Private Endpoint</strong> creates a network interface with a <em>private IP address from your VNet's address space</em> that maps to a specific PaaS service instance. Traffic to that PaaS service goes entirely over the private network — it never touches the public internet or the service's public IP.</p>
+
+  <h3>How private endpoints work</h3>
+  <ol>
+    <li>Create a private endpoint resource, specifying the target PaaS resource (e.g. a specific Storage Account) and the sub-resource type (e.g. <code>blob</code>).</li>
+    <li>Azure provisions a NIC in your chosen subnet with a private IP from that subnet's address space (e.g. 10.20.3.5).</li>
+    <li>All traffic from your VNet to that Storage Account is routed to 10.20.3.5 — it stays entirely within the private network.</li>
+    <li>Optionally disable public access on the Storage Account — now even internet callers cannot reach it.</li>
+  </ol>
+
+  <div class="callout callout-danger">
+    <strong>DNS is the most critical private endpoint requirement</strong>
+    Your application calls <code>mystorageaccount.blob.core.windows.net</code>. Without DNS configuration, this name resolves to the Storage Account's public IP (e.g. 52.x.x.x) — traffic bypasses the private endpoint and goes to the internet. With correct DNS configuration, the same name resolves to your private endpoint IP (e.g. 10.20.3.5) — traffic stays private. The private endpoint exists but does nothing useful until DNS is correctly configured. This is the single most commonly missed step in private endpoint deployments.
+  </div>
+
+  <h3>Private DNS Zone configuration</h3>
+  <p>The recommended approach for private endpoint DNS is to use <strong>Azure Private DNS Zones</strong>:</p>
+  <ol>
+    <li>Create a Private DNS Zone named <code>privatelink.blob.core.windows.net</code> (the zone name depends on the service — each has a specific privatelink subdomain).</li>
+    <li>Link the Private DNS Zone to every VNet that needs to resolve the private endpoint.</li>
+    <li>When you create the private endpoint, enable "Integrate with private DNS zone" — Azure automatically creates an A record in the zone mapping the storage account's FQDN to the private IP.</li>
+    <li>Clients in linked VNets now resolve <code>mystorageaccount.blob.core.windows.net</code> → <code>mystorageaccount.privatelink.blob.core.windows.net</code> → <code>10.20.3.5</code> (private IP).</li>
+  </ol>
+
+  <h3>Private DNS Zone names by service</h3>
+  <table>
+    <thead>
+      <tr><th>Service</th><th>Sub-resource</th><th>Private DNS Zone name</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Azure Blob Storage</td><td>blob</td><td><code>privatelink.blob.core.windows.net</code></td></tr>
+      <tr><td>Azure File Storage</td><td>file</td><td><code>privatelink.file.core.windows.net</code></td></tr>
+      <tr><td>Azure SQL Database</td><td>sqlServer</td><td><code>privatelink.database.windows.net</code></td></tr>
+      <tr><td>Azure Key Vault</td><td>vault</td><td><code>privatelink.vaultcore.azure.net</code></td></tr>
+      <tr><td>Azure Container Registry</td><td>registry</td><td><code>privatelink.azurecr.io</code></td></tr>
+      <tr><td>Azure Cosmos DB (SQL)</td><td>Sql</td><td><code>privatelink.documents.azure.com</code></td></tr>
+    </tbody>
+  </table>
+
+  <div class="callout callout-warn">
+    <strong>Hub-spoke DNS for private endpoints</strong>
+    In a hub-spoke model, private DNS zones should be linked to the Hub VNet. Spoke VMs use the hub's DNS resolver (Azure DNS Private Resolver or a DNS forwarder VM) to resolve private endpoint names. Do not link the same zone to every spoke VNet manually — use the hub as the central DNS resolution point, which gives you a single place to manage zone links as your spoke count grows.
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     SERVICE ENDPOINTS VS PRIVATE ENDPOINTS
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Service Endpoints vs Private Endpoints — Side by Side</h2>
+  <p>Understanding the differences between these two connectivity options is critical for both the exam and real-world architecture decisions. They solve similar problems but with different mechanisms and different trade-offs.</p>
+
+  <table>
+    <thead>
+      <tr><th>Feature</th><th>Service Endpoints</th><th>Private Endpoints</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>Private IP in VNet</strong></td>
+        <td>No — service retains public IP</td>
+        <td>Yes — NIC with private IP in your subnet</td>
+      </tr>
+      <tr>
+        <td><strong>Traffic path</strong></td>
+        <td>Azure backbone to service's public endpoint</td>
+        <td>Fully private; never touches service public IP</td>
+      </tr>
+      <tr>
+        <td><strong>Public access disabled</strong></td>
+        <td>No (service still accessible from internet unless separately restricted)</td>
+        <td>Yes — public access can be fully disabled</td>
+      </tr>
+      <tr>
+        <td><strong>DNS changes required</strong></td>
+        <td>No — FQDN still resolves to public IP</td>
+        <td>Yes — FQDN must resolve to private IP</td>
+      </tr>
+      <tr>
+        <td><strong>Cross-subscription</strong></td>
+        <td>Service endpoint policies only within subscription</td>
+        <td>Yes — private endpoint can target resources in other subscriptions</td>
+      </tr>
+      <tr>
+        <td><strong>Cross-region</strong></td>
+        <td>No — service endpoint is region-specific</td>
+        <td>Yes — private endpoint in one region can connect to a resource in another</td>
+      </tr>
+      <tr>
+        <td><strong>On-premises access</strong></td>
+        <td>Not directly accessible from on-premises</td>
+        <td>Yes — on-premises traffic via VPN/ExpressRoute can reach the private IP</td>
+      </tr>
+      <tr>
+        <td><strong>Setup complexity</strong></td>
+        <td>Low — enable on subnet, configure service firewall</td>
+        <td>Medium — create endpoint, configure DNS zone, link to VNets</td>
+      </tr>
+      <tr>
+        <td><strong>Cost</strong></td>
+        <td>Free (part of VNet)</td>
+        <td>Per-hour cost + per-GB data processing fee</td>
+      </tr>
+      <tr>
+        <td><strong>When to use</strong></td>
+        <td>Dev/test, simple scenarios, cost-sensitive environments</td>
+        <td>Production, compliance-driven, any scenario requiring full private access</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="callout callout-info">
+    <strong>The rule of thumb</strong>
+    Use Private Endpoints for production workloads. The DNS requirement is the main operational hurdle, but once your Private DNS Zone automation is in place (e.g. via Azure Policy auto-registration), it is seamless. Service Endpoints are a good fit for dev/test environments where the DNS overhead is not justified, or for simple storage firewalling where you trust your VNet boundary.
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     AZURE PRIVATE LINK
+═══════════════════════════════════════════════ -->
+<section>
+  <h2>Azure Private Link</h2>
+  <p><strong>Azure Private Link</strong> is the underlying platform service that powers Private Endpoints. When you create a Private Endpoint for a PaaS resource (Storage, SQL, Key Vault, etc.), you are consuming that service through Private Link.</p>
+  <p>Private Link also enables a second scenario: <strong>Private Link Service</strong>, which lets you expose your own multi-tenant service (e.g. your application running behind a Standard Internal Load Balancer) to other VNets or customers' VNets via private endpoints — without VNet peering. This is used for ISV scenarios and service provider architectures.</p>
+  <p>For AZ-104, the important distinction is: <em>Private Endpoint</em> is the consumer side (in your VNet), <em>Private Link Service</em> is the provider side (exposing your service). The exam focuses on the Private Endpoint consumer experience.</p>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     QUIZ
+═══════════════════════════════════════════════ -->
+<section class="quiz">
+  <h2>Check Your Understanding</h2>
+  <p>Click any option to see immediate feedback. Answers reflect real Azure behaviour.</p>
+
+  <!-- Q1 -->
+  <div class="quiz-question" data-correct="b">
+    <p>1. VNet A is peered to VNet B. VNet B is peered to VNet C. A VM in VNet A cannot communicate with a VM in VNet C. What is the correct explanation?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q1"> The peering between A and B was created in only one direction</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q1"> VNet peering is non-transitive — A-B and B-C peerings do not allow A-C communication</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q1"> Global peering is required for traffic to pass through an intermediary VNet</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q1"> The Allow Forwarded Traffic setting must be enabled on both peerings</label>
+    </div>
+    <div class="quiz-feedback">VNet peering is non-transitive by design. Peering A↔B and B↔C does not create a path for A↔C. To enable A↔C communication, either create a direct A↔C peering, or configure UDRs in A and C that route cross-spoke traffic through an NVA (Azure Firewall) in VNet B. "Allow Forwarded Traffic" (option D) only affects traffic that has been forwarded by an NVA — it does not make peering transitive. That setting would be part of the NVA solution, not the cause of the problem.</div>
+  </div>
+
+  <!-- Q2 -->
+  <div class="quiz-question" data-correct="c">
+    <p>2. You want a spoke VNet to use the hub VNet's VPN Gateway to connect to on-premises. What must be configured?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q2"> Allow Gateway Transit on the spoke peering only</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q2"> Use Remote Gateways on the hub peering only</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q2"> Allow Gateway Transit on the hub peering AND Use Remote Gateways on the spoke peering</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q2"> Create a VPN Gateway in the spoke VNet and configure a VNet-to-VNet connection</label>
+    </div>
+    <div class="quiz-feedback">Both settings are required: <em>Allow Gateway Transit</em> must be enabled on the <strong>hub side</strong> of the peering (this allows the hub's gateway to be used by peers), and <em>Use Remote Gateways</em> must be enabled on the <strong>spoke side</strong> of the peering (this tells the spoke to use the hub's gateway). If either setting is missing, the spoke will attempt to use its own default routing and will not route on-premises traffic through the hub gateway. The spoke must not have its own gateway for <em>Use Remote Gateways</em> to be enabled.</div>
+  </div>
+
+  <!-- Q3 -->
+  <div class="quiz-question" data-correct="a">
+    <p>3. You created a Private Endpoint for a Storage Account in your VNet. VMs in the VNet still connect to the Storage Account's public IP instead of the private endpoint. What is the most likely cause?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q3"> DNS is not configured — the storage account FQDN still resolves to the public IP instead of the private endpoint IP</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q3"> The NSG on the subnet is blocking traffic to the private endpoint's private IP</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q3"> The private endpoint is in a different subnet from the VMs</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q3"> Public access was not disabled on the Storage Account, so Azure routes to the public endpoint</label>
+    </div>
+    <div class="quiz-feedback">The most common private endpoint failure mode is missing DNS configuration. Even though the private endpoint NIC exists with a private IP, the application calls the FQDN (e.g. <code>myaccount.blob.core.windows.net</code>). Without a Private DNS Zone linked to the VNet and an A record mapping the FQDN to the private IP, DNS resolution returns the public IP. The application connects to the public IP — bypassing the private endpoint entirely. Creating the private endpoint does NOT automatically configure DNS unless you select "Integrate with private DNS zone" during creation. Option D is a common misconception — public access being enabled means external callers can still reach the service, but does not affect whether internal callers route to the public or private IP. That is purely a DNS resolution issue.</div>
+  </div>
+
+  <!-- Q4 -->
+  <div class="quiz-question" data-correct="d">
+    <p>4. How do Service Endpoints and Private Endpoints differ in terms of the service's public endpoint accessibility?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q4"> Both completely eliminate the service's public endpoint after configuration</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q4"> Service Endpoints disable the public endpoint; Private Endpoints keep it active</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q4"> Neither affects the public endpoint — both are routing optimisations only</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q4"> Service Endpoints leave the public endpoint active; Private Endpoints allow the public endpoint to be fully disabled</label>
+    </div>
+    <div class="quiz-feedback">Service Endpoints route traffic from your subnet through the Azure backbone to the service's <em>existing public endpoint</em> — the service's public IP remains active and reachable from the internet unless you separately configure the service firewall to block all public access. Private Endpoints create a private NIC in your VNet and allow you to set "Public network access: Disabled" on the service — at that point, the service's public IP stops accepting connections entirely, and only traffic through the private endpoint can reach the service. This is the key security advantage of Private Endpoints over Service Endpoints.</div>
+  </div>
+
+  <!-- Q5 -->
+  <div class="quiz-question" data-correct="b">
+    <p>5. In a hub-spoke topology, Spoke-A VMs need to reach Spoke-B VMs. How is this enabled without creating a direct Spoke-A to Spoke-B peering?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q5"> Enable Allow Forwarded Traffic on both spoke-to-hub peerings — this automatically routes spoke-to-spoke traffic</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q5"> Add UDRs in Spoke-A pointing Spoke-B's CIDR to Azure Firewall in the hub; the Firewall routes and inspects the traffic to Spoke-B</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q5"> Enable Use Remote Gateways on the spoke peerings — the hub gateway routes between spokes</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q5"> No configuration is needed — traffic between spokes automatically traverses the hub via the peering</label>
+    </div>
+    <div class="quiz-feedback">Allow Forwarded Traffic (option A) is a necessary prerequisite but not sufficient on its own — it allows forwarded packets to enter/exit a VNet through a peering, but it doesn't create routes. The actual routing is controlled by UDRs. In Spoke-A, you add a UDR: destination = Spoke-B's CIDR, next hop = VirtualAppliance pointing to the Azure Firewall's private IP in the hub. The Firewall receives the traffic, evaluates its network/application rules, and routes it to Spoke-B. Allow Forwarded Traffic must be enabled on the hub-to-spoke peerings for the Firewall's forwarded packets to exit to the spokes — so both are needed, but the UDR is the routing mechanism.</div>
+  </div>
+
+  <!-- Q6 -->
+  <div class="quiz-question" data-correct="c">
+    <p>6. You create a Private Endpoint for a Storage Account in your East US VNet. Resources in three other spoke VNets also need to resolve the storage account to the private IP. What is the correct DNS configuration?</p>
+    <div class="quiz-options">
+      <label class="quiz-option" data-option="a"><input type="radio" name="q6"> Create a separate Private DNS Zone for each spoke VNet and add A records manually</label>
+      <label class="quiz-option" data-option="b"><input type="radio" name="q6"> Add A records to the public DNS zone for the storage account pointing to the private IP</label>
+      <label class="quiz-option" data-option="c"><input type="radio" name="q6"> Create one privatelink.blob.core.windows.net Private DNS Zone, link it to all VNets (or the hub VNet with DNS forwarding), and let Azure auto-register the A record via private endpoint integration</label>
+      <label class="quiz-option" data-option="d"><input type="radio" name="q6"> No DNS configuration is needed — peered VNets automatically resolve private endpoints from any linked zone</label>
+    </div>
+    <div class="quiz-feedback">The correct approach is one <code>privatelink.blob.core.windows.net</code> Private DNS Zone, linked to every VNet (or to the hub VNet with spoke DNS traffic forwarded to the hub). When you create the private endpoint and select "Integrate with private DNS zone", Azure automatically creates an A record in that zone mapping the storage account name to the private IP. Spokes linked to this zone (directly or via the hub DNS resolver) will correctly resolve the FQDN to the private IP. Creating separate zones per VNet (option A) creates an unmaintainable operational burden. Adding records to the public DNS zone (option B) would expose the private IP publicly and break public callers. DNS resolution through peering links is not automatic (option D) — explicit zone links are required.</div>
+  </div>
+
+  <div class="quiz-score"></div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     PRIMARY SOURCE
+═══════════════════════════════════════════════ -->
+<div class="primary-source">
+  <strong>Primary source for this lesson</strong>
+  <a href="https://learn.microsoft.com/en-us/azure/private-link/private-endpoint-overview" target="_blank">
+    Azure Private Endpoint — Overview (Microsoft Learn)
+  </a>
+  <p style="margin-top:0.5rem;font-size:0.9rem;color:#deecf9;">Also read the VNet peering overview and the DNS for private endpoints article — the DNS configuration guide is especially important for production deployments and exam scenarios involving private endpoint troubleshooting.</p>
+</div>
+
+<!-- ═══════════════════════════════════════════════
+     ASK YOUR TEACHER
+═══════════════════════════════════════════════ -->
+<div class="ask-teacher">
+  <strong>Questions for your teacher (the AI agent)</strong><br>
+  This lesson covered peering, hub-spoke, service endpoints, and private endpoints. Go deeper on:
+  <ul style="margin-top:0.5rem;">
+    <li>Walk me through configuring private endpoint DNS in a hub-spoke topology using Azure DNS Private Resolver — how does the conditional forwarding work from spoke VMs to the hub resolver?</li>
+    <li>Explain the specific scenarios where Service Endpoints are still preferred over Private Endpoints in 2025 — are there any legitimate production use cases left?</li>
+    <li>How do I automate Private DNS Zone registration for new private endpoints using Azure Policy, so that every new endpoint is automatically registered without manual intervention?</li>
+    <li>What happens to private endpoint connectivity when the target PaaS resource is moved to a different subscription or region?</li>
+  </ul>
+</div>
+
+<!-- ═══════════════════════════════════════════════
+     NEXT LESSON PREVIEW
+═══════════════════════════════════════════════ -->
+<div class="callout callout-info">
+  <strong>Coming up: Lesson 17 — Azure DNS</strong>
+  You now understand Private DNS Zones from the perspective of private endpoints. The next lesson covers Azure DNS comprehensively — public zones, private zones, DNS Private Resolver, split-horizon DNS, and how to design a complete DNS architecture for a hybrid enterprise environment with both Azure and on-premises workloads.
+</div>
+
+<!-- ═══════════════════════════════════════════════
+     NAVIGATION
+═══════════════════════════════════════════════ -->
+<nav class="lesson-nav">
+  <a href="0015-nsgs.html">← Lesson 15 — NSGs &amp; ASGs</a>
+  <a href="0017-dns.html">Lesson 17 — Azure DNS →</a>
+</nav>
+
+<script src="../assets/quiz.js"></script>
+</body>
+</html>
