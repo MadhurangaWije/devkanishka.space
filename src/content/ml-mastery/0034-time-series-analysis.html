@@ -1,0 +1,800 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lesson 34: Time Series Analysis: Trends, Seasonality &amp; Decomposition | ML Mastery</title>
+  <link rel="stylesheet" href="../assets/style.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
+</head>
+<body>
+
+<header class="lesson-header">
+  <div class="header-inner">
+    <nav class="breadcrumb">
+      <a href="../reference/curriculum-map.html">ML Mastery</a>
+      <span class="sep">›</span>
+      <span>Phase 3: Unsupervised Learning</span>
+    </nav>
+    <div class="lesson-badges">
+      <span class="phase-badge">Phase 3 · Unsupervised Learning</span>
+      <span class="lesson-num-badge">Lesson 34</span>
+    </div>
+    <h1 class="lesson-title">Time Series Analysis: Trends, Seasonality &amp; Decomposition</h1>
+    <p class="lesson-subtitle">How to read the story hidden in sequential data — decomposing time series into trend, season, and noise components before any forecasting begins.</p>
+    <div class="meta-pills">
+      <span class="meta-pill">⏱ ~60 min</span>
+      <span class="meta-pill">🐍 pandas · statsmodels</span>
+      <span class="meta-pill">📈 Time Series</span>
+      <span class="meta-pill">Requires Lesson 33</span>
+    </div>
+  </div>
+</header>
+
+<main class="lesson-main">
+<div class="content-wrapper">
+
+<div class="objectives-card">
+  <h2>🎯 What You'll Learn</h2>
+  <ul>
+    <li>Understand what makes time series data fundamentally different from tabular data — temporal ordering, autocorrelation, and non-i.i.d. structure</li>
+    <li>Identify the four components of a time series: trend, seasonality, cyclicality, and noise</li>
+    <li>Test for stationarity using the Augmented Dickey-Fuller test and make series stationary through differencing and transformations</li>
+    <li>Decompose a time series into its components using <code>seasonal_decompose</code> from statsmodels</li>
+    <li>Interpret ACF and PACF plots to identify autocorrelation patterns and seasonal periodicity</li>
+  </ul>
+</div>
+
+<!-- ── Section 1 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">1</span> What Is Time Series Data?</h2>
+
+  <p>A time series is a sequence of observations collected at successive, typically equally-spaced, points in time. The defining characteristic that separates time series from tabular data is that <strong>the order of observations matters</strong>. The value at time t depends on values at times t−1, t−2, and so on — a property called autocorrelation. This violates the fundamental i.i.d. (independent and identically distributed) assumption that underpins most standard machine learning algorithms.</p>
+
+  <p>Examples of time series data that appear throughout ML and data science:</p>
+  <ul>
+    <li><strong>Finance</strong>: stock prices, exchange rates, volatility indices, trading volumes</li>
+    <li><strong>Operations</strong>: website traffic, API request counts, server CPU/memory utilisation</li>
+    <li><strong>Retail</strong>: daily/weekly/monthly sales, inventory levels, customer counts</li>
+    <li><strong>Climate/IoT</strong>: temperature, rainfall, energy consumption, sensor readings</li>
+    <li><strong>Health</strong>: heart rate, EEG signals, blood glucose, hospital admissions</li>
+  </ul>
+
+  <pre><code class="language-python">import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+
+# Loading time series data with pandas
+# The key: parse_dates and index_col together create a DatetimeIndex
+# df = pd.read_csv('sales_data.csv', parse_dates=['date'], index_col='date')
+
+# Generate synthetic monthly sales data to illustrate concepts
+np.random.seed(42)
+dates = pd.date_range(start='2019-01-01', periods=60, freq='MS')  # 5 years, monthly
+months = dates.month
+
+# Trend + seasonality + noise
+trend = np.linspace(1000, 1800, 60)              # growing trend
+seasonal = 200 * np.sin(2 * np.pi * (months - 3) / 12)  # annual season (peak in summer)
+noise = np.random.normal(0, 80, 60)
+sales = trend + seasonal + noise
+
+ts = pd.Series(sales, index=dates, name='monthly_sales')
+
+print(f"Series type:  {type(ts)}")
+print(f"Index type:   {type(ts.index)}")
+print(f"Frequency:    {ts.index.freq}")
+print(f"Date range:   {ts.index[0].date()} to {ts.index[-1].date()}")
+print(f"Observations: {len(ts)}")
+print(f"\nFirst 6 observations:")
+print(ts.head(6).round(1))
+
+# Key pandas operations for time series
+print(f"\nMonthly stats (last 12 months):")
+print(ts[-12:].describe().round(1))
+
+# Resample to quarterly (useful for higher-frequency data)
+quarterly = ts.resample('QS').sum()
+print(f"\nQuarterly total sales (last 4 quarters):")
+print(quarterly[-4:].round(0))</code></pre>
+
+  <div class="callout callout-key">
+    <span class="callout-icon">🔑</span>
+    <div class="callout-body">
+      <strong>Time Series Violates the i.i.d. Assumption</strong>
+      <p>Standard machine learning algorithms (logistic regression, random forest, SVMs) assume that training samples are drawn independently from the same distribution. Time series observations are neither independent (adjacent values are correlated) nor identically distributed (the distribution may change over time with trend and seasonality). This means: (1) standard cross-validation is wrong — you must never use future data to predict the past; (2) standard feature importance metrics may be misleading; (3) models that ignore temporal structure often underperform specialised time series methods.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 2 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">2</span> Components of a Time Series</h2>
+
+  <p>Every time series can be thought of as a combination of underlying components. Understanding which components are present is the essential first step before choosing a modelling or forecasting approach.</p>
+
+  <h3>The Four Components</h3>
+  <ul>
+    <li><strong>Trend (T)</strong>: the long-term direction of the series — upward, downward, or flat. Example: the steady growth in e-commerce sales over 10 years. Trends can be linear, exponential, or non-monotonic.</li>
+    <li><strong>Seasonality (S)</strong>: regular, periodic fluctuations with a fixed and known frequency. Example: retail sales spike every December; website traffic drops every weekend; energy consumption peaks every summer. The period is fixed — 12 months for annual, 7 days for weekly, 24 hours for daily.</li>
+    <li><strong>Cyclicality (C)</strong>: longer-period fluctuations that are irregular and do not have a fixed frequency. Example: economic boom-and-bust cycles, housing market cycles. Cyclicality is distinguished from seasonality by its lack of a fixed period — a recession might last 2 years, 5 years, or 10 years.</li>
+    <li><strong>Residuals/Noise (R)</strong>: the random, unexplained variation that remains after accounting for trend, seasonality, and cycles. Ideally, a well-modelled time series has residuals that look like white noise — no remaining patterns.</li>
+  </ul>
+
+  <h3>Additive vs Multiplicative Models</h3>
+  <pre><code class="language-python">import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
+np.random.seed(42)
+
+# Additive model: y = T + S + R  (use when seasonal amplitude is constant)
+# The seasonal swing stays ~200 units regardless of the trend level
+dates = pd.date_range('2018-01-01', periods=72, freq='MS')
+trend_additive = np.linspace(500, 900, 72)
+seasonal_additive = 150 * np.sin(2 * np.pi * np.arange(72) / 12)
+noise = np.random.normal(0, 30, 72)
+y_additive = trend_additive + seasonal_additive + noise
+
+# Multiplicative model: y = T × S × R  (use when seasonal amplitude grows with trend)
+# The seasonal swing is a FRACTION of the trend — grows as trend grows
+trend_mult = np.linspace(100, 500, 72)
+seasonal_mult = 1 + 0.3 * np.sin(2 * np.pi * np.arange(72) / 12)
+noise_mult = np.random.normal(1, 0.05, 72)
+y_multiplicative = trend_mult * seasonal_mult * noise_mult
+
+ts_additive = pd.Series(y_additive, index=dates)
+ts_mult = pd.Series(y_multiplicative, index=dates)
+
+print("Additive model: seasonal amplitude is CONSTANT regardless of trend")
+print(f"  Early seasonal range:  {ts_additive[:12].max()-ts_additive[:12].min():.0f}")
+print(f"  Late  seasonal range:  {ts_additive[-12:].max()-ts_additive[-12:].min():.0f}")
+print()
+print("Multiplicative model: seasonal amplitude GROWS with trend")
+print(f"  Early seasonal range:  {ts_mult[:12].max()-ts_mult[:12].min():.0f}")
+print(f"  Late  seasonal range:  {ts_mult[-12:].max()-ts_mult[-12:].min():.0f}")</code></pre>
+
+  <div class="callout callout-tip">
+    <span class="callout-icon">💡</span>
+    <div class="callout-body">
+      <strong>Additive vs Multiplicative: The Visual Rule of Thumb</strong>
+      <p>Plot your time series and look at the seasonal fluctuations over time. If the peaks and troughs stay roughly the same height regardless of the trend level — use an <strong>additive</strong> model. If the swings get bigger as the series grows (the peaks are proportionally higher, troughs proportionally lower) — use a <strong>multiplicative</strong> model. A log transform converts a multiplicative series into an additive one: log(T × S × R) = log(T) + log(S) + log(R). This is one of the most useful preprocessing tricks for time series.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 3 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">3</span> Visualising Time Series</h2>
+
+  <p>Before any modelling, thorough visual exploration reveals structure, outliers, and patterns that guide all subsequent decisions. Key visualisation techniques include line plots, rolling statistics, and lag plots.</p>
+
+  <pre><code class="language-python">import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+
+np.random.seed(42)
+
+# Reconstruct synthetic monthly sales series
+dates = pd.date_range(start='2019-01-01', periods=60, freq='MS')
+months = np.arange(1, 61) % 12 + 1
+trend = np.linspace(1000, 1800, 60)
+seasonal = 200 * np.sin(2 * np.pi * (months - 3) / 12)
+noise = np.random.normal(0, 80, 60)
+ts = pd.Series(trend + seasonal + noise, index=dates, name='sales')
+
+# 1. Rolling mean and std — reveals trend and changing variance
+window = 12  # 12-month rolling window
+rolling_mean = ts.rolling(window=window, center=True).mean()
+rolling_std  = ts.rolling(window=window, center=True).std()
+
+print("Rolling statistics (last 6 months):")
+comparison = pd.DataFrame({
+    'actual':       ts[-6:].round(1),
+    'rolling_mean': rolling_mean[-6:].round(1),
+    'rolling_std':  rolling_std[-6:].round(1),
+})
+print(comparison)
+
+# 2. Monthly seasonal pattern (seasonal subseries)
+ts_df = ts.to_frame()
+ts_df['month'] = ts_df.index.month
+monthly_avg = ts_df.groupby('month')['sales'].mean()
+print("\nAverage sales by month (seasonal pattern):")
+month_names = ['Jan','Feb','Mar','Apr','May','Jun',
+               'Jul','Aug','Sep','Oct','Nov','Dec']
+for m, avg in enumerate(monthly_avg, 1):
+    bar = '█' * int((avg - 900) / 30)
+    print(f"  {month_names[m-1]}: {avg:7.1f}  {bar}")
+
+# 3. Year-over-year comparison
+ts_df['year'] = ts_df.index.year
+print("\nMean annual sales by year (shows trend):")
+print(ts_df.groupby('year')['sales'].mean().round(1))
+
+# 4. Lag plot — check for autocorrelation
+lag1_corr = ts.corr(ts.shift(1))
+lag12_corr = ts.corr(ts.shift(12))
+print(f"\nLag-1 autocorrelation  (adjacent months): {lag1_corr:.4f}")
+print(f"Lag-12 autocorrelation (same month, prev year): {lag12_corr:.4f}")
+print("Strong lag-12 correlation confirms annual seasonality")</code></pre>
+</div>
+
+<!-- ── Section 4 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">4</span> Stationarity</h2>
+
+  <p>A time series is <strong>stationary</strong> if its statistical properties — mean, variance, and autocorrelation structure — are constant over time. This is not just a theoretical nicety: virtually every classical forecasting model (ARIMA, VAR, exponential smoothing) requires or implicitly assumes stationarity. Applying these models to non-stationary data produces unreliable forecasts and misleading statistical tests.</p>
+
+  <p>Stationarity has a formal definition: a series {Yₜ} is weakly stationary if:</p>
+  <ul>
+    <li>E[Yₜ] = μ (constant mean)</li>
+    <li>Var(Yₜ) = σ² (constant variance)</li>
+    <li>Cov(Yₜ, Yₜ₋ₖ) = γ(k) — only depends on lag k, not on time t</li>
+  </ul>
+
+  <pre><code class="language-python">import pandas as pd
+import numpy as np
+from statsmodels.tsa.stattools import adfuller
+
+np.random.seed(42)
+dates = pd.date_range('2019-01-01', periods=60, freq='MS')
+months = np.arange(1, 61) % 12 + 1
+trend = np.linspace(1000, 1800, 60)
+seasonal = 200 * np.sin(2 * np.pi * (months - 3) / 12)
+noise = np.random.normal(0, 80, 60)
+ts = pd.Series(trend + seasonal + noise, index=dates, name='sales')
+
+def adf_test(series, series_name="Series"):
+    """Run ADF test and print a clean interpretation."""
+    result = adfuller(series.dropna(), autolag='AIC')
+    adf_stat, p_value, lags_used, n_obs, crit_values, _ = result
+
+    print(f"\n=== ADF Test: {series_name} ===")
+    print(f"ADF Statistic:   {adf_stat:.4f}")
+    print(f"p-value:         {p_value:.6f}")
+    print(f"Lags used:       {lags_used}")
+    print(f"Num observations:{n_obs}")
+    print("Critical values:")
+    for key, val in crit_values.items():
+        print(f"   {key}: {val:.4f}")
+
+    if p_value < 0.05:
+        print("✅ Reject H0: series IS stationary (p < 0.05)")
+    else:
+        print("❌ Fail to reject H0: series IS NOT stationary (p >= 0.05)")
+        print("   → Apply differencing or log transform")
+    return p_value
+
+# Test 1: Original series (has trend + seasonality → non-stationary)
+p1 = adf_test(ts, "Original Sales (with trend + seasonality)")
+
+# Test 2: First difference (removes trend)
+ts_diff = ts.diff().dropna()
+p2 = adf_test(ts_diff, "First Difference")
+
+# Test 3: Seasonal difference (lag-12, removes annual seasonality)
+ts_seasonal_diff = ts.diff(12).dropna()
+p3 = adf_test(ts_seasonal_diff, "Seasonal Difference (lag-12)")
+
+print(f"\nSummary:")
+print(f"  Original:         p = {p1:.4f}  {'stationary' if p1 < 0.05 else 'NON-stationary'}")
+print(f"  First diff:       p = {p2:.4f}  {'stationary' if p2 < 0.05 else 'NON-stationary'}")
+print(f"  Seasonal diff:    p = {p3:.4f}  {'stationary' if p3 < 0.05 else 'NON-stationary'}")</code></pre>
+
+  <div class="callout callout-key">
+    <span class="callout-icon">🔑</span>
+    <div class="callout-body">
+      <strong>Interpreting the ADF Test</strong>
+      <p>The Augmented Dickey-Fuller (ADF) test's null hypothesis is that the series has a "unit root" — meaning it is non-stationary. A <strong>p-value &lt; 0.05</strong> gives you confidence to reject this null hypothesis, meaning the series is stationary. A <strong>p-value ≥ 0.05</strong> means you cannot reject non-stationarity — you need to transform the data. Do not blindly trust the ADF test alone; always combine with visual inspection of rolling mean and rolling std. A visually obvious trend that the ADF test fails to detect (because it needs more data) should still be differenced.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 5 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">5</span> Making a Series Stationary</h2>
+
+  <p>When the ADF test confirms non-stationarity, there are several standard transformations to apply, in order of severity:</p>
+
+  <pre><code class="language-python">import pandas as pd
+import numpy as np
+from statsmodels.tsa.stattools import adfuller
+
+np.random.seed(42)
+dates = pd.date_range('2019-01-01', periods=60, freq='MS')
+months = np.arange(1, 61) % 12 + 1
+trend = np.linspace(1000, 1800, 60)
+seasonal = 200 * np.sin(2 * np.pi * (months - 3) / 12)
+noise = np.random.normal(0, 80, 60)
+ts = pd.Series(trend + seasonal + noise, index=dates, name='sales')
+
+def quick_adf(series):
+    p = adfuller(series.dropna(), autolag='AIC')[1]
+    return f"p={p:.4f} ({'✅ stationary' if p < 0.05 else '❌ not stationary'})"
+
+# Transformation 1: First differencing — removes linear trend
+# Interpretation: "month-over-month change"
+ts_diff1 = ts.diff(1)
+print(f"First difference (Δ1):        {quick_adf(ts_diff1)}")
+
+# Transformation 2: Seasonal differencing (lag=12) — removes annual seasonality
+# Interpretation: "same month vs same month last year"
+ts_sdiff = ts.diff(12)
+print(f"Seasonal diff (Δ12):          {quick_adf(ts_sdiff)}")
+
+# Transformation 3: Both first + seasonal differencing (for trend + seasonality)
+ts_combined = ts.diff(12).diff(1)
+print(f"Seasonal + First diff:        {quick_adf(ts_combined)}")
+
+# Transformation 4: Log transform — stabilises growing variance (multiplicative to additive)
+ts_log = np.log(ts)
+ts_log_diff = ts_log.diff(1)
+print(f"Log + First diff:             {quick_adf(ts_log_diff)}")
+
+# Transformation 5: Box-Cox transform — generalises log (lambda=0), sqrt (lambda=0.5)
+from scipy.stats import boxcox
+ts_boxcox, lambda_bc = boxcox(ts.values)
+ts_bc = pd.Series(ts_boxcox, index=ts.index)
+print(f"Box-Cox (λ={lambda_bc:.3f}) + diff:   {quick_adf(ts_bc.diff(1))}")
+
+print("\n=== Practical guidance ===")
+print("1. Try first diff → check ADF → if still non-stationary:")
+print("2. Try seasonal diff (if seasonal) → check ADF → if still non-stationary:")
+print("3. Try log transform first, then diff")
+print("4. Rarely need to diff more than twice (d=2); if so, suspect the data")
+print("5. Always verify the differenced series looks like stationary white noise")</code></pre>
+</div>
+
+<!-- ── Section 6 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">6</span> Time Series Decomposition</h2>
+
+  <p>Decomposition formally separates a time series into its trend, seasonal, and residual components. It serves two purposes: (1) understanding the data — how much of the variation is due to trend vs seasonality vs noise? and (2) improving forecasting — some methods forecast each component separately and then recombine.</p>
+
+  <pre><code class="language-python">import pandas as pd
+import numpy as np
+from statsmodels.tsa.seasonal import seasonal_decompose
+from statsmodels.tsa.stattools import adfuller
+
+np.random.seed(42)
+dates = pd.date_range('2019-01-01', periods=60, freq='MS')
+months = np.arange(1, 61) % 12 + 1
+trend_component = np.linspace(1000, 1800, 60)
+seasonal_component = 200 * np.sin(2 * np.pi * (months - 3) / 12)
+noise = np.random.normal(0, 80, 60)
+ts = pd.Series(trend_component + seasonal_component + noise, index=dates)
+
+# Additive decomposition (seasonal amplitude is roughly constant)
+result_add = seasonal_decompose(
+    ts,
+    model='additive',    # or 'multiplicative'
+    period=12,           # seasonality period in observations
+    extrapolate_trend='freq'  # fill NaN at edges using trend frequency
+)
+
+# Access each component
+trend_est   = result_add.trend
+seasonal_est = result_add.seasonal
+residual_est = result_add.resid
+
+print("=== Additive Decomposition Results ===")
+print(f"\nTrend component (first 6 months):")
+print(trend_est[:6].round(1))
+print(f"\nSeasonal component (first 12 months = one full cycle):")
+print(seasonal_est[:12].round(1))
+print(f"\nResidual component (last 6 months):")
+print(residual_est[-6:].round(1))
+
+# Verify: trend + seasonal + residual ≈ original
+reconstruction = trend_est + seasonal_est + residual_est
+reconstruction_error = (ts - reconstruction).abs().mean()
+print(f"\nReconstruction MAE: {reconstruction_error:.6f}  (should be ~0)")
+
+# Analyse each component
+print(f"\n=== Component Analysis ===")
+# Trend: what is the monthly growth rate?
+trend_growth = (trend_est.iloc[-1] / trend_est.iloc[0] - 1) * 100
+print(f"Total trend growth over period: {trend_growth:.1f}%")
+monthly_growth = trend_est.pct_change().mean() * 100
+print(f"Average monthly trend growth:   {monthly_growth:.2f}%")
+annual_growth = (1 + monthly_growth/100)**12 - 1
+print(f"Implied annual growth rate:     {annual_growth*100:.1f}%")
+
+# Seasonality: which months peak/trough?
+seasonal_by_month = seasonal_est[:12]
+peak_month = seasonal_by_month.idxmax().strftime('%B')
+trough_month = seasonal_by_month.idxmin().strftime('%B')
+seasonal_range = seasonal_by_month.max() - seasonal_by_month.min()
+print(f"\nSeasonal peak:   {peak_month}")
+print(f"Seasonal trough: {trough_month}")
+print(f"Seasonal range:  {seasonal_range:.1f} units")
+
+# Residuals: should look like white noise
+resid_adf_p = adfuller(residual_est.dropna(), autolag='AIC')[1]
+print(f"\nResidual ADF p-value: {resid_adf_p:.4f}")
+print(f"Residuals {'✅ stationary (good — no remaining pattern)' if resid_adf_p < 0.05 else '❌ NOT stationary (model missing a pattern)'}")
+print(f"Residual mean:  {residual_est.mean():.2f}  (should be ~0)")
+print(f"Residual std:   {residual_est.std():.2f}")</code></pre>
+
+  <div class="callout callout-tip">
+    <span class="callout-icon">💡</span>
+    <div class="callout-body">
+      <strong>Interpreting Residuals from Decomposition</strong>
+      <p>After decomposition, inspect the residuals carefully. If they look like white noise (random scatter around zero, stationary, no visible patterns) — the decomposition has successfully captured the structure. If the residuals show clear patterns — spikes, changing variance, or autocorrelation — something systematic was missed. Possible causes: the trend is non-linear, there are multiple periodicities (daily + weekly + annual), or there are structural breaks (COVID, a product launch, a competitor exit). Good residuals mean a good model; patterned residuals mean opportunity for improvement.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 7 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">7</span> Autocorrelation (ACF) and Partial Autocorrelation (PACF)</h2>
+
+  <p>The ACF and PACF plots are the fundamental diagnostic tools for time series analysis. They tell you how a series relates to its own past values — information that guides the selection of AR and MA orders for ARIMA models (covered in Lesson 35).</p>
+
+  <ul>
+    <li><strong>ACF (Autocorrelation Function)</strong>: the correlation between the series and its lagged copy at each lag. A spike at lag k means the series at time t is correlated with the series at time t−k. Includes both direct and indirect effects of all intermediate lags.</li>
+    <li><strong>PACF (Partial Autocorrelation Function)</strong>: the correlation at lag k after removing the effect of all shorter lags. Isolates the direct relationship between Yₜ and Yₜ₋ₖ, controlling for lags 1 through k−1.</li>
+  </ul>
+
+  <pre><code class="language-python">import pandas as pd
+import numpy as np
+from statsmodels.graphics.tsaplots import plot_acf, plot_pacf
+from statsmodels.tsa.stattools import acf, pacf
+
+np.random.seed(42)
+dates = pd.date_range('2019-01-01', periods=60, freq='MS')
+months = np.arange(1, 61) % 12 + 1
+trend = np.linspace(1000, 1800, 60)
+seasonal = 200 * np.sin(2 * np.pi * (months - 3) / 12)
+noise = np.random.normal(0, 80, 60)
+ts = pd.Series(trend + seasonal + noise, index=dates)
+
+# Compute ACF values manually
+nlags = 24  # show up to 24 lags (2 years for monthly data)
+acf_values = acf(ts, nlags=nlags, fft=True)
+pacf_values = pacf(ts, nlags=nlags)
+
+print("ACF values (with confidence interval ~ ±2/√n):")
+n = len(ts)
+conf_band = 2 / np.sqrt(n)
+print(f"Confidence band: ±{conf_band:.3f}")
+print(f"\nLag  ACF    Significant?")
+print("-" * 35)
+for lag in [0, 1, 2, 3, 6, 11, 12, 13, 23, 24]:
+    acf_val = acf_values[lag]
+    sig = "✅ significant" if abs(acf_val) > conf_band else "   not significant"
+    print(f"  {lag:2d}   {acf_val:+.4f}  {sig}")
+
+# ACF on first-differenced series (stationarised)
+ts_diff = ts.diff().dropna()
+acf_diff = acf(ts_diff, nlags=24, fft=True)
+print(f"\nACF of first-differenced series:")
+print(f"  Lag 1:  {acf_diff[1]:+.4f}")
+print(f"  Lag 12: {acf_diff[12]:+.4f}")
+print(f"  Lag 24: {acf_diff[24]:+.4f}")
+print("\nReading the patterns:")
+print("  ACF cuts off after lag q → MA(q) process")
+print("  ACF decays gradually      → AR process")
+print("  ACF has spikes at 12, 24  → annual seasonality present")</code></pre>
+
+  <pre><code class="language-python"># Practical guide to reading ACF / PACF for ARIMA order selection
+print("=== ACF/PACF Pattern Recognition Guide ===\n")
+
+patterns = {
+    "Pure AR(p)": {
+        "ACF":  "Decays gradually (exponential or sinusoidal damping)",
+        "PACF": f"Cuts off sharply after lag p (spikes 1..p, then ~0)",
+        "Example": "Stock price returns often show AR(1) or AR(2) patterns"
+    },
+    "Pure MA(q)": {
+        "ACF":  "Cuts off sharply after lag q (spikes 1..q, then ~0)",
+        "PACF": "Decays gradually",
+        "Example": "Moving average smoothed series; error autocorrelation"
+    },
+    "ARIMA(p,d,q)": {
+        "ACF":  "Slow decay — apply differencing first, then look at ACF/PACF",
+        "PACF": "Slow decay — same as above",
+        "Example": "Most real-world economic series with trend"
+    },
+    "Seasonal AR(1)": {
+        "ACF":  "Significant spikes at lags s, 2s, 3s (e.g. 12, 24, 36 for monthly)",
+        "PACF": "Single significant spike at lag s",
+        "Example": "Monthly retail sales with annual seasonality"
+    },
+}
+
+for model, info in patterns.items():
+    print(f"Model: {model}")
+    for k, v in info.items():
+        print(f"  {k:8s}: {v}")
+    print()</code></pre>
+
+  <div class="callout callout-key">
+    <span class="callout-icon">🔑</span>
+    <div class="callout-body">
+      <strong>Always Run ACF/PACF on the Stationarised Series</strong>
+      <p>ACF and PACF are only interpretable on a stationary series. On a raw series with trend or seasonality, both ACF and PACF will show very high correlation at all lags — this isn't informative, it just reflects the non-stationarity. Always difference (and log-transform if needed) until the ADF test confirms stationarity, <em>then</em> examine the ACF and PACF of the transformed series to guide ARIMA order selection.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 8 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">8</span> Rolling Statistics &amp; Moving Averages</h2>
+
+  <p>Rolling statistics are among the most practically useful tools in a time series analyst's toolkit. They smooth noise, reveal underlying trends, and detect changing volatility — all without any formal modelling assumptions.</p>
+
+  <pre><code class="language-python">import pandas as pd
+import numpy as np
+
+np.random.seed(42)
+dates = pd.date_range('2019-01-01', periods=60, freq='MS')
+months = np.arange(1, 61) % 12 + 1
+trend = np.linspace(1000, 1800, 60)
+seasonal = 200 * np.sin(2 * np.pi * (months - 3) / 12)
+noise = np.random.normal(0, 80, 60)
+ts = pd.Series(trend + seasonal + noise, index=dates, name='sales')
+
+# ─── Simple Moving Average (SMA) ───
+# Equal weight to all observations in the window
+sma_3  = ts.rolling(window=3,  center=False).mean()   # 3-month SMA
+sma_12 = ts.rolling(window=12, center=False).mean()   # 12-month SMA (annual)
+
+print("Simple Moving Averages — last 6 periods:")
+print(pd.DataFrame({
+    'actual': ts[-6:].round(1),
+    'SMA-3':  sma_3[-6:].round(1),
+    'SMA-12': sma_12[-6:].round(1),
+}))
+
+# ─── Exponentially Weighted Moving Average (EWMA) ───
+# More weight to recent observations — adapts faster to changes
+# span parameter: effectively the number of periods to give most weight to
+ewma_3  = ts.ewm(span=3,  adjust=False).mean()
+ewma_12 = ts.ewm(span=12, adjust=False).mean()
+
+print("\nEWMA vs SMA comparison (last 3 months):")
+comparison = pd.DataFrame({
+    'actual':  ts[-3:].round(1),
+    'SMA-3':   sma_3[-3:].round(1),
+    'EWMA-3':  ewma_3[-3:].round(1),
+})
+print(comparison)
+print("EWMA-3 reacts faster to recent changes than SMA-3")
+
+# ─── Rolling Standard Deviation — detecting changing volatility ───
+rolling_std_12 = ts.rolling(window=12).std()
+print(f"\nRolling 12-month standard deviation (shows heteroscedasticity):")
+print(rolling_std_12[11::12].round(1))  # once per year
+
+# ─── Detecting Heteroscedasticity ───
+# If rolling_std grows over time → variance is NOT constant → series is heteroscedastic
+# This suggests using a log transform before modelling
+early_std = rolling_std_12[:30].mean()
+late_std  = rolling_std_12[30:].mean()
+ratio = late_std / early_std
+print(f"\nEarly period rolling std: {early_std:.1f}")
+print(f"Late  period rolling std: {late_std:.1f}")
+print(f"Ratio (late/early): {ratio:.2f}")
+print(f"{'⚠️ Heteroscedastic — consider log transform' if ratio > 1.2 else '✅ Roughly homoscedastic'}")</code></pre>
+</div>
+
+<!-- ── Real-World Spotlight ── -->
+<div class="use-case-section">
+  <div class="use-case-header">
+    <span style="font-size:1.5rem">🌍</span>
+    <h2>Real-World Spotlight: Retail Sales Decomposition</h2>
+  </div>
+  <p>A supermarket chain wants to understand its monthly sales pattern for staffing, inventory planning, and financial forecasting. We'll apply the full time series analysis pipeline: load data, visualise, test stationarity, decompose, and extract actionable business insights from each component.</p>
+  <pre><code class="language-python">import pandas as pd
+import numpy as np
+from statsmodels.tsa.seasonal import seasonal_decompose
+from statsmodels.tsa.stattools import adfuller, acf
+from statsmodels.graphics.tsaplots import plot_acf
+
+np.random.seed(42)
+
+# Simulate 4 years of monthly supermarket sales with realistic structure
+n_months = 48
+dates = pd.date_range('2020-01-01', periods=n_months, freq='MS')
+
+# Underlying structure
+annual_trend = 1.032  # 3.2% annual growth
+base_sales = 2_000_000  # £2M monthly baseline
+trend_component = np.array([
+    base_sales * (annual_trend ** (m/12)) for m in range(n_months)
+])
+
+# Multiplicative seasonal pattern: Christmas (Dec) is 2.4x average
+month_factors = {
+    1: 0.82, 2: 0.78, 3: 0.88, 4: 0.92, 5: 0.96, 6: 0.98,
+    7: 0.99, 8: 1.00, 9: 0.97, 10: 1.02, 11: 1.18, 12: 2.40
+}
+months = dates.month
+seasonal_component = np.array([month_factors[m] for m in months])
+
+# Small noise
+noise_component = np.random.normal(1.0, 0.03, n_months)
+
+sales = trend_component * seasonal_component * noise_component
+ts = pd.Series(sales / 1e6, index=dates, name='sales_millions')  # in £M
+
+print("=== Supermarket Monthly Sales Analysis ===")
+print(f"Period: {dates[0].strftime('%b %Y')} to {dates[-1].strftime('%b %Y')}")
+print(f"Total sales (4 years): £{ts.sum():.1f}M")
+print(f"Average monthly sales: £{ts.mean():.2f}M")
+print(f"Min: £{ts.min():.2f}M ({ts.idxmin().strftime('%b %Y')})")
+print(f"Max: £{ts.max():.2f}M ({ts.idxmax().strftime('%b %Y')})")
+
+# ADF test on raw series
+_, p_raw, _, _, _, _ = adfuller(ts, autolag='AIC')
+print(f"\nADF p-value (raw): {p_raw:.4f} → {'non-stationary' if p_raw >= 0.05 else 'stationary'}")
+print("Log-transforming (multiplicative → additive)...")
+ts_log = np.log(ts)
+_, p_log, _, _, _, _ = adfuller(ts_log.diff().dropna(), autolag='AIC')
+print(f"ADF p-value (log + diff): {p_log:.4f} → {'✅ stationary' if p_log < 0.05 else 'non-stationary'}")
+
+# Multiplicative decomposition (correct for this data)
+result = seasonal_decompose(ts, model='multiplicative', period=12,
+                            extrapolate_trend='freq')
+
+# Extract components
+trend_est   = result.trend
+seasonal_est = result.seasonal
+resid_est   = result.resid
+
+# Annual growth rate from trend
+start_trend = trend_est.iloc[0]
+end_trend   = trend_est.iloc[-1]
+total_growth = (end_trend / start_trend - 1) * 100
+years_elapsed = n_months / 12
+annual_growth_est = ((end_trend / start_trend) ** (1/years_elapsed) - 1) * 100
+print(f"\n=== Trend Analysis ===")
+print(f"Total growth (4 years): {total_growth:.1f}%")
+print(f"Implied annual growth:  {annual_growth_est:.1f}%  (true: 3.2%)")
+
+# Seasonal pattern
+print(f"\n=== Seasonal Analysis ===")
+seasonal_df = pd.DataFrame({
+    'month': dates.month,
+    'seasonal_factor': seasonal_est
+}).groupby('month').mean().round(3)
+seasonal_df.index = ['Jan','Feb','Mar','Apr','May','Jun',
+                     'Jul','Aug','Sep','Oct','Nov','Dec']
+print("Monthly seasonal factors (multiplicative, mean=1.0):")
+for m, row in seasonal_df.iterrows():
+    factor = row['seasonal_factor']
+    bar = '█' * int(factor * 10)
+    change_pct = (factor - 1) * 100
+    print(f"  {m:3s}: {factor:.3f}  ({change_pct:+.0f}%)  {bar}")
+
+# Residual analysis
+_, p_resid, _, _, _, _ = adfuller(resid_est.dropna(), autolag='AIC')
+resid_mean = resid_est.mean()
+print(f"\n=== Residual Diagnostics ===")
+print(f"Residual mean: {resid_mean:.4f}  (should be ~1.0 for multiplicative)")
+print(f"ADF p-value:   {p_resid:.4f}  → {'✅ stationary residuals (good)' if p_resid < 0.05 else '❌ residuals still show pattern'}")
+
+# ACF of residuals
+acf_vals = acf(resid_est.dropna(), nlags=13, fft=True)
+conf = 2 / np.sqrt(len(resid_est.dropna()))
+print(f"\nACF of residuals (significant if |value| > {conf:.3f}):")
+for lag in [1, 2, 3, 6, 12]:
+    flag = "⚠️ significant" if abs(acf_vals[lag]) > conf else "✅ not significant"
+    print(f"  Lag {lag:2d}: {acf_vals[lag]:+.4f}  {flag}")
+
+print("\n=== Business Insights ===")
+print(f"1. Year-over-year sales growth: ~{annual_growth_est:.1f}% annually")
+dec_factor = seasonal_df.loc['Dec', 'seasonal_factor']
+feb_factor = seasonal_df.loc['Feb', 'seasonal_factor']
+print(f"2. December is {dec_factor:.1f}x average monthly sales")
+print(f"3. February is the weakest month ({feb_factor:.2f}x average)")
+print(f"4. Holiday season (Nov-Dec) = ~{(seasonal_df.loc['Nov','seasonal_factor']+dec_factor)*100/12*100:.0f}% of annual sales")
+print(f"5. Residuals are stationary → decomposition captured all systematic patterns")</code></pre>
+  <p>These decomposition insights directly inform business decisions: staffing up 2.4× in December, negotiating supplier contracts based on the trend growth rate, scheduling store renovations in February (trough month), and using the trend + seasonal components as a baseline forecast. The stationary residuals confirm that the decomposition successfully extracted the systematic patterns — only genuine random variation remains. ACF of residuals showing no significant autocorrelation means no remaining predictable signal has been left on the table.</p>
+</div>
+
+<!-- ── Quiz ── -->
+<div class="quiz-section">
+  <div id="lesson-34-quiz"></div>
+</div>
+
+<!-- ── Practice ── -->
+<div class="practice-card">
+  <h2>✍️ Practice Exercises</h2>
+  <ol>
+    <li>Download the Air Passengers dataset (classic monthly airline passenger data, available as <code>seaborn.load_dataset('flights')</code>). Apply both additive and multiplicative decomposition. Which model fits better — and how can you tell by looking at the residuals?</li>
+    <li>The ADF test gives different results on the original series vs the differenced series. Run ADF on: (a) the raw Air Passengers series, (b) after log transform, (c) after log + first diff, (d) after log + seasonal diff (lag=12). At which step does it first become stationary?</li>
+    <li>Using the Air Passengers dataset, compute the ACF and PACF of the log-differenced series. Identify: (a) which lags are significant, (b) whether the pattern suggests AR, MA, or ARMA structure, (c) whether seasonal AR or MA terms are needed.</li>
+    <li>Generate a time series with a structural break: 3 years of normal growth, then an abrupt step change (e.g., a new competitor enters the market). Run decomposition and ADF. Does the decomposition correctly capture the break? What happens to the residuals?</li>
+  </ol>
+</div>
+
+<!-- ── Primary Source ── -->
+<div class="primary-source">
+  <h2>📚 Primary Source for This Lesson</h2>
+  <p><a href="https://otexts.com/fpp3/" target="_blank"><strong>Forecasting: Principles and Practice (3rd ed.) — Hyndman &amp; Athanasopoulos</strong></a><br>
+  This free online textbook is the gold standard for learning time series analysis and forecasting. Chapters 1–3 cover everything in this lesson in greater depth: time series patterns, decomposition (STL vs classical), and transformations. The examples use R, but the concepts translate directly to Python. Highly recommended for Chapter 3 (time series decomposition) and Chapter 9 (ARIMA) as preparation for Lesson 35.</p>
+</div>
+
+<!-- ── Ask Tutor ── -->
+<div class="ask-tutor">
+  <span class="icon">💬</span>
+  <span>Getting a non-stationary ADF result even after differencing? Seeing unexpected patterns in your decomposition residuals? Share your time series plot — your tutor can diagnose whether you need seasonal differencing, a log transform, or if there's a structural break hiding in your data.</span>
+</div>
+
+<!-- ── Navigation ── -->
+<nav class="lesson-nav">
+  <a href="./0033-recommendation-systems.html" class="nav-btn">← Lesson 33: Recommendation Systems</a>
+  <a href="./0035-time-series-forecasting.html" class="nav-btn nav-btn-next">Lesson 35: Time Series Forecasting →</a>
+</nav>
+
+</div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-core.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/plugins/autoloader/prism-autoloader.min.js"></script>
+<script src="../assets/quiz.js"></script>
+<script>
+new MLQuiz('lesson-34-quiz', [
+  {
+    question: "What is the Augmented Dickey-Fuller (ADF) test used for in time series analysis?",
+    options: [
+      "Testing whether a time series is stationary — the null hypothesis is that the series has a unit root (is non-stationary)",
+      "Testing whether a time series has a seasonal component with a known period",
+      "Computing the optimal window size for rolling statistics on a given series",
+      "Measuring the goodness of fit of an additive vs multiplicative decomposition model"
+    ],
+    correct: 0,
+    explanation: "The ADF test tests the null hypothesis H0: the series has a unit root (non-stationary). A p-value < 0.05 lets you reject H0 and conclude stationarity. A p-value ≥ 0.05 fails to reject H0 — the series is non-stationary and needs transformation (differencing, log transform, or both). The test is named 'augmented' because it includes lagged difference terms to control for autocorrelation."
+  },
+  {
+    question: "A monthly sales time series has ADF p-value = 0.45. What is the recommended next step?",
+    options: [
+      "Apply first differencing (or log transform + differencing) to remove trend, then retest with ADF",
+      "The series is already stationary — a p-value close to 0.5 is ideal for forecasting",
+      "Increase the number of lags in the ADF test until p-value drops below 0.05",
+      "Switch from additive to multiplicative decomposition before testing stationarity"
+    ],
+    correct: 0,
+    explanation: "p = 0.45 means you cannot reject the unit root — the series is non-stationary. The standard procedure: (1) apply first differencing: ts.diff(), (2) retest with ADF. If still non-stationary, try seasonal differencing or log transform. Most economic series with a trend become stationary after first or seasonal differencing. Never proceed with ARIMA modelling on a non-stationary series."
+  },
+  {
+    question: "What is the difference between seasonality and cyclicality in a time series?",
+    options: [
+      "Seasonality has a fixed, known frequency (e.g., every 12 months); cyclicality has irregular longer-period fluctuations with no fixed frequency (e.g., economic cycles of variable length)",
+      "Seasonality is caused by weather; cyclicality is caused by economic factors",
+      "Seasonality is modelled with multiplicative decomposition; cyclicality requires additive",
+      "Seasonality lasts less than one year; cyclicality refers to any pattern longer than one year"
+    ],
+    correct: 0,
+    explanation: "Seasonality: regular, predictable fluctuations with a fixed period — Christmas shopping peaks in December every year, traffic spikes every Monday morning. Cyclicality: longer-period fluctuations driven by economic, business, or environmental cycles that don't repeat with a fixed interval — recessions can last 1 year or 5 years. This distinction matters for modelling: seasonal patterns can be captured by SARIMA or seasonal decomposition; cyclicality is harder to model and often treated as part of the trend."
+  },
+  {
+    question: "An ACF plot shows strong significant spikes at lags 12, 24, and 36 in a monthly time series. What does this indicate?",
+    options: [
+      "The series has strong annual seasonality — each value is highly correlated with the same month in previous years",
+      "The series needs to be differenced 12 times to achieve stationarity",
+      "The series follows an AR(12) process — you should set p=12 in ARIMA",
+      "The ACF is inconclusive — significant spikes at multiples of 12 indicate white noise"
+    ],
+    correct: 0,
+    explanation: "Significant ACF spikes at lags s, 2s, 3s (12, 24, 36 for monthly data) is the hallmark of seasonal autocorrelation with period s=12. It means: January 2024 is correlated with January 2023 and January 2022. This pattern indicates annual seasonality — seasonal differencing (ts.diff(12)) is needed, and a SARIMA model's seasonal terms should be considered. This is different from an AR(12) process, which would show the PACF cutting off at lag 12."
+  },
+  {
+    question: "Why is an additive decomposition model preferred when the seasonal amplitude stays constant over time?",
+    options: [
+      "Because in an additive model, the seasonal component is added regardless of the trend level — this matches series where seasonal swings stay constant in absolute terms as the trend grows",
+      "Because additive models are always more accurate; multiplicative models are only used for non-negative data",
+      "Because additive decomposition uses fewer parameters and is therefore always preferred for parsimony",
+      "Because statsmodels only supports additive decomposition; multiplicative requires manual log transformation"
+    ],
+    correct: 0,
+    explanation: "In an additive model: y = T + S + R. The seasonal component S has the same value regardless of where T is. In a multiplicative model: y = T × S × R, the seasonal effect scales with the trend. If a retail store has a Christmas peak of +£200k regardless of whether annual sales are £1M or £5M — additive. If the Christmas peak is always 20% above average (and 20% of £5M > 20% of £1M) — multiplicative. Choosing the wrong model leaves patterned residuals."
+  }
+]);
+</script>
+
+</body>
+</html>

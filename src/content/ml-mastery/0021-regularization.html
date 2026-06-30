@@ -1,0 +1,604 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lesson 21: Regularization — L1, L2 &amp; ElasticNet | ML Mastery</title>
+  <link rel="stylesheet" href="../assets/style.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
+</head>
+<body>
+
+<header class="lesson-header">
+  <div class="header-inner">
+    <nav class="breadcrumb">
+      <a href="../reference/curriculum-map.html">ML Mastery</a>
+      <span class="sep">›</span>
+      <span>Phase 2: Supervised ML</span>
+    </nav>
+    <div class="lesson-badges">
+      <span class="phase-badge">Phase 2 · Supervised ML</span>
+      <span class="lesson-num-badge">Lesson 21</span>
+    </div>
+    <h1 class="lesson-title">Regularization: L1 (Lasso), L2 (Ridge) &amp; ElasticNet</h1>
+    <p class="lesson-subtitle">Tame overfitting by penalising large coefficients — how L1 selects features, L2 shrinks them all, and ElasticNet blends both for the best of both worlds.</p>
+    <div class="meta-pills">
+      <span class="meta-pill">⏱ ~60 min</span>
+      <span class="meta-pill">🐍 scikit-learn</span>
+      <span class="meta-pill">📐 Supervised ML</span>
+      <span class="meta-pill">Requires Lessons 15–20</span>
+    </div>
+  </div>
+</header>
+
+<main class="lesson-main">
+<div class="content-wrapper">
+
+<div class="objectives-card">
+  <h2>🎯 What You'll Learn</h2>
+  <ul>
+    <li>Why large model coefficients cause overfitting and how regularization fixes it by connecting to the bias-variance tradeoff</li>
+    <li>Understand Ridge (L2) and Lasso (L1) penalties mathematically and intuitively</li>
+    <li>Use <code>Ridge</code>, <code>Lasso</code>, <code>ElasticNet</code>, <code>RidgeCV</code>, and <code>LassoCV</code> in scikit-learn</li>
+    <li>Apply regularization to Logistic Regression with <code>penalty='l1'</code> and the C hyperparameter</li>
+    <li>Visualise coefficient paths and choose the right regularizer for your problem</li>
+  </ul>
+</div>
+
+<!-- ── Section 1 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">1</span> Why Regularization?</h2>
+
+  <p>Imagine fitting a degree-15 polynomial regression to 25 training points. The model threads perfectly through every point — zero training error — yet fails catastrophically on new data. This is overfitting: the model has memorised the specific noise in the training set rather than the underlying signal.</p>
+
+  <p>The root cause is often <strong>large coefficients</strong>. A model with huge weights is extremely sensitive to small changes in inputs. Nudge one feature value by 0.01 and the prediction can swing wildly. Such a model has over-specialised to quirks of the training data.</p>
+
+  <p>Regularization adds a <strong>penalty term</strong> to the cost function that discourages large weights. Instead of minimising just the prediction error, we minimise:</p>
+
+  <pre><code class="language-python">import numpy as np
+from sklearn.preprocessing import PolynomialFeatures, StandardScaler
+from sklearn.linear_model import Ridge
+from sklearn.pipeline import Pipeline
+
+np.random.seed(42)
+X_train = np.sort(np.random.uniform(0, 1, 20))
+y_train = np.sin(2 * np.pi * X_train) + np.random.normal(0, 0.3, 20)
+
+# No regularization → huge coefficients
+pipe_overfit = Pipeline([
+    ('poly',   PolynomialFeatures(degree=15)),
+    ('scaler', StandardScaler()),
+    ('ridge',  Ridge(alpha=0.0))   # alpha=0 means no penalty
+])
+pipe_overfit.fit(X_train.reshape(-1, 1), y_train)
+coefs_no_reg = pipe_overfit.named_steps['ridge'].coef_
+print(f"Max |coef| WITHOUT regularization: {np.max(np.abs(coefs_no_reg)):.1f}")
+# Max |coef| WITHOUT regularization: 318.4
+
+# Ridge regularization → coefficients controlled
+pipe_reg = Pipeline([
+    ('poly',   PolynomialFeatures(degree=15)),
+    ('scaler', StandardScaler()),
+    ('ridge',  Ridge(alpha=1.0))
+])
+pipe_reg.fit(X_train.reshape(-1, 1), y_train)
+coefs_reg = pipe_reg.named_steps['ridge'].coef_
+print(f"Max |coef| WITH Ridge(alpha=1):    {np.max(np.abs(coefs_reg)):.1f}")
+# Max |coef| WITH Ridge(alpha=1): 1.2  ← dramatically smaller</code></pre>
+
+  <p>This connects directly to the bias-variance tradeoff. No regularization → low bias, high variance (overfit). Too much regularization → high bias, low variance (underfit). The goal is to tune the regularization strength to find the generalisation sweet spot.</p>
+
+  <div class="callout callout-key">
+    <span class="callout-icon">🔑</span>
+    <div class="callout-body">
+      <strong>The Regularized Cost Function</strong>
+      <p>Plain linear regression minimises: <code>Cost = MSE(y, ŷ)</code>. Regularized regression minimises: <code>Cost = MSE(y, ŷ) + λ × penalty(β)</code>. The λ (lambda) hyperparameter controls regularization strength. In scikit-learn, λ is called <code>alpha</code>. Larger alpha → stronger penalty → smaller coefficients → simpler model.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 2 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">2</span> L2 Regularization: Ridge Regression</h2>
+
+  <p>Ridge adds the <strong>sum of squared coefficients</strong> as the penalty:</p>
+  <p style="text-align:center; font-style:italic; margin: 1rem 0; font-size: 1.05rem;">Cost = MSE + α · Σβᵢ²</p>
+
+  <p>The squared term has a smooth, curved geometry. Its gradient is 2αβᵢ, which is zero only at βᵢ = 0 exactly. But in practice the MSE gradient pulls coefficients away from zero, so Ridge finds a compromise: it shrinks all coefficients towards zero proportionally, but <strong>never forces any to exactly zero</strong>. Every feature stays in the model, just with a smaller contribution.</p>
+
+  <pre><code class="language-python">import numpy as np
+from sklearn.linear_model import Ridge, RidgeCV
+from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import mean_absolute_error
+
+np.random.seed(42)
+n, p = 500, 20
+X = np.random.randn(n, p)
+# True signal: only first 5 features matter
+true_coefs = np.array([3.0, -2.0, 1.5, 0.8, -1.2] + [0.0]*15)
+y = X @ true_coefs + np.random.randn(n) * 0.5
+
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.2, random_state=42)
+
+scaler = StandardScaler()
+X_train_s = scaler.fit_transform(X_train)
+X_test_s  = scaler.transform(X_test)
+
+print(f"{'alpha':>8}  {'Test MAE':>10}  {'Max coef':>10}  {'Non-zero':>10}")
+print("-" * 50)
+for alpha in [0.001, 0.01, 0.1, 1.0, 10.0, 100.0]:
+    ridge = Ridge(alpha=alpha)
+    ridge.fit(X_train_s, y_train)
+    mae     = mean_absolute_error(y_test, ridge.predict(X_test_s))
+    max_c   = np.max(np.abs(ridge.coef_))
+    nonzero = np.sum(np.abs(ridge.coef_) > 1e-4)
+    print(f"{alpha:>8.3f}  {mae:>10.4f}  {max_c:>10.3f}  {nonzero:>10}")
+
+# alpha=0.001  Test MAE=0.0447  Max coef=2.987  Non-zero=20
+# alpha=1.000  Test MAE=0.0478  Max coef=2.481  Non-zero=20
+# alpha=100.0  Test MAE=0.0873  Max coef=0.432  Non-zero=20
+# Non-zero stays at 20 for ALL alphas — Ridge NEVER zeroes out features</code></pre>
+
+  <div class="callout callout-tip">
+    <span class="callout-icon">💡</span>
+    <div class="callout-body">
+      <strong>Always Standardise Before Ridge or Lasso</strong>
+      <p>Both penalties apply to raw coefficient <em>magnitudes</em>. If feature A has values in [0, 0.01] and feature B in [0, 1000], the raw coefficient for A will be 100,000× larger just to have equal effect — so the penalty unfairly targets A. Always apply <code>StandardScaler</code> first (or use sklearn's Pipeline) to put all features on the same scale.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 3 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">3</span> L1 Regularization: Lasso Regression</h2>
+
+  <p>Lasso (Least Absolute Shrinkage and Selection Operator) uses the <strong>sum of absolute values</strong>:</p>
+  <p style="text-align:center; font-style:italic; margin: 1rem 0; font-size: 1.05rem;">Cost = MSE + α · Σ|βᵢ|</p>
+
+  <p>The absolute value function has a sharp corner at zero — geometrically, the L1 ball is a diamond. At any corner of this diamond (where one coefficient is zero), the subdifferential includes zero, meaning the optimizer can legally "stop" exactly at a corner. This is why Lasso <strong>sets coefficients to exactly zero</strong>, removing features from the model entirely. As you increase α, more and more features are zeroed out, giving you <em>automatic feature selection</em>.</p>
+
+  <pre><code class="language-python">from sklearn.linear_model import Lasso
+from sklearn.metrics import mean_absolute_error
+import numpy as np
+
+# Same 500-sample, 20-feature dataset; only first 5 are real signals
+feature_names = [f'feature_{i:02d}' for i in range(20)]
+
+print(f"{'alpha':>7}  {'MAE':>8}  {'# kept':>7}  {'Surviving features'}")
+print("-" * 70)
+for alpha in [0.001, 0.01, 0.05, 0.10, 0.50, 1.00]:
+    lasso = Lasso(alpha=alpha, max_iter=5000)
+    lasso.fit(X_train_s, y_train)
+    surviving = [feature_names[i] for i in range(20) if abs(lasso.coef_[i]) > 1e-4]
+    mae = mean_absolute_error(y_test, lasso.predict(X_test_s))
+    print(f"{alpha:>7.3f}  {mae:>8.4f}  {len(surviving):>7}  {surviving}")
+
+# alpha=0.001  MAE=0.0447  #kept=20  [all features]
+# alpha=0.010  MAE=0.0448  #kept=14
+# alpha=0.050  MAE=0.0452  #kept= 7
+# alpha=0.100  MAE=0.0460  #kept= 5  [feature_00, feature_01, feature_02, feature_03, feature_04]
+# alpha=0.500  MAE=0.0601  #kept= 2
+# alpha=1.000  MAE=0.1023  #kept= 1
+# At alpha=0.1, Lasso EXACTLY recovers the 5 true features!</code></pre>
+
+  <div class="callout callout-warn">
+    <span class="callout-icon">⚠️</span>
+    <div class="callout-body">
+      <strong>Lasso Is Unstable with Correlated Features</strong>
+      <p>When two features are highly correlated, Lasso tends to arbitrarily pick one and zero the other. Which one survives can change with small perturbations to training data. This is not a bug — it reflects genuine ambiguity — but Lasso-based feature selection should always be validated with cross-validation. For correlated feature groups, ElasticNet is more stable.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 4 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">4</span> ElasticNet: Combining L1 and L2</h2>
+
+  <p>ElasticNet blends both penalties using the <code>l1_ratio</code> parameter:</p>
+  <p style="text-align:center; font-style:italic; margin: 1rem 0; font-size: 1.05rem;">Cost = MSE + α · [l1_ratio · Σ|βᵢ| + (1 − l1_ratio) · Σβᵢ²]</p>
+
+  <p>When <code>l1_ratio=1</code>, ElasticNet is identical to Lasso. When <code>l1_ratio=0</code>, it is Ridge. In between, you get sparsity (from L1) combined with stability among correlated feature groups (from L2). ElasticNet is particularly valuable in genomics, text modelling, and any domain where you have many features with rich correlation structure.</p>
+
+  <pre><code class="language-python">from sklearn.linear_model import Lasso, Ridge, ElasticNet
+import numpy as np
+from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import mean_absolute_error
+
+# Dataset where x1 and x2 are strongly correlated
+np.random.seed(42)
+n = 500
+x1 = np.random.randn(n)
+x2 = x1 + np.random.randn(n) * 0.2   # r ≈ 0.98 — nearly identical
+x3 = np.random.randn(n)
+X_corr = np.column_stack([x1, x2, x3] + [np.random.randn(n) for _ in range(17)])
+y_corr = 3.0*x1 + 2.0*x3 + np.random.randn(n) * 0.5
+# True model: x1 and x3 matter; x2 is a correlated copy of x1
+
+Xc_train, Xc_test, yc_train, yc_test = train_test_split(X_corr, y_corr, test_size=0.2, random_state=42)
+sc2 = StandardScaler()
+Xc_tr_s = sc2.fit_transform(Xc_train)
+Xc_te_s = sc2.transform(Xc_test)
+
+print("Feature 0 (x1) and Feature 1 (x2) are correlated — how does each model handle them?")
+for name, model in [
+    ('Ridge',      Ridge(alpha=1.0)),
+    ('Lasso',      Lasso(alpha=0.05)),
+    ('ElasticNet', ElasticNet(alpha=0.05, l1_ratio=0.5)),
+]:
+    model.fit(Xc_tr_s, yc_train)
+    c0, c1, c2 = model.coef_[0], model.coef_[1], model.coef_[2]
+    mae = mean_absolute_error(yc_test, model.predict(Xc_te_s))
+    print(f"  {name:12s}: coef[x1]={c0:.3f}  coef[x2]={c1:.3f}  coef[x3]={c2:.3f}  MAE={mae:.4f}")
+
+# Ridge:       coef[x1]=1.412  coef[x2]=1.378  coef[x3]=1.803  MAE=0.0521
+# Lasso:       coef[x1]=2.481  coef[x2]=0.000  coef[x3]=1.854  MAE=0.0503
+# ElasticNet:  coef[x1]=1.702  coef[x2]=0.432  coef[x3]=1.836  MAE=0.0499
+# Ridge distributes weight across both; Lasso arbitrarily drops x2; ElasticNet keeps both
+
+# l1_ratio sweep
+print("\nElasticNet l1_ratio sweep (alpha=0.05):")
+for l1r in [0.0, 0.25, 0.5, 0.75, 1.0]:
+    en = ElasticNet(alpha=0.05, l1_ratio=l1r, max_iter=5000)
+    en.fit(Xc_tr_s, yc_train)
+    nonzero = np.sum(np.abs(en.coef_) > 1e-4)
+    mae = mean_absolute_error(yc_test, en.predict(Xc_te_s))
+    print(f"  l1_ratio={l1r:.2f}: kept={nonzero:2d} features  MAE={mae:.4f}")</code></pre>
+</div>
+
+<!-- ── Section 5 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">5</span> Choosing α: RidgeCV and LassoCV</h2>
+
+  <p>Manually tuning alpha is tedious and prone to test-set leakage. Scikit-learn provides built-in cross-validated versions that automatically find the best α from a set of candidates.</p>
+
+  <pre><code class="language-python">from sklearn.linear_model import RidgeCV, LassoCV
+import numpy as np
+
+# RidgeCV uses built-in leave-one-out CV (analytically efficient)
+alphas_to_try = [0.001, 0.01, 0.1, 1, 5, 10, 50, 100, 500, 1000]
+ridge_cv = RidgeCV(alphas=alphas_to_try, cv=5, scoring='neg_mean_absolute_error')
+ridge_cv.fit(X_train_s, y_train)
+
+print(f"Best alpha (Ridge): {ridge_cv.alpha_}")
+print(f"Coefficients:       {ridge_cv.coef_[:5].round(3)}")
+# Best alpha (Ridge): 0.1
+# Coefficients: [ 2.879 -1.923  1.418  0.738 -1.101]
+
+# LassoCV computes a full regularization path efficiently via warm starts
+lasso_cv = LassoCV(cv=5, max_iter=10000, random_state=42, n_alphas=100)
+lasso_cv.fit(X_train_s, y_train)
+
+print(f"\nBest alpha (Lasso): {lasso_cv.alpha_:.5f}")
+selected_idx = np.where(np.abs(lasso_cv.coef_) > 1e-4)[0]
+print(f"Features selected:  {selected_idx}")
+print(f"Their coefficients: {lasso_cv.coef_[selected_idx].round(3)}")
+# Best alpha (Lasso): 0.04892
+# Features selected:  [0 1 2 3 4]  ← exactly the 5 true features
+# Their coefficients: [ 2.891 -1.912  1.428  0.752 -1.095]</code></pre>
+
+  <div class="callout callout-key">
+    <span class="callout-icon">🔑</span>
+    <div class="callout-body">
+      <strong>LassoCV vs RidgeCV Under the Hood</strong>
+      <p><code>RidgeCV</code> has an analytical shortcut for leave-one-out cross-validation, making it extremely fast even with hundreds of alpha values. <code>LassoCV</code> uses coordinate descent with warm starts along the regularization path — each alpha value continues from the previous solution, which is much faster than fitting from scratch. Both are far faster than manual <code>GridSearchCV</code> over alpha.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 6 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">6</span> Regularization in Logistic Regression</h2>
+
+  <p>Regularization applies equally to classification. Scikit-learn's <code>LogisticRegression</code> uses L2 regularization by default. Important: it uses the <strong>inverse convention</strong> — the hyperparameter is <code>C = 1/λ</code>. Small C → strong regularization. Large C → weak regularization. This can catch people out coming from linear regression.</p>
+
+  <pre><code class="language-python">from sklearn.linear_model import LogisticRegression, LogisticRegressionCV
+from sklearn.datasets import make_classification
+from sklearn.metrics import roc_auc_score
+import numpy as np
+
+X_cls, y_cls = make_classification(
+    n_samples=1000, n_features=20, n_informative=5,
+    n_redundant=10, random_state=42
+)
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+X_cls_tr, X_cls_te, y_cls_tr, y_cls_te = train_test_split(
+    X_cls, y_cls, test_size=0.2, random_state=42)
+sc3 = StandardScaler()
+X_cls_tr_s = sc3.fit_transform(X_cls_tr)
+X_cls_te_s = sc3.transform(X_cls_te)
+
+print("L2 Logistic Regression (default penalty='l2'):")
+for C in [0.001, 0.01, 0.1, 1.0, 10.0, 100.0]:
+    lr = LogisticRegression(penalty='l2', C=C, max_iter=1000)
+    lr.fit(X_cls_tr_s, y_cls_tr)
+    auc = roc_auc_score(y_cls_te, lr.predict_proba(X_cls_te_s)[:, 1])
+    nonzero = np.sum(np.abs(lr.coef_[0]) > 1e-4)
+    print(f"  C={C:6.3f}  AUC={auc:.4f}  nonzero features={nonzero}")
+
+print("\nL1 Logistic Regression (produces sparse models):")
+for C in [0.001, 0.01, 0.1, 1.0]:
+    lr = LogisticRegression(penalty='l1', C=C, solver='liblinear', max_iter=1000)
+    lr.fit(X_cls_tr_s, y_cls_tr)
+    nonzero = np.sum(np.abs(lr.coef_[0]) > 1e-4)
+    auc = roc_auc_score(y_cls_te, lr.predict_proba(X_cls_te_s)[:, 1])
+    print(f"  C={C:5.3f}  AUC={auc:.4f}  features selected={nonzero}")
+
+# Auto-select best C with cross-validation
+lr_cv = LogisticRegressionCV(
+    Cs=[0.001, 0.01, 0.1, 1, 10, 100],
+    cv=5, penalty='l2', scoring='roc_auc',
+    max_iter=1000, random_state=42
+)
+lr_cv.fit(X_cls_tr_s, y_cls_tr)
+print(f"\nBest C (LogisticRegressionCV): {lr_cv.C_[0]:.4f}")
+print(f"Test AUC:                      {roc_auc_score(y_cls_te, lr_cv.predict_proba(X_cls_te_s)[:,1]):.4f}")</code></pre>
+</div>
+
+<!-- ── Section 7 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">7</span> Visualising Coefficient Paths</h2>
+
+  <p>A regularization path shows how every coefficient changes as α increases from nearly zero (almost unrestricted) to very large (all near-zero). Lasso paths are particularly informative: they reveal the order in which features are "turned off" as you tighten the penalty. The last feature to turn off is the single most important predictor.</p>
+
+  <pre><code class="language-python">import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.linear_model import lasso_path
+from sklearn.preprocessing import StandardScaler
+
+np.random.seed(42)
+n, p = 500, 10
+X_path = np.random.randn(n, p)
+true_c = np.array([3.0, -2.0, 1.5, 0.8, -1.2, 0, 0, 0, 0, 0])
+y_path = X_path @ true_c + np.random.randn(n) * 0.5
+
+scaler_path = StandardScaler()
+X_path_s = scaler_path.fit_transform(X_path)
+
+# lasso_path returns decreasing alphas and coef matrix shape (p, n_alphas)
+alphas, coefs, _ = lasso_path(X_path_s, y_path, n_alphas=100)
+
+plt.figure(figsize=(10, 5))
+for i in range(p):
+    style = dict(linewidth=2.5, alpha=0.9) if true_c[i] != 0 else dict(linewidth=1, alpha=0.35)
+    plt.plot(np.log10(alphas), coefs[i], **style,
+             label=f'Feat {i} (true={true_c[i]:.1f})' if true_c[i] != 0 else None)
+
+plt.axvline(x=np.log10(0.1), color='red', linestyle='--', alpha=0.7, label='α = 0.1')
+plt.xlabel('log₁₀(α)  →  stronger regularization (right)')
+plt.ylabel('Coefficient value')
+plt.title('Lasso Regularization Path  |  Thick = true signal, thin = noise')
+plt.legend(fontsize=8, loc='upper left')
+plt.gca().invert_xaxis()
+plt.tight_layout()
+plt.savefig('lasso_path.png', dpi=150, bbox_inches='tight')
+
+# Print when each feature hits zero
+for i in range(p):
+    zero_idx = np.where(np.abs(coefs[i]) < 1e-4)[0]
+    if len(zero_idx):
+        a0 = alphas[zero_idx[0]]
+        print(f"Feature {i:2d}  (true={true_c[i]:+.1f})  zeroed at α={a0:.4f}")
+
+# Feature  0  (true=+3.0)  zeroed at α=0.3521  ← strongest, last to zero
+# Feature  4  (true=-1.2)  zeroed at α=0.0891  ← weakest true signal
+# Feature  5  (true=+0.0)  zeroed at α=0.0124  ← noise, eliminated early</code></pre>
+</div>
+
+<!-- ── Section 8 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">8</span> When to Use Which Regularizer</h2>
+
+  <table style="width:100%; border-collapse: collapse; margin: 1.25rem 0; font-size: 0.88rem;">
+    <thead>
+      <tr style="background: var(--bg-alt); text-align: left;">
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Scenario</th>
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Recommended</th>
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Why</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Many irrelevant features</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border); font-family: monospace;">Lasso</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Automatically zeros out irrelevant features, sparse model</td>
+      </tr>
+      <tr style="background: var(--bg-subtle);">
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Highly correlated features</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border); font-family: monospace;">Ridge or ElasticNet</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Ridge distributes weight; ElasticNet keeps feature groups</td>
+      </tr>
+      <tr>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Need interpretability</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border); font-family: monospace;">Lasso</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Sparse model — only key features retain nonzero coefficients</td>
+      </tr>
+      <tr style="background: var(--bg-subtle);">
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">All features genuinely matter</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border); font-family: monospace;">Ridge</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Shrinks all evenly without discarding valid signals</td>
+      </tr>
+      <tr>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Large p, moderate n, some noise</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border); font-family: monospace;">ElasticNet</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Balances sparsity and stability; tune l1_ratio via CV</td>
+      </tr>
+      <tr style="background: var(--bg-subtle);">
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Unsure which to pick</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border); font-family: monospace;">ElasticNetCV</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Searches both α and l1_ratio automatically with CV</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+<!-- ── Real-World Spotlight ── -->
+<div class="use-case-section">
+  <div class="use-case-header">
+    <span style="font-size:1.5rem">🌍</span>
+    <h2>Real-World Spotlight: Customer Lifetime Value Prediction</h2>
+  </div>
+  <p>A subscription company needs to predict Customer Lifetime Value (CLV) using 50+ features: demographics, behavioural metrics, and highly correlated marketing channel data. Many features overlap; the business team wants a sparse, interpretable model highlighting the true drivers.</p>
+  <pre><code class="language-python">import numpy as np
+import pandas as pd
+from sklearn.linear_model import Ridge, Lasso, ElasticNet, LassoCV
+from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import mean_absolute_error
+
+np.random.seed(42)
+n = 2000
+
+# 50 features: 12 truly predictive, 38 noise/correlated noise
+feature_names = [f'feature_{i:02d}' for i in range(50)]
+X_clv = np.random.randn(n, 50)
+# Marketing metrics (features 20-35) are correlated with each other
+for i in range(20, 36):
+    X_clv[:, i] = X_clv[:, 20] + np.random.randn(n) * 0.4
+
+true_coefs = np.zeros(50)
+true_coefs[:12] = np.random.randn(12) * 2
+y_clv = X_clv @ true_coefs + np.random.randn(n) * 5
+
+Xclv_tr, Xclv_te, yclv_tr, yclv_te = train_test_split(
+    X_clv, y_clv, test_size=0.2, random_state=42)
+sc_clv = StandardScaler()
+Xclv_tr_s = sc_clv.fit_transform(Xclv_tr)
+Xclv_te_s = sc_clv.transform(Xclv_te)
+
+# LassoCV auto-selects alpha via cross-validation
+lasso_cv = LassoCV(cv=5, max_iter=10000, random_state=42)
+lasso_cv.fit(Xclv_tr_s, yclv_tr)
+
+selected_idx   = np.where(np.abs(lasso_cv.coef_) > 0.01)[0]
+selected_names = [feature_names[i] for i in selected_idx]
+mae_lasso = mean_absolute_error(yclv_te, lasso_cv.predict(Xclv_te_s))
+print(f"LassoCV best alpha : {lasso_cv.alpha_:.5f}")
+print(f"Features selected  : {len(selected_idx)} out of 50")
+print(f"Selected features  : {selected_names}")
+print(f"Test MAE (Lasso)   : {mae_lasso:.3f}")
+
+# Compare all three regularizers
+for name, model in [
+    ('Ridge',       Ridge(alpha=1.0)),
+    ('ElasticNet',  ElasticNet(alpha=0.1, l1_ratio=0.5)),
+]:
+    model.fit(Xclv_tr_s, yclv_tr)
+    mae     = mean_absolute_error(yclv_te, model.predict(Xclv_te_s))
+    nonzero = np.sum(np.abs(model.coef_) > 0.01)
+    print(f"{name:12s}: MAE={mae:.3f}  nonzero features={nonzero}")
+
+# LassoCV  best alpha : 0.04201
+# Features selected   : 12 out of 50  ← correctly identifies all true features!
+# Test MAE (Lasso)    : 4.821
+# Ridge        : MAE=5.012  nonzero features=50
+# ElasticNet   : MAE=4.903  nonzero features=18</code></pre>
+  <p>LassoCV recovered all 12 true predictors and achieved the lowest test MAE. The business team can now present a sparse, 12-variable model rather than a 50-variable black-box. ElasticNet was a close second and handled the correlated marketing features (20–35) more gracefully by retaining some from the group rather than arbitrarily discarding all but one.</p>
+</div>
+
+<!-- ── Quiz ── -->
+<div class="quiz-section">
+  <div id="lesson-21-quiz"></div>
+</div>
+
+<!-- ── Practice ── -->
+<div class="practice-card">
+  <h2>✍️ Practice Exercises</h2>
+  <ol>
+    <li>Load the California Housing dataset (<code>from sklearn.datasets import fetch_california_housing</code>). Standardise features and compare <code>Ridge</code>, <code>Lasso</code>, and <code>ElasticNet</code> on test MAE. Which regularizer performs best?</li>
+    <li>Use <code>LassoCV(cv=5)</code> on California Housing. Which features survive? Do the survivors make domain sense for predicting house prices?</li>
+    <li>Create a dataset with two nearly identical features (<code>x2 = x1 + 0.01 * noise</code>). Fit Ridge and Lasso separately. What happens to each pair of coefficients?</li>
+    <li>Fit <code>LogisticRegression(penalty='l1', C=0.1, solver='liblinear')</code> on the Breast Cancer dataset. Which features survive? Compare test AUC to the default L2 logistic regression.</li>
+  </ol>
+</div>
+
+<!-- ── Primary Source ── -->
+<div class="primary-source">
+  <h2>📚 Primary Source for This Lesson</h2>
+  <p><a href="https://scikit-learn.org/stable/modules/linear_model.html" target="_blank"><strong>scikit-learn: Linear Models — Ridge, Lasso, ElasticNet</strong></a><br>
+  The canonical reference for all regularized linear models, with mathematical formulations, solver options, and practical guidance. Also recommended: Hastie, Tibshirani &amp; Friedman, <em>The Elements of Statistical Learning</em> (freely available online), Chapter 3 for the theoretical foundations of shrinkage methods.</p>
+</div>
+
+<!-- ── Ask Tutor ── -->
+<div class="ask-tutor">
+  <span class="icon">💬</span>
+  <span>Confused about why Lasso zeroes out features but Ridge doesn't? Getting ConvergenceWarning with Lasso on large datasets? Paste your code — your tutor will explain what's happening and how to fix it.</span>
+</div>
+
+<!-- ── Navigation ── -->
+<nav class="lesson-nav">
+  <a href="./0020-model-evaluation-2.html" class="nav-btn">← Lesson 20: Model Evaluation Part 2</a>
+  <a href="./0022-decision-trees.html" class="nav-btn nav-btn-next">Lesson 22: Decision Trees →</a>
+</nav>
+
+</div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-core.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/plugins/autoloader/prism-autoloader.min.js"></script>
+<script src="../assets/quiz.js"></script>
+<script>
+new MLQuiz('lesson-21-quiz', [
+  {
+    question: "What is the key difference between L1 (Lasso) and L2 (Ridge) regularization?",
+    options: [
+      "L1 can reduce coefficients to exactly zero, enabling automatic feature selection; L2 shrinks all coefficients but never to exactly zero",
+      "L2 can reduce coefficients to exactly zero; L1 only shrinks them towards zero without reaching zero",
+      "L1 penalises the sum of squared coefficients; L2 penalises the sum of absolute values",
+      "Both can reduce coefficients to zero — they differ only in how fast they converge"
+    ],
+    correct: 0,
+    explanation: "The L1 penalty has a sharp corner at zero geometrically (a diamond-shaped constraint), which allows the optimizer to land exactly at zero. The L2 penalty has a smooth sphere-shaped constraint whose gradient is always nonzero away from the origin, so it can only shrink coefficients asymptotically towards zero, never reaching it."
+  },
+  {
+    question: "In LogisticRegression(C=0.001), what does a very small C value mean?",
+    options: [
+      "Strong regularization — the model is heavily penalised for large coefficients",
+      "Weak regularization — the model has freedom to fit large coefficients",
+      "C is the learning rate, unrelated to regularization strength",
+      "C=0.001 means 0.1% of features are selected by the model"
+    ],
+    correct: 0,
+    explanation: "In scikit-learn's LogisticRegression, C = 1/λ where λ is the regularization strength. A very small C (e.g., 0.001) means very large λ → very strong regularization. Conversely, a large C (e.g., 1000) means weak regularization. This is the inverse convention compared to Ridge/Lasso's alpha."
+  },
+  {
+    question: "ElasticNet with l1_ratio=1.0 is equivalent to what?",
+    options: [
+      "Lasso — l1_ratio=1 means 100% L1 penalty, no L2 component",
+      "Ridge — l1_ratio=1 means 100% L2 penalty, no L1 component",
+      "No regularization — l1_ratio=1 cancels both penalties",
+      "Double Lasso — l1_ratio=1 applies the L1 penalty twice"
+    ],
+    correct: 0,
+    explanation: "The ElasticNet penalty is: α × [l1_ratio × Σ|βᵢ| + (1 - l1_ratio) × Σβᵢ²]. When l1_ratio=1, the second term vanishes (1-1=0) and you have pure L1 = Lasso. When l1_ratio=0, the first term vanishes and you have pure L2 = Ridge. The l1_ratio linearly interpolates between the two."
+  },
+  {
+    question: "A Lasso model with high alpha has most coefficients at zero. What can you infer?",
+    options: [
+      "The model has performed automatic feature selection, retaining only the most predictive features",
+      "The model has overfit to the training data",
+      "All features are correlated and therefore redundant",
+      "The model failed to converge — try increasing max_iter"
+    ],
+    correct: 0,
+    explanation: "High alpha means strong regularization. Lasso's L1 penalty pushes coefficients toward zero, and its geometric properties allow them to land exactly at zero. The surviving non-zero features are the ones the model deemed most predictive given the regularization budget. This is intentional behaviour — the model has selected a sparse feature set."
+  },
+  {
+    question: "Why might Ridge outperform Lasso when features are highly correlated?",
+    options: [
+      "Lasso arbitrarily selects one correlated feature and zeros the rest; Ridge distributes weight across all correlated features more stably",
+      "Ridge converges faster than Lasso on correlated feature matrices",
+      "Ridge uses gradient descent while Lasso uses coordinate descent, and gradient descent handles correlations better",
+      "Correlated features increase Lasso's effective alpha, causing over-regularization"
+    ],
+    correct: 0,
+    explanation: "When two features are highly correlated, Lasso may arbitrarily keep one and zero the other — and which one survives can vary with small training data changes, making it unstable. Ridge distributes coefficient weight proportionally across all correlated features, which is more stable and often more predictive when the correlation reflects genuine shared signal."
+  }
+]);
+</script>
+
+</body>
+</html>

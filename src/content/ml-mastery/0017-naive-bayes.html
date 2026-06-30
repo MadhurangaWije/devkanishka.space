@@ -1,0 +1,664 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lesson 17: Naive Bayes Classifier | ML Mastery</title>
+  <link rel="stylesheet" href="../assets/style.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
+</head>
+<body>
+
+<header class="lesson-header">
+  <div class="header-inner">
+    <nav class="breadcrumb">
+      <a href="../reference/curriculum-map.html">ML Mastery</a>
+      <span class="sep">›</span>
+      <span>Phase 2: Supervised ML</span>
+    </nav>
+    <div class="lesson-badges">
+      <span class="phase-badge">Phase 2 · Supervised ML</span>
+      <span class="lesson-num-badge">Lesson 17</span>
+    </div>
+    <h1 class="lesson-title">Naive Bayes Classifier</h1>
+    <p class="lesson-subtitle">Bayes' theorem + one strong assumption = a surprisingly powerful classifier. Fast, effective on text, and mathematically elegant — despite a simplification that's almost always wrong.</p>
+    <div class="meta-pills">
+      <span class="meta-pill">⏱ ~60 min</span>
+      <span class="meta-pill">🐍 Python + scikit-learn</span>
+      <span class="meta-pill">📊 Text Classification</span>
+      <span class="meta-pill">Requires Lesson 16</span>
+    </div>
+  </div>
+</header>
+
+<main class="lesson-main">
+<div class="content-wrapper">
+
+<div class="objectives-card">
+  <h2>🎯 What You'll Learn</h2>
+  <ul>
+    <li>Apply Bayes' theorem to derive a probabilistic classification rule: posterior ∝ likelihood × prior</li>
+    <li>Understand the "naive" conditional independence assumption and why it often works despite being wrong</li>
+    <li>Distinguish Gaussian NB (continuous features), Multinomial NB (word counts), and Bernoulli NB (binary features)</li>
+    <li>Understand Laplace smoothing and why it prevents catastrophic zero-probability failures</li>
+    <li>Build a text sentiment classifier using TF-IDF + MultinomialNB in a sklearn Pipeline</li>
+  </ul>
+</div>
+
+<!-- ── Section 1 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">1</span> Bayes' Theorem Review</h2>
+
+  <p>Naive Bayes is built on one of the most fundamental results in probability theory — <strong>Bayes' theorem</strong>. Given a class label C and a set of observed features X, the theorem tells us how to compute the probability of the class given the features:</p>
+
+  <p style="text-align:center; font-size:1.15rem; margin: 1rem 0;">P(C | X) = P(X | C) × P(C) / P(X)</p>
+
+  <p>Let's name each term:</p>
+  <ul>
+    <li><strong>P(C | X)</strong> — the <em>posterior</em>: what we want. The probability of class C given the observed features X.</li>
+    <li><strong>P(X | C)</strong> — the <em>likelihood</em>: how probable are these features if the true class is C?</li>
+    <li><strong>P(C)</strong> — the <em>prior</em>: how common is class C in general, before seeing any features? (e.g., 20% of emails are spam)</li>
+    <li><strong>P(X)</strong> — the <em>evidence</em>: probability of observing these features across all classes. Since it's the same for all classes, we can ignore it when comparing.</li>
+  </ul>
+
+  <p>For classification, we compute the posterior for each class and predict the one with the highest value:</p>
+  <p style="text-align:center; font-size:1.05rem; margin: 0.8rem 0;">ŷ = argmax_C  P(X | C) × P(C)</p>
+
+  <p>This is the MAP (Maximum A Posteriori) estimate — the class that makes the observed features most probable given the class frequency.</p>
+
+  <div class="callout callout-key">
+    <span class="callout-icon">🔑</span>
+    <div class="callout-body">
+      <strong>Posterior ∝ Likelihood × Prior</strong>
+      <p>We can ignore P(X) (the denominator) when comparing classes because it's the same for all of them. We just need to compare the numerator across classes: whichever class gives the highest likelihood × prior wins. This is what Naive Bayes actually computes.</p>
+    </div>
+  </div>
+
+  <pre><code class="language-python">import numpy as np
+
+# Manual Bayes' theorem example: spam detection
+# Prior probabilities (from training data)
+p_spam = 0.20   # 20% of all emails are spam
+p_ham  = 0.80   # 80% are ham
+
+# Likelihood: P(contains "free" | class)
+p_free_given_spam = 0.60  # 60% of spam emails contain "free"
+p_free_given_ham  = 0.05  # 5% of ham emails contain "free"
+
+# Bayes' theorem
+p_email_is_free = p_free_given_spam * p_spam + p_free_given_ham * p_ham  # P(X)
+
+p_spam_given_free = (p_free_given_spam * p_spam) / p_email_is_free
+p_ham_given_free  = (p_free_given_ham  * p_ham)  / p_email_is_free
+
+print(f"P(spam | 'free') = {p_spam_given_free:.4f}")  # ~0.75
+print(f"P(ham  | 'free') = {p_ham_given_free:.4f}")   # ~0.25
+print(f"Prediction: {'SPAM' if p_spam_given_free > p_ham_given_free else 'ham'}")</code></pre>
+
+  <div class="output-block">
+    <div class="output-label">Output</div>
+P(spam | 'free') = 0.7500
+P(ham  | 'free') = 0.2500
+Prediction: SPAM
+  </div>
+</div>
+
+<!-- ── Section 2 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">2</span> The Naive Assumption</h2>
+
+  <p>Real documents have many features (thousands of unique words). Computing P(x₁, x₂, ..., xₙ | C) for all feature combinations is computationally intractable and requires exponentially more training data as features increase.</p>
+
+  <p>Naive Bayes solves this with one bold simplification: <strong>assume all features are conditionally independent given the class</strong>. This means the joint probability of all features factors into a product of individual probabilities:</p>
+
+  <p style="text-align:center; font-size:1.05rem; margin: 0.8rem 0;">P(x₁, x₂, ..., xₙ | C) = P(x₁|C) × P(x₂|C) × ... × P(xₙ|C)</p>
+
+  <p>This is the "naive" part — and it's almost always factually wrong. In reality, features are correlated. If a document contains "machine", it's much more likely to also contain "learning". The two are not independent. Yet despite this false assumption, Naive Bayes achieves surprisingly good classification performance in practice.</p>
+
+  <p>The reason: for classification we only need to correctly <em>rank</em> the classes by posterior probability — we don't need accurate probability values. The independence assumption, even when wrong, often preserves the correct ranking. The most probable class stays the most probable, even with bad probability estimates.</p>
+
+  <pre><code class="language-python"># Illustrating the naive independence product
+import numpy as np
+
+# Likelihoods for individual words given class (from training)
+vocab = ["free", "prize", "meeting", "tomorrow", "click", "urgent"]
+p_word_given_spam = np.array([0.60, 0.50, 0.02, 0.01, 0.40, 0.35])
+p_word_given_ham  = np.array([0.05, 0.02, 0.30, 0.25, 0.03, 0.04])
+
+# A new email contains: "free", "click", "urgent" (indices 0, 4, 5)
+# All other words absent
+words_present = np.array([1, 1, 0, 0, 1, 1])   # 1 = present, 0 = absent
+words_absent  = 1 - words_present
+
+# Naive product: P(features | class) = prod P(word|class)^present * P(no word|class)^absent
+p_features_spam = (np.prod(p_word_given_spam**words_present) *
+                   np.prod((1 - p_word_given_spam)**words_absent))
+p_features_ham  = (np.prod(p_word_given_ham**words_present) *
+                   np.prod((1 - p_word_given_ham)**words_absent))
+
+p_prior_spam = 0.20
+p_prior_ham  = 0.80
+
+unnorm_spam = p_features_spam * p_prior_spam
+unnorm_ham  = p_features_ham  * p_prior_ham
+
+p_spam = unnorm_spam / (unnorm_spam + unnorm_ham)
+print(f"P(spam | email) = {p_spam:.6f}")
+print(f"Prediction: {'SPAM' if p_spam > 0.5 else 'ham'}")</code></pre>
+</div>
+
+<!-- ── Section 3 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">3</span> Gaussian Naive Bayes</h2>
+
+  <p><strong>GaussianNB</strong> is used when features are continuous. It assumes each feature follows a normal (Gaussian) distribution within each class. During training, it estimates the mean (μ) and standard deviation (σ) of each feature for each class. During prediction, it evaluates the Gaussian probability density function to compute P(xᵢ|C).</p>
+
+  <pre><code class="language-python">from sklearn.naive_bayes import GaussianNB
+from sklearn.datasets import load_iris
+from sklearn.model_selection import train_test_split, cross_val_score
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import classification_report
+import numpy as np
+
+iris = load_iris()
+X, y = iris.data, iris.target
+
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.25, random_state=42, stratify=y)
+
+# Gaussian NB does NOT require scaling — it estimates its own per-class distributions
+gnb = GaussianNB()
+gnb.fit(X_train, y_train)
+
+print("Classification Report:")
+print(classification_report(y_test, gnb.predict(X_test), target_names=iris.target_names))
+
+# Inspect what the model learned
+print("\nPer-class means (μ) for each feature:")
+for class_idx, class_name in enumerate(iris.target_names):
+    print(f"  {class_name}: {gnb.theta_[class_idx].round(2)}")
+
+print("\nPer-class variances (σ²) for each feature:")
+for class_idx, class_name in enumerate(iris.target_names):
+    print(f"  {class_name}: {gnb.var_[class_idx].round(3)}")
+
+# Class priors (estimated from training data proportions)
+print(f"\nClass priors: {gnb.class_prior_.round(3)}")
+
+# Probability outputs
+proba = gnb.predict_proba(X_test[:3])
+print(f"\nProbabilities for first 3 test samples:\n{proba.round(3)}")</code></pre>
+</div>
+
+<!-- ── Section 4 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">4</span> Multinomial Naive Bayes</h2>
+
+  <p><strong>MultinomialNB</strong> is designed for discrete count data — most commonly word counts or TF-IDF scores in text classification. The model estimates P(word | class) as the relative frequency of that word in documents of that class.</p>
+
+  <p>The core formula: P(word_w | class_c) = (count(w, c) + α) / (total_words(c) + α × vocab_size)</p>
+
+  <p>The α parameter is the <strong>Laplace smoothing</strong> term (covered in the next section). Without it, any word that never appears in training spam would give P(word|spam)=0, causing the entire product to collapse to zero for any email containing that word.</p>
+
+  <pre><code class="language-python">from sklearn.naive_bayes import MultinomialNB
+from sklearn.feature_extraction.text import CountVectorizer, TfidfVectorizer
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import classification_report
+from sklearn.pipeline import Pipeline
+import numpy as np
+
+# Toy text classification dataset
+documents = [
+    "buy cheap medications online now",
+    "win a prize click here free offer",
+    "team meeting tomorrow at 9am conference room",
+    "please review the attached quarterly report",
+    "urgent account suspended verify immediately",
+    "free iPhone winner congratulations claim now",
+    "project deadline is next Friday please confirm",
+    "your bank account needs verification urgent",
+    "can you join the standup call tomorrow",
+    "exclusive deal only today limited offer free",
+]
+labels = [1, 1, 0, 0, 1, 1, 0, 1, 0, 1]  # 1=spam, 0=ham
+
+# Pipeline: raw text → count vectors → Multinomial NB
+pipeline = Pipeline([
+    ('vectorizer', CountVectorizer(stop_words='english')),
+    ('nb',         MultinomialNB(alpha=1.0))  # alpha=1.0 is Laplace smoothing
+])
+
+X_train, X_test, y_train, y_test = train_test_split(
+    documents, labels, test_size=0.3, random_state=42)
+
+pipeline.fit(X_train, y_train)
+
+print("Classification Report:")
+print(classification_report(y_test, pipeline.predict(X_test),
+                             target_names=['ham', 'spam']))
+
+# Inspect feature log probabilities — top spam-indicative words
+vectorizer = pipeline.named_steps['vectorizer']
+nb_model   = pipeline.named_steps['nb']
+vocab     = vectorizer.get_feature_names_out()
+
+# Log probability of each word for spam class (index 1)
+spam_log_probs = nb_model.feature_log_prob_[1]
+top_spam_words = np.argsort(spam_log_probs)[-8:][::-1]
+
+print("\nTop 8 words most associated with SPAM:")
+for idx in top_spam_words:
+    print(f"  '{vocab[idx]}':  log P(word|spam) = {spam_log_probs[idx]:.3f}")</code></pre>
+</div>
+
+<!-- ── Section 5 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">5</span> Bernoulli Naive Bayes</h2>
+
+  <p><strong>BernoulliNB</strong> works with binary features — for each word, either it is present (1) or absent (0) in the document. Unlike MultinomialNB which cares about how many times a word appears, BernoulliNB only cares whether it appears at all. It also explicitly models the probability that a word is <em>absent</em>, which can help distinguish classes when a word's absence is informative.</p>
+
+  <pre><code class="language-python">from sklearn.naive_bayes import BernoulliNB, MultinomialNB
+from sklearn.feature_extraction.text import CountVectorizer
+from sklearn.pipeline import Pipeline
+
+docs = [
+    "free prize offer limited time",
+    "meeting tomorrow morning conference room",
+    "click here win money now",
+    "project review deadline next week",
+    "urgent claim your reward today",
+    "team lunch Friday anyone interested",
+]
+labels = [1, 0, 1, 0, 1, 0]
+
+# BernoulliNB pipeline: binary_mode=True binarizes counts
+bernoulli_pipe = Pipeline([
+    ('vec', CountVectorizer(binary=True)),  # binary=True: word present=1, absent=0
+    ('nb',  BernoulliNB(alpha=1.0))
+])
+bernoulli_pipe.fit(docs, labels)
+
+# MultinomialNB pipeline: uses raw counts
+multi_pipe = Pipeline([
+    ('vec', CountVectorizer()),
+    ('nb',  MultinomialNB(alpha=1.0))
+])
+multi_pipe.fit(docs, labels)
+
+test_docs = ["free money win prize", "project update tomorrow"]
+print("BernoulliNB predictions:", bernoulli_pipe.predict(test_docs))
+print("MultinomialNB predictions:", multi_pipe.predict(test_docs))
+print("\nBernoulli probabilities:", bernoulli_pipe.predict_proba(test_docs).round(3))
+print("Multinomial probabilities:", multi_pipe.predict_proba(test_docs).round(3))</code></pre>
+
+  <div class="callout callout-tip">
+    <span class="callout-icon">💡</span>
+    <div class="callout-body">
+      <strong>Bernoulli vs Multinomial</strong>
+      <p>Use <strong>MultinomialNB</strong> when repetition matters (e.g., a word appearing 10 times is stronger evidence than once). Use <strong>BernoulliNB</strong> when binary presence/absence is sufficient and you have short documents. For most modern NLP tasks with TF-IDF features, MultinomialNB is the more common choice.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 6 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">6</span> Laplace Smoothing</h2>
+
+  <p>Consider this scenario: the word "mortgage" appears in training ham emails but never in spam emails. Without smoothing, P("mortgage" | spam) = 0. Now a test email contains "mortgage". The Naive Bayes product for spam includes this zero probability, making the entire posterior for spam = 0, regardless of all other evidence. One missing word completely eliminates a class.</p>
+
+  <p><strong>Laplace smoothing</strong> (also called add-1 smoothing, or add-α smoothing) solves this by adding α (typically 1) to every count before computing probabilities:</p>
+
+  <p style="text-align:center; font-size:1.05rem; margin: 0.8rem 0;">P(word_w | class_c) = (count(w, c) + α) / (Σ_w count(w, c) + α × |vocab|)</p>
+
+  <pre><code class="language-python">import numpy as np
+
+# Example: vocabulary of 5 words, 3 training spam documents
+# Word counts in spam training docs:
+word_counts_spam = {'free': 8, 'prize': 5, 'meeting': 0, 'report': 0, 'claim': 3}
+vocab_size = len(word_counts_spam)
+total_spam_words = sum(word_counts_spam.values())  # 16
+
+alpha = 1.0  # Laplace smoothing
+
+# Without smoothing
+print("WITHOUT smoothing:")
+for word, count in word_counts_spam.items():
+    prob = count / total_spam_words if total_spam_words > 0 else 0
+    print(f"  P('{word}' | spam) = {prob:.4f}")
+
+# With Laplace smoothing
+print("\nWITH Laplace smoothing (alpha=1):")
+for word, count in word_counts_spam.items():
+    prob_smooth = (count + alpha) / (total_spam_words + alpha * vocab_size)
+    print(f"  P('{word}' | spam) = {prob_smooth:.4f}")
+
+# The difference
+meeting_no_smooth = 0 / 16
+meeting_smooth    = (0 + 1) / (16 + 1 * 5)
+print(f"\nP('meeting'|spam) without smoothing: {meeting_no_smooth}")
+print(f"P('meeting'|spam) with smoothing:    {meeting_smooth:.5f}")
+print("Smoothing prevents the catastrophic zero that kills the product")</code></pre>
+
+  <div class="callout callout-warn">
+    <span class="callout-icon">⚠️</span>
+    <div class="callout-body">
+      <strong>Never Use Alpha=0 in Production</strong>
+      <p>Setting <code>alpha=0</code> in sklearn's NB models disables smoothing. If your test data contains any word that was absent from one class in training, you will get zero probability for that class regardless of all other evidence. Always use at least <code>alpha=1e-10</code> and typically <code>alpha=1.0</code> for balanced smoothing.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 7 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">7</span> Full Pipeline: TF-IDF + MultinomialNB</h2>
+
+  <p>In practice, raw word counts are less informative than <strong>TF-IDF</strong> (Term Frequency–Inverse Document Frequency) scores. TF-IDF down-weights common words like "the" and "is" that appear in all documents, and up-weights distinctive words that are rare overall but frequent in specific documents. Combining TF-IDF with MultinomialNB is a classic and powerful text classification baseline.</p>
+
+  <pre><code class="language-python">from sklearn.naive_bayes import MultinomialNB
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.pipeline import Pipeline
+from sklearn.model_selection import cross_val_score, StratifiedKFold
+from sklearn.preprocessing import MinMaxScaler
+from sklearn.metrics import classification_report
+import numpy as np
+
+# Simulated product review sentiment dataset
+# (In practice, use the IMDB or Amazon reviews dataset)
+reviews = [
+    "This product is absolutely amazing, works perfectly",
+    "Terrible quality, broke after one day, waste of money",
+    "Great value for the price, highly recommend to everyone",
+    "Worst purchase I have ever made, completely useless",
+    "Exceeded all my expectations, love this product",
+    "Do not buy this garbage, horrible customer service",
+    "Five stars, best product in its category by far",
+    "Returned immediately, very poor build quality",
+    "My family loves it, will definitely buy again",
+    "Broken on arrival, seller unresponsive, avoid",
+    "Outstanding quality and fast shipping, very happy",
+    "Disappointed with this purchase, not as described",
+]
+sentiments = [1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0]  # 1=positive, 0=negative
+
+# TF-IDF + NB pipeline
+# Note: TfidfVectorizer can produce negative values after normalization
+# but MultinomialNB requires non-negative features — we use MinMaxScaler
+pipeline = Pipeline([
+    ('tfidf',   TfidfVectorizer(ngram_range=(1, 2), max_features=5000,
+                                 sublinear_tf=True, min_df=1)),
+    ('nb',      MultinomialNB(alpha=0.1))
+])
+
+# Cross-validate
+skf = StratifiedKFold(n_splits=3, shuffle=True, random_state=42)
+scores = cross_val_score(pipeline, reviews, sentiments, cv=skf, scoring='accuracy')
+print(f"3-fold CV accuracy: {scores.mean():.3f} ± {scores.std():.3f}")
+
+# Fit on all data and inspect top positive/negative words
+pipeline.fit(reviews, sentiments)
+nb     = pipeline.named_steps['nb']
+vocab  = pipeline.named_steps['tfidf'].get_feature_names_out()
+
+pos_log_probs = nb.feature_log_prob_[1]
+neg_log_probs = nb.feature_log_prob_[0]
+
+# Words with highest log-probability ratio (most indicative)
+log_ratio = pos_log_probs - neg_log_probs
+top_pos = np.argsort(log_ratio)[-5:][::-1]
+top_neg = np.argsort(log_ratio)[:5]
+
+print("\nMost positive words:", [vocab[i] for i in top_pos])
+print("Most negative words:", [vocab[i] for i in top_neg])
+
+# Predict on new reviews
+new_reviews = [
+    "Amazing product, works flawlessly",
+    "Complete garbage, do not buy"
+]
+proba = pipeline.predict_proba(new_reviews)
+for text, p in zip(new_reviews, proba):
+    print(f"\n{text[:40]}")
+    print(f"  P(negative)={p[0]:.3f}  P(positive)={p[1]:.3f}")</code></pre>
+</div>
+
+<!-- ── Section 8 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">8</span> Strengths and Weaknesses</h2>
+
+  <table style="width:100%; border-collapse: collapse; margin: 1.25rem 0; font-size: 0.87rem;">
+    <thead>
+      <tr style="background: var(--bg-alt); text-align: left;">
+        <th style="padding: 0.7rem 1rem; border: 1px solid var(--border);">Aspect</th>
+        <th style="padding: 0.7rem 1rem; border: 1px solid var(--border);">Strengths</th>
+        <th style="padding: 0.7rem 1rem; border: 1px solid var(--border);">Weaknesses</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Training speed</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Extremely fast — a single pass through data</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">—</td>
+      </tr>
+      <tr style="background: var(--bg-subtle);">
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Sample efficiency</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Works well with very little training data</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">—</td>
+      </tr>
+      <tr>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">High-dimensional data</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Scales well to thousands of features (text)</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">—</td>
+      </tr>
+      <tr style="background: var(--bg-subtle);">
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Independence assumption</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Simplifies computation enormously</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Rarely holds in practice; correlated features not handled</td>
+      </tr>
+      <tr>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Probability calibration</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Correct class ranking</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Probability values are often overconfident (near 0 or 1)</td>
+      </tr>
+      <tr style="background: var(--bg-subtle);">
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Online learning</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Easily updated with new data using <code>partial_fit</code></td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">—</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <pre><code class="language-python">from sklearn.naive_bayes import MultinomialNB
+from sklearn.feature_extraction.text import CountVectorizer
+import numpy as np
+
+# Online learning with partial_fit — useful for streaming data
+vectorizer = CountVectorizer()
+
+# Batch 1
+docs_1  = ["free prize offer", "meeting tomorrow", "win money now"]
+labels_1 = [1, 0, 1]
+X_1 = vectorizer.fit_transform(docs_1)
+
+nb = MultinomialNB(alpha=1.0)
+nb.partial_fit(X_1, labels_1, classes=[0, 1])
+print("After batch 1:", nb.class_count_)
+
+# Batch 2 — new data arrives; no need to retrain from scratch
+docs_2   = ["report submitted today", "urgent click here free"]
+labels_2 = [0, 1]
+X_2 = vectorizer.transform(docs_2)  # use existing vocabulary
+
+nb.partial_fit(X_2, labels_2)
+print("After batch 2:", nb.class_count_)</code></pre>
+</div>
+
+<!-- ── Real-World ── -->
+<div class="use-case-section">
+  <div class="use-case-header">
+    <span style="font-size:1.5rem">🌍</span>
+    <h2>Real-World Spotlight: Sentiment Analysis Pipeline</h2>
+  </div>
+
+  <div class="callout callout-realworld">
+    <span class="callout-icon">🌍</span>
+    <div class="callout-body">
+      <strong>Product Review Sentiment at Scale</strong>
+      <p>E-commerce platforms process millions of product reviews. A MultinomialNB classifier with TF-IDF features can be trained on labeled reviews (positive/negative) in seconds and deployed to classify new reviews in real time. The model is especially valuable as a baseline before trying heavier approaches like BERT.</p>
+      <p>A key insight: <code>feature_log_prob_</code> reveals exactly which words the model associates with each sentiment. This is not only useful for debugging — it's also a form of explainability that product teams can use to understand what language drives customer sentiment.</p>
+    </div>
+  </div>
+
+  <pre><code class="language-python">from sklearn.naive_bayes import MultinomialNB
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.pipeline import Pipeline
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import classification_report
+import numpy as np
+
+# Larger simulated review dataset
+np.random.seed(42)
+positive_phrases = [
+    "great product love it", "excellent quality highly recommend",
+    "fantastic works perfectly amazing", "best purchase ever five stars",
+    "wonderful fast shipping very happy", "outstanding value perfect condition",
+    "incredible product exceeded expectations", "superb quality worth every penny",
+]
+negative_phrases = [
+    "terrible quality broke immediately", "waste of money do not buy",
+    "horrible product return immediately", "worst purchase ever avoid this",
+    "broken on arrival very disappointed", "complete garbage fell apart quickly",
+    "overpriced and poor quality terrible", "defective item bad customer service",
+]
+
+reviews  = positive_phrases * 15 + negative_phrases * 15  # 240 reviews
+labels   = [1] * 120 + [0] * 120
+
+X_train, X_test, y_train, y_test = train_test_split(
+    reviews, labels, test_size=0.25, random_state=42, stratify=labels)
+
+pipe = Pipeline([
+    ('tfidf', TfidfVectorizer(ngram_range=(1, 2), sublinear_tf=True)),
+    ('nb',    MultinomialNB(alpha=0.5))
+])
+pipe.fit(X_train, y_train)
+
+print("Test set performance:")
+print(classification_report(y_test, pipe.predict(X_test),
+                             target_names=['negative', 'positive']))
+
+# Top words by log-probability ratio
+nb_m  = pipe.named_steps['nb']
+vocab = pipe.named_steps['tfidf'].get_feature_names_out()
+ratio = nb_m.feature_log_prob_[1] - nb_m.feature_log_prob_[0]
+
+print("Top 5 positive indicator words/phrases:")
+for idx in np.argsort(ratio)[-5:][::-1]:
+    print(f"  '{vocab[idx]}'")
+
+print("\nTop 5 negative indicator words/phrases:")
+for idx in np.argsort(ratio)[:5]:
+    print(f"  '{vocab[idx]}'")</code></pre>
+</div>
+
+<!-- ── Quiz ── -->
+<section class="quiz-section">
+  <h2>Quick Check</h2>
+  <div id="quiz1"></div>
+</section>
+
+<!-- ── Practice ── -->
+<div class="practice-card">
+  <h2>✍️ Practice Exercises</h2>
+  <ol>
+    <li>Apply GaussianNB to the <code>load_wine()</code> dataset (3 classes, 13 features). Print the per-class means (<code>theta_</code>) for two features and explain intuitively how the classifier uses them.</li>
+    <li>Build a MultinomialNB spam classifier on the SMS Spam Collection dataset (available from UCI ML Repository or as part of nltk). Achieve at least 95% accuracy. Use a Pipeline with CountVectorizer.</li>
+    <li>Vary the <code>alpha</code> parameter (0.001, 0.01, 0.1, 0.5, 1.0, 5.0) in MultinomialNB on a text dataset. Plot cross-validation accuracy vs alpha. What is the optimal value?</li>
+    <li>Compare the probability calibration of GaussianNB vs LogisticRegression on the breast cancer dataset. Plot histograms of predicted probabilities for each class. Which model produces more "extreme" probabilities (near 0 or 1)?</li>
+    <li>Using <code>partial_fit</code>, simulate an online learning scenario: train a MultinomialNB in 5 mini-batches of 20 reviews each, printing accuracy after each batch.</li>
+  </ol>
+</div>
+
+<div class="primary-source">
+  <h2>📚 Primary Sources</h2>
+  <p><a href="https://scikit-learn.org/stable/modules/naive_bayes.html" target="_blank"><strong>sklearn: Naive Bayes</strong></a> — covers all three variants with mathematical details.<br>
+  <a href="https://en.wikipedia.org/wiki/Naive_Bayes_classifier" target="_blank"><strong>Wikipedia: Naive Bayes classifier</strong></a> — good derivation of the full Bayesian framework.</p>
+</div>
+
+<div class="ask-tutor">
+  <span class="icon">💬</span>
+  <span>Getting zero probabilities or NaN log-losses? Almost certainly a smoothing issue. Share your code and I'll pinpoint the problem.</span>
+</div>
+
+<nav class="lesson-nav">
+  <a href="./0016-knn.html" class="nav-btn nav-btn-prev">← Lesson 16: K-Nearest Neighbors</a>
+  <a href="./0018-svm.html" class="nav-btn nav-btn-next">Lesson 18: Support Vector Machines →</a>
+</nav>
+
+</div><!-- /content-wrapper -->
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-core.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/plugins/autoloader/prism-autoloader.min.js"></script>
+<script src="../assets/quiz.js"></script>
+<script>
+new MLQuiz('quiz1', [
+  {
+    question: "What is the 'naive' assumption in Naive Bayes?",
+    options: [
+      "Features are conditionally independent given the class label — P(x₁,x₂,...|C) = ∏ P(xᵢ|C)",
+      "All classes have equal prior probability — P(class 0) = P(class 1)",
+      "Feature values follow a Gaussian distribution within each class",
+      "The model only uses the single most predictive feature for classification"
+    ],
+    correct: 0,
+    explanation: "The naive assumption is conditional independence: given the class label, each feature is independent of all other features. This allows the joint likelihood P(x₁,x₂,...,xₙ|C) to be computed as a simple product of individual probabilities — massively reducing the number of parameters and training data needed."
+  },
+  {
+    question: "What problem does Laplace smoothing solve in Naive Bayes?",
+    options: [
+      "Zero probability for unseen words/features — without smoothing, a single unseen word makes an entire class probability zero",
+      "Overfitting to training data by penalising large probability estimates",
+      "Correlated features being counted multiple times in the product",
+      "Class imbalance where one class dominates the prior probability"
+    ],
+    correct: 0,
+    explanation: "Without smoothing, any word that never appeared in training documents of a given class gets P(word|class)=0. Since all features are multiplied together, this zero propagates to make the entire class posterior zero — the class is permanently eliminated no matter how much other evidence supports it. Laplace smoothing adds α to all counts, ensuring no probability is exactly zero."
+  },
+  {
+    question: "Which sklearn Naive Bayes variant is most appropriate for word count features?",
+    options: [
+      "MultinomialNB — specifically designed for discrete count data like word frequencies",
+      "GaussianNB — because word counts can be approximated as normally distributed",
+      "BernoulliNB — because whether a word appears is more important than how often",
+      "ComplementNB — it is always more accurate than MultinomialNB for text"
+    ],
+    correct: 0,
+    explanation: "MultinomialNB models the probability of each count value using the multinomial distribution — exactly what word counts represent. GaussianNB assumes continuous normally distributed features. BernoulliNB uses binary features (present/absent). MultinomialNB is the standard choice for document classification with CountVectorizer or TfidfVectorizer."
+  },
+  {
+    question: "Despite the naive independence assumption being violated in real data, Naive Bayes often performs surprisingly well. What is the best explanation for this?",
+    options: [
+      "Classification only requires the correct ranking of posteriors across classes, not accurate probability values — and the independence assumption often preserves the correct ranking",
+      "Feature correlations cancel each other out, making the independence assumption approximately true",
+      "The prior probability P(C) compensates for errors in the likelihood P(X|C)",
+      "Laplace smoothing corrects the errors introduced by the independence assumption"
+    ],
+    correct: 0,
+    explanation: "For a correct classification, we just need the right class to have the highest posterior probability. The actual probability values don't have to be accurate. Even with correlated features (which get over-counted), the dominant class usually remains dominant. This is why Naive Bayes achieves good classification accuracy despite producing poorly calibrated probability values."
+  },
+  {
+    question: "What does clf.feature_log_prob_ contain in a fitted MultinomialNB model?",
+    options: [
+      "A matrix of shape (n_classes, n_features) containing log P(feature | class) for each feature-class combination",
+      "A 1D array of the total log-probability of the training data under the model",
+      "The log of the prior probabilities for each class",
+      "The log-likelihood of each training sample"
+    ],
+    correct: 0,
+    explanation: "feature_log_prob_ has shape (n_classes, n_features). Entry [c, f] is the log probability of feature f given class c — i.e., log P(word_f | class_c). These are the smoothed log-probabilities estimated from training data. You can use them to find the most class-indicative words by comparing feature_log_prob_[0] vs feature_log_prob_[1]."
+  }
+]);
+</script>
+
+</body>
+</html>

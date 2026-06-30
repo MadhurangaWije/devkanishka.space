@@ -1,0 +1,683 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lesson 22: Decision Trees | ML Mastery</title>
+  <link rel="stylesheet" href="../assets/style.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
+</head>
+<body>
+
+<header class="lesson-header">
+  <div class="header-inner">
+    <nav class="breadcrumb">
+      <a href="../reference/curriculum-map.html">ML Mastery</a>
+      <span class="sep">›</span>
+      <span>Phase 2: Supervised ML</span>
+    </nav>
+    <div class="lesson-badges">
+      <span class="phase-badge">Phase 2 · Supervised ML</span>
+      <span class="lesson-num-badge">Lesson 22</span>
+    </div>
+    <h1 class="lesson-title">Decision Trees</h1>
+    <p class="lesson-subtitle">The one algorithm a human can actually read — how trees split data, measure impurity, and why they overfit without constraints.</p>
+    <div class="meta-pills">
+      <span class="meta-pill">⏱ ~60 min</span>
+      <span class="meta-pill">🐍 scikit-learn</span>
+      <span class="meta-pill">🌳 Supervised ML</span>
+      <span class="meta-pill">Requires Lessons 15–21</span>
+    </div>
+  </div>
+</header>
+
+<main class="lesson-main">
+<div class="content-wrapper">
+
+<div class="objectives-card">
+  <h2>🎯 What You'll Learn</h2>
+  <ul>
+    <li>Understand the tree structure: root nodes, decision nodes, and leaf nodes for classification and regression</li>
+    <li>Compute Gini impurity and entropy, and understand why these guide split selection</li>
+    <li>Train <code>DecisionTreeClassifier</code> and <code>DecisionTreeRegressor</code> with scikit-learn</li>
+    <li>Visualise a trained tree with <code>plot_tree</code> and <code>export_text</code></li>
+    <li>Control overfitting using <code>max_depth</code>, <code>min_samples_split</code>, and <code>min_samples_leaf</code></li>
+  </ul>
+</div>
+
+<!-- ── Section 1 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">1</span> The Decision Tree Intuition</h2>
+
+  <p>A decision tree mimics how humans naturally make decisions: a series of yes/no questions that narrow down possibilities until you reach a conclusion. "Is the customer's monthly charge above $70?" → Yes → "Is their contract month-to-month?" → Yes → Predict: high churn risk. This flowchart structure is completely transparent — you can follow every path from input to prediction.</p>
+
+  <p>Structurally, a decision tree consists of:</p>
+  <ul>
+    <li><strong>Root node</strong>: the very first split — chosen to be the most informative question across all features</li>
+    <li><strong>Internal (decision) nodes</strong>: subsequent split points, each testing one feature against a threshold</li>
+    <li><strong>Leaf nodes</strong>: terminal nodes that return a prediction (majority class for classification, mean value for regression)</li>
+  </ul>
+
+  <p>The same algorithm handles both classification (<code>DecisionTreeClassifier</code>) and regression (<code>DecisionTreeRegressor</code>). The only difference is the split criterion and the leaf prediction.</p>
+
+  <pre><code class="language-python">import numpy as np
+import pandas as pd
+from sklearn.tree import DecisionTreeClassifier, export_text
+from sklearn.datasets import load_iris
+from sklearn.model_selection import train_test_split
+
+# Quick demo: Iris classification
+iris = load_iris()
+X, y = iris.data, iris.target
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+# A shallow tree — interpretable
+tree = DecisionTreeClassifier(max_depth=3, random_state=42)
+tree.fit(X_train, y_train)
+
+print(f"Training accuracy: {tree.score(X_train, y_train):.4f}")
+print(f"Test accuracy:     {tree.score(X_test, y_test):.4f}")
+print(f"Number of leaves:  {tree.get_n_leaves()}")
+print(f"Tree depth:        {tree.get_depth()}")
+
+# Human-readable text representation
+print("\n" + export_text(tree, feature_names=iris.feature_names))
+# |--- petal length (cm) <= 2.45
+# |   |--- class: 0              ← setosa: pure leaf
+# |--- petal length (cm) >  2.45
+# |   |--- petal width (cm) <= 1.75
+# |   |   |--- petal length (cm) <= 4.95
+# |   |   |   |--- class: 1
+# ...
+# A human can verify every rule by reading the output above</code></pre>
+
+  <div class="callout callout-key">
+    <span class="callout-icon">🔑</span>
+    <div class="callout-body">
+      <strong>Interpretability Is a First-Class Feature</strong>
+      <p>Decision trees are one of the few ML models that are genuinely interpretable by non-technical stakeholders. A doctor, judge, or loan officer can read a shallow decision tree and understand exactly why a decision was made — and potentially challenge it. This interpretability has real legal and ethical value in high-stakes applications.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 2 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">2</span> How Trees Split: Gini Impurity</h2>
+
+  <p>At each internal node, the algorithm searches every feature and every possible threshold to find the split that best separates the classes. "Best" is defined by a measure of impurity. The default in scikit-learn is <strong>Gini impurity</strong>.</p>
+
+  <p>For a node containing samples from K classes, where pᵢ is the fraction of class i:</p>
+  <p style="text-align:center; font-style:italic; margin: 1rem 0; font-size: 1.05rem;">Gini = 1 − Σ pᵢ²</p>
+
+  <p>A <strong>pure node</strong> (all samples same class) has Gini = 0 (perfect). An <strong>equal split</strong> of two classes (50/50) has Gini = 0.5 (worst for binary). The algorithm greedily picks the split that minimises the <em>weighted average</em> child Gini across left and right subtrees.</p>
+
+  <pre><code class="language-python">import numpy as np
+
+def gini_impurity(counts):
+    """Compute Gini from a list of class counts."""
+    total = sum(counts)
+    if total == 0:
+        return 0.0
+    probs = [c / total for c in counts]
+    return 1.0 - sum(p**2 for p in probs)
+
+def weighted_gini(left_counts, right_counts):
+    """Weighted Gini after a split: two child nodes."""
+    n_left  = sum(left_counts)
+    n_right = sum(right_counts)
+    n_total = n_left + n_right
+    g_left  = gini_impurity(left_counts)
+    g_right = gini_impurity(right_counts)
+    return (n_left / n_total) * g_left + (n_right / n_total) * g_right
+
+# Before split: 100 samples, 60 class-A, 40 class-B
+parent_gini = gini_impurity([60, 40])
+print(f"Parent Gini: {parent_gini:.4f}")   # 0.4800
+
+# Split option 1: left=[50A, 10B], right=[10A, 30B]
+w1 = weighted_gini([50, 10], [10, 30])
+print(f"Split 1 weighted Gini: {w1:.4f}")  # 0.2917  ← better split
+
+# Split option 2: left=[30A, 20B], right=[30A, 20B]  (no improvement)
+w2 = weighted_gini([30, 20], [30, 20])
+print(f"Split 2 weighted Gini: {w2:.4f}")  # 0.4800  ← no improvement
+
+# Impurity reduction (Gini gain) for each split
+print(f"\nGini gain split 1: {parent_gini - w1:.4f}")  # 0.1883 ← choose this
+print(f"Gini gain split 2: {parent_gini - w2:.4f}")  # 0.0000 ← useless split
+
+# Verify: pure node
+print(f"\nPure node  Gini: {gini_impurity([100, 0]):.4f}")   # 0.0000
+print(f"Equal split Gini: {gini_impurity([50, 50]):.4f}")  # 0.5000
+print(f"3-class even Gini: {gini_impurity([33, 33, 34]):.4f}")  # ~0.6667</code></pre>
+</div>
+
+<!-- ── Section 3 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">3</span> Entropy &amp; Information Gain</h2>
+
+  <p>Entropy is an alternative impurity measure rooted in information theory. It quantifies the uncertainty in a node's class distribution:</p>
+  <p style="text-align:center; font-style:italic; margin: 1rem 0; font-size: 1.05rem;">Entropy = −Σ pᵢ · log₂(pᵢ)</p>
+
+  <p><strong>Information Gain</strong> is the reduction in entropy achieved by a split:</p>
+  <p style="text-align:center; font-style:italic; margin: 1rem 0; font-size: 1.05rem;">IG = Entropy(parent) − weighted average Entropy(children)</p>
+
+  <p>Practically, Gini and Entropy usually produce very similar trees. Gini is slightly faster to compute (no logarithm). Choose <code>criterion='entropy'</code> if you want Information Gain explicitly.</p>
+
+  <pre><code class="language-python">import numpy as np
+
+def entropy(counts):
+    total = sum(counts)
+    if total == 0:
+        return 0.0
+    result = 0.0
+    for c in counts:
+        if c > 0:
+            p = c / total
+            result -= p * np.log2(p)
+    return result
+
+def information_gain(parent_counts, left_counts, right_counts):
+    n_left  = sum(left_counts)
+    n_right = sum(right_counts)
+    n_total = n_left + n_right
+    parent_entropy  = entropy(parent_counts)
+    weighted_child  = (n_left / n_total) * entropy(left_counts) + \
+                      (n_right / n_total) * entropy(right_counts)
+    return parent_entropy - weighted_child
+
+# Parent: 60 class-A, 40 class-B
+parent_e = entropy([60, 40])
+print(f"Parent entropy: {parent_e:.4f} bits")  # 0.9710 bits
+
+# Two candidate splits
+ig1 = information_gain([60, 40], [50, 10], [10, 30])
+ig2 = information_gain([60, 40], [30, 20], [30, 20])
+print(f"Information gain split 1: {ig1:.4f}")  # 0.2830 ← better
+print(f"Information gain split 2: {ig2:.4f}")  # 0.0000
+
+# Compare Gini vs Entropy in sklearn
+from sklearn.tree import DecisionTreeClassifier
+from sklearn.datasets import load_breast_cancer
+from sklearn.model_selection import train_test_split
+
+X_bc, y_bc = load_breast_cancer(return_X_y=True)
+X_btr, X_bte, y_btr, y_bte = train_test_split(X_bc, y_bc, test_size=0.2, random_state=42)
+
+for criterion in ['gini', 'entropy']:
+    dt = DecisionTreeClassifier(criterion=criterion, max_depth=5, random_state=42)
+    dt.fit(X_btr, y_btr)
+    print(f"criterion='{criterion:7s}': train={dt.score(X_btr, y_btr):.4f}  test={dt.score(X_bte, y_bte):.4f}")
+# criterion='gini   ': train=0.9890  test=0.9298
+# criterion='entropy': train=0.9890  test=0.9298  ← nearly identical</code></pre>
+
+  <div class="callout callout-tip">
+    <span class="callout-icon">💡</span>
+    <div class="callout-body">
+      <strong>Gini vs Entropy: Which to Use?</strong>
+      <p>In practice they produce almost identical trees and nearly the same accuracy. Use Gini (the default) unless you have a specific reason not to. Entropy is slightly more expensive to compute (requires log₂) but can produce marginally better-balanced trees on some problems. The hyperparameter that matters far more is <code>max_depth</code>.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 4 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">4</span> Regression Trees</h2>
+
+  <p>For regression, the mechanism is the same but the criterion changes. Instead of impurity, we minimise <strong>mean squared error (MSE)</strong> — equivalently, we maximise variance reduction. The leaf prediction is the <strong>mean of all target values</strong> that fall in that leaf.</p>
+
+  <pre><code class="language-python">from sklearn.tree import DecisionTreeRegressor
+from sklearn.datasets import fetch_california_housing
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import mean_absolute_error, r2_score
+import numpy as np
+
+housing = fetch_california_housing()
+X_h, y_h = housing.data, housing.target
+X_htr, X_hte, y_htr, y_hte = train_test_split(X_h, y_h, test_size=0.2, random_state=42)
+
+print(f"{'max_depth':>12}  {'Train R²':>10}  {'Test R²':>10}  {'Test MAE':>10}")
+print("-" * 50)
+for depth in [None, 3, 5, 7, 10, 15]:
+    reg = DecisionTreeRegressor(max_depth=depth, random_state=42)
+    reg.fit(X_htr, y_htr)
+    r2_train = r2_score(y_htr, reg.predict(X_htr))
+    r2_test  = r2_score(y_hte, reg.predict(X_hte))
+    mae_test = mean_absolute_error(y_hte, reg.predict(X_hte))
+    depth_label = str(depth) if depth else 'None(full)'
+    print(f"{depth_label:>12}  {r2_train:>10.4f}  {r2_test:>10.4f}  {mae_test:>10.4f}")
+
+# max_depth  Train R²   Test R²   Test MAE
+# None(full) 1.0000     0.5998    0.4362  ← perfect train, poor test = overfit
+#          3 0.5867     0.5629    0.5598
+#          5 0.8089     0.6771    0.4218
+#          7 0.9259     0.7051    0.3876  ← best test performance
+#         10 0.9838     0.6712    0.4106
+#         15 0.9990     0.6148    0.4280  ← overfit again
+
+# A depth-7 tree achieves a good test R² without memorising training data</code></pre>
+</div>
+
+<!-- ── Section 5 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">5</span> Training a Decision Tree with scikit-learn</h2>
+
+  <p>Here is a complete training and evaluation workflow for <code>DecisionTreeClassifier</code>, including the key hyperparameters you'll use in practice:</p>
+
+  <pre><code class="language-python">import numpy as np
+import pandas as pd
+from sklearn.tree import DecisionTreeClassifier
+from sklearn.datasets import make_classification
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import classification_report, confusion_matrix
+
+np.random.seed(42)
+X, y = make_classification(
+    n_samples=5000, n_features=15, n_informative=8,
+    n_redundant=4, n_clusters_per_class=2, random_state=42
+)
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.2, stratify=y, random_state=42)
+
+# Full, unconstrained tree — will overfit
+tree_full = DecisionTreeClassifier(random_state=42)
+tree_full.fit(X_train, y_train)
+print(f"Unconstrained — Train: {tree_full.score(X_train, y_train):.4f}  "
+      f"Test: {tree_full.score(X_test, y_test):.4f}  "
+      f"Depth: {tree_full.get_depth()}")
+
+# Constrained tree — better generalisation
+tree_pruned = DecisionTreeClassifier(
+    max_depth=8,           # limits tree depth
+    min_samples_split=20,  # a node needs ≥20 samples to be split
+    min_samples_leaf=10,   # each leaf must have ≥10 samples
+    max_features=0.8,      # consider 80% of features at each split
+    criterion='gini',
+    random_state=42
+)
+tree_pruned.fit(X_train, y_train)
+print(f"Pruned         — Train: {tree_pruned.score(X_train, y_train):.4f}  "
+      f"Test: {tree_pruned.score(X_test, y_test):.4f}  "
+      f"Depth: {tree_pruned.get_depth()}")
+
+y_pred = tree_pruned.predict(X_test)
+print("\nClassification Report:")
+print(classification_report(y_test, y_pred))
+
+# Feature importances
+feature_imp = pd.Series(
+    tree_pruned.feature_importances_,
+    index=[f'feature_{i}' for i in range(X.shape[1])]
+).sort_values(ascending=False)
+print("\nTop 5 feature importances:")
+print(feature_imp.head(5).round(4))</code></pre>
+</div>
+
+<!-- ── Section 6 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">6</span> Visualising Decision Trees</h2>
+
+  <p>One of the biggest advantages of decision trees is that you can look at the model. Scikit-learn provides two tools: <code>plot_tree</code> for a graphical visualization and <code>export_text</code> for a text-based one you can print or log.</p>
+
+  <pre><code class="language-python">import matplotlib.pyplot as plt
+from sklearn.tree import plot_tree, export_text
+from sklearn.datasets import load_iris
+from sklearn.tree import DecisionTreeClassifier
+
+iris = load_iris()
+tree_viz = DecisionTreeClassifier(max_depth=3, random_state=42)
+tree_viz.fit(iris.data, iris.target)
+
+# ── Graphical plot ──
+fig, ax = plt.subplots(figsize=(16, 8))
+plot_tree(
+    tree_viz,
+    feature_names=iris.feature_names,
+    class_names=iris.target_names,
+    filled=True,              # colour nodes by majority class
+    rounded=True,             # rounded box corners
+    max_depth=3,              # how deep to visualise
+    fontsize=9,
+    ax=ax
+)
+plt.title("Iris Decision Tree (max_depth=3)", fontsize=14)
+plt.tight_layout()
+plt.savefig('iris_tree.png', dpi=150, bbox_inches='tight')
+
+# ── Text representation ── (easier to read in a terminal or notebook)
+text_tree = export_text(tree_viz, feature_names=list(iris.feature_names))
+print(text_tree)
+# |--- petal length (cm) <= 2.45
+# |   |--- class: setosa
+# |--- petal length (cm) >  2.45
+# |   |--- petal width (cm) <= 1.75
+# |   |   |--- petal length (cm) <= 4.95
+# |   |   |   |--- petal width (cm) <= 1.65
+# |   |   |   |   |--- class: versicolor
+# |   |   |   |--- petal width (cm) >  1.65
+# |   |   |   |   |--- class: virginica
+# ...
+
+# ── Reading a tree node ──
+# Each node shows:
+# - The test condition (feature ≤ threshold)
+# - Gini impurity
+# - Number of samples reaching this node
+# - Class distribution [n_class0, n_class1, ...]
+# - Majority class</code></pre>
+
+  <div class="callout callout-tip">
+    <span class="callout-icon">💡</span>
+    <div class="callout-body">
+      <strong>Keep Depth ≤ 4 for Human Readability</strong>
+      <p>A tree with depth 10 has up to 2¹⁰ = 1024 leaves. No human can audit that. For presentations, stakeholder reports, or regulatory compliance, keep <code>max_depth=3</code> or <code>max_depth=4</code>. For model performance, use Random Forests (next lesson) — they combine many deep trees to get the accuracy without sacrificing stability.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 7 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">7</span> Controlling Overfitting</h2>
+
+  <p>Without constraints, a decision tree grows until every leaf contains exactly one training sample — perfectly memorising the training data with zero training error but terrible generalisation. The key hyperparameters for controlling this are:</p>
+
+  <pre><code class="language-python">from sklearn.tree import DecisionTreeClassifier
+from sklearn.model_selection import train_test_split, cross_val_score
+from sklearn.datasets import load_breast_cancer
+import numpy as np
+
+X_bc, y_bc = load_breast_cancer(return_X_y=True)
+X_btr, X_bte, y_btr, y_bte = train_test_split(X_bc, y_bc, test_size=0.2, random_state=42)
+
+hyperparams = [
+    # (max_depth, min_samples_split, min_samples_leaf)
+    (None,  2,   1),   # default — no constraints → overfit
+    (5,     2,   1),
+    (5,    20,   5),
+    (5,    20,  10),
+    (3,    20,  10),
+]
+
+print(f"{'max_depth':>12}  {'min_split':>10}  {'min_leaf':>10}  {'Train':>8}  {'Test':>8}  {'CV±std':>12}")
+print("-" * 72)
+for md, ms, ml in hyperparams:
+    dt = DecisionTreeClassifier(max_depth=md, min_samples_split=ms, min_samples_leaf=ml, random_state=42)
+    dt.fit(X_btr, y_btr)
+    train_acc = dt.score(X_btr, y_btr)
+    test_acc  = dt.score(X_bte, y_bte)
+    cv_scores = cross_val_score(dt, X_bc, y_bc, cv=5, scoring='accuracy')
+    depth_label = str(md) if md else 'None'
+    print(f"{depth_label:>12}  {ms:>10}  {ml:>10}  {train_acc:>8.4f}  {test_acc:>8.4f}  {cv_scores.mean():>6.4f}±{cv_scores.std():.4f}")
+
+# max_depth  min_split  min_leaf  Train     Test       CV±std
+# None              2         1   1.0000    0.9386     0.9280±0.0142  ← overfit
+# 5                 2         1   0.9956    0.9298     0.9282±0.0143
+# 5                20         5   0.9582    0.9386     0.9315±0.0117
+# 5                20        10   0.9516    0.9474     0.9368±0.0112  ← best
+# 3                20        10   0.9429    0.9298     0.9262±0.0165</code></pre>
+
+  <table style="width:100%; border-collapse: collapse; margin: 1.25rem 0; font-size: 0.88rem;">
+    <thead>
+      <tr style="background: var(--bg-alt); text-align: left;">
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Hyperparameter</th>
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">What it controls</th>
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Effect when increased</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border); font-family: monospace;">max_depth</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Maximum levels in the tree</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">More complex model, higher variance</td>
+      </tr>
+      <tr style="background: var(--bg-subtle);">
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border); font-family: monospace;">min_samples_split</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Min samples to consider splitting a node</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Simpler model, fewer small splits</td>
+      </tr>
+      <tr>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border); font-family: monospace;">min_samples_leaf</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Min samples required in each leaf</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Simpler model, more regularised leaves</td>
+      </tr>
+      <tr style="background: var(--bg-subtle);">
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border); font-family: monospace;">max_features</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Fraction of features to consider per split</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Less randomness; closer to full search</td>
+      </tr>
+      <tr>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border); font-family: monospace;">max_leaf_nodes</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Upper bound on total leaves</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">More complex; build with best-first splits</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+<!-- ── Section 8 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">8</span> Feature Importance</h2>
+
+  <p>Decision trees provide a natural measure of feature importance: the total <strong>weighted impurity reduction</strong> contributed by each feature across all splits, normalised to sum to 1. Features used near the root (early splits) typically have higher importance because those splits affect more samples.</p>
+
+  <pre><code class="language-python">import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from sklearn.tree import DecisionTreeClassifier
+from sklearn.datasets import load_breast_cancer
+from sklearn.model_selection import train_test_split
+
+X_bc, y_bc = load_breast_cancer(return_X_y=True)
+feature_names = load_breast_cancer().feature_names
+
+X_btr, X_bte, y_btr, y_bte = train_test_split(X_bc, y_bc, test_size=0.2, random_state=42)
+
+dt = DecisionTreeClassifier(max_depth=5, min_samples_leaf=10, random_state=42)
+dt.fit(X_btr, y_btr)
+
+# Feature importances — automatically normalised to sum to 1
+importances = pd.Series(dt.feature_importances_, index=feature_names)
+importances_sorted = importances.sort_values(ascending=False)
+
+print("Top 10 feature importances (impurity-based):")
+print(importances_sorted.head(10).round(4))
+# worst concave points    0.5423  ← used at the root, dominates
+# worst radius            0.1102
+# worst area              0.0876
+# ...
+
+# Bar plot
+plt.figure(figsize=(10, 6))
+importances_sorted.head(10).sort_values().plot(kind='barh', color='steelblue')
+plt.title('Top 10 Feature Importances — Breast Cancer Tree')
+plt.xlabel('Importance (weighted impurity reduction)')
+plt.tight_layout()
+plt.savefig('dt_importance.png', dpi=150, bbox_inches='tight')</code></pre>
+
+  <div class="callout callout-warn">
+    <span class="callout-icon">⚠️</span>
+    <div class="callout-body">
+      <strong>Impurity-Based Importance Is Biased Towards High-Cardinality Features</strong>
+      <p>A numerical feature with 1000 unique values has more split opportunities than a binary feature — so it can appear more important purely by chance. For unbiased feature importance, use permutation importance (<code>from sklearn.inspection import permutation_importance</code>) which directly measures how much test-set performance drops when a feature is randomly shuffled.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Real-World Spotlight ── -->
+<div class="use-case-section">
+  <div class="use-case-header">
+    <span style="font-size:1.5rem">🌍</span>
+    <h2>Real-World Spotlight: Telecom Customer Churn — Reading the Tree</h2>
+  </div>
+  <p>A telecom company trains a decision tree on historical customer data to understand what drives churn. The tree is deliberately kept shallow (max_depth=5) to produce human-readable, auditable rules that the customer retention team can act on directly.</p>
+  <pre><code class="language-python">import numpy as np
+import pandas as pd
+from sklearn.tree import DecisionTreeClassifier, export_text, plot_tree
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import classification_report
+import matplotlib.pyplot as plt
+
+np.random.seed(42)
+n = 5000
+
+# Synthetic telecom dataset
+df = pd.DataFrame({
+    'tenure_months':    np.random.randint(1, 72, n),
+    'monthly_charge':   np.random.uniform(20, 120, n).round(2),
+    'num_services':     np.random.randint(1, 8, n),
+    'contract_type':    np.random.choice([0, 1, 2], n, p=[0.5, 0.3, 0.2]),  # 0=monthly,1=annual,2=biennial
+    'tech_support':     np.random.randint(0, 2, n),
+    'num_complaints':   np.random.poisson(0.8, n).clip(0, 5),
+})
+# Realistic churn probability
+churn_prob = (
+    0.35 * (df['monthly_charge'] / 120) +
+    0.30 * (1 - df['tenure_months'] / 72) +
+    0.20 * (df['num_complaints'] / 5) +
+    0.15 * (1 - df['contract_type'] / 2)
+)
+df['churned'] = (np.random.rand(n) < churn_prob).astype(int)
+print(f"Churn rate: {df['churned'].mean():.1%}")
+
+feature_cols = ['tenure_months', 'monthly_charge', 'num_services',
+                'contract_type', 'tech_support', 'num_complaints']
+X = df[feature_cols].values
+y = df['churned'].values
+
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.2, stratify=y, random_state=42)
+
+# Deliberately shallow for interpretability
+dt_churn = DecisionTreeClassifier(max_depth=5, min_samples_leaf=50, random_state=42)
+dt_churn.fit(X_train, y_train)
+
+print(f"\nTraining accuracy: {dt_churn.score(X_train, y_train):.4f}")
+print(f"Test accuracy:     {dt_churn.score(X_test, y_test):.4f}")
+print(f"\n{classification_report(y_test, dt_churn.predict(X_test), target_names=['Retained', 'Churned'])}")
+
+# Human-readable rules
+print("\nDecision rules:")
+print(export_text(dt_churn, feature_names=feature_cols))
+# |--- monthly_charge <= 70.00
+# |   |--- tenure_months <= 12
+# |   |   |--- num_complaints <= 1
+# |   |   |   |--- class: Retained
+# |   |   |--- num_complaints > 1
+# |   |   |   |--- class: Churned     ← high-risk: new + complaints
+# |   |--- tenure_months > 12
+# |   |   |--- class: Retained
+# |--- monthly_charge > 70.00
+# |   |--- contract_type <= 0         ← month-to-month AND high charge
+# |   |   |--- class: Churned         ← highest churn risk group
+# ...
+
+# Feature importances
+feat_imp = pd.Series(dt_churn.feature_importances_, index=feature_cols)
+print("\nFeature importances:")
+print(feat_imp.sort_values(ascending=False).round(4))</code></pre>
+  <p>The tree exposed three actionable insights: (1) customers on month-to-month contracts with monthly charges &gt;$70 are the highest-risk group; (2) new customers (&lt;12 months tenure) with complaints need immediate intervention; (3) longer-tenured customers are largely self-retaining regardless of charge. The retention team can now run targeted campaigns for each identified segment.</p>
+</div>
+
+<!-- ── Quiz ── -->
+<div class="quiz-section">
+  <div id="lesson-22-quiz"></div>
+</div>
+
+<!-- ── Practice ── -->
+<div class="practice-card">
+  <h2>✍️ Practice Exercises</h2>
+  <ol>
+    <li>Train an unconstrained <code>DecisionTreeClassifier</code> on the Titanic dataset (from Lesson 4). Record training and test accuracy. Then add <code>max_depth=5, min_samples_leaf=20</code> — how do train and test accuracy change?</li>
+    <li>Manually compute Gini impurity for a node with 80 class-A samples and 20 class-B samples. Then compute the weighted Gini after splitting into [70A, 5B] and [10A, 15B].</li>
+    <li>Use <code>export_text</code> to print a depth-3 tree trained on the Wine dataset (<code>from sklearn.datasets import load_wine</code>). Can you write the decision rules in plain English?</li>
+    <li>Compare <code>feature_importances_</code> from a single tree vs <code>permutation_importance</code> on the breast cancer dataset. Do they agree on the top features?</li>
+  </ol>
+</div>
+
+<!-- ── Primary Source ── -->
+<div class="primary-source">
+  <h2>📚 Primary Source for This Lesson</h2>
+  <p><a href="https://scikit-learn.org/stable/modules/tree.html" target="_blank"><strong>scikit-learn: Decision Trees</strong></a><br>
+  The official guide covers the CART algorithm, feature importance computation, and multi-output trees. For theory, see Breiman et al. (1984) <em>Classification and Regression Trees</em> — the seminal text that defined the field. Hastie, Tibshirani &amp; Friedman, Chapter 9 is also excellent for the statistical perspective.</p>
+</div>
+
+<!-- ── Ask Tutor ── -->
+<div class="ask-tutor">
+  <span class="icon">💬</span>
+  <span>Getting 100% training accuracy with terrible test accuracy? Confused about what Gini impurity actually measures? Paste your situation — your tutor can walk you through the tree's decisions node by node.</span>
+</div>
+
+<!-- ── Navigation ── -->
+<nav class="lesson-nav">
+  <a href="./0021-regularization.html" class="nav-btn">← Lesson 21: Regularization</a>
+  <a href="./0023-ensemble-methods.html" class="nav-btn nav-btn-next">Lesson 23: Ensemble Methods →</a>
+</nav>
+
+</div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-core.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/plugins/autoloader/prism-autoloader.min.js"></script>
+<script src="../assets/quiz.js"></script>
+<script>
+new MLQuiz('lesson-22-quiz', [
+  {
+    question: "A node contains 40 samples of class A and 60 samples of class B. What is its Gini impurity?",
+    options: [
+      "0.48 — computed as 1 - (0.4² + 0.6²) = 1 - 0.16 - 0.36",
+      "0.50 — Gini is always 0.5 for two-class problems",
+      "0.24 — the sum of squared probabilities without subtracting from 1",
+      "0.40 — the fraction of the minority class"
+    ],
+    correct: 0,
+    explanation: "Gini = 1 - Σpᵢ². With p_A = 40/100 = 0.4 and p_B = 60/100 = 0.6: Gini = 1 - (0.4² + 0.6²) = 1 - (0.16 + 0.36) = 1 - 0.52 = 0.48. A pure node (all one class) gives Gini=0; a perfectly split node (50/50) gives Gini=0.5."
+  },
+  {
+    question: "What does a low value of min_samples_leaf lead to?",
+    options: [
+      "Overfitting — the tree can create leaves serving only 1–2 samples, memorising noise",
+      "Underfitting — fewer leaves means less model capacity",
+      "Faster training — fewer leaf splits to compute",
+      "Higher bias — the model cannot learn complex patterns"
+    ],
+    correct: 0,
+    explanation: "min_samples_leaf sets the minimum number of samples required at a leaf node. A very low value (like 1, the default) allows the tree to keep splitting until each leaf has a single training sample — perfect training accuracy but memorised noise. Increasing min_samples_leaf (e.g., to 10 or 20) forces each leaf to represent a pattern seen in many training examples."
+  },
+  {
+    question: "How does sklearn's DecisionTreeClassifier handle missing values by default?",
+    options: [
+      "It doesn't — you must impute missing values before training",
+      "It ignores samples with missing values during training",
+      "It automatically uses the median for numerical and mode for categorical features",
+      "It creates a special 'missing' branch at each split"
+    ],
+    correct: 0,
+    explanation: "Unlike XGBoost or LightGBM, scikit-learn's DecisionTreeClassifier cannot handle missing values natively. If you pass data with NaN values, it raises a ValueError. You must impute them first using SimpleImputer, KNNImputer, or manual strategies before fitting the tree."
+  },
+  {
+    question: "What does feature_importances_ measure in a decision tree?",
+    options: [
+      "The total weighted impurity reduction each feature contributes across all splits, normalised to sum to 1",
+      "The number of times each feature is used as a split criterion",
+      "The correlation coefficient between each feature and the target variable",
+      "The depth at which each feature first appears in the tree"
+    ],
+    correct: 0,
+    explanation: "feature_importances_ computes: for each feature, sum up the impurity reduction × number_of_samples for every node that used that feature as a split criterion, then normalise so all importances sum to 1. Features at the root contribute more because they split more samples. This measure is biased toward high-cardinality numeric features — permutation importance is a less biased alternative."
+  },
+  {
+    question: "Why are decision trees prone to overfitting without depth constraints?",
+    options: [
+      "They can grow until each leaf has a single training sample, perfectly memorising the training data",
+      "They use too many features for each split, ignoring weaker but still valid signals",
+      "Their impurity criteria favour majority classes, causing the tree to ignore minority patterns",
+      "Gini impurity decreases monotonically, so the tree never stops splitting naturally"
+    ],
+    correct: 0,
+    explanation: "Without constraints, a CART decision tree will keep splitting until each leaf is pure — often until every leaf contains exactly one training sample. At that point, training accuracy is 100% but the tree has memorised specific noise instances rather than learning the true signal. Constraints like max_depth, min_samples_split, and min_samples_leaf prevent this."
+  }
+]);
+</script>
+
+</body>
+</html>

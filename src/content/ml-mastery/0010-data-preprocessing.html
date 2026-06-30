@@ -1,0 +1,725 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lesson 10: Data Preprocessing | ML Mastery</title>
+  <link rel="stylesheet" href="../assets/style.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
+</head>
+<body>
+
+<header class="lesson-header">
+  <div class="header-inner">
+    <nav class="breadcrumb">
+      <a href="../reference/curriculum-map.html">ML Mastery</a>
+      <span class="sep">›</span>
+      <span>Phase 2: Supervised ML</span>
+    </nav>
+    <div class="lesson-badges">
+      <span class="phase-badge">Phase 2 · Supervised ML</span>
+      <span class="lesson-num-badge">Lesson 10</span>
+    </div>
+    <h1 class="lesson-title">Data Preprocessing: Encoding, Scaling &amp; sklearn Pipelines</h1>
+    <p class="lesson-subtitle">Transform raw data into model-ready inputs — without leaking information from the test set into training. The foundation of every reliable ML workflow.</p>
+    <div class="meta-pills">
+      <span class="meta-pill">⏱ ~60 min</span>
+      <span class="meta-pill">🔧 scikit-learn</span>
+      <span class="meta-pill">Phase 2 · Supervised ML</span>
+      <span class="meta-pill">Requires Lessons 03 &amp; 09</span>
+    </div>
+  </div>
+</header>
+
+<main class="lesson-main">
+<div class="content-wrapper">
+
+<div class="objectives-card">
+  <h2>🎯 What You'll Learn</h2>
+  <ul>
+    <li>Why preprocessing is essential, and which algorithms are sensitive to feature scale</li>
+    <li>Encode categorical variables using LabelEncoder, OrdinalEncoder, and OneHotEncoder — and when to use each</li>
+    <li>Scale numerical features with StandardScaler, MinMaxScaler, and RobustScaler</li>
+    <li>Apply the golden rule: <strong>fit on training data only</strong>, then transform both train and test</li>
+    <li>Build robust preprocessing pipelines with <code>sklearn.Pipeline</code> and <code>ColumnTransformer</code></li>
+  </ul>
+</div>
+
+<div class="callout callout-tip">
+  <span class="callout-icon">⚙️</span>
+  <div class="callout-body">
+    <strong>Setup</strong>
+    <p>All tools in this lesson are part of scikit-learn: <code>pip install scikit-learn pandas numpy</code>. Import conventions used throughout: <code>import pandas as pd</code>, <code>import numpy as np</code>, <code>from sklearn.preprocessing import ...</code>.</p>
+  </div>
+</div>
+
+<!-- ── Section 1 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">1</span> Why Preprocessing Matters</h2>
+
+  <p>Raw data rarely comes in a form that ML algorithms can directly consume. Text categories, missing values, wildly different numerical scales — these all need to be addressed before training. But beyond convenience, preprocessing is <strong>mathematically necessary</strong> for many algorithm families:</p>
+
+  <ul>
+    <li><strong>Distance-based algorithms (KNN, SVM, k-means):</strong> these compute distances between data points. If one feature ranges 0–100 and another ranges 0–0.001, the first feature dominates every distance calculation — the second is effectively ignored. Scaling is essential.</li>
+    <li><strong>Gradient-based algorithms (linear regression, logistic regression, neural networks):</strong> gradients are proportional to feature magnitudes. Features with large scales produce large gradients, causing instability and slow convergence. Scaling smooths the loss landscape.</li>
+    <li><strong>Tree-based algorithms (decision trees, random forests, XGBoost):</strong> these split on individual feature thresholds and are completely scale-invariant. Scaling doesn't help or hurt them.</li>
+    <li><strong>Algorithms that assume numeric input:</strong> virtually all sklearn estimators require numeric arrays. Categorical text columns must be encoded before training.</li>
+  </ul>
+
+  <div class="callout callout-key">
+    <span class="callout-icon">🔑</span>
+    <div class="callout-body">
+      <strong>The Core Rule</strong>
+      <p>All preprocessing transformers must be <strong>fit on the training set only</strong> and then <em>applied</em> to both train and test sets. Fitting on the full dataset contaminates training with test statistics — a form of data leakage that inflates evaluation metrics. Using sklearn Pipelines enforces this rule automatically.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 2 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">2</span> Categorical Encoding</h2>
+
+  <p>Machine learning models work with numbers. Categorical features — "city", "product_type", "education_level" — must be converted to numeric representations. The method you choose depends on the <em>nature</em> of the category.</p>
+
+  <h3>Label Encoding (for target variable or binary categories)</h3>
+  <p>Maps each category to an integer. Appropriate for the <em>target variable</em> in classification, and for truly binary categories (yes/no). Never use for nominal features with more than 2 categories in tree-free models — it imposes a false ordinal relationship.</p>
+  <pre><code class="language-python">from sklearn.preprocessing import LabelEncoder
+import pandas as pd
+
+le = LabelEncoder()
+y = ['cat', 'dog', 'cat', 'fish', 'dog']
+y_encoded = le.fit_transform(y)
+print(y_encoded)         # [0 1 0 2 1]
+print(le.classes_)       # ['cat' 'dog' 'fish']
+
+# Inverse: recover original labels from predictions
+print(le.inverse_transform([0, 2]))  # ['cat' 'fish']</code></pre>
+
+  <h3>Ordinal Encoding (for ordered categories)</h3>
+  <p>When a categorical variable has a meaningful order (Small &lt; Medium &lt; Large, Bronze &lt; Silver &lt; Gold), OrdinalEncoder lets you specify that order explicitly.</p>
+  <pre><code class="language-python">from sklearn.preprocessing import OrdinalEncoder
+
+oe = OrdinalEncoder(categories=[['Low', 'Medium', 'High']])
+X = [['Low'], ['High'], ['Medium'], ['Low'], ['High']]
+X_encoded = oe.fit_transform(X)
+print(X_encoded.ravel())   # [0. 2. 1. 0. 2.]
+# Low→0, Medium→1, High→2  — order is preserved</code></pre>
+
+  <h3>One-Hot Encoding (for nominal categories)</h3>
+  <p>For categories without natural ordering (city names, product types, job titles), one-hot encoding creates a new binary column for each category. A row gets a 1 in the column for its category and 0 in all others. This avoids the false ordinal relationship.</p>
+  <pre><code class="language-python">from sklearn.preprocessing import OneHotEncoder
+import numpy as np
+
+# Nominal feature: no natural order between cities
+cities = [['London'], ['Paris'], ['Tokyo'], ['London'], ['Berlin']]
+ohe = OneHotEncoder(sparse_output=False)  # dense matrix for readability
+encoded = ohe.fit_transform(cities)
+
+print(ohe.categories_)          # [array(['Berlin', 'London', 'Paris', 'Tokyo'])]
+print(encoded)
+# [[0. 1. 0. 0.]   # London
+#  [0. 0. 1. 0.]   # Paris
+#  [0. 0. 0. 1.]   # Tokyo
+#  [0. 1. 0. 0.]   # London
+#  [1. 0. 0. 0.]]  # Berlin
+
+# Pandas equivalent for quick exploration
+df = pd.DataFrame({'city': ['London', 'Paris', 'Tokyo', 'London']})
+print(pd.get_dummies(df, drop_first=True))
+#    city_Paris  city_Tokyo  city_London  (Berlin dropped as reference)
+# Use drop_first=True to avoid the dummy variable trap</code></pre>
+
+  <div class="callout callout-warn">
+    <span class="callout-icon">⚠️</span>
+    <div class="callout-body">
+      <strong>The Dummy Variable Trap</strong>
+      <p>If you have k categories and create k binary columns, the last column is perfectly predictable from the others — they always sum to 1. This creates multicollinearity, which destabilises linear models. The fix: drop one category column (use <code>drop='first'</code> in <code>OneHotEncoder</code> or <code>drop_first=True</code> in <code>pd.get_dummies</code>). Tree-based models are immune — you can skip <code>drop='first'</code> for them.</p>
+    </div>
+  </div>
+
+  <h3>Handling Unseen Categories</h3>
+  <pre><code class="language-python"># OneHotEncoder by default raises an error on unseen categories in test set.
+# Use handle_unknown='ignore' to replace unseen categories with all zeros.
+ohe = OneHotEncoder(sparse_output=False, handle_unknown='ignore')
+ohe.fit(X_train_cats)
+# Test data might have a city the model never saw in training:
+X_test_transformed = ohe.transform(X_test_cats)   # no error — unseen → all zeros</code></pre>
+</div>
+
+<!-- ── Section 3 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">3</span> Feature Scaling</h2>
+
+  <p>Feature scaling transforms numerical features so they occupy comparable ranges. The three most important scalers in scikit-learn each have different assumptions and use cases:</p>
+
+  <h3>StandardScaler — z-score normalization</h3>
+  <p>Centers each feature to mean=0 and standard deviation=1. The resulting values are called z-scores. This is the default choice for most gradient-based and distance-based algorithms.</p>
+  <pre><code class="language-python">from sklearn.preprocessing import StandardScaler
+import numpy as np
+
+X = np.array([[1000, 2],
+              [2000, 3],
+              [3000, 5],
+              [4000, 4]])
+
+scaler = StandardScaler()
+X_scaled = scaler.fit_transform(X)
+
+print("Means:  ", scaler.mean_)         # [2500.    3.5]
+print("Std:    ", scaler.scale_)        # [1118.03  1.12]
+print("Scaled:\n", X_scaled)
+# [[-1.342 -1.342]
+#  [-0.447 -0.447]
+#  [ 0.447  1.342]
+#  [ 1.342  0.447]]
+# Each column now has mean≈0 and std=1</code></pre>
+
+  <h3>MinMaxScaler — range normalization</h3>
+  <p>Scales features to a fixed range, default [0, 1]. Preserves zero values and is useful when you need bounded outputs (e.g., feeding into a sigmoid layer or image pixel normalization).</p>
+  <pre><code class="language-python">from sklearn.preprocessing import MinMaxScaler
+
+mms = MinMaxScaler(feature_range=(0, 1))
+X_mms = mms.fit_transform(X)
+print(X_mms)
+# [[0.    0.   ]
+#  [0.333 0.333]
+#  [0.667 1.   ]
+#  [1.    0.667]]
+# Values now in [0, 1] for both columns
+
+# MinMaxScaler is sensitive to outliers — one extreme value compresses everything else
+# e.g., if one house sold for $50M in a dataset of typical homes, all others get squished near 0</code></pre>
+
+  <h3>RobustScaler — median and IQR normalization</h3>
+  <p>Uses the median and interquartile range (IQR) instead of mean and standard deviation. Since median and IQR are insensitive to outliers, this scaler is the right choice when your data contains significant outliers you want to preserve (not remove).</p>
+  <pre><code class="language-python">from sklearn.preprocessing import RobustScaler
+
+X_with_outliers = np.array([[1, 2], [2, 3], [3, 4], [4, 5], [100, 6]])
+rs = RobustScaler()
+X_robust = rs.fit_transform(X_with_outliers)
+
+print("Median: ", rs.center_)    # [3. 4.]
+print("IQR:    ", rs.scale_)     # [2. 2.]
+print(X_robust)
+# [[-1.   -1.  ]
+#  [-0.5  -0.5 ]
+#  [ 0.    0.  ]
+#  [ 0.5   0.5 ]
+#  [48.5   1.  ]]  ← outlier (100) still stands out but doesn't crush other values</code></pre>
+
+  <div style="margin: 1.25rem 0; overflow-x: auto;">
+    <table style="width: 100%; border-collapse: collapse; font-size: 0.84rem;">
+      <thead>
+        <tr style="background: var(--bg-alt);">
+          <th style="padding: 0.6rem 1rem; border: 1px solid var(--border); text-align: left;">Scaler</th>
+          <th style="padding: 0.6rem 1rem; border: 1px solid var(--border); text-align: left;">Formula</th>
+          <th style="padding: 0.6rem 1rem; border: 1px solid var(--border); text-align: left;">Output range</th>
+          <th style="padding: 0.6rem 1rem; border: 1px solid var(--border); text-align: left;">When to use</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td style="padding: 0.55rem 1rem; border: 1px solid var(--border);">StandardScaler</td><td style="padding: 0.55rem 1rem; border: 1px solid var(--border);">(x − μ) / σ</td><td style="padding: 0.55rem 1rem; border: 1px solid var(--border);">Unbounded, mean=0 std=1</td><td style="padding: 0.55rem 1rem; border: 1px solid var(--border);">⭐ Default for linear models, SVMs, KNN, PCA</td></tr>
+        <tr style="background: var(--bg-subtle);"><td style="padding: 0.55rem 1rem; border: 1px solid var(--border);">MinMaxScaler</td><td style="padding: 0.55rem 1rem; border: 1px solid var(--border);">(x − min) / (max − min)</td><td style="padding: 0.55rem 1rem; border: 1px solid var(--border);">[0, 1] (or custom)</td><td style="padding: 0.55rem 1rem; border: 1px solid var(--border);">Image data, neural network input layers</td></tr>
+        <tr><td style="padding: 0.55rem 1rem; border: 1px solid var(--border);">RobustScaler</td><td style="padding: 0.55rem 1rem; border: 1px solid var(--border);">(x − median) / IQR</td><td style="padding: 0.55rem 1rem; border: 1px solid var(--border);">Unbounded, robust to outliers</td><td style="padding: 0.55rem 1rem; border: 1px solid var(--border);">Data with significant outliers you want to keep</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<!-- ── Section 4 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">4</span> The Critical Rule: Fit on Train Only</h2>
+
+  <p>This is the most commonly violated rule in data preprocessing, and it produces the most insidious bugs — because the code runs fine, evaluations look great, and the problem only surfaces in production.</p>
+
+  <h3>The Wrong Way (Data Leakage)</h3>
+  <pre><code class="language-python">from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import train_test_split
+import numpy as np
+
+X = np.random.randn(1000, 5)
+y = np.random.randint(0, 2, 1000)
+
+# ❌ WRONG — fit on the FULL dataset before splitting
+scaler = StandardScaler()
+X_scaled = scaler.fit_transform(X)           # uses test statistics!
+X_train, X_test, y_train, y_test = train_test_split(X_scaled, y, test_size=0.2)
+# The test set's mean and std leaked into the scaler
+# Evaluation metrics are optimistically biased</code></pre>
+
+  <h3>The Right Way</h3>
+  <pre><code class="language-python">from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import train_test_split
+import numpy as np
+
+X = np.random.randn(1000, 5)
+y = np.random.randint(0, 2, 1000)
+
+# ✓ CORRECT — split FIRST, then fit scaler on training data only
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+scaler = StandardScaler()
+X_train_scaled = scaler.fit_transform(X_train)   # learns mean/std FROM TRAIN ONLY
+X_test_scaled  = scaler.transform(X_test)         # applies train statistics to test
+
+# The distinction between fit_transform and transform:
+# fit_transform(X_train) = fit(X_train) → transform(X_train)  [computes AND applies]
+# transform(X_test)      = apply training stats to test data   [applies only]
+print("Train scaler mean:", scaler.mean_)   # computed from training set only</code></pre>
+
+  <div class="callout callout-warn">
+    <span class="callout-icon">⚠️</span>
+    <div class="callout-body">
+      <strong>Why This Actually Matters</strong>
+      <p>If you scale using the full dataset, the scaler learns statistics (mean, std) that include test data. During evaluation, the model "saw" test statistics during preprocessing — it's like giving away answers before the exam. The model appears to generalise better than it truly does. When deployed on genuinely new data, it performs worse than expected.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 5 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">5</span> Train/Test Split Best Practices</h2>
+
+  <pre><code class="language-python">from sklearn.model_selection import train_test_split
+import pandas as pd
+
+df = pd.read_csv('house_prices.csv')
+X = df.drop('price', axis=1)
+y = df['price']
+
+# Basic split
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y,
+    test_size=0.2,      # 80% train, 20% test
+    random_state=42,    # reproducibility — always set this
+)
+print(X_train.shape, X_test.shape)  # (1168, 79) (292, 79)
+
+# For CLASSIFICATION — use stratify to preserve class proportions
+df_clf = pd.read_csv('churn.csv')
+X_clf = df_clf.drop('churned', axis=1)
+y_clf = df_clf['churned']
+
+X_train, X_test, y_train, y_test = train_test_split(
+    X_clf, y_clf,
+    test_size=0.2,
+    random_state=42,
+    stratify=y_clf,     # ensures train/test have same churn rate
+)
+
+# Verify stratification worked
+print("Train churn rate:", y_train.mean())   # e.g., 0.142
+print("Test churn rate: ", y_test.mean())    # e.g., 0.142  ← same!</code></pre>
+
+  <div class="callout callout-tip">
+    <span class="callout-icon">💡</span>
+    <div class="callout-body">
+      <strong>Stratification is critical for imbalanced datasets</strong>
+      <p>If your dataset is 95% class 0 and 5% class 1, a random split might put all class-1 examples in the training set by chance, leaving you with an empty class in the test set. <code>stratify=y</code> guarantees both splits maintain the original 95/5 ratio. Always use it for classification.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 6 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">6</span> sklearn Pipelines: The Right Way to Chain Steps</h2>
+
+  <p>The manual approach to preprocessing — split, fit scaler, transform train, transform test — is error-prone and verbose. The elegant solution is a <strong>Pipeline</strong>: a single object that chains multiple steps and applies the fit-on-train rule automatically.</p>
+
+  <h3>Simple Pipeline: Scaler + Classifier</h3>
+  <pre><code class="language-python">from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
+from sklearn.linear_model import LogisticRegression
+from sklearn.model_selection import train_test_split, cross_val_score
+from sklearn.datasets import load_breast_cancer
+
+X, y = load_breast_cancer(return_X_y=True)
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
+
+# Build the pipeline
+pipeline = Pipeline([
+    ('scaler', StandardScaler()),             # step 1: scale features
+    ('classifier', LogisticRegression(max_iter=1000))  # step 2: fit model
+])
+
+# Training: fit() calls scaler.fit_transform(X_train) then classifier.fit(X_train_scaled, y_train)
+pipeline.fit(X_train, y_train)
+
+# Prediction: transform() calls scaler.transform(X_test) then classifier.predict(X_test_scaled)
+y_pred = pipeline.predict(X_test)
+print("Test accuracy:", pipeline.score(X_test, y_test))  # 0.9737
+
+# Cross-validation — leakage-safe because Pipeline fits scaler separately in each fold
+cv_scores = cross_val_score(pipeline, X_train, y_train, cv=5, scoring='accuracy')
+print(f"CV accuracy: {cv_scores.mean():.4f} ± {cv_scores.std():.4f}")
+# CV accuracy: 0.9758 ± 0.0085</code></pre>
+
+  <div class="callout callout-key">
+    <span class="callout-icon">🔑</span>
+    <div class="callout-body">
+      <strong>Why Pipelines Make Cross-Validation Correct</strong>
+      <p>When you use <code>cross_val_score(pipeline, ...)</code>, sklearn fits the entire pipeline independently on each training fold. The scaler's statistics are computed only from that fold's training data — not from validation data. Without a Pipeline, if you pre-scale before cross-validation, you've leaked validation statistics into every fold's training process.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 7 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">7</span> ColumnTransformer for Mixed Data Types</h2>
+
+  <p>Real datasets typically have a mix of numerical and categorical columns, each requiring different preprocessing. <code>ColumnTransformer</code> applies different transformers to different subsets of columns and concatenates the results.</p>
+
+  <pre><code class="language-python">import pandas as pd
+import numpy as np
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import StandardScaler, OneHotEncoder
+from sklearn.pipeline import Pipeline
+from sklearn.linear_model import LogisticRegression
+from sklearn.model_selection import train_test_split
+
+# Sample dataset: house price classification (affordable vs not)
+data = {
+    'sqft':          [1200, 2300, 1800, 3200, 950],
+    'bedrooms':      [2, 4, 3, 5, 1],
+    'neighborhood':  ['Downtown', 'Suburbs', 'Downtown', 'Rural', 'Suburbs'],
+    'house_style':   ['Ranch', 'Colonial', 'Ranch', 'Colonial', 'Ranch'],
+    'affordable':    [1, 0, 1, 0, 1],
+}
+df = pd.DataFrame(data)
+X = df.drop('affordable', axis=1)
+y = df['affordable']
+
+# Identify column types
+numeric_cols     = ['sqft', 'bedrooms']
+categorical_cols = ['neighborhood', 'house_style']
+
+# Build transformers for each column type
+numeric_transformer = Pipeline([
+    ('scaler', StandardScaler()),
+])
+
+categorical_transformer = Pipeline([
+    ('onehot', OneHotEncoder(handle_unknown='ignore', drop='first')),
+])
+
+# Combine into a ColumnTransformer
+preprocessor = ColumnTransformer(
+    transformers=[
+        ('num', numeric_transformer,     numeric_cols),
+        ('cat', categorical_transformer, categorical_cols),
+    ],
+    remainder='drop'    # drop any columns not listed above
+)
+
+# Wrap preprocessor + model in a final Pipeline
+full_pipeline = Pipeline([
+    ('preprocessor', preprocessor),
+    ('classifier',   LogisticRegression(max_iter=500)),
+])
+
+# Train and evaluate
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.4, random_state=42)
+full_pipeline.fit(X_train, y_train)
+print("Test accuracy:", full_pipeline.score(X_test, y_test))
+
+# Inspect the output shape after preprocessing
+preprocessor.fit(X_train)
+X_transformed = preprocessor.transform(X_train)
+print("Transformed shape:", X_transformed.shape)
+# (3, 5):  2 numeric features + (3-1=2) neighborhood cols + (2-1=1) style col = 5 total</code></pre>
+
+  <h3>Using make_column_transformer (shorthand)</h3>
+  <pre><code class="language-python">from sklearn.compose import make_column_transformer
+
+# Shorter syntax for simple cases
+preprocessor = make_column_transformer(
+    (StandardScaler(),                              numeric_cols),
+    (OneHotEncoder(handle_unknown='ignore'),        categorical_cols),
+    remainder='passthrough'   # keep other columns unchanged
+)</code></pre>
+</div>
+
+<!-- ── Section 8 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">8</span> Handling Missing Values in Preprocessing</h2>
+
+  <p>Missing values must be handled before most sklearn estimators can run. The cleanest approach is to add imputation as the first step in a Pipeline or ColumnTransformer, so it too is fit on training data only.</p>
+
+  <pre><code class="language-python">from sklearn.impute import SimpleImputer
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler, OneHotEncoder
+from sklearn.compose import ColumnTransformer
+from sklearn.ensemble import RandomForestClassifier
+import numpy as np
+import pandas as pd
+
+# Simulate a dataset with missing values
+np.random.seed(42)
+n = 200
+df = pd.DataFrame({
+    'age':         np.random.normal(40, 10, n),
+    'income':      np.random.normal(60000, 15000, n),
+    'credit_score': np.random.normal(700, 50, n),
+    'employment':  np.random.choice(['Full-time', 'Part-time', 'Self-employed', None], n),
+    'home_owner':  np.random.choice(['Yes', 'No', None], n),
+})
+# Introduce some missing values
+df.loc[df.sample(20).index, 'age']    = np.nan
+df.loc[df.sample(15).index, 'income'] = np.nan
+
+numeric_cols     = ['age', 'income', 'credit_score']
+categorical_cols = ['employment', 'home_owner']
+
+# Numeric pipeline: impute with mean, then scale
+numeric_pipeline = Pipeline([
+    ('imputer', SimpleImputer(strategy='mean')),   # missing → column mean
+    ('scaler',  StandardScaler()),
+])
+
+# Categorical pipeline: impute with most frequent value, then one-hot encode
+categorical_pipeline = Pipeline([
+    ('imputer', SimpleImputer(strategy='most_frequent')),  # missing → mode
+    ('encoder', OneHotEncoder(handle_unknown='ignore', sparse_output=False)),
+])
+
+preprocessor = ColumnTransformer([
+    ('num', numeric_pipeline,     numeric_cols),
+    ('cat', categorical_pipeline, categorical_cols),
+])
+
+# Final pipeline with classifier
+model_pipeline = Pipeline([
+    ('prep',   preprocessor),
+    ('model',  RandomForestClassifier(n_estimators=100, random_state=42)),
+])
+
+# imputer.fit() learns mean from TRAINING set only → no leakage
+y = np.random.randint(0, 2, n)
+X = df
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+model_pipeline.fit(X_train, y_train)
+print("Accuracy:", model_pipeline.score(X_test, y_test))</code></pre>
+
+  <div class="callout callout-tip">
+    <span class="callout-icon">💡</span>
+    <div class="callout-body">
+      <strong>Imputation Strategy Guide</strong>
+      <p><code>strategy='mean'</code> — best for roughly symmetric numeric distributions. <code>strategy='median'</code> — better for skewed numeric distributions (e.g., income, house prices). <code>strategy='most_frequent'</code> — for categorical features and binary variables. <code>strategy='constant', fill_value=0</code> — when absence of a value is itself informative (e.g., "no prior loans"). For complex patterns, consider <code>IterativeImputer</code> (experimental) which uses other features to predict missing values.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Real World ── -->
+<div class="use-case-section">
+  <div class="use-case-header">
+    <span style="font-size:1.5rem">🌍</span>
+    <h2>Real-World Spotlight: House Price Prediction Pipeline</h2>
+  </div>
+
+  <p>The Ames Housing dataset is a classic real-world dataset with 79 features — a mix of numeric and categorical — and significant missing values. Here's a complete preprocessing pipeline:</p>
+
+  <div class="callout callout-realworld">
+    <span class="callout-icon">🏠</span>
+    <div class="callout-body">
+      <strong>Dataset context:</strong> Predict house sale prices from features like GrLivArea (gross living area), LotArea, Neighborhood, HouseStyle. The dataset has 1460 rows and includes 19 features with missing values.
+    </div>
+  </div>
+
+  <pre><code class="language-python">import pandas as pd
+import numpy as np
+from sklearn.model_selection import train_test_split, cross_val_score
+from sklearn.pipeline import Pipeline
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import StandardScaler, OneHotEncoder
+from sklearn.impute import SimpleImputer
+from sklearn.linear_model import Ridge
+from sklearn.metrics import mean_squared_error
+
+# Load Ames Housing (from kaggle or sklearn.datasets)
+df = pd.read_csv('ames_housing.csv')
+X = df.drop('SalePrice', axis=1)
+y = np.log1p(df['SalePrice'])   # log-transform target to reduce skew
+
+# Identify column types
+numeric_features     = X.select_dtypes(include=['int64', 'float64']).columns.tolist()
+categorical_features = X.select_dtypes(include=['object']).columns.tolist()
+
+print(f"Numeric features:     {len(numeric_features)}")    # e.g., 36
+print(f"Categorical features: {len(categorical_features)}")  # e.g., 43
+
+# Build full preprocessing pipeline
+numeric_transformer = Pipeline([
+    ('imputer', SimpleImputer(strategy='median')),
+    ('scaler',  StandardScaler()),
+])
+
+categorical_transformer = Pipeline([
+    ('imputer', SimpleImputer(strategy='most_frequent')),
+    ('encoder', OneHotEncoder(handle_unknown='ignore', sparse_output=False)),
+])
+
+preprocessor = ColumnTransformer([
+    ('num', numeric_transformer,     numeric_features),
+    ('cat', categorical_transformer, categorical_features),
+])
+
+full_pipeline = Pipeline([
+    ('prep',  preprocessor),
+    ('model', Ridge(alpha=10.0)),
+])
+
+# Train/test split — no stratify for regression
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.2, random_state=42
+)
+
+full_pipeline.fit(X_train, y_train)
+y_pred = full_pipeline.predict(X_test)
+
+rmse = mean_squared_error(y_test, y_pred, squared=False)
+print(f"Test RMSE (log scale): {rmse:.4f}")    # ~0.131
+print(f"Test R²:               {full_pipeline.score(X_test, y_test):.4f}")  # ~0.881
+
+# Cross-validation to verify
+cv_rmse = cross_val_score(full_pipeline, X_train, y_train,
+                           cv=5, scoring='neg_root_mean_squared_error')
+print(f"CV RMSE: {(-cv_rmse).mean():.4f} ± {cv_rmse.std():.4f}")</code></pre>
+</div>
+
+<!-- ── Quiz ── -->
+<div class="quiz-section">
+  <h2>Quick Check</h2>
+  <div id="lesson-10-quiz"></div>
+</div>
+
+<!-- ── Practice ── -->
+<div class="practice-card">
+  <h2>✍️ Practice Exercises</h2>
+  <ol>
+    <li>Load any dataset with a mix of numerical and categorical columns. Identify which columns need OrdinalEncoder (there's an ordering) and which need OneHotEncoder (no ordering). Build a ColumnTransformer that applies the appropriate encoder to each.</li>
+    <li>Write code that <strong>intentionally does it wrong</strong> (fit scaler on full data before splitting) and <strong>correctly</strong> (fit on train only). Use <code>cross_val_score</code> to measure AUC for both approaches. Observe the inflated performance from the wrong approach.</li>
+    <li>Build a complete Pipeline for the Titanic dataset: impute 'Age' with median, 'Embarked' with most_frequent; one-hot encode 'Sex' and 'Embarked'; StandardScale 'Age', 'Fare', 'Pclass'; train a LogisticRegression. Evaluate with 5-fold cross-validated accuracy.</li>
+    <li>After fitting a pipeline, extract the fitted preprocessing steps to inspect what the scaler learned: <code>pipeline.named_steps['scaler'].mean_</code>. Do the same for a pipeline with a ColumnTransformer. How do you access the numeric sub-pipeline's scaler?</li>
+  </ol>
+  <details>
+    <summary>▶ Show Titanic pipeline solution</summary>
+    <pre><code class="language-python">import pandas as pd
+from sklearn.pipeline import Pipeline
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import StandardScaler, OneHotEncoder
+from sklearn.impute import SimpleImputer
+from sklearn.linear_model import LogisticRegression
+from sklearn.model_selection import cross_val_score
+
+df = pd.read_csv('titanic.csv')
+X = df[['Age', 'Fare', 'Pclass', 'Sex', 'Embarked']]
+y = df['Survived']
+
+numeric_transformer = Pipeline([
+    ('imputer', SimpleImputer(strategy='median')),
+    ('scaler',  StandardScaler()),
+])
+categorical_transformer = Pipeline([
+    ('imputer', SimpleImputer(strategy='most_frequent')),
+    ('encoder', OneHotEncoder(drop='first', handle_unknown='ignore', sparse_output=False)),
+])
+preprocessor = ColumnTransformer([
+    ('num', numeric_transformer,     ['Age', 'Fare', 'Pclass']),
+    ('cat', categorical_transformer, ['Sex', 'Embarked']),
+])
+pipeline = Pipeline([
+    ('prep',  preprocessor),
+    ('model', LogisticRegression(max_iter=200)),
+])
+scores = cross_val_score(pipeline, X, y, cv=5, scoring='accuracy')
+print(f"CV Accuracy: {scores.mean():.4f} ± {scores.std():.4f}")</code></pre>
+  </details>
+</div>
+
+<!-- Primary Source -->
+<div class="primary-source">
+  <h2>📚 Primary Source for This Lesson</h2>
+  <p><a href="https://scikit-learn.org/stable/modules/preprocessing.html" target="_blank"><strong>scikit-learn User Guide: Preprocessing Data</strong></a><br>
+  The official, authoritative documentation for all preprocessing tools covered in this lesson. Includes examples for every scaler and encoder, explanations of the mathematical transformations, and guidance on when to use each. Read sections 6.3 (preprocessing), 6.5 (pipelines), and 6.7 (column transformer).</p>
+</div>
+
+<!-- Ask Tutor -->
+<div class="ask-tutor">
+  <span class="icon">💬</span>
+  <span>Getting a "could not convert string to float" error? Or confused about which columns belong in the numeric transformer? Paste your DataFrame's <code>df.info()</code> output and your pipeline code — your AI tutor will help you debug it.</span>
+</div>
+
+<!-- Navigation -->
+<nav class="lesson-nav">
+  <a href="./0009-ml-project-lifecycle.html" class="nav-btn nav-btn-prev">← Lesson 09: ML Project Life Cycle</a>
+  <a href="./0011-linear-regression.html" class="nav-btn nav-btn-next">Lesson 11: Linear Regression →</a>
+</nav>
+
+</div><!-- /content-wrapper -->
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-core.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/plugins/autoloader/prism-autoloader.min.js"></script>
+<script src="../assets/quiz.js"></script>
+<script>
+new MLQuiz('lesson-10-quiz', [
+  {
+    question: "Why should you fit the scaler on training data only, and NOT on the full dataset?",
+    options: [
+      "Fitting on the full dataset leaks test statistics into training, causing optimistically biased evaluation metrics",
+      "Fitting on the full dataset takes longer because it processes more rows",
+      "StandardScaler requires balanced classes which the full dataset may not have",
+      "Fitting on test data makes the scaler parameters less accurate for the training set"
+    ],
+    correct: 0,
+    explanation: "Fitting a scaler on the full dataset uses test statistics (mean, std) during training — this is data leakage. The model indirectly 'sees' the test set during preprocessing, which inflates evaluation performance. In production, this means the model appears better than it truly is on genuinely new data."
+  },
+  {
+    question: "You have an 'education level' feature with values: 'High School' < 'Bachelor's' < 'Master's' < 'PhD'. Which encoder should you use?",
+    options: [
+      "OrdinalEncoder — because there is a natural meaningful order between the categories",
+      "OneHotEncoder — because these are categorical and should produce binary columns",
+      "LabelEncoder — because it can handle multi-class text labels",
+      "StandardScaler — because education level can be treated as a continuous variable"
+    ],
+    correct: 0,
+    explanation: "OrdinalEncoder is correct when there is a meaningful order between categories. Education level clearly has an order (Higher education = higher value). You should specify the order explicitly: OrdinalEncoder(categories=[['High School', \"Bachelor's\", \"Master's\", 'PhD']]). Using OneHotEncoder would discard the ordering information."
+  },
+  {
+    question: "What does pipeline.fit(X_train, y_train) do internally for a Pipeline with steps [StandardScaler, LogisticRegression]?",
+    options: [
+      "Calls scaler.fit_transform(X_train), passes the result to lr.fit(X_train_scaled, y_train)",
+      "Calls scaler.fit(X_train) only, then separately lr.fit(X_train, y_train) on the raw data",
+      "Calls scaler.transform(X_train) first, then lr.fit on the result — the scaler is already fit",
+      "Fits the LogisticRegression first, then fits the StandardScaler on the residuals"
+    ],
+    correct: 0,
+    explanation: "Pipeline.fit() calls fit_transform() on all intermediate steps (all steps except the last), passing the output of each step as input to the next. The final step gets .fit() called on it. So: scaler.fit_transform(X_train) → lr.fit(scaled_X_train, y_train). This is why Pipelines prevent data leakage in cross-validation."
+  },
+  {
+    question: "A KNN classifier gives poor results even though you have plenty of data. The dataset has a 'salary' feature ranging 0–500,000 and a 'years_experience' feature ranging 0–40. What preprocessing is most likely needed?",
+    options: [
+      "Feature scaling (StandardScaler or MinMaxScaler) — salary's large range dominates all distance calculations",
+      "One-hot encoding — KNN cannot handle numerical features directly",
+      "Ordinal encoding — KNN requires ordinal representations of all features",
+      "Log transformation of years_experience — it is more skewed than salary"
+    ],
+    correct: 0,
+    explanation: "KNN is a distance-based algorithm. The 'salary' feature ranges 0–500,000 while 'years_experience' ranges 0–40. Any distance computation is dominated by salary — 'years_experience' effectively contributes nothing. StandardScaler or MinMaxScaler brings both features to comparable scales, allowing KNN to use all features equally."
+  },
+  {
+    question: "Why does OneHotEncoder use drop='first' (or pd.get_dummies uses drop_first=True)?",
+    options: [
+      "To avoid the dummy variable trap — with k categories, k-1 columns fully specify the category, so k columns are linearly redundant",
+      "To reduce the number of features and speed up training for large datasets",
+      "To prevent the encoder from creating columns for rare categories below a frequency threshold",
+      "To ensure the first category is always treated as the baseline for comparison"
+    ],
+    correct: 0,
+    explanation: "The dummy variable trap: if you have 3 categories A, B, C and create 3 binary columns, the third column is always determinable from the first two (if both are 0, it must be 1). This perfect multicollinearity causes problems for linear models (singular matrix). Dropping one column (usually the first) removes the redundancy. Tree-based models don't need this — they handle correlated features naturally."
+  }
+]);
+</script>
+
+</body>
+</html>

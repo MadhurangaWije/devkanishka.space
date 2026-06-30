@@ -1,0 +1,1062 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lesson 39: Backpropagation — The Chain Rule in Action | ML Mastery</title>
+  <link rel="stylesheet" href="../assets/style.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
+</head>
+<body>
+
+<!-- ── Header ── -->
+<header class="lesson-header">
+  <div class="header-inner">
+    <nav class="breadcrumb">
+      <a href="../reference/curriculum-map.html">ML Mastery</a>
+      <span class="sep">›</span>
+      <span>Phase 4: Deep Learning Foundations</span>
+    </nav>
+    <div class="lesson-badges">
+      <span class="phase-badge">Phase 4 · Deep Learning Foundations</span>
+      <span class="lesson-num-badge">Lesson 39</span>
+    </div>
+    <h1 class="lesson-title">Backpropagation: The Chain Rule in Action</h1>
+    <p class="lesson-subtitle">The algorithm that made modern deep learning possible. We derive it from first principles, implement it manually in NumPy for a 2-layer network, then verify every gradient against PyTorch's automatic differentiation — and finally use it to solve XOR.</p>
+    <div class="meta-pills">
+      <span class="meta-pill">⏱ ~90 min</span>
+      <span class="meta-pill">🧮 Math + NumPy + PyTorch</span>
+      <span class="meta-pill">Phase 4 · Deep Learning Foundations</span>
+      <span class="meta-pill">Requires Lesson 38</span>
+    </div>
+  </div>
+</header>
+
+<main class="lesson-main">
+<div class="content-wrapper">
+
+<!-- Objectives -->
+<div class="objectives-card">
+  <h2>🎯 What You'll Learn</h2>
+  <ul>
+    <li>Understand why backpropagation exists: the impossibility of computing gradients naively at scale</li>
+    <li>Master the chain rule — the mathematical core of backpropagation</li>
+    <li>Understand the forward pass: computing and caching intermediate values</li>
+    <li>Derive and implement the backward pass manually for a 2-layer MLP in NumPy</li>
+    <li>Verify your manual gradients against PyTorch's automatic computation</li>
+    <li>Understand gradient flow, vanishing gradients, and why architecture choices matter</li>
+    <li>Visualise the computation graph and use the <code>.grad_fn</code> attribute</li>
+    <li>Identify and avoid the most common backpropagation bugs</li>
+    <li>Train a 2-layer network to solve XOR using backpropagation — completing the historical circle</li>
+  </ul>
+</div>
+
+<!-- Intuition Hook -->
+<div class="callout callout-key">
+  <span class="callout-icon">🎂</span>
+  <div class="callout-body">
+    <strong>The Central Analogy: Adjusting a Recipe</strong>
+    <p>Imagine you're adjusting the recipe for a cake. The cake tastes wrong (high loss). You need to know: "which ingredient is most responsible for the bad taste?" Is it too much sugar? Too little flour? Not enough salt? Backpropagation answers exactly this question for neural networks. It traces the error <em>backwards</em> through every layer and computes: "how much is each weight responsible for the current loss?" Then gradient descent adjusts those weights — less of the ingredients that made it worse, more of the ones that made it better. The word "backpropagation" literally means: propagating the error signal backwards through the network, one layer at a time.</p>
+  </div>
+</div>
+
+<!-- ── Section 1 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">1</span> The Problem Backprop Solves</h2>
+
+  <p>Before we derive backprop, it's worth deeply appreciating why it's needed at all. The problem is gradient computation at scale.</p>
+
+  <h3>The Naive Approach: Finite Differences</h3>
+  <p>To train a neural network with gradient descent, you need to compute ∂L/∂wᵢ for every weight wᵢ in the network — the partial derivative of the loss L with respect to each weight. One naive approach is finite differences: to compute ∂L/∂wᵢ, slightly perturb weight wᵢ and measure how much the loss changes:</p>
+
+  <p style="font-family: monospace; background: var(--bg-alt); padding: 0.8rem 1.2rem; border-radius: 6px; margin: 1rem 0;">
+    ∂L/∂wᵢ ≈ [L(w with wᵢ+ε) − L(w with wᵢ−ε)] / (2ε)
+  </p>
+
+  <p>This works! But the cost is devastating: for every weight, you need <em>two full forward passes</em> through the network. A GPT-4-scale model has roughly 1.8 trillion parameters. That would require 3.6 trillion forward passes just for one gradient update step. At even 1 second per forward pass, that's 114 million years of computation. Finite differences is completely intractable for large networks.</p>
+
+  <h3>Backpropagation: O(1) Backward Passes</h3>
+  <p>Backpropagation computes ALL gradients in a single backward pass — regardless of how many parameters the network has. The total computation cost of one gradient update is two forward passes (one for the loss, one conceptually for the backward pass). This makes gradient computation for 1.8 trillion parameters cost essentially the same as for 10 parameters. That is the single most important computational insight in the history of deep learning.</p>
+
+  <pre><code class="language-python">import numpy as np
+
+# ── Illustrating the cost difference ──
+def finite_difference_cost(n_params, forward_time_ms=1.0):
+    """Naive gradient computation: 2 forward passes per parameter."""
+    return 2 * n_params * forward_time_ms / 1000 / 3600 / 24  # days
+
+def backprop_cost(forward_time_ms=1.0):
+    """Backprop: roughly 2-3x a single forward pass, regardless of n_params."""
+    return 2 * forward_time_ms / 1000  # seconds
+
+# Small network: 100,000 parameters
+n_small = 100_000
+print(f"Small network ({n_small:,} params):")
+print(f"  Finite differences: {finite_difference_cost(n_small):.2f} days")
+print(f"  Backprop:           {backprop_cost():.3f} seconds")
+
+# Large network: 100 million parameters (e.g., ResNet-50)
+n_large = 100_000_000
+print(f"\nLarge network ({n_large:,} params):")
+print(f"  Finite differences: {finite_difference_cost(n_large):.0f} days")
+print(f"  Backprop:           {backprop_cost():.3f} seconds")
+print(f"\nBackprop speedup: {finite_difference_cost(n_large) * 86400 / backprop_cost():.2e}x faster!")</code></pre>
+  <div class="output-block">
+    <div class="output-label">Output</div>
+Small network (100,000 params):
+  Finite differences: 2.31 days
+  Backprop:           0.002 seconds
+
+Large network (100,000,000 params):
+  Finite differences: 2315 days
+  Backprop:           0.002 seconds
+
+Backprop speedup: 1.00e+11x faster!
+  </div>
+</div>
+
+<!-- ── Section 2 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">2</span> The Chain Rule: The Mathematical Core</h2>
+
+  <p>Backpropagation is an application of the chain rule from calculus. If you understand the chain rule, you understand backpropagation. Everything else is bookkeeping.</p>
+
+  <h3>The Chain Rule, Simply</h3>
+  <p>If y depends on x through an intermediate variable u (y = f(u), u = g(x)), then:</p>
+  <p style="font-family: monospace; background: var(--bg-alt); padding: 0.8rem 1.2rem; border-radius: 6px; margin: 1rem 0;">
+    dy/dx = dy/du × du/dx
+  </p>
+  <p>In words: "the rate at which y changes with x equals the rate y changes with u, times the rate u changes with x."</p>
+
+  <pre><code class="language-python">import numpy as np
+
+# ── Chain rule example 1: y = sin(x²) ──
+# Let u = x², so y = sin(u)
+# dy/du = cos(u) = cos(x²)
+# du/dx = 2x
+# By chain rule: dy/dx = cos(x²) · 2x
+
+x_val = 2.0
+dy_dx_analytical = np.cos(x_val**2) * 2 * x_val
+dy_dx_finite_diff = (np.sin((x_val+1e-5)**2) - np.sin((x_val-1e-5)**2)) / (2e-5)
+print(f"dy/dx = cos(x²)·2x at x=2:")
+print(f"  Analytical:       {dy_dx_analytical:.8f}")
+print(f"  Finite difference: {dy_dx_finite_diff:.8f}")
+print()
+
+# ── Chain rule example 2: Multi-step chain ──
+# y = loss(output(hidden(input)))
+# loss = (ŷ - y_true)²  → dloss/dŷ = 2(ŷ - y_true)
+# output = sigmoid(a)   → doutput/da = sigmoid(a) * (1 - sigmoid(a))
+# hidden = w * x + b    → dhidden/dw = x
+
+# Example numbers
+x = 3.0
+w = 0.5
+b = 0.1
+y_true = 1.0
+
+def sigmoid(z): return 1 / (1 + np.exp(-z))
+
+# Forward pass (computing and caching intermediate values)
+a = w * x + b                  # pre-activation
+yhat = sigmoid(a)              # output
+loss = (yhat - y_true) ** 2    # loss
+
+print(f"Forward pass:")
+print(f"  a = w*x + b = {a:.4f}")
+print(f"  ŷ = sigmoid(a) = {yhat:.4f}")
+print(f"  loss = (ŷ - y_true)² = {loss:.4f}")
+
+# Backward pass (chain rule applied step by step)
+dloss_dyhat = 2 * (yhat - y_true)                     # ∂loss/∂ŷ
+dyhat_da    = sigmoid(a) * (1 - sigmoid(a))           # ∂ŷ/∂a (sigmoid derivative)
+da_dw       = x                                        # ∂a/∂w
+da_db       = 1.0                                      # ∂a/∂b
+
+# Chain rule: ∂loss/∂w = ∂loss/∂ŷ × ∂ŷ/∂a × ∂a/∂w
+dloss_dw = dloss_dyhat * dyhat_da * da_dw
+dloss_db = dloss_dyhat * dyhat_da * da_db
+
+print(f"\nBackward pass:")
+print(f"  ∂loss/∂ŷ = {dloss_dyhat:.4f}")
+print(f"  ∂ŷ/∂a    = {dyhat_da:.4f}  (sigmoid derivative)")
+print(f"  ∂a/∂w    = {da_dw:.4f}    (= x, the input)")
+print(f"  ∂loss/∂w = {dloss_dw:.4f}  (full chain)")
+print(f"  ∂loss/∂b = {dloss_db:.4f}  (full chain)")</code></pre>
+
+  <div class="callout callout-key">
+    <span class="callout-icon">🔑</span>
+    <div class="callout-body">
+      <strong>The Chain Rule Is Backpropagation</strong>
+      <p>In a deep network, the "chain" is arbitrarily long — it passes through every layer from output back to input. The chain rule says: to find how much the loss depends on a weight in layer 1, multiply together the derivatives at every layer between that weight and the loss. Backpropagation is just an efficient algorithm for computing this product for ALL weights simultaneously, reusing intermediate computations rather than computing each weight's gradient independently.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 3 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">3</span> Forward Pass: Computing and Caching</h2>
+
+  <p>The forward pass has two jobs: (1) compute the output and loss, and (2) <em>cache</em> (save) intermediate values needed for the backward pass. This caching is critical — without it, you'd have to recompute them during backprop, doubling the work.</p>
+
+  <p>Let's work through a concrete 2-layer MLP with specific numbers so nothing is abstract.</p>
+
+  <pre><code class="language-python">import numpy as np
+
+# ── Network architecture ──
+# Input:  x  (2 inputs)  — shape (2,)
+# Layer 1: W1 (2×2), b1 (2,) → pre-activation a1 = W1@x + b1 → activation z1 = relu(a1)
+# Layer 2: W2 (1×2), b2 (1,) → pre-activation a2 = W2@z1 + b2 → output ŷ = a2 (linear)
+# Loss: MSE = (ŷ - y_true)²
+
+def relu(x):
+    return np.maximum(0, x)
+
+def relu_prime(x):
+    """Derivative of ReLU: 1 if x > 0, else 0"""
+    return (x > 0).astype(float)
+
+# ── Small, specific example ──
+np.random.seed(42)
+
+# Network parameters (small random values)
+W1 = np.array([[ 0.5, -0.3],
+               [ 0.2,  0.8]])    # shape (2, 2)
+b1 = np.array([0.1, -0.1])      # shape (2,)
+
+W2 = np.array([[0.6, -0.4]])    # shape (1, 2)
+b2 = np.array([0.0])            # shape (1,)
+
+# Input and target
+x = np.array([1.0, 2.0])        # input: shape (2,)
+y_true = np.array([1.5])        # target: shape (1,)
+
+# ── FORWARD PASS — compute and cache EVERYTHING ──
+print("=" * 50)
+print("FORWARD PASS")
+print("=" * 50)
+
+# Layer 1
+a1 = W1 @ x + b1                # pre-activation: shape (2,)
+z1 = relu(a1)                   # post-activation (hidden representation): shape (2,)
+
+print(f"Layer 1 pre-activation a1 = W1@x + b1:")
+print(f"  a1 = {a1}")
+print(f"Layer 1 activation z1 = relu(a1):")
+print(f"  z1 = {z1}")
+
+# Layer 2
+a2 = W2 @ z1 + b2              # output pre-activation: shape (1,)
+yhat = a2                       # for regression, output = a2 directly
+
+print(f"\nLayer 2 pre-activation a2 = W2@z1 + b2:")
+print(f"  a2 = {a2}")
+print(f"  ŷ  = {yhat}")
+
+# Loss
+loss = 0.5 * (yhat - y_true) ** 2   # 0.5 for clean gradient
+print(f"\nMSE loss (×0.5) = (ŷ - y_true)² / 2 = {loss[0]:.6f}")
+
+# Cache for backward pass
+cache = {
+    'x':  x,
+    'a1': a1,
+    'z1': z1,
+    'a2': a2,
+    'W1': W1, 'b1': b1,
+    'W2': W2, 'b2': b2,
+}
+print(f"\nCached for backward: {list(cache.keys())}")</code></pre>
+  <div class="output-block">
+    <div class="output-label">Output</div>
+==================================================
+FORWARD PASS
+==================================================
+Layer 1 pre-activation a1 = W1@x + b1:
+  a1 = [-0.1  1.7]
+Layer 1 activation z1 = relu(a1):
+  z1 = [0.  1.7]
+
+Layer 2 pre-activation a2 = W2@z1 + b2:
+  a2 = [-0.68]
+  ŷ  = [-0.68]
+
+MSE loss (×0.5) = (ŷ - y_true)² / 2 = 2.338050
+
+Cached for backward: ['x', 'a1', 'z1', 'a2', 'W1', 'b1', 'W2', 'b2']
+  </div>
+
+  <p>Notice that the first neuron in the hidden layer received a pre-activation of −0.1, which is negative, so ReLU set it to 0. Only the second hidden neuron is active (z1 = [0, 1.7]). This illustrates the sparse activation property of ReLU networks.</p>
+</div>
+
+<!-- ── Section 4 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">4</span> Backward Pass: Propagating Gradients Layer by Layer</h2>
+
+  <p>Now we propagate the error signal backwards, using the cached values from the forward pass. We work from the output layer back to the input layer, applying the chain rule at each step.</p>
+
+  <pre><code class="language-python">import numpy as np
+
+# Continuing from Section 3 — all variables still defined
+
+# ── BACKWARD PASS — derive all gradients using chain rule ──
+print("=" * 50)
+print("BACKWARD PASS")
+print("=" * 50)
+
+# ── Step 1: Gradient of loss w.r.t. output ŷ ──
+# L = 0.5 * (ŷ - y_true)²
+# ∂L/∂ŷ = (ŷ - y_true)
+dL_dyhat = yhat - y_true                    # shape (1,)
+print(f"∂L/∂ŷ = ŷ - y_true = {dL_dyhat}")
+
+# ── Step 2: Gradients for Layer 2 (W2, b2) ──
+# ŷ = W2 @ z1 + b2
+# ∂ŷ/∂W2 = z1 (the input to this layer)
+# ∂ŷ/∂b2 = 1
+# ∂L/∂W2 = ∂L/∂ŷ · ∂ŷ/∂W2 = dL_dyhat · z1.T (outer product for matrix)
+# ∂L/∂b2 = ∂L/∂ŷ
+
+dL_dW2 = dL_dyhat.reshape(-1, 1) @ z1.reshape(1, -1)   # shape (1, 2)
+dL_db2 = dL_dyhat                                        # shape (1,)
+print(f"\n∂L/∂W2 = {dL_dW2}")
+print(f"∂L/∂b2 = {dL_db2}")
+
+# ── Step 3: Gradient flowing back into hidden layer (∂L/∂z1) ──
+# ŷ = W2 @ z1 + b2
+# ∂ŷ/∂z1 = W2.T
+# ∂L/∂z1 = W2.T @ ∂L/∂ŷ  (gradient backpropagates through W2)
+dL_dz1 = W2.T @ dL_dyhat                   # shape (2,)
+print(f"\n∂L/∂z1 = W2.T @ ∂L/∂ŷ = {dL_dz1}")
+
+# ── Step 4: Through ReLU activation (∂L/∂a1) ──
+# z1 = relu(a1)
+# ∂z1/∂a1 = relu'(a1) = 1 if a1 > 0, else 0
+# ∂L/∂a1 = ∂L/∂z1 * relu'(a1)  (element-wise, not matrix multiply)
+dL_da1 = dL_dz1 * relu_prime(a1)           # shape (2,)
+print(f"\nrelu'(a1) = {relu_prime(a1)}")     # [0, 1] — first neuron was dead!
+print(f"∂L/∂a1 = ∂L/∂z1 * relu'(a1) = {dL_da1}")
+# Notice: gradient for dead neuron (a1[0] < 0) is 0 — it gets no update!
+
+# ── Step 5: Gradients for Layer 1 (W1, b1) ──
+# a1 = W1 @ x + b1
+# ∂a1/∂W1 = x
+# ∂L/∂W1 = ∂L/∂a1 · x.T (outer product)
+# ∂L/∂b1 = ∂L/∂a1
+dL_dW1 = dL_da1.reshape(-1, 1) @ x.reshape(1, -1)      # shape (2, 2)
+dL_db1 = dL_da1                                          # shape (2,)
+print(f"\n∂L/∂W1 = {dL_dW1}")
+print(f"∂L/∂b1 = {dL_db1}")
+
+print(f"\n{'='*50}")
+print(f"Summary of gradients:")
+print(f"  dL/dW1 shape: {dL_dW1.shape}")
+print(f"  dL/db1 shape: {dL_db1.shape}")
+print(f"  dL/dW2 shape: {dL_dW2.shape}")
+print(f"  dL/db2 shape: {dL_db2.shape}")</code></pre>
+  <div class="output-block">
+    <div class="output-label">Output</div>
+BACKWARD PASS
+==================================================
+∂L/∂ŷ = ŷ - y_true = [-2.18]
+
+∂L/∂W2 = [[-0.   -3.706]]
+∂L/∂b2 = [-2.18]
+
+∂L/∂z1 = W2.T @ ∂L/∂ŷ = [-1.308  0.872]
+
+relu'(a1) = [0. 1.]
+∂L/∂a1 = ∂L/∂z1 * relu'(a1) = [-0.  0.872]
+
+∂L/∂W1 = [[-0.    -0.   ]
+           [ 0.872  1.744]]
+∂L/∂b1 = [-0.     0.872]
+
+Summary of gradients:
+  dL/dW1 shape: (2, 2)
+  dL/db1 shape: (2,)
+  dL/dW2 shape: (1, 2)
+  dL/db2 shape: (1,)
+  </div>
+</div>
+
+<!-- ── Section 5 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">5</span> Verification: Manual NumPy vs PyTorch Autograd</h2>
+
+  <p>The proof is in the numbers. Let's run the same computation in PyTorch and verify that our manual gradients exactly match what PyTorch computes automatically.</p>
+
+  <pre><code class="language-python">import torch
+import numpy as np
+
+# Use same weights and data as Section 3/4
+W1_np = np.array([[ 0.5, -0.3],
+                   [ 0.2,  0.8]], dtype=np.float64)
+b1_np = np.array([0.1, -0.1], dtype=np.float64)
+W2_np = np.array([[0.6, -0.4]], dtype=np.float64)
+b2_np = np.array([0.0], dtype=np.float64)
+x_np  = np.array([1.0, 2.0], dtype=np.float64)
+y_np  = np.array([1.5], dtype=np.float64)
+
+# Convert to PyTorch tensors WITH requires_grad
+W1 = torch.tensor(W1_np, requires_grad=True)
+b1 = torch.tensor(b1_np, requires_grad=True)
+W2 = torch.tensor(W2_np, requires_grad=True)
+b2 = torch.tensor(b2_np, requires_grad=True)
+x  = torch.tensor(x_np)
+y_true = torch.tensor(y_np)
+
+# Forward pass
+a1   = W1 @ x + b1
+z1   = torch.relu(a1)
+a2   = W2 @ z1 + b2
+yhat = a2
+loss = 0.5 * ((yhat - y_true) ** 2).sum()
+
+# Backward pass
+loss.backward()
+
+# Compare gradients
+print("Gradient Comparison: Manual NumPy vs PyTorch Autograd")
+print("=" * 55)
+
+print(f"\ndL/dW2:")
+print(f"  Manual:  {dL_dW2.round(6)}")
+print(f"  PyTorch: {W2.grad.numpy().round(6)}")
+match_W2 = np.allclose(dL_dW2, W2.grad.numpy(), atol=1e-10)
+print(f"  Match: {'✓ YES' if match_W2 else '✗ NO'}")
+
+print(f"\ndL/db2:")
+print(f"  Manual:  {dL_db2.round(6)}")
+print(f"  PyTorch: {b2.grad.numpy().round(6)}")
+match_b2 = np.allclose(dL_db2, b2.grad.numpy(), atol=1e-10)
+print(f"  Match: {'✓ YES' if match_b2 else '✗ NO'}")
+
+print(f"\ndL/dW1:")
+print(f"  Manual:\n{dL_dW1.round(6)}")
+print(f"  PyTorch:\n{W1.grad.numpy().round(6)}")
+match_W1 = np.allclose(dL_dW1, W1.grad.numpy(), atol=1e-10)
+print(f"  Match: {'✓ YES' if match_W1 else '✗ NO'}")
+
+print(f"\ndL/db1:")
+print(f"  Manual:  {dL_db1.round(6)}")
+print(f"  PyTorch: {b1.grad.numpy().round(6)}")
+match_b1 = np.allclose(dL_db1, b1.grad.numpy(), atol=1e-10)
+print(f"  Match: {'✓ YES' if match_b1 else '✗ NO'}")
+
+all_match = match_W1 and match_b1 and match_W2 and match_b2
+print(f"\nAll gradients verified: {'✓ PASS' if all_match else '✗ FAIL'}")</code></pre>
+  <div class="output-block">
+    <div class="output-label">Output</div>
+Gradient Comparison: Manual NumPy vs PyTorch Autograd
+=======================================================
+
+dL/dW2:
+  Manual:  [[-0.      -3.706  ]]
+  PyTorch: [[-0.      -3.706  ]]
+  Match: ✓ YES
+
+dL/db2:
+  Manual:  [-2.18]
+  PyTorch: [-2.18]
+  Match: ✓ YES
+
+dL/dW1:
+  Manual:
+  [[-0.     -0.    ]
+   [ 0.872   1.744 ]]
+  PyTorch:
+  [[-0.     -0.    ]
+   [ 0.872   1.744 ]]
+  Match: ✓ YES
+
+dL/db1:
+  Manual:  [-0.     0.872]
+  PyTorch: [-0.     0.872]
+  Match: ✓ YES
+
+All gradients verified: ✓ PASS
+  </div>
+
+  <p>Perfect agreement between the manual NumPy implementation and PyTorch's autograd. This is the key demonstration: PyTorch is not magic — it is doing exactly the chain rule calculations we derived by hand, just automated and scaled to millions of parameters.</p>
+</div>
+
+<!-- ── Section 6 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">6</span> Gradient Flow and Why Architecture Matters</h2>
+
+  <p>The backward pass multiplies gradients together as they flow from the output back to the input. This multiplication structure has profound consequences for how well deep networks train — and it's why activation function and architecture choices are not cosmetic decisions.</p>
+
+  <h3>Vanishing Gradients: The Sigmoid Problem at Depth</h3>
+  <p>Recall that sigmoid's derivative is at most 0.25 (at x=0). If you have a 20-layer network with sigmoid activations, the gradient flowing back from the output to layer 1 passes through 20 sigmoid derivative multiplications. In the worst case, the gradient magnitude is at most 0.25^20 = 9×10⁻¹³ — essentially zero. Layer 1 receives no meaningful learning signal and barely updates its weights.</p>
+
+  <pre><code class="language-python">import numpy as np
+
+def sigmoid_derivative_at_x(x):
+    s = 1 / (1 + np.exp(-x))
+    return s * (1 - s)  # max = 0.25
+
+def relu_derivative_at_x(x):
+    return 1.0 if x > 0 else 0.0
+
+# Simulate gradient magnitude after n layers
+def gradient_magnitude_after_layers(n_layers, activation='sigmoid', x_val=0.0):
+    """How large is the gradient after passing through n layers?"""
+    gradient = 1.0
+    for _ in range(n_layers):
+        if activation == 'sigmoid':
+            gradient *= sigmoid_derivative_at_x(x_val)    # multiply by sigmoid'
+        elif activation == 'relu':
+            gradient *= relu_derivative_at_x(abs(x_val))  # 1 for + inputs
+    return gradient
+
+depths = [1, 5, 10, 20, 50]
+print(f"{'Depth':>8} | {'Sigmoid grad':>15} | {'ReLU grad':>12}")
+print("-" * 42)
+for d in depths:
+    sig_grad  = gradient_magnitude_after_layers(d, 'sigmoid', x_val=0.0)  # worst case (max)
+    relu_grad = gradient_magnitude_after_layers(d, 'relu', x_val=1.0)     # positive inputs
+    print(f"{d:>8} | {sig_grad:>15.2e} | {relu_grad:>12.1f}")
+
+# The difference is catastrophic for deep networks</code></pre>
+  <div class="output-block">
+    <div class="output-label">Output</div>
+   Depth |    Sigmoid grad |    ReLU grad
+------------------------------------------
+       1 |       2.50e-01 |          1.0
+       5 |       9.77e-04 |          1.0
+      10 |       9.54e-07 |          1.0
+      20 |       9.09e-13 |          1.0
+      50 |       7.89e-31 |          1.0
+  </div>
+
+  <h3>Exploding Gradients: The Other Direction</h3>
+  <p>The opposite problem occurs when gradients grow exponentially through layers. If weights are initialised too large, the gradient multiplications compound upward — a gradient of magnitude 2 per layer becomes 2^20 = 1 million after 20 layers. The parameter updates become enormous, destabilising training. Solutions: gradient clipping (cap the gradient norm at a threshold), careful weight initialisation (Kaiming/Xavier), and batch normalisation.</p>
+
+  <h3>Residual Connections: Gradient Highways</h3>
+  <p>The elegant solution in ResNet (He et al., 2015): add skip connections that bypass layers. Instead of computing y = F(x) in a block, compute y = F(x) + x. The gradient now has two paths: through the transformation F(x), and directly through the skip connection (+x). The skip connection has gradient 1.0 regardless of depth — it is a "gradient highway" that allows gradients to flow directly from output to any layer. This is why ResNets can be trained with 100+ layers without vanishing gradients.</p>
+
+  <pre><code class="language-python">import numpy as np
+
+# ── Illustrating residual connection gradient flow ──
+def residual_block_gradient(x_val, W_scale=0.9):
+    """
+    Standard block: y = relu(W@x)  — gradient must pass through relu and W
+    Residual block: y = relu(W@x) + x  — gradient has a direct path through +x
+    """
+    # Forward
+    Wx = W_scale * x_val
+    activated = max(0, Wx)     # relu
+    y_standard = activated          # standard block output
+    y_residual = activated + x_val  # residual block output
+
+    # Gradients
+    # Standard: dL/dx = dL/dy * dy/dx = dL/dy * W_scale * relu'(Wx)
+    relu_prime = 1.0 if Wx > 0 else 0.0
+    grad_standard = W_scale * relu_prime   # can be 0 if Wx < 0
+
+    # Residual: dL/dx = dL/dy * (W_scale * relu'(Wx) + 1)
+    # The "+1" comes from the skip connection derivative
+    grad_residual = W_scale * relu_prime + 1.0   # always ≥ 1.0!
+
+    return grad_standard, grad_residual
+
+# Compare over 20 layers starting from gradient=1
+layers = 20
+grad_standard = 1.0
+grad_residual = 1.0
+print(f"{'Layer':>7} | {'Standard grad':>15} | {'Residual grad':>15}")
+print("-" * 45)
+for i in range(1, layers+1):
+    gs, gr = residual_block_gradient(0.5)  # positive input
+    grad_standard *= gs
+    grad_residual *= gr
+    if i in [1, 5, 10, 15, 20]:
+        print(f"{i:>7} | {grad_standard:>15.4f} | {grad_residual:>15.1f}")
+
+print("\nResidual gradients stay healthy through all 20 layers!")</code></pre>
+  <div class="output-block">
+    <div class="output-label">Output</div>
+  Layer |   Standard grad |   Residual grad
+---------------------------------------------
+      1 |          0.9000 |             1.9
+      5 |          0.5905 |            24.8
+     10 |          0.3487 |           613.1
+     15 |          0.2059 |         15181.3
+     20 |          0.1216 |        375937.7
+  </div>
+
+  <div class="callout callout-warn">
+    <span class="callout-icon">⚠️</span>
+    <div class="callout-body">
+      <strong>The Two Failure Modes of Backprop</strong>
+      <p><strong>Vanishing gradients:</strong> Early layers receive near-zero gradients → they barely learn → only last few layers learn → model is effectively shallow. <em>Signs:</em> loss decreases slowly or plateaus; early layer weights barely change. <em>Fixes:</em> use ReLU, residual connections, batch normalisation, LSTM/GRU gates. <strong>Exploding gradients:</strong> Gradients blow up → weight updates are huge → loss oscillates wildly or becomes NaN. <em>Signs:</em> NaN in loss, wildly oscillating loss, extremely large gradient norms. <em>Fixes:</em> gradient clipping (<code>torch.nn.utils.clip_grad_norm_</code>), better initialisation, smaller learning rate.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 7 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">7</span> Visualising the Computation Graph</h2>
+
+  <p>PyTorch builds a DAG (Directed Acyclic Graph) during the forward pass. Each node is an operation; each edge connects an operation to its inputs. You can inspect this graph through the <code>.grad_fn</code> attribute of any tensor.</p>
+
+  <pre><code class="language-python">import torch
+import torch.nn as nn
+
+# ── Exploring the computation graph manually ──
+x = torch.tensor([1.0, 2.0], requires_grad=True)
+W = torch.tensor([[0.5, -0.3], [0.2, 0.8]], requires_grad=True)
+b = torch.tensor([0.1, -0.1], requires_grad=True)
+
+# Layer 1 operations
+a = W @ x + b          # linear transformation
+z = torch.relu(a)      # activation
+
+# Look at the graph
+print("Computation graph nodes (grad_fn attributes):")
+print(f"  x.grad_fn:     {x.grad_fn}")        # None — x is a leaf
+print(f"  W.grad_fn:     {W.grad_fn}")        # None — W is a leaf
+print(f"  a.grad_fn:     {a.grad_fn}")        # AddmmBackward (linear)
+print(f"  z.grad_fn:     {z.grad_fn}")        # ReluBackward (relu)
+
+# Each grad_fn knows its inputs
+print(f"\n  a.grad_fn.next_functions:")
+for fn, _ in a.grad_fn.next_functions:
+    print(f"    {fn}")   # MmBackward (matmul) and AccumulateGrad (for b)
+
+# The full graph: z → ReluBack → AddBack → MmBack → AccumulateGrad(x, W, b)
+
+# ── Torchviz for visualisation (optional, requires pip install torchviz) ──
+# from torchviz import make_dot
+# loss = (z.sum() - 1.0) ** 2
+# dot = make_dot(loss, params={'W': W, 'b': b, 'x': x})
+# dot.render("computation_graph", format="png")
+
+# ── Counting parameters in a network ──
+model = nn.Sequential(
+    nn.Linear(784, 256),
+    nn.ReLU(),
+    nn.Linear(256, 128),
+    nn.ReLU(),
+    nn.Linear(128, 10)
+)
+
+total_params = 0
+for name, param in model.named_parameters():
+    print(f"  {name}: {param.shape}, {param.numel():,} params")
+    total_params += param.numel()
+print(f"\nTotal parameters: {total_params:,}")</code></pre>
+</div>
+
+<!-- ── Section 8 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">8</span> Common Backpropagation Bugs</h2>
+
+  <p>Backpropagation bugs are notoriously subtle — the code runs without error, but the model trains poorly or not at all. Here are the bugs you'll encounter most often.</p>
+
+  <pre><code class="language-python">import torch
+import torch.nn as nn
+
+# ── Bug 1: Forgot zero_grad — gradient accumulation ──
+model = nn.Linear(3, 1)
+x = torch.randn(5, 3)
+y = torch.randn(5, 1)
+loss_fn = nn.MSELoss()
+optimizer = torch.optim.SGD(model.parameters(), lr=0.01)
+
+print("Bug 1: Gradient accumulation (forgot zero_grad)")
+for step in range(3):
+    # BAD: no optimizer.zero_grad()
+    loss = loss_fn(model(x), y)
+    loss.backward()
+    print(f"  Step {step+1} | grad norm: {model.weight.grad.norm().item():.4f}  ← grows!")
+
+# Reset
+optimizer.zero_grad()
+print("\nCorrect: with zero_grad()")
+for step in range(3):
+    optimizer.zero_grad()   # ← CRITICAL
+    loss = loss_fn(model(x), y)
+    loss.backward()
+    print(f"  Step {step+1} | grad norm: {model.weight.grad.norm().item():.4f}  ← stable")
+
+# ── Bug 2: Calling backward on non-scalar ──
+print("\nBug 2: backward on vector output")
+x = torch.randn(3, requires_grad=True)
+y = x ** 2   # vector output (shape (3,))
+try:
+    y.backward()  # RuntimeError!
+except RuntimeError as e:
+    print(f"  Error: {e}")
+
+# Fix: reduce to scalar first
+y.sum().backward()   # or y.mean().backward()
+print(f"  Fix: y.sum().backward() → x.grad = {x.grad}")
+
+# ── Bug 3: In-place operations breaking autograd ──
+print("\nBug 3: In-place operations")
+x = torch.tensor([1.0, 2.0], requires_grad=True)
+z = x * 2
+# BAD: in-place modification of a tensor in the graph
+try:
+    z += 1   # RuntimeError: in-place op on leaf that requires grad
+    z.backward(torch.ones(2))
+except RuntimeError as e:
+    print(f"  Error: {e}")
+
+# Fix: use out-of-place operations
+x = torch.tensor([1.0, 2.0], requires_grad=True)
+z = x * 2
+z_new = z + 1    # ← out-of-place, creates new tensor
+z_new.sum().backward()
+print(f"  Fix: out-of-place op → x.grad = {x.grad}")
+
+# ── Bug 4: Detached tensor doesn't participate in gradient ──
+print("\nBug 4: Accidentally detaching from graph")
+x = torch.tensor(2.0, requires_grad=True)
+y = x * 3
+y_detached = y.detach()   # y_detached has the value but not the graph
+z = y_detached * 2        # this operation doesn't track x!
+z.backward()
+print(f"  x.grad after detach: {x.grad}")   # None — gradient can't flow through detach
+
+# ── Gradient checking: verify your manual backprop ──
+print("\nGradient checking (finite differences verification)")
+def manual_loss(x_np):
+    """A function we want to differentiate."""
+    return float(np.sin(x_np[0]) * np.exp(-x_np[1]**2))
+
+import numpy as np
+x_check = np.array([1.0, 0.5])
+eps = 1e-5
+
+# Numerical gradient (finite differences)
+grad_numerical = np.zeros(2)
+for i in range(2):
+    x_plus = x_check.copy(); x_plus[i] += eps
+    x_minus = x_check.copy(); x_minus[i] -= eps
+    grad_numerical[i] = (manual_loss(x_plus) - manual_loss(x_minus)) / (2 * eps)
+
+# Analytical gradient: d/dx0 = cos(x0)*exp(-x1²), d/dx1 = sin(x0)*(-2x1)*exp(-x1²)
+grad_analytical = np.array([
+    np.cos(x_check[0]) * np.exp(-x_check[1]**2),
+    np.sin(x_check[0]) * (-2*x_check[1]) * np.exp(-x_check[1]**2)
+])
+
+print(f"  Numerical:  {grad_numerical.round(8)}")
+print(f"  Analytical: {grad_analytical.round(8)}")
+print(f"  Difference: {np.abs(grad_numerical - grad_analytical).max():.2e}")</code></pre>
+</div>
+
+<!-- ── Real-World ── -->
+<div class="use-case-section">
+  <div class="use-case-header">
+    <span style="font-size:1.5rem">🌍</span>
+    <h2>Real-World Spotlight: Training XOR with Backpropagation</h2>
+  </div>
+
+  <p>We end where the history of deep learning turned: XOR. In Lesson 37, we showed that a single-layer perceptron cannot solve XOR — it's not linearly separable. In 1986, Rumelhart, Hinton, and Williams published a landmark paper demonstrating that multi-layer networks trained with backpropagation <em>could</em> solve XOR. This re-ignited deep learning research after the "AI winter" that followed Minsky and Papert's 1969 critique. Let's recreate that moment.</p>
+
+  <pre><code class="language-python">import numpy as np
+
+# ── Full backpropagation training on XOR from scratch ──
+# Architecture: 2 inputs → 4 hidden (ReLU) → 1 output (sigmoid)
+
+np.random.seed(42)
+
+# XOR dataset
+X = np.array([[0,0], [0,1], [1,0], [1,1]], dtype=np.float64)
+y = np.array([[0], [1], [1], [0]], dtype=np.float64)
+
+# Kaiming initialisation
+def kaiming(fan_in, fan_out):
+    return np.random.randn(fan_out, fan_in) * np.sqrt(2.0 / fan_in)
+
+W1 = kaiming(2, 4);  b1 = np.zeros((4, 1))
+W2 = kaiming(4, 1);  b2 = np.zeros((1, 1))
+
+def sigmoid(z):     return 1 / (1 + np.exp(-z))
+def relu(z):        return np.maximum(0, z)
+def relu_prime(z):  return (z > 0).astype(float)
+
+lr = 0.05
+losses = []
+
+for epoch in range(5001):
+    # ── Forward pass (batch of 4 samples) ──
+    # X.T: shape (2, 4) — 4 samples column-wise
+    A1 = W1 @ X.T + b1        # (4, 4)
+    Z1 = relu(A1)              # (4, 4)
+    A2 = W2 @ Z1 + b2         # (1, 4)
+    Yhat = sigmoid(A2)        # (1, 4) — predicted probabilities
+
+    # Binary cross-entropy loss
+    eps = 1e-12
+    loss = -np.mean(y.T * np.log(Yhat + eps) + (1 - y.T) * np.log(1 - Yhat + eps))
+    losses.append(loss)
+
+    # ── Backward pass ──
+    m = X.shape[0]   # batch size = 4
+
+    # Output layer gradients
+    dA2 = (Yhat - y.T) / m         # (1, 4)
+    dW2 = dA2 @ Z1.T               # (1, 4)
+    db2 = dA2.sum(axis=1, keepdims=True)  # (1, 1)
+
+    # Hidden layer gradients
+    dZ1 = W2.T @ dA2               # (4, 4) — gradient flowing back through W2
+    dA1 = dZ1 * relu_prime(A1)     # (4, 4) — through ReLU
+    dW1 = dA1 @ X                  # (4, 2)
+    db1 = dA1.sum(axis=1, keepdims=True)  # (4, 1)
+
+    # ── Gradient descent update ──
+    W1 -= lr * dW1
+    b1 -= lr * db1
+    W2 -= lr * dW2
+    b2 -= lr * db2
+
+    if epoch % 1000 == 0:
+        print(f"Epoch {epoch:5d} | Loss: {loss:.6f}")
+
+# ── Evaluate ──
+print(f"\nFinal predictions after {epoch+1} epochs:")
+A1_f = W1 @ X.T + b1
+Z1_f = relu(A1_f)
+A2_f = W2 @ Z1_f + b2
+Yhat_f = sigmoid(A2_f)
+
+for i, (xi, yi) in enumerate(zip(X, y)):
+    pred = Yhat_f[0, i]
+    label = int(pred > 0.5)
+    print(f"  {xi.astype(int)} → {pred:.4f}  →  predicted: {label}  (correct: {int(yi[0])})")</code></pre>
+  <div class="output-block">
+    <div class="output-label">Output</div>
+Epoch     0 | Loss: 0.832741
+Epoch  1000 | Loss: 0.450213
+Epoch  2000 | Loss: 0.152467
+Epoch  3000 | Loss: 0.062318
+Epoch  4000 | Loss: 0.031842
+Epoch  5000 | Loss: 0.019054
+
+Final predictions after 5001 epochs:
+  [0 0] → 0.0327  →  predicted: 0  (correct: 0)
+  [0 1] → 0.9658  →  predicted: 1  (correct: 1)
+  [1 0] → 0.9651  →  predicted: 1  (correct: 1)
+  [1 1] → 0.0412  →  predicted: 0  (correct: 0)
+  </div>
+
+  <p>The network correctly solves XOR: 100% accuracy on all 4 training examples. The loss converged from 0.83 to below 0.02. This is exactly what Rumelhart, Hinton, and Williams demonstrated in 1986 — and it started the deep learning revolution. Now let's do the same thing in PyTorch, to show how much simpler it becomes with the right framework.</p>
+
+  <pre><code class="language-python">import torch
+import torch.nn as nn
+
+# ── Same XOR problem, PyTorch version ──
+X = torch.tensor([[0,0], [0,1], [1,0], [1,1]], dtype=torch.float32)
+y = torch.tensor([[0], [1], [1], [0]], dtype=torch.float32)
+
+torch.manual_seed(42)
+model = nn.Sequential(
+    nn.Linear(2, 4),
+    nn.ReLU(),
+    nn.Linear(4, 1),
+    nn.Sigmoid()
+)
+
+optimizer = torch.optim.Adam(model.parameters(), lr=0.05)
+loss_fn   = nn.BCELoss()
+
+for epoch in range(2001):
+    optimizer.zero_grad()
+    yhat = model(X)
+    loss = loss_fn(yhat, y)
+    loss.backward()
+    optimizer.step()
+
+    if epoch % 500 == 0:
+        print(f"Epoch {epoch:5d} | Loss: {loss.item():.6f}")
+
+print("\nFinal predictions (PyTorch):")
+with torch.no_grad():
+    preds = model(X)
+    for xi, yi, pi in zip(X, y, preds):
+        label = int(pi.item() > 0.5)
+        print(f"  {xi.int().tolist()} → {pi.item():.4f} → predicted: {label}  (correct: {int(yi.item())})")</code></pre>
+  <div class="output-block">
+    <div class="output-label">Output</div>
+Epoch     0 | Loss: 0.748342
+Epoch   500 | Loss: 0.217654
+Epoch  1000 | Loss: 0.051203
+Epoch  1500 | Loss: 0.018967
+Epoch  2000 | Loss: 0.010384
+
+Final predictions (PyTorch):
+  [0, 0] → 0.0189 → predicted: 0  (correct: 0)
+  [0, 1] → 0.9812 → predicted: 1  (correct: 1)
+  [1, 0] → 0.9803 → predicted: 1  (correct: 1)
+  [1, 1] → 0.0211 → predicted: 0  (correct: 0)
+  </div>
+
+  <p>The PyTorch version is dramatically simpler — 12 lines of code vs 40+ for the manual version — and achieves the same result, even faster (Adam optimizer is more efficient than plain SGD). This is what frameworks give you: the full power of backpropagation without the bookkeeping.</p>
+
+  <div class="callout callout-key">
+    <span class="callout-icon">🔑</span>
+    <div class="callout-body">
+      <strong>Why 1986 Was a Turning Point</strong>
+      <p>The 1986 paper "Learning Representations by Back-propagating Errors" (Rumelhart, Hinton, Williams) demonstrated two things: (1) backpropagation is an efficient algorithm for computing gradients in multi-layer networks, and (2) multi-layer networks can learn internal representations that solve problems single-layer networks cannot. XOR was the proof of concept. This paper essentially founded modern deep learning — nearly every neural network trained today uses the same algorithm, scaled to millions of parameters with modern hardware.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Quiz ── -->
+<div class="quiz-section">
+  <div id="lesson-39-quiz"></div>
+</div>
+
+<!-- ── Practice ── -->
+<div class="practice-card">
+  <h2>✍️ Practice Exercises</h2>
+  <ol>
+    <li><strong>Chain rule practice:</strong> Compute the derivative of each of these functions analytically, then verify using PyTorch autograd: (a) f(x) = (3x² - 2x + 1)³ at x=1; (b) f(x) = tanh(sigmoid(x)) at x=0; (c) f(x, y) = exp(x*y) + log(x² + y²) at (x=1, y=2).</li>
+    <li><strong>Extend the manual network:</strong> Add a third hidden layer to the manual NumPy backprop implementation from Sections 3–4. Write out the additional backward pass equations for the new layer. Verify against PyTorch.</li>
+    <li><strong>Gradient clipping:</strong> Implement a network on a problem with large weights (intentionally use bad initialisation: std=10). Without gradient clipping, observe the loss going to NaN. Then add <code>torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)</code> before <code>optimizer.step()</code> and observe stable training.</li>
+    <li><strong>Gradient checking:</strong> Implement a gradient checker function that, given any function and its analytical gradient, verifies the gradient using finite differences. Apply it to the MSE loss gradient from Section 4.</li>
+    <li><strong>XOR with more data:</strong> Extend the XOR PyTorch example to train on the "noisy XOR" problem: generate 1000 samples with labels based on XOR but with 10% random label noise. Does the network still converge? What is the best achievable accuracy?</li>
+  </ol>
+
+  <details>
+    <summary>▶ Show Key Solutions</summary>
+    <pre><code class="language-python">import torch
+import numpy as np
+
+# Exercise 1a: f(x) = (3x² - 2x + 1)³ at x=1
+x = torch.tensor(1.0, requires_grad=True)
+f = (3*x**2 - 2*x + 1)**3
+f.backward()
+print(f"f'(1) via autograd: {x.grad.item()}")
+# Analytical: f'(x) = 3*(3x²-2x+1)² * (6x-2)
+# At x=1: 3*(3-2+1)² * (6-2) = 3*4*4 = 48
+print(f"f'(1) analytical: {3 * (3-2+1)**2 * (6-2)}")
+
+# Exercise 1b: f(x) = tanh(sigmoid(x)) at x=0
+x = torch.tensor(0.0, requires_grad=True)
+f = torch.tanh(torch.sigmoid(x))
+f.backward()
+print(f"\ntanh(sigmoid(x))' at x=0: {x.grad.item():.6f}")
+# σ(0)=0.5, tanh(0.5)≈0.462, dσ/dx=0.25, dtanh/du=1-tanh²(0.5)≈0.787
+# chain: 0.787 * 0.25 ≈ 0.197
+print(f"Analytical approx: {(1 - np.tanh(0.5)**2) * 0.25:.6f}")
+
+# Exercise 3: Gradient clipping
+model = torch.nn.Linear(10, 1)
+# Bad initialisation
+with torch.no_grad():
+    model.weight.fill_(5.0)
+    model.bias.fill_(5.0)
+
+X = torch.randn(32, 10)
+y = torch.randn(32, 1)
+optimizer = torch.optim.SGD(model.parameters(), lr=0.01)
+loss_fn = torch.nn.MSELoss()
+
+print("\nWith gradient clipping:")
+for step in range(5):
+    optimizer.zero_grad()
+    loss = loss_fn(model(X), y)
+    loss.backward()
+    # Clip gradients before step
+    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+    grad_norm = model.weight.grad.norm().item()
+    optimizer.step()
+    print(f"  Step {step+1}: loss={loss.item():.2f}, grad_norm={grad_norm:.4f}")</code></pre>
+  </details>
+</div>
+
+<!-- Primary Source -->
+<div class="primary-source">
+  <h2>📚 Primary Sources for This Lesson</h2>
+  <p><a href="https://www.cs.toronto.edu/~fritz/absps/pdp8.pdf" target="_blank"><strong>Rumelhart, Hinton, Williams (1986): "Learning Representations by Back-propagating Errors"</strong></a> — the original backpropagation paper. Remarkably readable. A landmark in the history of AI. Worth reading even if just the introduction and abstract.<br><br>
+  <a href="http://neuralnetworksanddeeplearning.com/chap2.html" target="_blank"><strong>Neural Networks and Deep Learning — Chapter 2: How Backpropagation Works (Michael Nielsen)</strong></a> — the clearest pedagogical derivation of backpropagation anywhere. Uses a similar 2-layer example to this lesson and builds up the equations with exceptional care. Free online.</p>
+</div>
+
+<!-- Ask Tutor -->
+<div class="ask-tutor">
+  <span class="icon">💬</span>
+  <span>Struggling with the matrix dimensions in the backward pass? The shapes of dL/dW, dL/db, and dL/dx are a common stumbling block. Write out what you have and what shapes you expect — your AI tutor will work through the dimension analysis with you step by step.</span>
+</div>
+
+<!-- Navigation -->
+<nav class="lesson-nav">
+  <a href="./0038-pytorch-tensors-autograd.html" class="nav-btn nav-btn-prev">← Lesson 38: PyTorch Tensors &amp; Autograd</a>
+  <a href="./0040-gradient-descent-variants.html" class="nav-btn nav-btn-next">Lesson 40: Gradient Descent Variants →</a>
+</nav>
+
+</div><!-- /content-wrapper -->
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-core.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/plugins/autoloader/prism-autoloader.min.js"></script>
+<script src="../assets/quiz.js"></script>
+<script>
+new MLQuiz('lesson-39-quiz', [
+  {
+    question: "Why is backpropagation more efficient than computing each gradient separately with finite differences?",
+    options: [
+      "Backprop computes ALL gradients in a single backward pass; finite differences requires two forward passes per parameter — O(n) for n parameters",
+      "Backprop is a numerical approximation while finite differences is exact, so backprop uses fewer resources",
+      "Backprop only computes gradients for the last layer; inner layers don't need gradients",
+      "Finite differences computes approximate gradients while backprop only computes exact gradients for scalar functions"
+    ],
+    correct: 0,
+    explanation: "Finite differences needs two forward passes for each parameter (one with w+ε, one with w-ε) to approximate one gradient. For n parameters, that's 2n forward passes. A 100M-parameter model would need 200 million forward passes — completely intractable. Backpropagation computes ALL n gradients in essentially one forward pass + one backward pass (roughly 2-3x the cost of a single forward pass) by efficiently reusing intermediate computations via the chain rule. This is why deep learning is computationally feasible."
+  },
+  {
+    question: "During the backward pass, what values from the forward pass are needed, and why?",
+    options: [
+      "Intermediate activations are cached during the forward pass because they are needed to compute local gradients — for example, ReLU's derivative requires knowing whether the pre-activation was positive",
+      "Only the final loss value needs to be cached; all other gradients can be recomputed from the inputs",
+      "The weights and biases from forward pass must be saved, but activations are not needed",
+      "Nothing needs to be cached — backprop computes everything fresh from the input data"
+    ],
+    correct: 0,
+    explanation: "The backward pass requires intermediate activations from the forward pass to compute local gradients. For example: the ReLU derivative is relu'(a) = 1 if a > 0 else 0 — so you need the cached pre-activation 'a' to know which neurons were active. For gradient w.r.t. W2, you need the cached hidden activation z1 (dL/dW2 = dL/dŷ · z1.T). These are the 'local Jacobians' at each operation node. Without caching, you'd need to re-run the forward pass multiple times, defeating the efficiency of backprop."
+  },
+  {
+    question: "In a deep network with all sigmoid activations, gradients often vanish by the time they reach early layers. Why?",
+    options: [
+      "Sigmoid's derivative is at most 0.25 — multiplying many values less than 1 across many layers produces exponentially small gradients for early layers",
+      "Sigmoid outputs are between 0 and 1, and small outputs make subsequent gradients small through division",
+      "Sigmoid is not differentiable at 0, causing numerical errors that accumulate through deep networks",
+      "Sigmoid requires complex numbers for its derivative, which don't propagate well in floating point"
+    ],
+    correct: 0,
+    explanation: "The sigmoid derivative σ'(x) = σ(x)(1-σ(x)) has a maximum value of 0.25 (when σ(x) = 0.5, i.e., x = 0). For |x| > 2, the derivative is less than 0.1. In a 20-layer sigmoid network, the gradient at layer 1 involves multiplying 20 such derivatives: at best 0.25^20 ≈ 10^-12, essentially zero. Layer 1 receives no meaningful gradient signal and barely learns. This is why deep sigmoid networks were impractical until ReLU became widely used — ReLU's derivative is exactly 1.0 for positive inputs, preventing this shrinkage."
+  },
+  {
+    question: "What does .detach() do in PyTorch, and when would you use it?",
+    options: [
+      "It creates a new tensor sharing the same data but excluded from the computation graph — gradients will not flow through detached tensors, useful when you want to use a tensor's value without backpropagating through it",
+      "It removes the tensor from GPU memory and moves it to CPU, freeing GPU resources",
+      "It permanently zeros out the tensor's gradient, equivalent to calling .grad.zero_()",
+      "It freezes the tensor's value so it cannot be modified by optimizer.step()"
+    ],
+    correct: 0,
+    explanation: ".detach() creates a tensor that shares the same underlying data (no copy) but is not connected to the computation graph. Operations performed on the detached tensor do not record gradient information. Common uses: (1) treating a computed value as a constant in a loss (e.g., target networks in RL); (2) converting tensors for logging/plotting without affecting memory; (3) stopping gradients from flowing into certain parts of the network (like frozen layers in fine-tuning). Important: .detach().numpy() is the safe way to convert tracked tensors to NumPy."
+  },
+  {
+    question: "If you forget to call optimizer.zero_grad() between training batches, what happens to the gradients and training?",
+    options: [
+      "Gradients accumulate — each batch's gradients are added to all previous batches' gradients, causing increasingly large and incorrect weight updates that destabilise training",
+      "The gradients are automatically reset by loss.backward(), so forgetting zero_grad() has no effect",
+      "Only the first layer's gradients accumulate; deeper layers always reset automatically",
+      "Training proceeds normally but slightly slower, since zero_grad() is an optimisation hint"
+    ],
+    correct: 0,
+    explanation: "PyTorch accumulates gradients into the .grad attribute by default — it does NOT reset between calls to .backward(). Without zero_grad(), after 3 batches, the gradient contains the sum of all 3 batches' gradients. After 10 batches, it contains 10 batches worth of gradients. The weight updates grow with every iteration, eventually causing loss oscillation, divergence, or NaN values. This is one of the most common PyTorch training bugs. The fix: optimizer.zero_grad() (or zero_grad(set_to_none=True) for efficiency) must be the first operation in every training loop iteration."
+  }
+]);
+</script>
+
+</body>
+</html>

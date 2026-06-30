@@ -1,0 +1,995 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lesson 41: PyTorch Datasets, DataLoaders &amp; Training Loop | ML Mastery</title>
+  <link rel="stylesheet" href="../assets/style.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
+</head>
+<body>
+
+<header class="lesson-header">
+  <div class="header-inner">
+    <nav class="breadcrumb">
+      <a href="../reference/curriculum-map.html">ML Mastery</a>
+      <span class="sep">›</span>
+      <span>Phase 4: Deep Learning Foundations</span>
+    </nav>
+    <div class="lesson-badges">
+      <span class="phase-badge">Phase 4 · Deep Learning Foundations</span>
+      <span class="lesson-num-badge">Lesson 41</span>
+    </div>
+    <h1 class="lesson-title">PyTorch in Practice: Datasets, DataLoaders &amp; the Training Loop</h1>
+    <p class="lesson-subtitle">The complete infrastructure of PyTorch model training — from loading one sample to orchestrating GPU-accelerated mini-batch training with the canonical training loop.</p>
+    <div class="meta-pills">
+      <span class="meta-pill">⏱ ~75 min</span>
+      <span class="meta-pill">🔥 PyTorch</span>
+      <span class="meta-pill">Phase 4 · Deep Learning Foundations</span>
+      <span class="meta-pill">Requires Lesson 40</span>
+    </div>
+  </div>
+</header>
+
+<main class="lesson-main">
+<div class="content-wrapper">
+
+<div class="objectives-card">
+  <h2>🎯 What You'll Learn</h2>
+  <ul>
+    <li>Build PyTorch models using <code>nn.Module</code>: understand <code>__init__</code>, <code>forward()</code>, and automatic parameter tracking</li>
+    <li>Use the most important built-in layers: <code>nn.Linear</code>, <code>nn.ReLU</code>, <code>nn.Sequential</code>, <code>nn.Dropout</code>, <code>nn.BatchNorm1d</code></li>
+    <li>Choose the right loss function for regression, binary classification, and multi-class classification</li>
+    <li>Create custom <code>torch.utils.data.Dataset</code> subclasses — from NumPy arrays to CSV files to image folders</li>
+    <li>Configure <code>DataLoader</code> for efficient batching, shuffling, and parallel data loading</li>
+    <li>Write the canonical PyTorch training loop step-by-step, with a separate validation loop</li>
+    <li>Save and load models: <code>state_dict</code> vs full model, checkpointing for resume</li>
+  </ul>
+</div>
+
+<div class="callout callout-tip">
+  <span class="callout-icon">💡</span>
+  <div class="callout-body">
+    <strong>Intuition Hook — The Data Pipeline Assembly Line</strong>
+    <p>In classical ML, you load your data into a NumPy array and pass it to sklearn's <code>.fit()</code>. In deep learning, data rarely fits in memory all at once — you might have millions of images. PyTorch's Dataset and DataLoader system is an elegant solution: <code>Dataset</code> says "here's how to load <em>one sample</em>"; <code>DataLoader</code> says "I'll batch them up efficiently, shuffle them, and load them in parallel so your GPU is never waiting." Think of it as a factory assembly line: Dataset workers fetch raw materials (samples), and DataLoader is the conveyor belt that groups them into boxes (batches) for the GPU factory floor.</p>
+  </div>
+</div>
+
+<!-- ── Section 1 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">1</span> The torch.nn.Module: Building Blocks of PyTorch Models</h2>
+
+  <p>In PyTorch, <em>everything</em> is a Module. Individual layers (<code>nn.Linear</code>, <code>nn.ReLU</code>), entire networks, and even loss functions are all subclasses of <code>nn.Module</code>. Understanding Module is the key to understanding how PyTorch tracks parameters, computes gradients, and applies operations.</p>
+
+  <p>When you subclass <code>nn.Module</code>, you must implement two methods:</p>
+  <ul>
+    <li><strong><code>__init__(self)</code></strong>: Define your layers here. Any <code>nn.Module</code> you assign as an attribute gets automatically registered as a parameter container.</li>
+    <li><strong><code>forward(self, x)</code></strong>: Define the computation. PyTorch calls this when you call <code>model(x)</code>.</li>
+  </ul>
+
+  <pre><code class="language-python">import torch
+import torch.nn as nn
+
+class TwoLayerMLP(nn.Module):
+    """
+    A two-layer Multi-Layer Perceptron.
+    Demonstrates the two required methods: __init__ and forward.
+    """
+    def __init__(self, input_dim, hidden_dim, output_dim):
+        super().__init__()   # ALWAYS call super().__init__() first!
+
+        # Define layers as attributes — PyTorch auto-registers their parameters
+        self.fc1 = nn.Linear(input_dim, hidden_dim)
+        self.relu = nn.ReLU()
+        self.fc2 = nn.Linear(hidden_dim, output_dim)
+
+    def forward(self, x):
+        """Define the computation graph. Called when you do model(x)."""
+        out = self.fc1(x)     # Linear: y = Wx + b
+        out = self.relu(out)  # Activation: max(0, x)
+        out = self.fc2(out)   # Linear: output layer (no activation here — loss applies it)
+        return out
+
+# Instantiate the model
+model = TwoLayerMLP(input_dim=10, hidden_dim=64, output_dim=1)
+print(model)
+# TwoLayerMLP(
+#   (fc1): Linear(in_features=10, out_features=64, bias=True)
+#   (relu): ReLU()
+#   (fc2): Linear(in_features=64, out_features=1, bias=True)
+# )
+
+# Count parameters
+total_params = sum(p.numel() for p in model.parameters())
+trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+print(f"Total parameters:     {total_params:,}")
+print(f"Trainable parameters: {trainable_params:,}")
+
+# Forward pass
+x = torch.randn(5, 10)   # batch of 5 samples, each with 10 features
+output = model(x)         # calls forward() automatically
+print(f"Input shape:  {x.shape}")     # torch.Size([5, 10])
+print(f"Output shape: {output.shape}")  # torch.Size([5, 1])</code></pre>
+
+  <div class="output-block">
+    <div class="output-label">Output</div>
+Total parameters:     705
+Trainable parameters: 705
+Input shape:  torch.Size([5, 10])
+Output shape: torch.Size([5, 1])
+  </div>
+
+  <h3>Inspecting Parameters</h3>
+  <pre><code class="language-python"># See all parameter names and shapes
+for name, param in model.named_parameters():
+    print(f"{name:15s} | shape: {str(param.shape):20s} | requires_grad: {param.requires_grad}")
+
+# fc1.weight     | shape: torch.Size([64, 10])    | requires_grad: True
+# fc1.bias       | shape: torch.Size([64])        | requires_grad: True
+# fc2.weight     | shape: torch.Size([1, 64])     | requires_grad: True
+# fc2.bias       | shape: torch.Size([1])         | requires_grad: True
+
+# Move model to GPU if available
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+model = model.to(device)
+print(f"Model moved to: {device}")</code></pre>
+
+  <div class="callout callout-key">
+    <span class="callout-icon">🔑</span>
+    <div class="callout-body">
+      <strong>Why nn.Module Exists</strong>
+      <p>The Module system automates the tedious bookkeeping of parameter tracking. When you do <code>self.fc1 = nn.Linear(...)</code>, PyTorch registers all of fc1's weights and biases under the parent module. <code>model.parameters()</code> then returns all of them — from every layer — in one place. Without this system, you'd have to manually track every weight tensor and pass them all to the optimizer yourself.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 2 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">2</span> Common PyTorch Layers You'll Use Every Day</h2>
+
+  <p>PyTorch ships with a comprehensive library of pre-built layers. Here are the ones you'll encounter in virtually every deep learning project.</p>
+
+  <h3>Linear Layers and Activations</h3>
+  <pre><code class="language-python">import torch.nn as nn
+
+# nn.Linear(in_features, out_features, bias=True)
+# Implements: y = xW^T + b
+# in_features: size of each input sample
+# out_features: size of each output sample
+fc = nn.Linear(128, 64)
+print(f"fc.weight shape: {fc.weight.shape}")  # torch.Size([64, 128])
+print(f"fc.bias shape:   {fc.bias.shape}")    # torch.Size([64])
+
+# Activation functions
+relu    = nn.ReLU()        # max(0, x) — most common, default choice
+sigmoid = nn.Sigmoid()     # 1/(1+e^-x) — outputs in (0,1) — for binary classification
+tanh    = nn.Tanh()        # (e^x - e^-x)/(e^x + e^-x) — outputs in (-1,1) — for RNNs
+leaky   = nn.LeakyReLU(negative_slope=0.01)   # allows small gradient for x < 0
+gelu    = nn.GELU()        # smooth ReLU approximation — standard in Transformers
+
+x = torch.tensor([-2.0, -1.0, 0.0, 1.0, 2.0])
+print(f"ReLU:    {relu(x)}")    # [0., 0., 0., 1., 2.]
+print(f"Sigmoid: {sigmoid(x).round(decimals=3)}")  # [0.119, 0.269, 0.5, 0.731, 0.881]
+print(f"Tanh:    {tanh(x).round(decimals=3)}")     # [-0.964, -0.762, 0., 0.762, 0.964]</code></pre>
+
+  <h3>nn.Sequential: Stack Layers in Order</h3>
+  <pre><code class="language-python"># Two equivalent ways to build the same MLP:
+
+# Method 1: Explicit class (more flexible, allows custom logic in forward)
+class ExplicitMLP(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.fc1 = nn.Linear(784, 256)
+        self.bn1 = nn.BatchNorm1d(256)
+        self.relu1 = nn.ReLU()
+        self.drop1 = nn.Dropout(p=0.3)
+        self.fc2 = nn.Linear(256, 128)
+        self.relu2 = nn.ReLU()
+        self.fc3 = nn.Linear(128, 10)
+
+    def forward(self, x):
+        x = self.drop1(self.relu1(self.bn1(self.fc1(x))))
+        x = self.relu2(self.fc2(x))
+        return self.fc3(x)
+
+# Method 2: nn.Sequential (concise, sufficient for simple architectures)
+sequential_mlp = nn.Sequential(
+    nn.Linear(784, 256),
+    nn.BatchNorm1d(256),
+    nn.ReLU(),
+    nn.Dropout(p=0.3),
+    nn.Linear(256, 128),
+    nn.ReLU(),
+    nn.Linear(128, 10)
+)
+
+# Both are identical in function — Sequential is fine when forward pass is linear
+x = torch.randn(4, 784)
+out_explicit = ExplicitMLP()(x)
+out_sequential = sequential_mlp(x)
+print(f"Explicit MLP output shape:    {out_explicit.shape}")     # torch.Size([4, 10])
+print(f"Sequential MLP output shape:  {out_sequential.shape}")  # torch.Size([4, 10])</code></pre>
+
+  <h3>model.train() vs model.eval()</h3>
+  <pre><code class="language-python"># Some layers (Dropout, BatchNorm) behave DIFFERENTLY in training vs inference
+# You must switch modes explicitly
+
+model.train()   # Training mode: Dropout drops neurons, BatchNorm uses batch stats
+# ... training loop ...
+
+model.eval()    # Evaluation mode: Dropout disabled, BatchNorm uses running stats
+# ... validation / inference ...
+
+# Forgetting model.eval() during validation is one of the most common bugs in PyTorch!
+# Your validation accuracy will be lower than it should be because Dropout is still active.</code></pre>
+
+  <div class="callout callout-warn">
+    <span class="callout-icon">⚠️</span>
+    <div class="callout-body">
+      <strong>The Most Common PyTorch Bug: Forgetting model.eval()</strong>
+      <p>If you run evaluation or inference while the model is still in training mode, Dropout is still randomly zeroing neurons. This means: (1) your validation accuracy will be artificially low, (2) predictions will be non-deterministic (different every time you run), (3) BatchNorm will use the current batch's statistics rather than the running statistics from training. Always call <code>model.eval()</code> before any validation or inference block.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 3 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">3</span> Loss Functions in PyTorch: Choosing the Right One</h2>
+
+  <p>The loss function is the objective your model optimises. Choosing the wrong one is one of the most common mistakes beginners make. Here's a clear guide to the main options and when to use each.</p>
+
+  <pre><code class="language-python">import torch
+import torch.nn as nn
+
+# ── Regression ────────────────────────────────────────────────────────────
+mse_loss = nn.MSELoss()    # Mean Squared Error: (1/n) Σ(y_pred - y_true)²
+mae_loss = nn.L1Loss()     # Mean Absolute Error: (1/n) Σ|y_pred - y_true|
+huber    = nn.HuberLoss()  # Smooth L1: MSE for small errors, MAE for large (robust to outliers)
+
+y_pred = torch.tensor([2.5, 3.1, 1.8])
+y_true = torch.tensor([2.0, 3.0, 2.0])
+
+print(f"MSE:   {mse_loss(y_pred, y_true):.4f}")   # (0.5²+0.1²+0.2²)/3 = 0.10
+print(f"MAE:   {mae_loss(y_pred, y_true):.4f}")   # (0.5+0.1+0.2)/3 = 0.27
+print(f"Huber: {huber(y_pred, y_true):.4f}")
+
+# ── Binary Classification ─────────────────────────────────────────────────
+# Option 1: BCELoss — expects probabilities in (0, 1)
+# Use when you apply sigmoid to logits yourself
+bce_loss = nn.BCELoss()
+probs = torch.sigmoid(torch.tensor([1.5, -0.8, 2.1]))  # apply sigmoid first
+labels = torch.tensor([1.0, 0.0, 1.0])
+print(f"BCE:   {bce_loss(probs, labels):.4f}")
+
+# Option 2: BCEWithLogitsLoss — expects RAW LOGITS (more numerically stable)
+# Use this one in practice — it applies sigmoid internally with better precision
+bce_logit = nn.BCEWithLogitsLoss()
+logits = torch.tensor([1.5, -0.8, 2.1])   # raw model output, no sigmoid applied
+print(f"BCE (logits): {bce_logit(logits, labels):.4f}")
+
+# ── Multi-Class Classification ─────────────────────────────────────────────
+# CrossEntropyLoss = log-softmax + NLLLoss in one step
+# IMPORTANT: Expects RAW LOGITS — do NOT apply softmax before it!
+ce_loss = nn.CrossEntropyLoss()
+logits_mc = torch.tensor([[2.0, 0.5, -1.0],   # class 0 most likely
+                           [0.1, 3.2,  0.3],   # class 1 most likely
+                           [-0.5, 0.2, 1.8]])  # class 2 most likely
+# Labels are CLASS INDICES (not one-hot vectors)
+class_labels = torch.tensor([0, 1, 2])
+print(f"CrossEntropy: {ce_loss(logits_mc, class_labels):.4f}")</code></pre>
+
+  <div class="callout callout-warn">
+    <span class="callout-icon">⚠️</span>
+    <div class="callout-body">
+      <strong>The Double-Softmax Bug</strong>
+      <p>A very common mistake: the model's last layer applies <code>nn.Softmax()</code>, and then the loss is <code>nn.CrossEntropyLoss()</code> — which internally applies log-softmax. You've now applied softmax twice. The result: gradients become almost zero near the softmax output, training stalls, and your model learns almost nothing. Fix: <strong>never apply softmax before CrossEntropyLoss</strong>. Pass raw logits. If you need probabilities for inference, apply <code>torch.softmax(logits, dim=1)</code> only at prediction time.</p>
+    </div>
+  </div>
+
+  <table style="width:100%; border-collapse: collapse; margin: 1.25rem 0; font-size: 0.85rem;">
+    <thead>
+      <tr style="background: var(--bg-alt);">
+        <th style="padding: 0.65rem 1rem; border: 1px solid var(--border); text-align: left;">Task</th>
+        <th style="padding: 0.65rem 1rem; border: 1px solid var(--border); text-align: left;">Loss Function</th>
+        <th style="padding: 0.65rem 1rem; border: 1px solid var(--border); text-align: left;">Model Output</th>
+        <th style="padding: 0.65rem 1rem; border: 1px solid var(--border); text-align: left;">Label Type</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td style="padding: 0.55rem 1rem; border: 1px solid var(--border);">Regression</td>
+        <td style="padding: 0.55rem 1rem; border: 1px solid var(--border); font-family: monospace;">nn.MSELoss()</td>
+        <td style="padding: 0.55rem 1rem; border: 1px solid var(--border);">Any real number</td>
+        <td style="padding: 0.55rem 1rem; border: 1px solid var(--border);">float tensor</td>
+      </tr>
+      <tr style="background: var(--bg-subtle);">
+        <td style="padding: 0.55rem 1rem; border: 1px solid var(--border);">Binary classification</td>
+        <td style="padding: 0.55rem 1rem; border: 1px solid var(--border); font-family: monospace;">nn.BCEWithLogitsLoss()</td>
+        <td style="padding: 0.55rem 1rem; border: 1px solid var(--border);">Raw logit (scalar)</td>
+        <td style="padding: 0.55rem 1rem; border: 1px solid var(--border);">0.0 or 1.0 float</td>
+      </tr>
+      <tr>
+        <td style="padding: 0.55rem 1rem; border: 1px solid var(--border);">Multi-class classification</td>
+        <td style="padding: 0.55rem 1rem; border: 1px solid var(--border); font-family: monospace;">nn.CrossEntropyLoss()</td>
+        <td style="padding: 0.55rem 1rem; border: 1px solid var(--border);">Logits vector (one per class)</td>
+        <td style="padding: 0.55rem 1rem; border: 1px solid var(--border);">int class index</td>
+      </tr>
+      <tr style="background: var(--bg-subtle);">
+        <td style="padding: 0.55rem 1rem; border: 1px solid var(--border);">Robust regression</td>
+        <td style="padding: 0.55rem 1rem; border: 1px solid var(--border); font-family: monospace;">nn.HuberLoss()</td>
+        <td style="padding: 0.55rem 1rem; border: 1px solid var(--border);">Any real number</td>
+        <td style="padding: 0.55rem 1rem; border: 1px solid var(--border);">float tensor</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+<!-- ── Section 4 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">4</span> torch.utils.data.Dataset: Custom Data Loading</h2>
+
+  <p>The <code>Dataset</code> class is an abstract interface with one simple contract: implement <code>__len__</code> (how many samples?) and <code>__getitem__</code> (given an index, return that sample). Everything else — batching, shuffling, parallel loading — is handled by DataLoader.</p>
+
+  <p>This design is elegant because your Dataset doesn't need to hold all data in memory. <code>__getitem__</code> can load from disk on demand — reading a single row from a CSV, loading one image file, fetching from a database. Only the data for the current batch is ever in memory.</p>
+
+  <h3>Example 1: Wrapping NumPy Arrays (Simplest Case)</h3>
+  <pre><code class="language-python">import torch
+from torch.utils.data import Dataset, TensorDataset, DataLoader
+import numpy as np
+
+# TensorDataset: the simplest Dataset — just wraps existing tensors
+X_np = np.random.randn(1000, 10).astype(np.float32)
+y_np = (X_np[:, 0] + X_np[:, 1] > 0).astype(np.float32)
+
+# Convert to tensors and wrap
+X_tensor = torch.from_numpy(X_np)
+y_tensor = torch.from_numpy(y_np)
+dataset = TensorDataset(X_tensor, y_tensor)
+
+print(f"Dataset length: {len(dataset)}")           # 1000
+sample_x, sample_y = dataset[42]                   # get sample 42
+print(f"Sample x shape: {sample_x.shape}")         # torch.Size([10])
+print(f"Sample y: {sample_y.item():.0f}")          # 0 or 1</code></pre>
+
+  <h3>Example 2: Custom CSV Dataset (Load On Demand)</h3>
+  <pre><code class="language-python">import pandas as pd
+
+class CSVDataset(Dataset):
+    """
+    Loads tabular data from a CSV file on demand.
+    Only the requested row is loaded at inference time.
+    """
+    def __init__(self, filepath, feature_cols, target_col):
+        # Load the full CSV once — into memory — but as a DataFrame
+        # (For very large files, you could use memory-mapped files instead)
+        self.df = pd.read_csv(filepath)
+        self.feature_cols = feature_cols
+        self.target_col = target_col
+
+    def __len__(self):
+        return len(self.df)
+
+    def __getitem__(self, idx):
+        # Load ONE row by index
+        row = self.df.iloc[idx]
+
+        features = torch.tensor(row[self.feature_cols].values, dtype=torch.float32)
+        label    = torch.tensor(row[self.target_col], dtype=torch.float32)
+
+        return features, label
+
+# Usage:
+# dataset = CSVDataset('employees.csv', feature_cols=['age','salary','dept'], target_col='bonus')
+# print(f"Dataset size: {len(dataset)}")
+# features, label = dataset[0]    # loads just row 0</code></pre>
+
+  <h3>Example 3: Image Dataset (Load from Disk)</h3>
+  <pre><code class="language-python">import os
+from PIL import Image
+from torchvision import transforms
+
+class ImageFolderDataset(Dataset):
+    """
+    Loads images from a folder structure:
+    data/
+      class_0/   img001.jpg, img002.jpg, ...
+      class_1/   img101.jpg, img102.jpg, ...
+    """
+    def __init__(self, root_dir, transform=None):
+        self.root_dir = root_dir
+        self.transform = transform
+        self.samples = []   # list of (filepath, label_index)
+
+        # Build list of (image_path, class_label) pairs
+        classes = sorted(os.listdir(root_dir))
+        self.class_to_idx = {cls: i for i, cls in enumerate(classes)}
+
+        for cls in classes:
+            cls_dir = os.path.join(root_dir, cls)
+            for fname in os.listdir(cls_dir):
+                if fname.lower().endswith(('.jpg', '.png', '.jpeg')):
+                    self.samples.append((os.path.join(cls_dir, fname), self.class_to_idx[cls]))
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, idx):
+        filepath, label = self.samples[idx]
+
+        # Load image from disk — only THIS image is loaded now
+        image = Image.open(filepath).convert('RGB')
+
+        # Apply transforms (resize, normalize, augment)
+        if self.transform:
+            image = self.transform(image)
+
+        return image, label
+
+# Create dataset with transforms
+train_transform = transforms.Compose([
+    transforms.Resize((224, 224)),
+    transforms.RandomHorizontalFlip(),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+])
+# dataset = ImageFolderDataset('data/train/', transform=train_transform)
+# print(f"Classes: {dataset.class_to_idx}")
+# print(f"Total images: {len(dataset)}")</code></pre>
+
+  <div class="callout callout-key">
+    <span class="callout-icon">🔑</span>
+    <div class="callout-body">
+      <strong>The Power of On-Demand Loading</strong>
+      <p>The <code>__getitem__</code> contract is what makes PyTorch scalable. For image datasets with 10 million images (hundreds of GB), you can't load everything into memory. But your Dataset knows <em>how</em> to load any single image by index. DataLoader calls <code>__getitem__</code> in parallel across multiple CPU workers, ensuring the GPU always has fresh batches to process. The GPU never waits for data.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 5 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">5</span> DataLoader: Efficient Batching</h2>
+
+  <p>The DataLoader wraps a Dataset and handles the mechanics of: random sampling (shuffling), grouping into batches, parallel loading (multiple CPU workers), and moving data to GPU efficiently. You almost never need to implement this yourself — DataLoader handles everything.</p>
+
+  <pre><code class="language-python">from torch.utils.data import DataLoader, random_split
+
+# Example: split dataset into train/validation sets
+dataset = TensorDataset(X_tensor, y_tensor)
+train_size = int(0.8 * len(dataset))
+val_size = len(dataset) - train_size
+train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
+
+# ── DataLoader parameters explained ──────────────────────────────────────
+train_loader = DataLoader(
+    train_dataset,
+    batch_size=64,          # how many samples per batch
+    shuffle=True,           # shuffle at the start of each epoch (training only)
+    num_workers=4,          # parallel data loading processes (usually 2-4)
+    pin_memory=True,        # faster CPU→GPU transfer (use when GPU is available)
+    drop_last=True          # drop the last batch if it's smaller than batch_size
+)                           # (avoids issues with BatchNorm on tiny batches)
+
+val_loader = DataLoader(
+    val_dataset,
+    batch_size=128,          # can use larger batch for validation (no gradient storage)
+    shuffle=False,           # never shuffle validation — need consistent results
+    num_workers=4,
+    pin_memory=True
+)
+
+print(f"Train batches per epoch: {len(train_loader)}")
+print(f"Val batches per epoch:   {len(val_loader)}")
+
+# Iterate over DataLoader
+for batch_idx, (X_batch, y_batch) in enumerate(train_loader):
+    print(f"Batch {batch_idx}: X shape={X_batch.shape}, y shape={y_batch.shape}")
+    if batch_idx >= 2:   # just show first 3 batches
+        break
+
+# Batch 0: X shape=torch.Size([64, 10]), y shape=torch.Size([64])
+# Batch 1: X shape=torch.Size([64, 10]), y shape=torch.Size([64])
+# Batch 2: X shape=torch.Size([64, 10]), y shape=torch.Size([64])</code></pre>
+
+  <div class="callout callout-tip">
+    <span class="callout-icon">💡</span>
+    <div class="callout-body">
+      <strong>num_workers: The Data Loading Bottleneck</strong>
+      <p>With <code>num_workers=0</code> (the default), data loading happens on the same process as training — the GPU sits idle while the CPU loads the next batch. With <code>num_workers=4</code>, four worker processes pre-fetch batches in parallel while the GPU trains on the current batch. For image datasets with heavy preprocessing (resize, augment), this can be the difference between 10% and 90% GPU utilisation. Start with <code>num_workers=2</code> or <code>4</code> and increase if GPU utilisation is low.</p>
+    </div>
+  </div>
+
+  <h3>Built-in Datasets: torchvision</h3>
+  <pre><code class="language-python">from torchvision import datasets, transforms
+
+# Standard transform pipeline for MNIST
+mnist_transform = transforms.Compose([
+    transforms.ToTensor(),                          # PIL → [0,1] float tensor
+    transforms.Normalize((0.1307,), (0.3081,))     # mean, std from MNIST statistics
+])
+
+# Download = True will download if not already present
+train_set = datasets.MNIST(root='./data', train=True,  download=True, transform=mnist_transform)
+test_set  = datasets.MNIST(root='./data', train=False, download=True, transform=mnist_transform)
+
+train_loader = DataLoader(train_set, batch_size=64, shuffle=True,  num_workers=2)
+test_loader  = DataLoader(test_set,  batch_size=256, shuffle=False, num_workers=2)
+
+# Data augmentation for CIFAR-10
+cifar_train_transform = transforms.Compose([
+    transforms.RandomCrop(32, padding=4),           # random crop with padding
+    transforms.RandomHorizontalFlip(p=0.5),         # flip 50% of images
+    transforms.ColorJitter(brightness=0.2, contrast=0.2),
+    transforms.ToTensor(),
+    transforms.Normalize((0.4914, 0.4822, 0.4465), (0.247, 0.243, 0.261))
+])
+
+cifar_val_transform = transforms.Compose([   # no augmentation for validation
+    transforms.ToTensor(),
+    transforms.Normalize((0.4914, 0.4822, 0.4465), (0.247, 0.243, 0.261))
+])
+
+cifar_train = datasets.CIFAR10('./data', train=True,  download=True, transform=cifar_train_transform)
+cifar_test  = datasets.CIFAR10('./data', train=False, download=True, transform=cifar_val_transform)</code></pre>
+</div>
+
+<!-- ── Section 6 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">6</span> The Complete Training Loop</h2>
+
+  <p>The PyTorch training loop is the engine of deep learning. Every framework — Keras, fast.ai, PyTorch Lightning — is abstracting over the same six steps. Understanding them at this level means you can debug anything, customise anything, and know exactly what's happening under the hood.</p>
+
+  <p><strong>The 6 steps of a training iteration:</strong></p>
+
+  <pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.optim as optim
+from torchvision import datasets, transforms
+from torch.utils.data import DataLoader
+
+# ── Setup ──────────────────────────────────────────────────────────────────
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+transform = transforms.Compose([transforms.ToTensor(), transforms.Normalize((0.1307,), (0.3081,))])
+train_set = datasets.MNIST('./data', train=True,  download=True, transform=transform)
+test_set  = datasets.MNIST('./data', train=False, download=True, transform=transform)
+train_loader = DataLoader(train_set, batch_size=64, shuffle=True,  num_workers=2)
+test_loader  = DataLoader(test_set,  batch_size=256, shuffle=False, num_workers=2)
+
+model = nn.Sequential(
+    nn.Flatten(),
+    nn.Linear(784, 256), nn.ReLU(), nn.Dropout(0.2),
+    nn.Linear(256, 128), nn.ReLU(), nn.Dropout(0.2),
+    nn.Linear(128, 10)
+).to(device)
+
+optimizer = optim.Adam(model.parameters(), lr=1e-3)
+criterion = nn.CrossEntropyLoss()
+scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=10)
+
+def train_one_epoch(model, loader, optimizer, criterion, device):
+    """Run one full training epoch. Returns average loss."""
+    model.train()   # Step 0: switch to training mode (enables Dropout, etc.)
+    total_loss = 0.0
+
+    for X_batch, y_batch in loader:
+        # Move batch to same device as model
+        X_batch = X_batch.to(device)
+        y_batch = y_batch.to(device)
+
+        # Step 1: zero gradients — MUST do this every iteration
+        # (PyTorch accumulates gradients by default — leftover gradients from
+        #  previous batch would corrupt this batch's update)
+        optimizer.zero_grad()
+
+        # Step 2: forward pass
+        logits = model(X_batch)
+
+        # Step 3: compute loss
+        loss = criterion(logits, y_batch)
+
+        # Step 4: backward pass — compute gradients for ALL parameters
+        loss.backward()
+
+        # Step 5: optimizer step — update ALL parameters using their gradients
+        optimizer.step()
+
+        total_loss += loss.item()
+
+    return total_loss / len(loader)   # average loss over all batches
+
+def evaluate(model, loader, criterion, device):
+    """Run validation loop. Returns average loss and accuracy."""
+    model.eval()   # switch to eval mode (disables Dropout, fixes BatchNorm)
+    total_loss = 0.0
+    correct = 0
+    total = 0
+
+    with torch.no_grad():   # disable gradient computation — saves memory and time
+        for X_batch, y_batch in loader:
+            X_batch = X_batch.to(device)
+            y_batch = y_batch.to(device)
+
+            logits = model(X_batch)
+            loss = criterion(logits, y_batch)
+            total_loss += loss.item()
+
+            # Get predicted class: index of highest logit
+            preds = logits.argmax(dim=1)
+            correct += (preds == y_batch).sum().item()
+            total += y_batch.size(0)
+
+    avg_loss = total_loss / len(loader)
+    accuracy = correct / total * 100
+    return avg_loss, accuracy
+
+# ── Training Loop ──────────────────────────────────────────────────────────
+print(f"Training on {device}")
+print(f"{'Epoch':>5} | {'Train Loss':>10} | {'Val Loss':>8} | {'Val Acc':>8} | {'LR':>8}")
+print("-" * 55)
+
+for epoch in range(1, 11):
+    train_loss = train_one_epoch(model, train_loader, optimizer, criterion, device)
+    val_loss, val_acc = evaluate(model, test_loader, criterion, device)
+    scheduler.step()   # update LR at end of each epoch
+
+    current_lr = scheduler.get_last_lr()[0]
+    print(f"{epoch:5d} | {train_loss:10.4f} | {val_loss:8.4f} | {val_acc:7.2f}% | {current_lr:.6f}")</code></pre>
+
+  <div class="output-block">
+    <div class="output-label">Output (approximate)</div>
+Training on cuda
+Epoch | Train Loss |  Val Loss |  Val Acc |       LR
+-------------------------------------------------------
+    1 |     0.3012 |    0.1487 |   95.47% | 0.000955
+    2 |     0.1524 |    0.1081 |   96.73% | 0.000829
+    3 |     0.1187 |    0.0934 |   97.15% | 0.000655
+    4 |     0.0997 |    0.0858 |   97.38% | 0.000455
+    5 |     0.0888 |    0.0814 |   97.61% | 0.000250
+  </div>
+
+  <div class="callout callout-key">
+    <span class="callout-icon">🔑</span>
+    <div class="callout-body">
+      <strong>Why optimizer.zero_grad() Comes FIRST</strong>
+      <p>PyTorch accumulates gradients — by design. Each call to <code>loss.backward()</code> adds the new gradients to any existing gradients in the parameter tensors. This is useful for gradient accumulation (Lesson 40), but for standard training you want a fresh gradient at each step. If you forget <code>zero_grad()</code>, gradients from multiple batches accumulate and you're effectively training with incorrect, blended gradients. The bug is subtle — training won't crash, it just converges poorly.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 7 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">7</span> Saving and Loading Models</h2>
+
+  <p>Training a model takes time. You need to save your work — both to share the model and to resume if training is interrupted. PyTorch gives you two approaches, and one is strongly recommended.</p>
+
+  <h3>The Recommended Way: Save state_dict</h3>
+  <pre><code class="language-python">import torch
+
+# ── Saving ─────────────────────────────────────────────────────────────────
+# Save ONLY the model weights (not the model class code)
+torch.save(model.state_dict(), 'mnist_model.pt')
+print("Model weights saved!")
+
+# state_dict is just an OrderedDict of {layer_name: parameter_tensor}
+for key, tensor in model.state_dict().items():
+    print(f"  {key:25s}: {tensor.shape}")
+
+# ── Loading ────────────────────────────────────────────────────────────────
+# You must recreate the model architecture first
+model_loaded = nn.Sequential(
+    nn.Flatten(),
+    nn.Linear(784, 256), nn.ReLU(), nn.Dropout(0.2),
+    nn.Linear(256, 128), nn.ReLU(), nn.Dropout(0.2),
+    nn.Linear(128, 10)
+)
+model_loaded.load_state_dict(torch.load('mnist_model.pt', map_location='cpu'))
+model_loaded.eval()
+print("Model loaded successfully!")
+
+# map_location='cpu' allows loading a GPU-trained model on a CPU machine</code></pre>
+
+  <h3>Full Checkpoint: Save Everything for Resume</h3>
+  <pre><code class="language-python">def save_checkpoint(model, optimizer, scheduler, epoch, val_loss, filepath):
+    """Save a full training checkpoint so training can be resumed."""
+    checkpoint = {
+        'epoch': epoch,
+        'model_state_dict': model.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+        'scheduler_state_dict': scheduler.state_dict() if scheduler else None,
+        'val_loss': val_loss,
+    }
+    torch.save(checkpoint, filepath)
+
+def load_checkpoint(filepath, model, optimizer, scheduler=None):
+    """Load a checkpoint and restore all states."""
+    checkpoint = torch.load(filepath, map_location='cpu')
+
+    model.load_state_dict(checkpoint['model_state_dict'])
+    optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+
+    if scheduler and checkpoint['scheduler_state_dict']:
+        scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+
+    start_epoch = checkpoint['epoch'] + 1
+    best_val_loss = checkpoint['val_loss']
+    print(f"Resumed from epoch {checkpoint['epoch']}, val_loss={best_val_loss:.4f}")
+    return start_epoch, best_val_loss
+
+# Save best model during training
+best_val_loss = float('inf')
+for epoch in range(1, 11):
+    train_loss = train_one_epoch(model, train_loader, optimizer, criterion, device)
+    val_loss, val_acc = evaluate(model, test_loader, criterion, device)
+    scheduler.step()
+
+    # Save only if this is the best model so far
+    if val_loss < best_val_loss:
+        best_val_loss = val_loss
+        save_checkpoint(model, optimizer, scheduler, epoch, val_loss, 'best_model.pt')
+        print(f"  ✓ Saved new best model (val_loss={val_loss:.4f})")</code></pre>
+
+  <div class="callout callout-tip">
+    <span class="callout-icon">💡</span>
+    <div class="callout-body">
+      <strong>Why Save state_dict Instead of the Full Model?</strong>
+      <p>Saving the full model with <code>torch.save(model, 'model.pt')</code> uses Python's pickle and saves the model class code by reference. If you reorganise your code, rename classes, or share the file, loading breaks. Saving <code>state_dict</code> — just the weights — is portable. The only requirement is that you define the same architecture in code before loading. This is the recommended approach in the PyTorch documentation and virtually all production deployments.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Real World ── -->
+<div class="use-case-section">
+  <div class="use-case-header">
+    <span style="font-size:1.5rem">🌍</span>
+    <h2>Real-World Spotlight: Employee Bonus Prediction with Full PyTorch Pipeline</h2>
+  </div>
+
+  <div class="callout callout-realworld">
+    <span class="callout-icon">🧠</span>
+    <div class="callout-body">
+      <strong>Complete production workflow:</strong> Build a custom Dataset for tabular CSV data, a 3-hidden-layer MLP with BatchNorm and Dropout, train with DataLoader, validate each epoch, save the best model, then load it for inference. This is the exact pattern used in production ML pipelines.
+    </div>
+  </div>
+
+  <pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.optim as optim
+import pandas as pd
+import numpy as np
+from torch.utils.data import Dataset, DataLoader, random_split
+from sklearn.preprocessing import StandardScaler
+
+# ── 1. Create synthetic employee dataset ──────────────────────────────────
+np.random.seed(42)
+n = 2000
+data = pd.DataFrame({
+    'years_exp':    np.random.uniform(0, 20, n),
+    'performance':  np.random.uniform(1, 5, n),
+    'department':   np.random.randint(0, 5, n).astype(float),
+    'salary':       np.random.uniform(30000, 150000, n),
+    'certifications': np.random.randint(0, 8, n).astype(float),
+})
+# Target: bonus (regression)
+data['bonus'] = (
+    0.05 * data['salary']
+    + 2000 * data['performance']
+    + 500  * data['years_exp']
+    + 300  * data['certifications']
+    + np.random.normal(0, 1000, n)
+)
+
+feature_cols = ['years_exp', 'performance', 'department', 'salary', 'certifications']
+target_col   = 'bonus'
+
+# ── 2. Custom Dataset ─────────────────────────────────────────────────────
+class EmployeeDataset(Dataset):
+    def __init__(self, dataframe, feature_cols, target_col, scaler=None, fit_scaler=False):
+        features_np = dataframe[feature_cols].values.astype(np.float32)
+        targets_np  = dataframe[target_col].values.astype(np.float32)
+
+        if fit_scaler:
+            scaler.fit(features_np)
+
+        if scaler:
+            features_np = scaler.transform(features_np)
+
+        self.X = torch.from_numpy(features_np)
+        self.y = torch.from_numpy(targets_np)
+
+    def __len__(self): return len(self.y)
+    def __getitem__(self, idx): return self.X[idx], self.y[idx]
+
+# Split 80/20 train/val
+train_df = data.iloc[:1600]
+val_df   = data.iloc[1600:]
+scaler   = StandardScaler()
+
+train_dataset = EmployeeDataset(train_df, feature_cols, target_col, scaler, fit_scaler=True)
+val_dataset   = EmployeeDataset(val_df,   feature_cols, target_col, scaler, fit_scaler=False)
+
+train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True,  num_workers=0)
+val_loader   = DataLoader(val_dataset,   batch_size=128, shuffle=False, num_workers=0)
+
+# ── 3. Model: MLP with BatchNorm and Dropout ──────────────────────────────
+class BonusMLP(nn.Module):
+    def __init__(self, input_dim):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(input_dim, 128), nn.BatchNorm1d(128), nn.ReLU(), nn.Dropout(0.2),
+            nn.Linear(128, 64),        nn.BatchNorm1d(64),  nn.ReLU(), nn.Dropout(0.2),
+            nn.Linear(64, 32),         nn.ReLU(),
+            nn.Linear(32, 1)           # regression output
+        )
+    def forward(self, x): return self.net(x).squeeze(1)
+
+model = BonusMLP(input_dim=len(feature_cols))
+optimizer = optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-4)
+criterion = nn.MSELoss()
+scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=50)
+
+# ── 4. Training with best-model saving ───────────────────────────────────
+best_val_loss = float('inf')
+train_losses, val_losses = [], []
+
+for epoch in range(1, 51):
+    # Train
+    model.train()
+    running_loss = 0.0
+    for X_b, y_b in train_loader:
+        optimizer.zero_grad()
+        pred = model(X_b)
+        loss = criterion(pred, y_b)
+        loss.backward()
+        optimizer.step()
+        running_loss += loss.item()
+    train_loss = running_loss / len(train_loader)
+    train_losses.append(train_loss)
+
+    # Validate
+    model.eval()
+    running_val = 0.0
+    with torch.no_grad():
+        for X_b, y_b in val_loader:
+            pred = model(X_b)
+            running_val += criterion(pred, y_b).item()
+    val_loss = running_val / len(val_loader)
+    val_losses.append(val_loss)
+
+    scheduler.step()
+
+    if val_loss < best_val_loss:
+        best_val_loss = val_loss
+        torch.save(model.state_dict(), 'best_bonus_model.pt')
+
+    if epoch % 10 == 0:
+        print(f"Epoch {epoch:3d} | Train MSE: {train_loss:.1f} | Val MSE: {val_loss:.1f}")
+
+# ── 5. Load best model and predict ────────────────────────────────────────
+model.load_state_dict(torch.load('best_bonus_model.pt', map_location='cpu'))
+model.eval()
+
+sample_features = torch.tensor([[5.0, 4.2, 2.0, 75000.0, 3.0]], dtype=torch.float32)
+sample_scaled = torch.from_numpy(scaler.transform(sample_features.numpy()).astype(np.float32))
+with torch.no_grad():
+    predicted_bonus = model(sample_scaled).item()
+print(f"\nPredicted bonus: ${predicted_bonus:,.0f}")</code></pre>
+
+  <div class="output-block">
+    <div class="output-label">Output (approximate)</div>
+Epoch  10 | Train MSE: 1842341.2 | Val MSE: 1953201.4
+Epoch  20 | Train MSE: 1234521.3 | Val MSE: 1301452.1
+Epoch  30 | Train MSE: 1021344.2 | Val MSE: 1089234.5
+Epoch  40 | Train MSE: 978234.1  | Val MSE: 1041234.2
+Epoch  50 | Train MSE: 951234.3  | Val MSE: 1018234.1
+
+Predicted bonus: $18,432
+  </div>
+
+  <p>This is the complete production pattern. Every step here — custom Dataset, DataLoader, training loop, validation, best-model checkpoint, load-for-inference — appears verbatim in production ML codebases.</p>
+</div>
+
+<!-- ── Quiz ── -->
+<div class="quiz-section">
+  <h2>Quick Check</h2>
+  <div id="quiz-41"></div>
+</div>
+
+<!-- ── Practice ── -->
+<div class="practice-card">
+  <h2>✍️ Practice Exercises</h2>
+  <ol>
+    <li>Build a custom <code>Dataset</code> for the Iris dataset from sklearn. Split 80/20, wrap in DataLoaders, and train a 2-layer MLP classifier with <code>nn.CrossEntropyLoss</code>. Report validation accuracy.</li>
+    <li>Modify the training loop to also track and print: (a) the gradient norm before each optimizer step, and (b) the running accuracy on the training set (not just loss).</li>
+    <li>Add a learning rate finder: train for 100 steps while exponentially increasing the LR from 1e-7 to 10. Plot loss vs LR. The optimal LR is just before the loss starts increasing sharply.</li>
+    <li>Implement the full checkpointing workflow: save a checkpoint every 5 epochs. Then simulate an interrupted training run by loading epoch-15 checkpoint and continuing from there for another 10 epochs.</li>
+  </ol>
+</div>
+
+<!-- Primary Source -->
+<div class="primary-source">
+  <h2>📚 Primary Sources for This Lesson</h2>
+  <p><a href="https://pytorch.org/tutorials/beginner/data_loading_tutorial.html" target="_blank"><strong>PyTorch Data Loading Tutorial</strong></a> — the official guide to Dataset and DataLoader with image examples.<br>
+  <a href="https://pytorch.org/docs/stable/nn.html" target="_blank"><strong>torch.nn documentation</strong></a> — complete reference for all built-in layers, loss functions, and activations.<br>
+  <a href="https://pytorch.org/tutorials/beginner/saving_loading_models.html" target="_blank"><strong>Saving and Loading Models</strong></a> — official guide covering state_dict, full model, and checkpoint patterns.</p>
+</div>
+
+<!-- Ask Tutor -->
+<div class="ask-tutor">
+  <span class="icon">💬</span>
+  <span>Getting shape mismatches? CrossEntropyLoss giving unexpected errors? Paste your model definition and the error — your AI tutor will diagnose the issue in seconds.</span>
+</div>
+
+<!-- Navigation -->
+<nav class="lesson-nav">
+  <a href="./0040-gradient-descent-variants.html" class="nav-btn nav-btn-prev">← Lesson 40: Gradient Descent Variants</a>
+  <a href="./0042-optimizers.html" class="nav-btn nav-btn-next">Lesson 42: Optimizers →</a>
+</nav>
+
+</div><!-- /content-wrapper -->
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-core.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/plugins/autoloader/prism-autoloader.min.js"></script>
+<script src="../assets/quiz.js"></script>
+<script>
+new MLQuiz('quiz-41', [
+  {
+    question: "What two methods MUST you implement when creating a custom torch.utils.data.Dataset?",
+    options: [
+      "__len__() returning the dataset size and __getitem__(idx) returning a single sample at the given index",
+      "__init__() for setup and __iter__() to iterate through all samples in order",
+      "load() to read data from disk and transform() to apply preprocessing to each sample",
+      "__len__() for size and __next__() to retrieve the next sample in sequence"
+    ],
+    correct: 0,
+    explanation: "The Dataset contract requires exactly two methods: __len__() must return the total number of samples (so DataLoader knows how many batches to create), and __getitem__(idx) must return the sample at index idx (the actual sample loading logic lives here). The DataLoader will call these methods automatically — you never need to call them manually in your training loop."
+  },
+  {
+    question: "Why should you call model.train() at the start of each training epoch and model.eval() before validation?",
+    options: [
+      "Dropout and BatchNorm behave differently in training vs inference — model.train() enables dropout and batch statistics; model.eval() disables dropout and uses running statistics",
+      "model.train() enables gradient computation and model.eval() disables it — this is what controls whether loss.backward() works",
+      "These calls free and re-allocate GPU memory, which prevents memory leaks between training and validation phases",
+      "model.train() loads training data into the model and model.eval() switches to a different evaluation dataset"
+    ],
+    correct: 0,
+    explanation: "Two layers are mode-sensitive: Dropout (randomly zeros neurons during training to prevent overfitting — disabled at eval for consistent predictions) and BatchNorm (uses current batch's mean/std during training for normalization, but uses exponential moving average statistics during eval for consistent inference). Forgetting model.eval() before validation leaves dropout active, artificially lowering validation accuracy and making predictions non-deterministic."
+  },
+  {
+    question: "nn.CrossEntropyLoss() expects the model output to be what?",
+    options: [
+      "Raw logits — unnormalised scores, one per class — NOT softmax probabilities; it applies log-softmax internally",
+      "Softmax probabilities that sum to 1.0 across all classes for each sample",
+      "One-hot encoded vectors with 1 at the correct class and 0 elsewhere",
+      "Log-softmax values (output of nn.LogSoftmax) for numerical stability"
+    ],
+    correct: 0,
+    explanation: "CrossEntropyLoss applies log-softmax internally as part of its computation. If you first apply nn.Softmax() in your model and then pass the result to CrossEntropyLoss, you've applied softmax twice — the second log-softmax acts on values in (0,1) which are already compressed, producing near-zero gradients that prevent learning. Always pass raw logits (the output of the last nn.Linear layer with no activation) to CrossEntropyLoss."
+  },
+  {
+    question: "What does num_workers=4 in DataLoader do?",
+    options: [
+      "Spawns 4 separate CPU worker processes to load and preprocess batches in parallel, keeping the GPU busy between training steps",
+      "Splits the dataset into 4 equal parts and trains on each part sequentially to reduce memory usage",
+      "Creates 4 identical copies of the model and averages their predictions (model ensembling)",
+      "Runs 4 training steps in parallel using 4 different subsets of each batch"
+    ],
+    correct: 0,
+    explanation: "num_workers controls parallel data loading. With num_workers=0 (default), the main training process loads batches sequentially — the GPU sits idle while the CPU loads and preprocesses the next batch. With num_workers=4, four background processes pre-fetch and preprocess batches while the GPU is training on the current batch. This overlap of I/O and computation is essential for high GPU utilisation, especially with image datasets that require disk reads and heavy augmentation."
+  },
+  {
+    question: "What is the recommended way to save a PyTorch model, and why?",
+    options: [
+      "Save model.state_dict() — just the weight tensors — because it's portable across code refactors and Python versions, unlike pickling the full model object",
+      "Save the full model with torch.save(model) — this captures everything including architecture, making loading simpler without needing to redefine the class",
+      "Export to ONNX format, which is framework-independent and automatically optimised for deployment",
+      "Save each parameter tensor individually using np.save() for maximum compatibility with other frameworks"
+    ],
+    correct: 0,
+    explanation: "Saving state_dict (model.state_dict()) saves only the weight tensors — an OrderedDict of {parameter_name: tensor}. To load, you recreate the model architecture in code and call model.load_state_dict(torch.load(...)). This is portable: moving code, renaming classes, or refactoring won't break the saved file. Saving the full model (torch.save(model)) uses pickle and stores a reference to the Python class — any code changes break the pickle. state_dict is the universally recommended approach."
+  }
+]);
+</script>
+
+</body>
+</html>

@@ -1,0 +1,765 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lesson 20: Model Evaluation II — ROC/AUC, Cost-Benefit &amp; Stratified K-Fold | ML Mastery</title>
+  <link rel="stylesheet" href="../assets/style.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
+</head>
+<body>
+
+<header class="lesson-header">
+  <div class="header-inner">
+    <nav class="breadcrumb">
+      <a href="../reference/curriculum-map.html">ML Mastery</a>
+      <span class="sep">›</span>
+      <span>Phase 2: Supervised ML</span>
+    </nav>
+    <div class="lesson-badges">
+      <span class="phase-badge">Phase 2 · Supervised ML</span>
+      <span class="lesson-num-badge">Lesson 20</span>
+    </div>
+    <h1 class="lesson-title">Model Evaluation II: ROC/AUC, Cost-Benefit Analysis &amp; Stratified K-Fold</h1>
+    <p class="lesson-subtitle">Move beyond hard label metrics. Evaluate model quality across all possible thresholds, translate model performance into business value, and validate reliably with stratified cross-validation.</p>
+    <div class="meta-pills">
+      <span class="meta-pill">⏱ ~60 min</span>
+      <span class="meta-pill">🐍 Python + scikit-learn</span>
+      <span class="meta-pill">📊 Model Evaluation</span>
+      <span class="meta-pill">Requires Lesson 19</span>
+    </div>
+  </div>
+</header>
+
+<main class="lesson-main">
+<div class="content-wrapper">
+
+<div class="objectives-card">
+  <h2>🎯 What You'll Learn</h2>
+  <ul>
+    <li>Use probability scores to evaluate a model's ranking ability, independent of any threshold</li>
+    <li>Build and interpret ROC curves: True Positive Rate vs False Positive Rate at all thresholds</li>
+    <li>Understand AUC as the probability that the model ranks a random positive higher than a random negative</li>
+    <li>Perform cost-benefit analysis on the ROC curve to find the optimal business threshold</li>
+    <li>Implement Stratified K-Fold cross-validation to prevent data leakage and unreliable estimates</li>
+  </ul>
+</div>
+
+<!-- ── Section 1 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">1</span> Beyond Hard Labels: Probability Scores</h2>
+
+  <p>In Lesson 19, we evaluated models using hard 0/1 predictions. But most classifiers — logistic regression, SVM with probability=True, random forests — output a <strong>probability score</strong> before thresholding. Evaluating these scores directly, rather than their thresholded labels, reveals more about the model's true capability.</p>
+
+  <p>The probability score tells us how confident the model is. A sample with P(y=1|x) = 0.95 and a sample with P(y=1|x) = 0.55 both become the same "1" label when we threshold at 0.5 — but they represent very different levels of certainty. Metrics that use raw probabilities can capture this distinction.</p>
+
+  <pre><code class="language-python">from sklearn.linear_model import LogisticRegression
+from sklearn.datasets import load_breast_cancer
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+from sklearn.pipeline import Pipeline
+import numpy as np
+
+cancer = load_breast_cancer()
+X, y = cancer.data, cancer.target  # 0=malignant, 1=benign
+
+X_tr, X_te, y_tr, y_te = train_test_split(
+    X, y, test_size=0.25, random_state=42, stratify=y)
+
+pipe = Pipeline([
+    ('scaler', StandardScaler()),
+    ('lr',     LogisticRegression(max_iter=1000, random_state=42))
+])
+pipe.fit(X_tr, y_tr)
+
+# Raw probability scores — shape (n_samples, n_classes)
+y_proba = pipe.predict_proba(X_te)
+y_scores = y_proba[:, 1]  # P(y=1|x) for each test sample
+
+# Inspect the distribution of scores
+print("Distribution of probability scores:")
+for threshold in [0.1, 0.3, 0.5, 0.7, 0.9]:
+    n_positive = (y_scores >= threshold).sum()
+    print(f"  Scores >= {threshold}: {n_positive}/{len(y_scores)} samples predicted positive")
+
+# Show score vs actual label for first 10 test samples
+print("\nFirst 10 test samples: score vs true label")
+print(f"{'Score':>8}  {'Predicted':>10}  {'Actual':>8}")
+for score, actual in zip(y_scores[:10], y_te[:10]):
+    pred = "positive" if score >= 0.5 else "negative"
+    actual_str = "positive" if actual == 1 else "negative"
+    print(f"{score:>8.4f}  {pred:>10}  {actual_str:>8}")</code></pre>
+</div>
+
+<!-- ── Section 2 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">2</span> The Precision-Recall Tradeoff</h2>
+
+  <p>Changing the classification threshold directly changes the tradeoff between precision and recall. Lower threshold → predict positive more often → higher recall, lower precision. Higher threshold → predict positive only when very confident → lower recall, higher precision. sklearn provides <code>precision_recall_curve()</code> to sweep all thresholds at once.</p>
+
+  <pre><code class="language-python">from sklearn.metrics import precision_recall_curve, average_precision_score
+from sklearn.linear_model import LogisticRegression
+from sklearn.datasets import load_breast_cancer
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+from sklearn.pipeline import Pipeline
+import numpy as np
+import matplotlib.pyplot as plt
+
+cancer = load_breast_cancer()
+X, y = cancer.data, 1 - cancer.target  # flip: malignant=1 (the "positive" case we care about)
+
+X_tr, X_te, y_tr, y_te = train_test_split(
+    X, y, test_size=0.25, random_state=42, stratify=y)
+
+pipe = Pipeline([('s', StandardScaler()),
+                 ('lr', LogisticRegression(max_iter=1000))])
+pipe.fit(X_tr, y_tr)
+
+y_scores = pipe.predict_proba(X_te)[:, 1]
+
+# Precision-Recall curve: arrays of (precision, recall, threshold) at every threshold
+precisions, recalls, thresholds = precision_recall_curve(y_te, y_scores)
+
+# Average Precision (area under PR curve) — useful summary for imbalanced data
+ap = average_precision_score(y_te, y_scores)
+print(f"Average Precision (AP): {ap:.4f}")
+
+# Plot the tradeoff
+fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+
+# Left: PR curve
+axes[0].plot(recalls, precisions, 'b-', linewidth=2)
+axes[0].set_xlabel('Recall')
+axes[0].set_ylabel('Precision')
+axes[0].set_title(f'Precision-Recall Curve (AP={ap:.3f})')
+axes[0].grid(True, alpha=0.3)
+
+# Right: Precision and Recall vs threshold
+axes[1].plot(thresholds, precisions[:-1], 'b-', label='Precision')
+axes[1].plot(thresholds, recalls[:-1],    'r-', label='Recall')
+axes[1].set_xlabel('Classification Threshold')
+axes[1].set_ylabel('Score')
+axes[1].set_title('Precision and Recall vs Threshold')
+axes[1].legend()
+axes[1].grid(True, alpha=0.3)
+
+plt.tight_layout()
+plt.show()
+
+# Find threshold that maximises F1
+f1_scores = 2 * precisions[:-1] * recalls[:-1] / (precisions[:-1] + recalls[:-1] + 1e-10)
+best_idx  = np.argmax(f1_scores)
+print(f"Best threshold for F1: {thresholds[best_idx]:.3f}")
+print(f"  Precision: {precisions[best_idx]:.4f}")
+print(f"  Recall:    {recalls[best_idx]:.4f}")
+print(f"  F1:        {f1_scores[best_idx]:.4f}")</code></pre>
+</div>
+
+<!-- ── Section 3 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">3</span> The ROC Curve</h2>
+
+  <p>The <strong>ROC (Receiver Operating Characteristic) curve</strong> plots the <strong>True Positive Rate (TPR)</strong> against the <strong>False Positive Rate (FPR)</strong> at every possible classification threshold. By sweeping from threshold=1.0 (predict nothing positive) to threshold=0.0 (predict everything positive), we trace out the curve.</p>
+
+  <ul>
+    <li><strong>TPR = Recall = TP/(TP+FN)</strong>: Fraction of actual positives that are correctly detected.</li>
+    <li><strong>FPR = FP/(FP+TN)</strong>: Fraction of actual negatives that are incorrectly flagged as positive (the "false alarm rate").</li>
+  </ul>
+
+  <p>Key points on the ROC curve:</p>
+  <ul>
+    <li><strong>(0, 0)</strong>: Threshold=1.0 — predict nothing positive. TPR=0, FPR=0.</li>
+    <li><strong>(1, 1)</strong>: Threshold=0.0 — predict everything positive. TPR=1, FPR=1.</li>
+    <li><strong>(0, 1)</strong>: Perfect classifier — all positives detected, no false alarms.</li>
+    <li><strong>Diagonal (0,0)→(1,1)</strong>: Random classifier — no better than chance.</li>
+  </ul>
+
+  <pre><code class="language-python">from sklearn.metrics import roc_curve, roc_auc_score, RocCurveDisplay
+from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.datasets import load_breast_cancer
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+from sklearn.pipeline import Pipeline
+import matplotlib.pyplot as plt
+import numpy as np
+
+cancer = load_breast_cancer()
+X, y = cancer.data, cancer.target
+
+X_tr, X_te, y_tr, y_te = train_test_split(
+    X, y, test_size=0.25, random_state=42, stratify=y)
+
+# Train two models
+lr_pipe = Pipeline([('s', StandardScaler()),
+                    ('lr', LogisticRegression(max_iter=1000))])
+rf_pipe = Pipeline([('s', StandardScaler()),
+                    ('rf', RandomForestClassifier(n_estimators=100, random_state=42))])
+
+lr_pipe.fit(X_tr, y_tr)
+rf_pipe.fit(X_tr, y_tr)
+
+lr_scores = lr_pipe.predict_proba(X_te)[:, 1]
+rf_scores = rf_pipe.predict_proba(X_te)[:, 1]
+
+# ROC curves
+lr_fpr, lr_tpr, lr_thresholds = roc_curve(y_te, lr_scores)
+rf_fpr, rf_tpr, rf_thresholds = roc_curve(y_te, rf_scores)
+
+lr_auc = roc_auc_score(y_te, lr_scores)
+rf_auc = roc_auc_score(y_te, rf_scores)
+
+# Plot
+fig, ax = plt.subplots(figsize=(7, 5))
+ax.plot(lr_fpr, lr_tpr, 'b-', linewidth=2, label=f'Logistic Regression (AUC={lr_auc:.3f})')
+ax.plot(rf_fpr, rf_tpr, 'g-', linewidth=2, label=f'Random Forest (AUC={rf_auc:.3f})')
+ax.plot([0, 1], [0, 1], 'k--', label='Random classifier (AUC=0.5)')
+ax.scatter([0], [1], s=100, color='gold', zorder=5, label='Perfect classifier')
+ax.set_xlabel('False Positive Rate (FPR)')
+ax.set_ylabel('True Positive Rate (TPR = Recall)')
+ax.set_title('ROC Curves: Logistic Regression vs Random Forest')
+ax.legend()
+ax.grid(True, alpha=0.3)
+plt.tight_layout()
+plt.show()
+
+print(f"Logistic Regression AUC: {lr_auc:.4f}")
+print(f"Random Forest AUC:       {rf_auc:.4f}")</code></pre>
+
+  <div class="callout callout-key">
+    <span class="callout-icon">🔑</span>
+    <div class="callout-body">
+      <strong>ROC vs PR Curve — When to Use Each</strong>
+      <p>The ROC curve is the standard choice when classes are approximately balanced. For severely imbalanced data (e.g., 1% positive), the ROC curve can look optimistic because FPR = FP/(FP+TN) — with many negatives, even a high FP count gives a low FPR. In this case, use the <strong>Precision-Recall curve</strong> instead, which better reflects performance on the minority class.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 4 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">4</span> AUC: Area Under the Curve</h2>
+
+  <p>The <strong>AUC</strong> (Area Under the ROC Curve) summarises the ROC curve as a single number between 0 and 1. It has a powerful probabilistic interpretation:</p>
+
+  <p style="text-align:center; font-style: italic; font-size:1.05rem; margin: 1rem 0;">"AUC is the probability that the model assigns a higher score to a randomly chosen positive sample than to a randomly chosen negative sample."</p>
+
+  <p>An AUC of 0.85 means: pick any positive sample and any negative sample at random. The model correctly ranks the positive higher 85% of the time. AUC = 0.5 means the model is no better than random ranking. AUC = 1.0 means the model perfectly separates all positives from negatives.</p>
+
+  <p>AUC is <strong>threshold-independent</strong> — it evaluates the model's ranking ability regardless of where you set the decision threshold. This makes it useful for comparing models before you've decided on an operational threshold.</p>
+
+  <pre><code class="language-python">from sklearn.metrics import roc_auc_score
+import numpy as np
+
+# Verify the probabilistic interpretation manually
+def auc_by_simulation(y_true, y_scores, n_simulations=100_000):
+    """
+    Manually estimate AUC by randomly sampling pairs.
+    AUC = P(score_positive > score_negative)
+    """
+    positives = y_scores[y_true == 1]
+    negatives = y_scores[y_true == 0]
+
+    rng = np.random.default_rng(42)
+    pos_samples = rng.choice(positives, size=n_simulations, replace=True)
+    neg_samples = rng.choice(negatives, size=n_simulations, replace=True)
+
+    # Handle ties: count as 0.5
+    correct  = (pos_samples > neg_samples).sum()
+    tied     = (pos_samples == neg_samples).sum()
+    return (correct + 0.5 * tied) / n_simulations
+
+# Generate scores for demonstration
+np.random.seed(42)
+y_true   = np.array([1] * 50 + [0] * 50)
+y_scores = np.concatenate([
+    np.random.beta(8, 3, 50),  # positives: scores concentrated near 1
+    np.random.beta(3, 8, 50)   # negatives: scores concentrated near 0
+])
+
+sklearn_auc = roc_auc_score(y_true, y_scores)
+manual_auc  = auc_by_simulation(y_true, y_scores)
+
+print(f"sklearn roc_auc_score:  {sklearn_auc:.4f}")
+print(f"Simulation (100K pairs): {manual_auc:.4f}")
+print(f"Interpretation: The model ranks a random positive above a random negative {sklearn_auc:.1%} of the time")
+
+# What different AUC ranges mean
+print("\nAUC interpretation guide:")
+for auc, label in [(0.5, "Random / useless"), (0.6, "Poor"),
+                   (0.7, "Fair"), (0.8, "Good"), (0.9, "Excellent"), (0.99, "Near-perfect")]:
+    bar = '█' * int((auc - 0.5) * 40)
+    print(f"  AUC={auc:.2f}  {label:20}  {bar}")</code></pre>
+</div>
+
+<!-- ── Section 5 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">5</span> Cost-Benefit Analysis Using the ROC Curve</h2>
+
+  <p>The ROC curve becomes directly actionable when you assign business costs to false positives and false negatives. For each threshold on the ROC curve, you can compute the <strong>expected value</strong> of using that threshold, then choose the one that maximises it (or minimises expected cost).</p>
+
+  <p>Consider a fraud detection system:</p>
+  <ul>
+    <li>True Positive: Fraud caught → save $500 in chargeback losses</li>
+    <li>False Positive: Legitimate transaction blocked → cost $10 in customer service + friction</li>
+    <li>False Negative: Fraud missed → lose $500</li>
+    <li>True Negative: No action needed → $0 cost</li>
+  </ul>
+
+  <pre><code class="language-python">from sklearn.metrics import roc_curve
+from sklearn.linear_model import LogisticRegression
+from sklearn.datasets import make_classification
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+from sklearn.pipeline import Pipeline
+import numpy as np
+import matplotlib.pyplot as plt
+
+# Simulate a fraud detection dataset (5% fraud rate)
+X, y = make_classification(n_samples=10000, weights=[0.95, 0.05],
+                            n_features=20, n_informative=10,
+                            random_state=42)
+
+X_tr, X_te, y_tr, y_te = train_test_split(
+    X, y, test_size=0.3, stratify=y, random_state=42)
+
+pipe = Pipeline([('s', StandardScaler()),
+                 ('lr', LogisticRegression(max_iter=1000))])
+pipe.fit(X_tr, y_tr)
+
+y_scores = pipe.predict_proba(X_te)[:, 1]
+fpr_arr, tpr_arr, thresholds = roc_curve(y_te, y_scores)
+
+# Business parameters
+n_test      = len(y_te)
+n_positives = y_te.sum()
+n_negatives = n_test - n_positives
+
+cost_fp = 10     # cost per false positive (blocked legit transaction)
+cost_fn = 500    # cost per false negative (fraud loss)
+benefit_tp = 0   # we're minimising cost, so TP avoidance is implicit in FN cost
+
+# Compute expected total cost at each threshold
+def expected_cost(tpr, fpr, n_pos, n_neg, cost_fn, cost_fp):
+    fn = (1 - tpr) * n_pos   # expected false negatives
+    fp = fpr * n_neg          # expected false positives
+    return fn * cost_fn + fp * cost_fp
+
+costs = [expected_cost(tpr, fpr, n_positives, n_negatives, cost_fn, cost_fp)
+         for tpr, fpr in zip(tpr_arr, fpr_arr)]
+
+# Find optimal threshold
+best_idx       = np.argmin(costs)
+best_threshold = thresholds[best_idx]
+best_cost      = costs[best_idx]
+best_tpr       = tpr_arr[best_idx]
+best_fpr       = fpr_arr[best_idx]
+
+print(f"=== Cost-Benefit Analysis ===")
+print(f"FP cost: ${cost_fp} per false positive")
+print(f"FN cost: ${cost_fn} per false negative")
+print(f"\nOptimal threshold: {best_threshold:.4f}")
+print(f"At this threshold:")
+print(f"  TPR (recall): {best_tpr:.4f}  — catches {best_tpr:.0%} of frauds")
+print(f"  FPR:          {best_fpr:.4f}  — {best_fpr:.0%} of legit transactions flagged")
+print(f"  Expected total cost on test set: ${best_cost:,.0f}")
+
+# Compare with default threshold 0.5
+default_idx = np.argmin(np.abs(thresholds - 0.5))
+default_cost = costs[default_idx]
+print(f"\nCost at default threshold (0.5): ${default_cost:,.0f}")
+print(f"Savings from optimal threshold: ${default_cost - best_cost:,.0f}")
+
+# Plot cost vs threshold
+plt.figure(figsize=(8, 4))
+plt.plot(thresholds, costs, 'b-', linewidth=2)
+plt.axvline(x=best_threshold, color='red', linestyle='--',
+            label=f'Optimal threshold={best_threshold:.3f}')
+plt.axvline(x=0.5, color='gray', linestyle='--', label='Default threshold=0.5')
+plt.xlabel('Classification Threshold')
+plt.ylabel('Expected Total Cost ($)')
+plt.title('Expected Cost vs Threshold — Fraud Detection')
+plt.legend()
+plt.grid(True, alpha=0.3)
+plt.tight_layout()
+plt.show()</code></pre>
+</div>
+
+<!-- ── Section 6 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">6</span> K-Fold Cross-Validation</h2>
+
+  <p>A single train/test split is noisy. The test set might be unusually easy or unusually hard by chance. <strong>K-fold cross-validation</strong> solves this by evaluating the model K times on different subsets of the data and averaging the results.</p>
+
+  <p>The procedure: divide the dataset into K equal-sized folds. For each fold i: train on all K-1 folds, evaluate on fold i. Average the K evaluation scores. This gives a more stable and unbiased estimate of generalisation performance.</p>
+
+  <pre><code class="language-python">from sklearn.model_selection import cross_val_score, KFold
+from sklearn.linear_model import LogisticRegression
+from sklearn.datasets import load_breast_cancer
+from sklearn.preprocessing import StandardScaler
+from sklearn.pipeline import Pipeline
+import numpy as np
+
+cancer = load_breast_cancer()
+X, y = cancer.data, cancer.target
+
+# Single train/test split — noisy estimate
+from sklearn.model_selection import train_test_split
+X_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=0.2, random_state=42)
+pipe_single = Pipeline([('s', StandardScaler()),
+                        ('lr', LogisticRegression(max_iter=1000))])
+pipe_single.fit(X_tr, y_tr)
+single_acc = pipe_single.score(X_te, y_te)
+print(f"Single split accuracy (test_size=0.2, seed=42): {single_acc:.4f}")
+
+# Try different random seeds to show variability
+print("\nAccuracy with 5 different random seeds:")
+for seed in [0, 1, 2, 3, 4]:
+    X_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=0.2, random_state=seed)
+    pipe = Pipeline([('s', StandardScaler()), ('lr', LogisticRegression(max_iter=1000))])
+    pipe.fit(X_tr, y_tr)
+    print(f"  seed={seed}: {pipe.score(X_te, y_te):.4f}")
+
+# K-fold cross-validation — stable estimate
+pipe_cv = Pipeline([('s', StandardScaler()),
+                    ('lr', LogisticRegression(max_iter=1000))])
+
+for k in [3, 5, 10]:
+    kf = KFold(n_splits=k, shuffle=True, random_state=42)
+    scores = cross_val_score(pipe_cv, X, y, cv=kf, scoring='accuracy')
+    print(f"\n{k}-Fold CV accuracy: {scores.mean():.4f} ± {scores.std():.4f}")
+    print(f"  Per-fold scores: {scores.round(4)}")</code></pre>
+</div>
+
+<!-- ── Section 7 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">7</span> Stratified K-Fold</h2>
+
+  <p>Standard K-fold splits data randomly. For imbalanced datasets, this can produce folds with wildly different class proportions — or even folds with zero positive samples, causing metrics like precision and AUC to be undefined or misleading.</p>
+
+  <p><strong>Stratified K-fold</strong> ensures that each fold has approximately the same proportion of each class as the overall dataset. This is the correct choice for classification problems and should be used by default over standard K-fold.</p>
+
+  <div class="callout callout-warn">
+    <span class="callout-icon">⚠️</span>
+    <div class="callout-body">
+      <strong>Always Use StratifiedKFold for Classification</strong>
+      <p>sklearn's <code>cross_val_score</code> with a classifier automatically uses stratified splitting when you pass an integer to <code>cv=</code>. But if you create a KFold object explicitly, it does NOT stratify. To be explicit and safe: always use <code>StratifiedKFold</code> for classification tasks, especially with imbalanced data.</p>
+    </div>
+  </div>
+
+  <pre><code class="language-python">from sklearn.model_selection import KFold, StratifiedKFold, cross_val_score
+from sklearn.linear_model import LogisticRegression
+from sklearn.datasets import make_classification
+from sklearn.preprocessing import StandardScaler
+from sklearn.pipeline import Pipeline
+import numpy as np
+
+# Severely imbalanced dataset: 95% class 0, 5% class 1
+X, y = make_classification(n_samples=1000, weights=[0.95, 0.05],
+                            n_features=20, random_state=42)
+
+print(f"Dataset: {(y==0).sum()} class 0, {(y==1).sum()} class 1")
+print(f"Class 1 rate: {y.mean():.2%}")
+
+# Show class proportions per fold
+print("\n=== Standard KFold (no stratification) ===")
+kf = KFold(n_splits=5, shuffle=True, random_state=42)
+for fold, (tr_idx, te_idx) in enumerate(kf.split(X, y)):
+    fold_rate = y[te_idx].mean()
+    print(f"  Fold {fold+1}: {len(te_idx)} samples, class 1 rate = {fold_rate:.2%}")
+
+print("\n=== StratifiedKFold ===")
+skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+for fold, (tr_idx, te_idx) in enumerate(skf.split(X, y)):
+    fold_rate = y[te_idx].mean()
+    print(f"  Fold {fold+1}: {len(te_idx)} samples, class 1 rate = {fold_rate:.2%}")
+
+# Compare AUC estimates: standard vs stratified
+pipe = Pipeline([('s', StandardScaler()),
+                 ('lr', LogisticRegression(max_iter=1000))])
+
+scores_kf  = cross_val_score(pipe, X, y, cv=kf,  scoring='roc_auc')
+scores_skf = cross_val_score(pipe, X, y, cv=skf, scoring='roc_auc')
+
+print(f"\nKFold    AUC: {scores_kf.mean():.4f} ± {scores_kf.std():.4f}")
+print(f"StratKFold AUC: {scores_skf.mean():.4f} ± {scores_skf.std():.4f}")
+print(f"\nStratifiedKFold has lower std (more stable estimates) on imbalanced data")</code></pre>
+</div>
+
+<!-- ── Section 8 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">8</span> Cross-Validation Pitfalls and Pipelines</h2>
+
+  <p>The most dangerous mistake in cross-validation is <strong>data leakage through preprocessing</strong>. If you fit a StandardScaler (or imputer, or feature selector) on the <em>entire dataset</em> before cross-validation, the test fold's statistics (mean, std) contaminate the scaler's fit. The model has effectively "seen" the test data through the scaler. This inflates performance estimates.</p>
+
+  <p>The solution is always to wrap preprocessing and model inside a <code>Pipeline</code>. sklearn's cross-validation runs the Pipeline's <code>fit</code> on the training fold and <code>transform</code> on the test fold in each iteration — exactly what you want.</p>
+
+  <pre><code class="language-python">from sklearn.model_selection import cross_val_score, StratifiedKFold, cross_validate
+from sklearn.linear_model import LogisticRegression
+from sklearn.preprocessing import StandardScaler
+from sklearn.pipeline import Pipeline
+from sklearn.datasets import load_breast_cancer
+import numpy as np
+
+cancer = load_breast_cancer()
+X, y = cancer.data, cancer.target
+
+skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+
+# ---- WRONG: leakage ----
+# Fitting scaler on ALL data before cross-validation
+scaler   = StandardScaler()
+X_scaled = scaler.fit_transform(X)  # test fold data leaks into scaler here!
+
+lr = LogisticRegression(max_iter=1000)
+wrong_scores = cross_val_score(lr, X_scaled, y, cv=skf, scoring='accuracy')
+
+# ---- CORRECT: no leakage ----
+# Scaler is inside the pipeline; it's fit only on training folds
+pipe = Pipeline([
+    ('scaler', StandardScaler()),
+    ('lr',     LogisticRegression(max_iter=1000))
+])
+correct_scores = cross_val_score(pipe, X, y, cv=skf, scoring='accuracy')
+
+print("=== Data Leakage Demonstration ===")
+print(f"WRONG  (leaky):   {wrong_scores.mean():.5f} ± {wrong_scores.std():.5f}")
+print(f"CORRECT (pipeline): {correct_scores.mean():.5f} ± {correct_scores.std():.5f}")
+print(f"Leakage inflates accuracy by: {(wrong_scores.mean() - correct_scores.mean())*100:.3f} pp")
+
+# cross_validate: multiple metrics at once
+from sklearn.metrics import make_scorer, roc_auc_score
+
+metrics = {
+    'accuracy':  'accuracy',
+    'roc_auc':   'roc_auc',
+    'f1':        'f1',
+    'precision': 'precision',
+    'recall':    'recall'
+}
+
+cv_results = cross_validate(pipe, X, y, cv=skf, scoring=metrics, return_train_score=True)
+
+print("\n=== Multiple Metrics via cross_validate ===")
+for metric in metrics:
+    test_mean  = cv_results[f'test_{metric}'].mean()
+    train_mean = cv_results[f'train_{metric}'].mean()
+    print(f"  {metric:12}  Train={train_mean:.4f}  Test={test_mean:.4f}")</code></pre>
+
+  <div class="callout callout-tip">
+    <span class="callout-icon">💡</span>
+    <div class="callout-body">
+      <strong>Pipeline = The Right Way to Cross-Validate</strong>
+      <p>Every preprocessing step that looks at data to compute statistics — StandardScaler, MinMaxScaler, SimpleImputer, SelectKBest, PCA — must be inside a Pipeline when used with cross-validation. Steps that apply a fixed transformation (like adding a polynomial feature) don't need to be in a Pipeline, but it's good practice to always use one anyway.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Real-World ── -->
+<div class="use-case-section">
+  <div class="use-case-header">
+    <span style="font-size:1.5rem">🌍</span>
+    <h2>Real-World Spotlight: Credit Scoring and Optimal Fraud Thresholds</h2>
+  </div>
+
+  <div class="callout callout-realworld">
+    <span class="callout-icon">🌍</span>
+    <div class="callout-body">
+      <strong>How Banks Choose Their Fraud Detection Threshold</strong>
+      <p>Banks do not use 0.5 as their fraud detection threshold. They compute the expected cost at every point on the ROC curve and find the threshold that minimises total expected losses. The cost calculation considers: cost of fraud investigation (FP), value of fraud prevented (TP), and cost of chargebacks (FN). Different banks make different tradeoffs based on their customer service budget and fraud loss tolerance.</p>
+      <p>The entire pipeline is then validated with Stratified K-Fold cross-validation using <code>roc_auc</code> as the evaluation metric (because AUC is threshold-independent and gives a complete view of the model's discrimination ability before the threshold decision). The threshold is chosen separately from model selection.</p>
+    </div>
+  </div>
+
+  <pre><code class="language-python">from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import GradientBoostingClassifier
+from sklearn.model_selection import StratifiedKFold, cross_val_score
+from sklearn.preprocessing import StandardScaler
+from sklearn.pipeline import Pipeline
+from sklearn.metrics import roc_curve, roc_auc_score
+from sklearn.datasets import make_classification
+import numpy as np
+import matplotlib.pyplot as plt
+
+# Simulate credit card transactions (3% fraud rate)
+np.random.seed(42)
+X, y = make_classification(
+    n_samples=20000, weights=[0.97, 0.03],
+    n_features=30, n_informative=15, n_redundant=5,
+    random_state=42)
+
+# Step 1: Model selection via StratifiedKFold + AUC
+skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+
+lr_pipe  = Pipeline([('s', StandardScaler()), ('lr', LogisticRegression(max_iter=2000))])
+gbc_pipe = Pipeline([('s', StandardScaler()),
+                     ('gbc', GradientBoostingClassifier(n_estimators=100, random_state=42))])
+
+lr_auc  = cross_val_score(lr_pipe,  X, y, cv=skf, scoring='roc_auc')
+gbc_auc = cross_val_score(gbc_pipe, X, y, cv=skf, scoring='roc_auc')
+
+print("=== Model Selection (5-Fold Stratified CV) ===")
+print(f"Logistic Regression AUC: {lr_auc.mean():.4f} ± {lr_auc.std():.4f}")
+print(f"Gradient Boosting AUC:   {gbc_auc.mean():.4f} ± {gbc_auc.std():.4f}")
+print(f"Winner: {'GradientBoosting' if gbc_auc.mean() > lr_auc.mean() else 'LogisticRegression'}")
+
+# Step 2: Train best model on 80% holdout, evaluate on 20%
+from sklearn.model_selection import train_test_split
+X_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=0.2, stratify=y, random_state=42)
+
+best_pipe = gbc_pipe if gbc_auc.mean() > lr_auc.mean() else lr_pipe
+best_pipe.fit(X_tr, y_tr)
+
+y_scores = best_pipe.predict_proba(X_te)[:, 1]
+fpr_arr, tpr_arr, thresholds = roc_curve(y_te, y_scores)
+final_auc = roc_auc_score(y_te, y_scores)
+print(f"\nHoldout test AUC: {final_auc:.4f}")
+
+# Step 3: Cost-benefit threshold selection
+n_pos = y_te.sum()
+n_neg = len(y_te) - n_pos
+
+cost_fp = 50    # manual review cost
+cost_fn = 500   # fraud loss
+
+costs = [(1-tpr)*n_pos*cost_fn + fpr*n_neg*cost_fp
+         for tpr, fpr in zip(tpr_arr, fpr_arr)]
+
+best_i = np.argmin(costs)
+print(f"\n=== Optimal Threshold (cost-benefit) ===")
+print(f"Threshold:     {thresholds[best_i]:.4f}")
+print(f"TPR (recall):  {tpr_arr[best_i]:.4f}")
+print(f"FPR:           {fpr_arr[best_i]:.4f}")
+print(f"Expected cost: ${costs[best_i]:,.0f}")
+print(f"vs default 0.5: ${costs[np.argmin(np.abs(thresholds - 0.5))]:,.0f}")
+print(f"Annual savings (if 20K transactions/day): ${(costs[np.argmin(np.abs(thresholds-0.5))] - costs[best_i])*365:,.0f}")</code></pre>
+</div>
+
+<!-- ── Quiz ── -->
+<section class="quiz-section">
+  <h2>Quick Check</h2>
+  <div id="quiz1"></div>
+</section>
+
+<!-- ── Practice ── -->
+<div class="practice-card">
+  <h2>✍️ Practice Exercises</h2>
+  <ol>
+    <li>Train a Logistic Regression and a KNN classifier on the breast cancer dataset. Plot both ROC curves on the same axes. Report the AUC for each and identify which model has better discriminative ability.</li>
+    <li>Using a severely imbalanced dataset (<code>make_classification(weights=[0.98, 0.02])</code>), demonstrate that the ROC curve can look optimistic while the Precision-Recall curve reveals the model's weakness. Plot both side-by-side.</li>
+    <li>Simulate the cost-benefit analysis: on any binary classification dataset, set FP_cost=100 and FN_cost=200. Plot expected cost vs threshold. Find the optimal threshold. Then repeat with FN_cost=1000. How does the optimal threshold shift?</li>
+    <li>Demonstrate data leakage: on the breast cancer dataset, scale <em>before</em> cross-validation and then inside a Pipeline. Report the accuracy for both approaches and the magnitude of the leakage inflation.</li>
+    <li>Use <code>cross_validate</code> with <code>StratifiedKFold(n_splits=10)</code> to evaluate a LogisticRegression on load_digits across 5 metrics simultaneously (accuracy, roc_auc with ovr, f1_macro, precision_macro, recall_macro). Report mean ± std for each.</li>
+  </ol>
+
+  <details>
+    <summary>▶ cross_validate multi-metric hint</summary>
+    <pre><code class="language-python">from sklearn.model_selection import cross_validate, StratifiedKFold
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
+from sklearn.linear_model import LogisticRegression
+from sklearn.datasets import load_digits
+
+X, y = load_digits(return_X_y=True)
+pipe = Pipeline([('s', StandardScaler()),
+                 ('lr', LogisticRegression(max_iter=5000, multi_class='ovr'))])
+skf = StratifiedKFold(n_splits=10, shuffle=True, random_state=42)
+
+scoring = {
+    'accuracy':        'accuracy',
+    'roc_auc_ovr':     'roc_auc_ovr',
+    'f1_macro':        'f1_macro',
+    'precision_macro': 'precision_macro',
+    'recall_macro':    'recall_macro',
+}
+results = cross_validate(pipe, X, y, cv=skf, scoring=scoring)
+for metric in scoring:
+    m = results[f'test_{metric}']
+    print(f"{metric:20}  {m.mean():.4f} ± {m.std():.4f}")</code></pre>
+  </details>
+</div>
+
+<div class="primary-source">
+  <h2>📚 Primary Sources</h2>
+  <p><a href="https://scikit-learn.org/stable/modules/model_evaluation.html#roc-metrics" target="_blank"><strong>sklearn: ROC and AUC</strong></a> — official documentation with worked examples and multi-class ROC.<br>
+  <a href="https://scikit-learn.org/stable/modules/cross_validation.html" target="_blank"><strong>sklearn: Cross-Validation</strong></a> — comprehensive guide to all CV strategies and pitfalls.</p>
+</div>
+
+<div class="ask-tutor">
+  <span class="icon">💬</span>
+  <span>Getting inconsistent cross-validation scores? Unsure which model's AUC difference is meaningful? Share your code and results — your AI tutor will help you interpret them correctly.</span>
+</div>
+
+<nav class="lesson-nav">
+  <a href="./0019-model-evaluation-1.html" class="nav-btn nav-btn-prev">← Lesson 19: Model Evaluation I</a>
+  <a href="./0021-regularization.html" class="nav-btn nav-btn-next">Lesson 21: Regularization →</a>
+</nav>
+
+</div><!-- /content-wrapper -->
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-core.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/plugins/autoloader/prism-autoloader.min.js"></script>
+<script src="../assets/quiz.js"></script>
+<script>
+new MLQuiz('quiz1', [
+  {
+    question: "An AUC of 0.5 for a binary classifier means what?",
+    options: [
+      "The model performs no better than random chance — it has no discriminative ability",
+      "The model achieves 50% accuracy, which is the minimum acceptable threshold",
+      "The model correctly ranks 50% of positive samples above all negatives",
+      "The ROC curve covers exactly 50% of the total area, indicating moderate performance"
+    ],
+    correct: 0,
+    explanation: "AUC = 0.5 means the ROC curve follows the diagonal — the model's ranking of positive vs negative samples is random. Equivalently: given a random positive and a random negative, the model assigns a higher score to the positive only 50% of the time (the same as a coin flip). Any useful model should have AUC > 0.5."
+  },
+  {
+    question: "Why should you use Stratified K-Fold instead of standard K-Fold for imbalanced classification?",
+    options: [
+      "To ensure each fold has the same class proportion as the full dataset — preventing folds with zero positive samples that make metrics undefined",
+      "Stratified K-Fold is always faster because it requires fewer folds",
+      "Standard K-Fold cannot be used with Pipeline objects",
+      "Stratified K-Fold automatically prevents data leakage from preprocessing"
+    ],
+    correct: 0,
+    explanation: "Standard KFold assigns samples to folds randomly. For a dataset with 2% positives, some folds may get 0 or 1 positive samples — making recall, AUC, and other metrics undefined or unreliable. StratifiedKFold maintains the class ratio in each fold (approximately 2% positives in every fold), ensuring each evaluation is representative."
+  },
+  {
+    question: "Lowering the classification threshold from 0.5 to 0.3 will generally do what?",
+    options: [
+      "Increase recall and decrease precision — more samples are classified as positive, catching more true positives but also more false positives",
+      "Increase precision and decrease recall — the model becomes more selective about positive predictions",
+      "Increase both precision and recall simultaneously",
+      "Have no effect since the model's probability scores don't change"
+    ],
+    correct: 0,
+    explanation: "At threshold 0.3, any sample with P(y=1)≥0.3 is predicted positive. This is a lower bar than 0.5, so more samples are classified as positive. More true positives are caught (higher recall), but proportionally more false positives are also included (lower precision). The tradeoff moves along the Precision-Recall curve toward higher recall."
+  },
+  {
+    question: "On the ROC curve, the point (FPR=0, TPR=1) represents what?",
+    options: [
+      "A perfect classifier — it catches all true positives with zero false positives at some threshold",
+      "The default operating point when threshold=0.5",
+      "A random classifier performing at chance level",
+      "The point where Precision equals Recall"
+    ],
+    correct: 0,
+    explanation: "(FPR=0, TPR=1) means: at some threshold, the model correctly identifies every positive sample (TPR=Recall=1.0) while generating zero false alarms (FPR=0.0). This is the top-left corner of the ROC plot — the ideal operating point. AUC=1.0 for such a model. In practice, real models trace a curve somewhere between the diagonal (random) and the top-left corner."
+  },
+  {
+    question: "Why is data leakage a risk when using cross-validation with preprocessing?",
+    options: [
+      "If scaling or imputation is fit on the full dataset before cross-validation, test fold statistics contaminate the preprocessing fit, inflating validation scores",
+      "Cross-validation automatically shares data between folds, which causes the model to memorise test data",
+      "Preprocessing changes the feature names, making cross-validation unable to match train and test features",
+      "Data leakage only occurs with neural networks, not with traditional sklearn models"
+    ],
+    correct: 0,
+    explanation: "When you call scaler.fit_transform(X_full) before cross-validation, the scaler learns the mean and std from the entire dataset — including what will become test folds. During CV, the 'test' fold was already used to compute scaling parameters. The model has indirectly 'seen' the test data through the scaler, giving it an unfair advantage. Fix: put the scaler inside a Pipeline so it only fits on training folds."
+  }
+]);
+</script>
+
+</body>
+</html>

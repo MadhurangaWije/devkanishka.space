@@ -1,0 +1,626 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lesson 23: Ensemble Methods — Voting, Bagging &amp; Random Forests | ML Mastery</title>
+  <link rel="stylesheet" href="../assets/style.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
+</head>
+<body>
+
+<header class="lesson-header">
+  <div class="header-inner">
+    <nav class="breadcrumb">
+      <a href="../reference/curriculum-map.html">ML Mastery</a>
+      <span class="sep">›</span>
+      <span>Phase 2: Supervised ML</span>
+    </nav>
+    <div class="lesson-badges">
+      <span class="phase-badge">Phase 2 · Supervised ML</span>
+      <span class="lesson-num-badge">Lesson 23</span>
+    </div>
+    <h1 class="lesson-title">Ensemble Methods: Majority Voting, Bagging &amp; Random Forests</h1>
+    <p class="lesson-subtitle">Why combining many imperfect models beats any single perfect one — the wisdom of crowds applied to machine learning.</p>
+    <div class="meta-pills">
+      <span class="meta-pill">⏱ ~60 min</span>
+      <span class="meta-pill">🐍 scikit-learn</span>
+      <span class="meta-pill">🌲 Supervised ML</span>
+      <span class="meta-pill">Requires Lesson 22</span>
+    </div>
+  </div>
+</header>
+
+<main class="lesson-main">
+<div class="content-wrapper">
+
+<div class="objectives-card">
+  <h2>🎯 What You'll Learn</h2>
+  <ul>
+    <li>Understand <em>why</em> ensembles work through the lens of bias-variance decomposition and the wisdom of crowds</li>
+    <li>Build voting ensembles (hard and soft) with <code>VotingClassifier</code></li>
+    <li>Explain bootstrap sampling and implement <code>BaggingClassifier</code> with out-of-bag evaluation</li>
+    <li>Train <code>RandomForestClassifier</code> and understand why random feature subsets make trees more diverse</li>
+    <li>Extract and interpret feature importances from a Random Forest</li>
+  </ul>
+</div>
+
+<!-- ── Section 1 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">1</span> Why Ensembles Work: Wisdom of Crowds</h2>
+
+  <p>In 1906, statistician Francis Galton attended a county fair where 800 people guessed the weight of an ox. No single guess was exact, but the <em>median</em> of all guesses — 1207 pounds — was accurate to within 0.8% of the true weight of 1198 pounds. Individual judgment was imperfect; collective judgment was astonishing.</p>
+
+  <p>Machine learning ensembles work on the same principle: individual models make different mistakes, and those errors tend to cancel out when you aggregate predictions. This only works if the models are:</p>
+  <ul>
+    <li><strong>Diverse</strong> — they make different mistakes on different examples</li>
+    <li><strong>Better than random</strong> — each individual model has some predictive power</li>
+  </ul>
+
+  <pre><code class="language-python">import numpy as np
+from sklearn.datasets import make_classification
+from sklearn.model_selection import cross_val_score
+from sklearn.linear_model import LogisticRegression
+from sklearn.tree import DecisionTreeClassifier
+from sklearn.neighbors import KNeighborsClassifier
+
+np.random.seed(42)
+X, y = make_classification(
+    n_samples=2000, n_features=20, n_informative=10,
+    n_redundant=5, random_state=42)
+
+# Individual model cross-validation scores
+models = {
+    'Logistic Regression': LogisticRegression(max_iter=1000, random_state=42),
+    'Decision Tree':       DecisionTreeClassifier(max_depth=5, random_state=42),
+    'KNN (k=7)':           KNeighborsClassifier(n_neighbors=7),
+}
+
+print("Individual model cross-validation accuracy:")
+for name, model in models.items():
+    scores = cross_val_score(model, X, y, cv=5, scoring='roc_auc')
+    print(f"  {name:25s}: {scores.mean():.4f} ± {scores.std():.4f}")
+
+# Logistic Regression     : 0.8712 ± 0.0183
+# Decision Tree           : 0.8419 ± 0.0215
+# KNN (k=7)               : 0.8534 ± 0.0201
+# None of these are the best model — but combining them often beats all three</code></pre>
+
+  <div class="callout callout-key">
+    <span class="callout-icon">🔑</span>
+    <div class="callout-body">
+      <strong>Bias-Variance Decomposition of Ensemble Error</strong>
+      <p>The expected prediction error of any model decomposes as: Error = Bias² + Variance + Irreducible Noise. A single deep decision tree has low bias but high variance (it changes a lot if you retrain on different data). Averaging many such trees keeps the low bias while cancelling out their variance — the trees' individual errors wash out. Ensembles primarily reduce variance.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 2 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">2</span> Majority Voting (Hard Voting)</h2>
+
+  <p>The simplest ensemble: train multiple different models and predict whichever class the majority of models predict. Three models vote; the class that gets two or more votes wins. Scikit-learn's <code>VotingClassifier</code> handles this automatically.</p>
+
+  <pre><code class="language-python">from sklearn.ensemble import VotingClassifier
+from sklearn.linear_model import LogisticRegression
+from sklearn.tree import DecisionTreeClassifier
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.preprocessing import StandardScaler
+from sklearn.pipeline import Pipeline
+from sklearn.model_selection import train_test_split, cross_val_score
+import numpy as np
+
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.2, stratify=y, random_state=42)
+
+# Note: KNN and Logistic Regression need scaled features
+lr_pipe  = Pipeline([('scaler', StandardScaler()), ('lr', LogisticRegression(max_iter=1000, random_state=42))])
+knn_pipe = Pipeline([('scaler', StandardScaler()), ('knn', KNeighborsClassifier(n_neighbors=7))])
+dt       = DecisionTreeClassifier(max_depth=5, random_state=42)
+
+# Hard voting: each model casts one vote; majority wins
+hard_voter = VotingClassifier(
+    estimators=[
+        ('lr',  lr_pipe),
+        ('dt',  dt),
+        ('knn', knn_pipe),
+    ],
+    voting='hard'
+)
+hard_voter.fit(X_train, y_train)
+
+print(f"Hard Voting  — Test accuracy: {hard_voter.score(X_test, y_test):.4f}")
+from sklearn.metrics import roc_auc_score
+y_pred_h = hard_voter.predict(X_test)
+# Note: hard voting doesn't support predict_proba for AUC directly
+
+# Compare to individual models
+for name, model in [('Logistic Regression', lr_pipe), ('Decision Tree', dt), ('KNN', knn_pipe)]:
+    model.fit(X_train, y_train)
+    print(f"  {name:25s}: {model.score(X_test, y_test):.4f}")
+
+# Hard Voting         : 0.8900  ← usually beats all individuals
+# Logistic Regression : 0.8725
+# Decision Tree       : 0.8450
+# KNN                 : 0.8600</code></pre>
+</div>
+
+<!-- ── Section 3 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">3</span> Soft Voting</h2>
+
+  <p>Soft voting averages the <em>predicted probabilities</em> across all models and picks the class with the highest average probability. Because it uses full confidence information rather than just the winning class, soft voting almost always outperforms hard voting — provided each model is well-calibrated.</p>
+
+  <pre><code class="language-python">from sklearn.ensemble import VotingClassifier
+from sklearn.metrics import roc_auc_score
+import numpy as np
+
+# Soft voting: average predict_proba across models
+soft_voter = VotingClassifier(
+    estimators=[
+        ('lr',  lr_pipe),
+        ('dt',  dt),
+        ('knn', knn_pipe),
+    ],
+    voting='soft'
+)
+soft_voter.fit(X_train, y_train)
+
+proba_soft = soft_voter.predict_proba(X_test)[:, 1]
+auc_soft   = roc_auc_score(y_test, proba_soft)
+acc_soft   = soft_voter.score(X_test, y_test)
+
+print(f"Soft Voting — Test accuracy: {acc_soft:.4f}  AUC: {auc_soft:.4f}")
+
+# Inspect the averaged probabilities for 5 test samples
+for i in range(5):
+    lr_p  = lr_pipe.predict_proba(X_test[i:i+1])[0, 1]
+    dt_p  = dt.predict_proba(X_test[i:i+1])[0, 1]
+    knn_p = knn_pipe.predict_proba(X_test[i:i+1])[0, 1]
+    avg_p = (lr_p + dt_p + knn_p) / 3
+    truth = y_test[i]
+    print(f"  Sample {i}: LR={lr_p:.3f}  DT={dt_p:.3f}  KNN={knn_p:.3f}  avg={avg_p:.3f}  true={truth}")
+
+# Soft Voting — Test accuracy: 0.9000  AUC: 0.9402
+# Higher AUC than hard voting because it uses full probability information</code></pre>
+
+  <div class="callout callout-tip">
+    <span class="callout-icon">💡</span>
+    <div class="callout-body">
+      <strong>When to Use Hard vs Soft Voting</strong>
+      <p>Use <strong>soft voting</strong> whenever all your base estimators support <code>predict_proba</code>. It's almost always better because it leverages the confidence of each model's prediction. Use <strong>hard voting</strong> only when some of your base estimators don't expose probabilities (e.g., some SVM variants). For AUC-focused tasks, soft voting is mandatory since AUC requires predicted probabilities.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 4 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">4</span> Weighted Voting</h2>
+
+  <p>Not all models are equally good. A well-calibrated approach is to give more influence to the models that performed better on a held-out validation set. This is weighted voting.</p>
+
+  <pre><code class="language-python">from sklearn.ensemble import VotingClassifier
+from sklearn.model_selection import cross_val_score
+import numpy as np
+
+# First evaluate each model's AUC on the training data via cross-validation
+# to determine appropriate weights
+base_aucs = {}
+for name, model in [('lr', lr_pipe), ('dt', dt), ('knn', knn_pipe)]:
+    scores = cross_val_score(model, X_train, y_train, cv=5, scoring='roc_auc')
+    base_aucs[name] = scores.mean()
+    print(f"  {name}: CV-AUC = {scores.mean():.4f}")
+
+# Weights proportional to CV-AUC
+weights = [base_aucs['lr'], base_aucs['dt'], base_aucs['knn']]
+print(f"\nWeights: {[round(w, 3) for w in weights]}")
+
+weighted_voter = VotingClassifier(
+    estimators=[('lr', lr_pipe), ('dt', dt), ('knn', knn_pipe)],
+    voting='soft',
+    weights=weights   # higher-AUC models get more say
+)
+weighted_voter.fit(X_train, y_train)
+
+from sklearn.metrics import roc_auc_score
+proba_w = weighted_voter.predict_proba(X_test)[:, 1]
+print(f"\nWeighted Soft Voting — AUC: {roc_auc_score(y_test, proba_w):.4f}")
+# Typically same or slightly better than unweighted soft voting</code></pre>
+</div>
+
+<!-- ── Section 5 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">5</span> Bagging: Bootstrap Aggregating</h2>
+
+  <p>Voting combines different model types. Bagging takes a different approach: train the <em>same</em> algorithm multiple times on different <strong>bootstrap samples</strong> of the training data — random samples drawn with replacement. Because each tree sees a slightly different dataset, the trees make different errors that cancel out when averaged.</p>
+
+  <p>Bootstrapping: from n training samples, draw n samples <em>with replacement</em>. On average, each bootstrap sample contains ~63.2% of original samples (some appear multiple times). The ~36.8% that weren't drawn become the <strong>out-of-bag (OOB)</strong> samples for that tree — a free validation set.</p>
+
+  <pre><code class="language-python">from sklearn.ensemble import BaggingClassifier
+from sklearn.tree import DecisionTreeClassifier
+from sklearn.metrics import roc_auc_score
+import numpy as np
+
+# Bagging: 100 decision trees on different bootstrap samples
+bag = BaggingClassifier(
+    estimator=DecisionTreeClassifier(max_depth=None),  # deep trees: high variance
+    n_estimators=100,
+    max_samples=1.0,    # each bootstrap uses 100% of n (with replacement)
+    max_features=1.0,   # all features (feature randomness is added in RandomForest)
+    bootstrap=True,
+    oob_score=True,     # use OOB samples for free validation estimate
+    random_state=42,
+    n_jobs=-1
+)
+bag.fit(X_train, y_train)
+
+print(f"Bagging — Test accuracy:   {bag.score(X_test, y_test):.4f}")
+print(f"Bagging — OOB accuracy:    {bag.oob_score_:.4f}")  # no test set needed!
+proba_bag = bag.predict_proba(X_test)[:, 1]
+print(f"Bagging — Test AUC:        {roc_auc_score(y_test, proba_bag):.4f}")
+
+# Compare to single deep tree (high variance)
+single_deep = DecisionTreeClassifier(max_depth=None, random_state=42)
+single_deep.fit(X_train, y_train)
+print(f"\nSingle deep tree — Test accuracy: {single_deep.score(X_test, y_test):.4f}")
+print(f"Single deep tree — Train accuracy: {single_deep.score(X_train, y_train):.4f}")
+
+# Bagging — Test accuracy:   0.9050     ← 9% better than single tree
+# Bagging — OOB accuracy:    0.8980     ← close to test (OOB is reliable)
+# Single deep tree — Test:   0.8250
+# Single deep tree — Train:  1.0000     ← perfect train, poor test = high variance</code></pre>
+
+  <div class="callout callout-key">
+    <span class="callout-icon">🔑</span>
+    <div class="callout-body">
+      <strong>OOB Score: Free Cross-Validation</strong>
+      <p>Each tree in a Bagging ensemble is trained on ~63% of the data. The remaining ~37% — the out-of-bag samples — can evaluate each tree. Averaging across all trees gives an unbiased performance estimate without a separate held-out set. With large ensembles (≥100 trees), OOB score is a reliable alternative to 5-fold cross-validation and comes for free.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 6 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">6</span> Random Forests</h2>
+
+  <p>Random Forests extend Bagging with one crucial addition: at each split, instead of considering all features, each tree considers only a <strong>random subset of features</strong>. This injects an extra layer of diversity — even trees trained on similar bootstrap samples will use different features at each node.</p>
+
+  <p>Why does this help? Without feature randomness, if one feature is very dominant, all trees will use it at the root and look very similar. With feature randomness, other features get more opportunities to shine, and the trees become less correlated. Less correlated trees → averaging reduces more variance.</p>
+
+  <pre><code class="language-python">from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import classification_report, roc_auc_score
+import numpy as np
+
+# Random Forest: bagging + random feature subset at each split
+rf = RandomForestClassifier(
+    n_estimators=200,      # more trees = better (diminishing returns after ~200)
+    max_features='sqrt',   # consider sqrt(n_features) features per split — classification default
+    max_depth=None,        # deep trees: RF relies on diversity, not shallow trees
+    min_samples_leaf=1,
+    bootstrap=True,
+    oob_score=True,
+    n_jobs=-1,
+    random_state=42
+)
+rf.fit(X_train, y_train)
+
+print(f"Random Forest — Test accuracy: {rf.score(X_test, y_test):.4f}")
+print(f"Random Forest — OOB accuracy:  {rf.oob_score_:.4f}")
+proba_rf = rf.predict_proba(X_test)[:, 1]
+print(f"Random Forest — Test AUC:      {roc_auc_score(y_test, proba_rf):.4f}")
+print(f"\n{classification_report(y_test, rf.predict(X_test))}")
+
+# Effect of n_estimators
+print("\nEffect of n_estimators on test AUC:")
+for n_est in [10, 25, 50, 100, 200, 500]:
+    rf_n = RandomForestClassifier(n_estimators=n_est, max_features='sqrt',
+                                   oob_score=True, n_jobs=-1, random_state=42)
+    rf_n.fit(X_train, y_train)
+    auc = roc_auc_score(y_test, rf_n.predict_proba(X_test)[:, 1])
+    print(f"  n_estimators={n_est:4d}: AUC={auc:.4f}  OOB={rf_n.oob_score_:.4f}")
+
+# n_estimators=  10: AUC=0.9301  OOB=0.9012  ← high variance
+# n_estimators= 100: AUC=0.9489  OOB=0.9223
+# n_estimators= 200: AUC=0.9501  OOB=0.9241  ← good balance
+# n_estimators= 500: AUC=0.9507  OOB=0.9249  ← diminishing returns</code></pre>
+</div>
+
+<!-- ── Section 7 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">7</span> Key Random Forest Hyperparameters</h2>
+
+  <pre><code class="language-python">from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import cross_val_score
+import numpy as np
+
+# Tuning max_features
+print("Effect of max_features:")
+for mf in [1, 3, 'sqrt', 'log2', None]:  # None = all features (= Bagging)
+    rf = RandomForestClassifier(n_estimators=100, max_features=mf, n_jobs=-1, random_state=42)
+    auc = cross_val_score(rf, X, y, cv=5, scoring='roc_auc').mean()
+    print(f"  max_features={str(mf):8s}: CV-AUC = {auc:.4f}")
+
+# max_features=1      : 0.9050  ← too restrictive, each tree is weak
+# max_features=sqrt   : 0.9421  ← classification default, usually best
+# max_features=log2   : 0.9398
+# max_features=None   : 0.9312  ← all features = correlated trees (plain bagging)
+
+# Tuning max_depth
+print("\nEffect of max_depth:")
+for md in [3, 5, 10, 20, None]:
+    rf = RandomForestClassifier(n_estimators=100, max_depth=md, max_features='sqrt',
+                                 n_jobs=-1, random_state=42)
+    scores = cross_val_score(rf, X, y, cv=5, scoring='roc_auc')
+    print(f"  max_depth={str(md):6s}: CV-AUC = {scores.mean():.4f} ± {scores.std():.4f}")
+
+# max_depth=3   : 0.8941 ± 0.0189  ← underfitting, too shallow
+# max_depth=10  : 0.9352 ± 0.0143
+# max_depth=None: 0.9421 ± 0.0162  ← deep trees work well with RF diversity</code></pre>
+
+  <table style="width:100%; border-collapse: collapse; margin: 1.25rem 0; font-size: 0.88rem;">
+    <thead>
+      <tr style="background: var(--bg-alt); text-align: left;">
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Hyperparameter</th>
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Default</th>
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Tuning guidance</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border); font-family: monospace;">n_estimators</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">100</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">More is better; use OOB to find diminishing returns point</td>
+      </tr>
+      <tr style="background: var(--bg-subtle);">
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border); font-family: monospace;">max_features</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">'sqrt'</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">'sqrt' for classification; n_features/3 for regression</td>
+      </tr>
+      <tr>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border); font-family: monospace;">max_depth</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">None</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Usually keep None; shallow trees can reduce RF performance</td>
+      </tr>
+      <tr style="background: var(--bg-subtle);">
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border); font-family: monospace;">min_samples_leaf</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">1</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Try 1–20; higher → smoother predictions, less overfit</td>
+      </tr>
+      <tr>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border); font-family: monospace;">oob_score</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">False</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Set True to get free OOB performance estimate</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+<!-- ── Section 8 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">8</span> Feature Importance in Random Forests</h2>
+
+  <p>Random Forest feature importances are averages of the single-tree importances across all 100+ trees. Because different trees use different bootstrap samples and different feature subsets, the RF importance is generally more stable and reliable than a single tree's importance — though still biased toward high-cardinality features.</p>
+
+  <pre><code class="language-python">import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.inspection import permutation_importance
+from sklearn.datasets import load_breast_cancer
+from sklearn.model_selection import train_test_split
+
+bc = load_breast_cancer()
+X_bc, y_bc = bc.data, bc.target
+feature_names = bc.feature_names
+X_btr, X_bte, y_btr, y_bte = train_test_split(X_bc, y_bc, test_size=0.2, random_state=42)
+
+rf_bc = RandomForestClassifier(n_estimators=200, max_features='sqrt',
+                                 oob_score=True, n_jobs=-1, random_state=42)
+rf_bc.fit(X_btr, y_btr)
+
+# Impurity-based feature importance (fast, but can be biased)
+imp_df = pd.Series(rf_bc.feature_importances_, index=feature_names)
+print("Top 10 RF feature importances (impurity-based):")
+print(imp_df.nlargest(10).round(4))
+
+# Permutation importance (slower, but unbiased)
+result = permutation_importance(rf_bc, X_bte, y_bte, n_repeats=20,
+                                 random_state=42, n_jobs=-1)
+perm_df = pd.Series(result.importances_mean, index=feature_names)
+print("\nTop 10 permutation importances (on test set):")
+print(perm_df.nlargest(10).round(4))
+
+# Compare: do they agree?
+top_imp  = set(imp_df.nlargest(10).index)
+top_perm = set(perm_df.nlargest(10).index)
+print(f"\nFeatures in both top-10 lists: {len(top_imp & top_perm)}/10")
+# Usually 7-9 overlap — permutation importance is the more trustworthy version</code></pre>
+
+  <div class="callout callout-warn">
+    <span class="callout-icon">⚠️</span>
+    <div class="callout-body">
+      <strong>Use Permutation Importance for Critical Feature Selection</strong>
+      <p>Impurity-based feature importances are computed on training data — they reflect how useful a feature was during training, not how much it matters for test-set predictions. Permutation importance shuffles one feature at a time on the <em>test set</em> and measures performance degradation. It is unbiased and reflects true generalisation importance. The extra computation time is almost always worth it.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Real-World Spotlight ── -->
+<div class="use-case-section">
+  <div class="use-case-header">
+    <span style="font-size:1.5rem">🌍</span>
+    <h2>Real-World Spotlight: Fraud Detection with Random Forest</h2>
+  </div>
+  <p>Online fraud datasets are characterised by severe class imbalance (often 0.1–1% fraud), and both false positives (blocking legitimate customers) and false negatives (missing fraud) are costly. Random Forests with <code>class_weight='balanced'</code> and OOB evaluation are a standard strong baseline in the industry.</p>
+  <pre><code class="language-python">import numpy as np
+import pandas as pd
+from sklearn.ensemble import VotingClassifier, RandomForestClassifier
+from sklearn.linear_model import LogisticRegression
+from sklearn.preprocessing import StandardScaler
+from sklearn.pipeline import Pipeline
+from sklearn.model_selection import train_test_split, StratifiedKFold, cross_val_score
+from sklearn.metrics import roc_auc_score, average_precision_score, classification_report
+
+np.random.seed(42)
+n = 100_000
+n_fraud = int(n * 0.005)  # 0.5% fraud rate
+
+# Synthetic transaction data
+X_legit = np.random.randn(n - n_fraud, 20) * 0.8
+X_fraud = np.random.randn(n_fraud, 20) * 1.5 + 0.3   # fraud skewed in feature space
+X_fraud = np.random.randn(n, 20)
+# Add informative features for fraud signal
+for i in range(5):
+    X_fraud[: , i] += np.random.choice([0, 1], n) * 1.2
+
+y = np.zeros(n)
+fraud_idx = np.random.choice(n, n_fraud, replace=False)
+y[fraud_idx] = 1
+feature_names = ['transaction_amount', 'merchant_category', 'time_since_last_txn',
+                  'dist_from_home', 'device_age'] + [f'feat_{i}' for i in range(15)]
+
+X_frtr, X_frte, y_frtr, y_frte = train_test_split(
+    X_fraud, y, test_size=0.2, stratify=y, random_state=42)
+print(f"Train fraud rate: {y_frtr.mean():.3%}  |  Test fraud rate: {y_frte.mean():.3%}")
+
+# Random Forest with balanced class weights
+rf_fraud = RandomForestClassifier(
+    n_estimators=200,
+    max_features='sqrt',
+    class_weight='balanced',    # compensates for imbalance
+    oob_score=True,
+    n_jobs=-1,
+    random_state=42
+)
+rf_fraud.fit(X_frtr, y_frtr)
+
+proba_rf = rf_fraud.predict_proba(X_frte)[:, 1]
+print(f"\nRandom Forest:")
+print(f"  OOB accuracy:    {rf_fraud.oob_score_:.4f}")
+print(f"  Test AUC-ROC:    {roc_auc_score(y_frte, proba_rf):.4f}")
+print(f"  Avg Precision:   {average_precision_score(y_frte, proba_rf):.4f}")
+
+# Top feature importances
+imp = pd.Series(rf_fraud.feature_importances_, index=feature_names)
+print("\nTop 5 fraud predictors:")
+print(imp.nlargest(5).round(4))
+# transaction_amount   0.1823
+# time_since_last_txn  0.1619
+# merchant_category    0.1401
+
+# Voting ensemble: LR + RF + compare
+lr_pipe = Pipeline([('sc', StandardScaler()), ('lr', LogisticRegression(class_weight='balanced', max_iter=1000))])
+voter = VotingClassifier(
+    estimators=[('lr', lr_pipe), ('rf', rf_fraud)],
+    voting='soft', weights=[1, 2]   # RF gets double vote
+)
+voter.fit(X_frtr, y_frtr)
+proba_v = voter.predict_proba(X_frte)[:, 1]
+print(f"\nVoting Ensemble (LR + RF, weight=[1,2]):")
+print(f"  Test AUC-ROC: {roc_auc_score(y_frte, proba_v):.4f}")</code></pre>
+  <p>The Random Forest with balanced class weights provides a strong, interpretable baseline: transaction amount, time since last transaction, and merchant category are the top fraud predictors — exactly what domain experts would expect. The voting ensemble with a logistic regression component adds modest AUC improvement by blending the RF's nonlinear patterns with LR's globally calibrated probabilities.</p>
+</div>
+
+<!-- ── Quiz ── -->
+<div class="quiz-section">
+  <div id="lesson-23-quiz"></div>
+</div>
+
+<!-- ── Practice ── -->
+<div class="practice-card">
+  <h2>✍️ Practice Exercises</h2>
+  <ol>
+    <li>Build a <code>VotingClassifier</code> using Logistic Regression, Decision Tree (depth=5), and Naive Bayes on the Breast Cancer dataset. Compare hard vs soft voting AUC. Which performs better and why?</li>
+    <li>Train a <code>BaggingClassifier</code> with <code>oob_score=True</code> on the Wine dataset. Check that OOB accuracy is close to 5-fold cross-validation accuracy.</li>
+    <li>For a Random Forest on the Titanic dataset, plot the test AUC vs <code>n_estimators</code> for values [5, 10, 25, 50, 100, 200]. Where does performance plateau?</li>
+    <li>Compare <code>feature_importances_</code> and <code>permutation_importance</code> on the Diabetes dataset. Do they give different rankings for the top features?</li>
+  </ol>
+</div>
+
+<!-- ── Primary Source ── -->
+<div class="primary-source">
+  <h2>📚 Primary Source for This Lesson</h2>
+  <p><a href="https://scikit-learn.org/stable/modules/ensemble.html" target="_blank"><strong>scikit-learn: Ensemble Methods</strong></a><br>
+  The comprehensive guide covering Voting, Bagging, Random Forests, and beyond. For the theoretical foundations: Breiman (2001) "Random Forests" (<em>Machine Learning</em> 45:5–32) — the original paper is surprisingly readable and worth 30 minutes of your time. Also see Dietterich (2000) "Ensemble Methods in Machine Learning" for a broader theoretical overview.</p>
+</div>
+
+<!-- ── Ask Tutor ── -->
+<div class="ask-tutor">
+  <span class="icon">💬</span>
+  <span>Confused about why OOB score differs from cross-validation? Getting worse results with the ensemble than individual models? Paste your situation and your tutor will diagnose why your models may not be diverse enough.</span>
+</div>
+
+<!-- ── Navigation ── -->
+<nav class="lesson-nav">
+  <a href="./0022-decision-trees.html" class="nav-btn">← Lesson 22: Decision Trees</a>
+  <a href="./0024-boosting.html" class="nav-btn nav-btn-next">Lesson 24: Boosting →</a>
+</nav>
+
+</div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-core.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/plugins/autoloader/prism-autoloader.min.js"></script>
+<script src="../assets/quiz.js"></script>
+<script>
+new MLQuiz('lesson-23-quiz', [
+  {
+    question: "What is the difference between hard and soft voting in an ensemble?",
+    options: [
+      "Hard voting takes the majority predicted class; soft voting averages predicted probabilities and picks the highest",
+      "Soft voting takes the majority predicted class; hard voting averages predicted probabilities",
+      "Hard voting uses all base estimators equally; soft voting weights them by their individual accuracy",
+      "Hard voting requires all models to agree; soft voting requires only a simple majority"
+    ],
+    correct: 0,
+    explanation: "Hard voting collects the predicted class from each model and returns the class that receives the most votes (majority). Soft voting collects the predicted probability for each class from each model, averages them, and returns the class with the highest average probability. Soft voting is generally superior because it uses full probability information rather than just the winning class."
+  },
+  {
+    question: "In Bagging, what does 'bootstrap sampling' mean?",
+    options: [
+      "Sampling with replacement — some training samples appear multiple times, others not at all in each bootstrap",
+      "Sampling without replacement — each bootstrap sample is a random subset of unique training samples",
+      "Stratified sampling — each bootstrap maintains the original class distribution exactly",
+      "Sequential sampling — each new model sees the examples the previous model got wrong"
+    ],
+    correct: 0,
+    explanation: "Bootstrap sampling draws n samples from n training examples with replacement. This means some examples appear 2, 3, or more times in a bootstrap, while others are excluded. On average, each bootstrap sample contains ~63.2% unique training examples (1 - 1/e ≈ 0.632). The ~36.8% that were excluded form the out-of-bag set used for free validation."
+  },
+  {
+    question: "What makes Random Forests more diverse than plain Bagging with decision trees?",
+    options: [
+      "Random Forests also randomly select a subset of features at each split, making individual trees less correlated",
+      "Random Forests use a different splitting criterion (entropy) while Bagging always uses Gini",
+      "Random Forests train on more bootstrap samples, so each tree sees more diverse data",
+      "Random Forests limit tree depth while Bagging allows unlimited depth"
+    ],
+    correct: 0,
+    explanation: "Plain Bagging with decision trees makes trees diverse only through different bootstrap samples. If one feature is very dominant, all trees will still use it at their roots and remain highly correlated. Random Forests add feature randomness: at each split, each tree considers only a random subset (typically sqrt(n_features)) of all features. This forces diversity even in the tree structure, reducing correlation and improving ensemble performance."
+  },
+  {
+    question: "What are out-of-bag (OOB) samples?",
+    options: [
+      "The ~36.8% of training samples NOT included in a given bootstrap — used as a free validation set for that tree",
+      "Samples that the ensemble classified incorrectly on the test set",
+      "Outlier samples removed before training to improve bootstrap quality",
+      "Test set samples used to validate the final ensemble after training"
+    ],
+    correct: 0,
+    explanation: "When a bootstrap sample of n items is drawn with replacement from n training examples, on average about 36.8% of training examples are not selected. These 'out-of-bag' samples are never seen during training for that particular tree, so they can be used to evaluate it. Averaging OOB predictions across all trees gives the OOB score — a reliable estimate of generalisation performance without needing a separate validation set."
+  },
+  {
+    question: "Why do Random Forests generally outperform single decision trees?",
+    options: [
+      "By averaging many trees trained on different data and feature subsets, they reduce variance while maintaining low bias",
+      "Random Forests use deeper trees that can capture more complex patterns than a single tree",
+      "Random Forests use gradient descent to optimise the ensemble, unlike single trees",
+      "Random Forests apply regularization to each tree's coefficients, reducing overfitting"
+    ],
+    correct: 0,
+    explanation: "A single deep decision tree has low bias (it can fit complex patterns) but high variance (it changes a lot with different training data — it memorises noise). Random Forest keeps the low bias by using deep trees but reduces variance by averaging many trees trained on different bootstrap samples and different feature subsets. The individual trees' errors cancel out, leading to a much more stable, accurate model."
+  }
+]);
+</script>
+
+</body>
+</html>

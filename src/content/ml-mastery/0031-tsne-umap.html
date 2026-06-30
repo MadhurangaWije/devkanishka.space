@@ -1,0 +1,987 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lesson 31: t-SNE &amp; UMAP — Visualizing High-Dimensional Data | ML Mastery</title>
+  <link rel="stylesheet" href="../assets/style.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
+</head>
+<body>
+
+<header class="lesson-header">
+  <div class="header-inner">
+    <nav class="breadcrumb">
+      <a href="../reference/curriculum-map.html">ML Mastery</a>
+      <span class="sep">›</span>
+      <span>Phase 3: Unsupervised Learning</span>
+    </nav>
+    <div class="lesson-badges">
+      <span class="phase-badge">Phase 3 · Unsupervised Learning</span>
+      <span class="lesson-num-badge">Lesson 31</span>
+    </div>
+    <h1 class="lesson-title">t-SNE &amp; UMAP: Visualizing High-Dimensional Data</h1>
+    <p class="lesson-subtitle">When PCA's linear lens isn't enough — the two dominant non-linear dimensionality reduction tools that reveal cluster structure invisible to any linear method, and the critical pitfalls of misreading their outputs.</p>
+    <div class="meta-pills">
+      <span class="meta-pill">⏱ ~60 min</span>
+      <span class="meta-pill">🐍 scikit-learn + umap-learn</span>
+      <span class="meta-pill">📐 Unsupervised Learning</span>
+      <span class="meta-pill">Requires Lesson 30</span>
+    </div>
+  </div>
+</header>
+
+<main class="lesson-main">
+<div class="content-wrapper">
+
+<div class="objectives-card">
+  <h2>🎯 What You'll Learn</h2>
+  <ul>
+    <li>Understand why PCA fails to reveal non-linear structure in data, and when non-linear dimensionality reduction is needed</li>
+    <li>Grasp the t-SNE algorithm's key mechanism and understand which of its output properties are meaningful vs misleading</li>
+    <li>Tune t-SNE's <code>perplexity</code> parameter correctly and avoid the common pitfalls of over-interpreting the output</li>
+    <li>Use UMAP as a faster, more information-preserving alternative that also supports transforming new data</li>
+    <li>Choose between PCA, t-SNE, and UMAP based on dataset size, task (visualisation vs preprocessing), and the type of structure you need to preserve</li>
+  </ul>
+</div>
+
+<!-- ── Section 1 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">1</span> Why PCA Isn't Always Enough</h2>
+
+  <p>PCA finds the directions of maximum <em>linear</em> variance. It can separate linearly separable clusters and compress correlated features. But what if the interesting structure is non-linear? What if the data lies on a curved surface embedded in high-dimensional space — a <em>manifold</em>?</p>
+
+  <pre><code class="language-python">import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.decomposition import PCA
+from sklearn.preprocessing import StandardScaler
+from sklearn.datasets import make_swiss_roll, make_s_curve
+
+# ── Swiss Roll: a 2D manifold curled into 3D ──
+X_swiss, colour_swiss = make_swiss_roll(n_samples=1000, noise=0.1, random_state=42)
+
+# PCA to 2D — completely destroys the manifold structure
+pca = PCA(n_components=2)
+X_swiss_pca = pca.fit_transform(StandardScaler().fit_transform(X_swiss))
+
+fig = plt.figure(figsize=(15, 5))
+
+# 3D original
+ax1 = fig.add_subplot(131, projection='3d')
+ax1.scatter(X_swiss[:, 0], X_swiss[:, 1], X_swiss[:, 2],
+            c=colour_swiss, cmap='plasma', alpha=0.7, s=10)
+ax1.set_title('Swiss Roll (3D original)\nTrue 2D manifold curled into 3D')
+ax1.set_xlabel('X'); ax1.set_ylabel('Y'); ax1.set_zlabel('Z')
+
+# PCA 2D
+ax2 = fig.add_subplot(132)
+ax2.scatter(X_swiss_pca[:, 0], X_swiss_pca[:, 1],
+            c=colour_swiss, cmap='plasma', alpha=0.7, s=10)
+ax2.set_title(f'PCA → 2D\n({pca.explained_variance_ratio_.sum()*100:.1f}% variance)\nMixes nearby colours: FAILS')
+ax2.set_xlabel('PC1'); ax2.set_ylabel('PC2')
+
+# Placeholder for t-SNE (shown later)
+ax3 = fig.add_subplot(133)
+ax3.text(0.5, 0.5, 'Non-linear methods\n(t-SNE, UMAP)\nunroll the manifold correctly',
+         ha='center', va='center', fontsize=11,
+         bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.7))
+ax3.set_title('Non-linear Reduction → 2D\n(t-SNE / UMAP)')
+ax3.axis('off')
+
+plt.suptitle('PCA Fails on Non-Linear Manifolds', fontsize=13)
+plt.tight_layout()
+plt.savefig('manifold_pca.png', dpi=150)
+
+print(f"PCA explains {pca.explained_variance_ratio_.sum()*100:.1f}% variance")
+print("But nearby points on the roll (same colour) are MIXED in PCA space")
+print("PCA cannot 'unroll' the Swiss roll — it needs non-linear methods")</code></pre>
+
+  <div class="callout callout-key">
+    <span class="callout-icon">🔑</span>
+    <div class="callout-body">
+      <strong>Manifold Hypothesis</strong>
+      <p>Real high-dimensional data (images, text, speech, genetic data) doesn't fill its ambient high-dimensional space uniformly. It tends to lie on or near a lower-dimensional curved surface — a manifold. MNIST digits have 784 dimensions but the "true" dimensionality is much lower: all valid handwritten "3"s form a manifold defined by stroke width, slant, loop size, etc. t-SNE and UMAP are designed to reveal this manifold structure.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 2 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">2</span> t-SNE: The Intuition</h2>
+
+  <p>t-SNE (t-distributed Stochastic Neighbor Embedding, van der Maaten &amp; Hinton, 2008) works in two stages:</p>
+
+  <p><strong>Stage 1 — Model high-dimensional similarities:</strong> For each pair of points (i, j), compute a similarity p(j|i): the probability that point i would pick point j as its neighbour, modelled as a Gaussian centred on i. The bandwidth of each Gaussian is calibrated per-point so that the effective number of neighbours equals the <code>perplexity</code> parameter. Symmetrise to get p(ij) = (p(j|i) + p(i|j)) / 2n.</p>
+
+  <p><strong>Stage 2 — Match in 2D:</strong> Randomly initialise points in 2D. Define q(ij) — the 2D similarities — using a heavy-tailed Student's t-distribution (not Gaussian). Optimise the 2D positions via gradient descent to minimise the KL divergence between P and Q. The t-distribution in 2D prevents crowding: moderately-close high-dimensional points can be placed further apart in 2D without penalty.</p>
+
+  <pre><code class="language-python">import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.manifold import TSNE
+from sklearn.preprocessing import StandardScaler
+from sklearn.decomposition import PCA
+from sklearn.datasets import load_digits
+import time
+
+digits = load_digits()
+X_digits, y_digits = digits.data, digits.target
+
+# Scale first
+scaler = StandardScaler()
+X_sc = scaler.fit_transform(X_digits)
+
+# PCA pre-processing recommendation: reduce to ~50 dims before t-SNE
+# This removes noise and speeds up t-SNE dramatically
+pca_init = PCA(n_components=50, random_state=42)
+X_pca50 = pca_init.fit_transform(X_sc)
+
+print(f"Original: {X_sc.shape}")
+print(f"After PCA-50: {X_pca50.shape}  ({pca_init.explained_variance_ratio_.sum()*100:.1f}% variance)")
+
+# Fit t-SNE
+t0 = time.time()
+tsne = TSNE(
+    n_components=2,
+    perplexity=30,
+    n_iter=1000,
+    learning_rate='auto',
+    init='pca',          # use PCA initialisation for more stable results
+    random_state=42
+)
+X_tsne = tsne.fit_transform(X_pca50)
+elapsed = time.time() - t0
+
+print(f"\nt-SNE completed in {elapsed:.1f}s")
+print(f"Output shape: {X_tsne.shape}")
+print(f"KL divergence (lower = better fit): {tsne.kl_divergence_:.4f}")
+
+# Visualise
+colors = plt.cm.tab10(np.linspace(0, 1, 10))
+plt.figure(figsize=(10, 8))
+for digit in range(10):
+    mask = y_digits == digit
+    plt.scatter(X_tsne[mask, 0], X_tsne[mask, 1],
+                c=[colors[digit]], alpha=0.7, s=15, label=str(digit))
+    centroid = X_tsne[mask].mean(axis=0)
+    plt.annotate(str(digit), centroid, fontsize=12, fontweight='bold',
+                 ha='center', va='center',
+                 bbox=dict(boxstyle='round,pad=0.2', facecolor='white', alpha=0.8))
+
+plt.title('t-SNE of MNIST Digits (perplexity=30)\nLocal cluster structure perfectly preserved')
+plt.legend(title='Digit', bbox_to_anchor=(1.02, 1), loc='upper left', fontsize=9)
+plt.axis('off')
+plt.tight_layout()
+plt.savefig('tsne_digits.png', dpi=150)</code></pre>
+</div>
+
+<!-- ── Section 3 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">3</span> t-SNE Key Parameters</h2>
+
+  <p>t-SNE has more parameters than PCA, and choosing them well is critical for getting meaningful results.</p>
+
+  <pre><code class="language-python">import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.manifold import TSNE
+from sklearn.preprocessing import StandardScaler
+from sklearn.decomposition import PCA
+from sklearn.datasets import load_digits
+
+X_digits, y_digits = load_digits(return_X_y=True)
+X_sc = StandardScaler().fit_transform(X_digits)
+X_pca50 = PCA(n_components=50, random_state=42).fit_transform(X_sc)
+
+# ── Effect of perplexity ──
+perplexities = [5, 15, 30, 50, 100]
+fig, axes = plt.subplots(1, len(perplexities), figsize=(20, 4))
+colors = plt.cm.tab10(np.linspace(0, 1, 10))
+
+for ax, perp in zip(axes, perplexities):
+    tsne_p = TSNE(n_components=2, perplexity=perp, n_iter=1000,
+                  learning_rate='auto', init='pca', random_state=42)
+    X_p = tsne_p.fit_transform(X_pca50)
+    for d in range(10):
+        mask = y_digits == d
+        ax.scatter(X_p[mask, 0], X_p[mask, 1], c=[colors[d]], alpha=0.6, s=5)
+    ax.set_title(f'perplexity={perp}')
+    ax.axis('off')
+
+plt.suptitle('Effect of Perplexity on t-SNE Layout', fontsize=12)
+plt.tight_layout()
+plt.savefig('tsne_perplexity.png', dpi=150)
+
+# ── Parameter guide ──
+param_info = {
+    'perplexity':      ('5–50 (try 30 as default)', 'Effective number of neighbours; larger for bigger/denser datasets'),
+    'n_iter':          ('≥ 1000 (try 2000 for small data)', 'More iterations = more refined layout; too few = noisy output'),
+    'learning_rate':   ("'auto' (sklearn ≥ 1.2) or 100–1000", 'Too high: clusters look like "exploded"; too low: ball of points'),
+    'init':            ("'pca' (preferred) or 'random'", "PCA init is more stable and reproducible than random"),
+    'random_state':    ('Integer, e.g. 42', 'Different seeds → completely different layouts (t-SNE is stochastic)'),
+    'metric':          ("'euclidean' (default) or any sklearn metric", 'Distance metric for high-dimensional space'),
+    'n_components':    ('2 (for 2D) or 3 (for 3D)',  'Almost always 2 for visualisation'),
+    'early_exaggeration': ('12 (default)', 'How tight initial clusters are — usually leave as default'),
+}
+
+print(f"{'Parameter':<25}  {'Recommended':>35}  Description")
+print("-" * 95)
+for param, (rec, desc) in param_info.items():
+    print(f"{param:<25}  {rec:>35}  {desc}")</code></pre>
+
+  <div class="callout callout-tip">
+    <span class="callout-icon">💡</span>
+    <div class="callout-body">
+      <strong>Always Pre-Reduce with PCA Before t-SNE</strong>
+      <p>On raw high-dimensional data (e.g., 784-dim MNIST pixels), t-SNE is very slow and noise-sensitive. The standard practice: first apply PCA to ~50 components (removing noise and reducing computation), then apply t-SNE to the PCA output. This is much faster and typically produces cleaner, more stable visualisations. Use <code>init='pca'</code> in TSNE for the most reproducible results.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 4 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">4</span> t-SNE Limitations and Critical Pitfalls</h2>
+
+  <p>t-SNE is one of the most misused tools in data science. Its visualisations are visually compelling, but many properties people intuit from them are simply wrong. Understanding these pitfalls is as important as knowing how to run the algorithm.</p>
+
+  <table style="width:100%; border-collapse: collapse; margin: 1.25rem 0; font-size: 0.88rem;">
+    <thead>
+      <tr style="background: var(--bg-alt); text-align: left;">
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Pitfall</th>
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">The Wrong Interpretation</th>
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">The Truth</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Inter-cluster distances</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">"Cluster A is closer to cluster B, so A and B are more similar"</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Inter-cluster distances are not meaningful. Only local (within-cluster) neighbourhoods are preserved.</td>
+      </tr>
+      <tr style="background: var(--bg-subtle);">
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Cluster sizes</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">"Cluster A is bigger, so it has more samples"</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Cluster area in the 2D plot is meaningless — it depends entirely on perplexity and density.</td>
+      </tr>
+      <tr>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Stochasticity</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">"Running t-SNE again gives the same layout"</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Without <code>random_state</code>, every run produces a different layout (possibly with clusters in different positions or orientations).</td>
+      </tr>
+      <tr style="background: var(--bg-subtle);">
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">New data</td>
+        <td style="padding: 0.6rem 1cm; border: 1px solid var(--border);">"I'll fit t-SNE on training data, then transform test data"</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">t-SNE has no <code>transform()</code>. You must refit the entire embedding from scratch with all data included.</td>
+      </tr>
+      <tr>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Global structure</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">"I can see that there are 3 main groups separated by large gaps"</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Global arrangement (left vs right, top vs bottom, gap sizes) is an artifact of the optimisation, not a property of the data.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <pre><code class="language-python">import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.manifold import TSNE
+from sklearn.preprocessing import StandardScaler
+from sklearn.decomposition import PCA
+from sklearn.datasets import load_digits
+
+X_digits, y_digits = load_digits(return_X_y=True)
+X_pca50 = PCA(n_components=50).fit_transform(StandardScaler().fit_transform(X_digits))
+
+# ── Show that different random seeds give different layouts ──
+fig, axes = plt.subplots(1, 4, figsize=(20, 4))
+for i, seed in enumerate([0, 1, 7, 42]):
+    tsne_s = TSNE(n_components=2, perplexity=30, n_iter=1000,
+                  learning_rate='auto', init='random', random_state=seed)
+    X_s = tsne_s.fit_transform(X_pca50)
+    colors = plt.cm.tab10(y_digits / 9.0)
+    axes[i].scatter(X_s[:, 0], X_s[:, 1], c=colors, alpha=0.6, s=8)
+    axes[i].set_title(f'random_state={seed}\n(clusters same, layout differs)')
+    axes[i].axis('off')
+
+plt.suptitle("t-SNE: Different Seeds → Different Layouts (Same Data!)", fontsize=12)
+plt.tight_layout()
+plt.savefig('tsne_stochastic.png', dpi=150)
+
+# ── t-SNE has no .transform() method ──
+from sklearn.manifold import TSNE as TSNE_check
+tsne_fit = TSNE(n_components=2, perplexity=30, random_state=42)
+X_embedded = tsne_fit.fit_transform(X_pca50[:100])
+
+# This would FAIL:
+try:
+    X_new_embedded = tsne_fit.transform(X_pca50[100:110])
+except AttributeError as e:
+    print(f"Error (expected): {e}")
+    print("→ To include new points, you must refit t-SNE with ALL data")
+
+print("\nKey rules for using t-SNE correctly:")
+print("✅ Local neighbourhood structure (which points are near each other) IS meaningful")
+print("❌ Distances between clusters are NOT meaningful")
+print("❌ Cluster sizes are NOT meaningful")
+print("❌ Global orientation/layout is NOT meaningful")
+print("❌ Cannot transform new data without refitting")</code></pre>
+
+  <div class="callout callout-warn">
+    <span class="callout-icon">⚠️</span>
+    <div class="callout-body">
+      <strong>t-SNE Is for Visualisation ONLY — Never for Preprocessing</strong>
+      <p>Because t-SNE cannot transform new data, is stochastic, and is very slow (O(n²)), it should never be used as a preprocessing step before a classifier. It has no <code>transform()</code> method. Using t-SNE in an sklearn Pipeline will raise an error. Use it exclusively for creating 2D/3D scatter plots to explore data structure. For preprocessing, use PCA or UMAP.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 5 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">5</span> UMAP: A Better Alternative</h2>
+
+  <p>UMAP (Uniform Manifold Approximation and Projection, McInnes et al., 2018) is a newer algorithm that addresses many of t-SNE's limitations while producing equally beautiful and often more informative visualisations.</p>
+
+  <p>UMAP's theoretical foundation is in Riemannian geometry and algebraic topology (you don't need to understand this to use it effectively). Practically, it:</p>
+  <ol>
+    <li>Constructs a high-dimensional graph where each point is connected to its k-nearest neighbours, with edge weights based on distance</li>
+    <li>Optimises a low-dimensional layout that preserves the structure of this graph using a cross-entropy loss</li>
+  </ol>
+
+  <p>The result: UMAP preserves <em>both</em> local neighbourhood structure (like t-SNE) <em>and</em> global structure (unlike t-SNE). Clusters that are close together in UMAP are genuinely more similar to each other in the original space.</p>
+
+  <pre><code class="language-python">import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.preprocessing import StandardScaler
+from sklearn.decomposition import PCA
+from sklearn.datasets import load_digits
+import time
+
+# Try to import UMAP
+try:
+    import umap
+    UMAP_AVAILABLE = True
+    print("umap-learn installed successfully")
+except ImportError:
+    UMAP_AVAILABLE = False
+    print("umap-learn not installed. Install with: pip install umap-learn")
+    print("(Showing conceptual code that will run once installed)")
+
+X_digits, y_digits = load_digits(return_X_y=True)
+X_sc = StandardScaler().fit_transform(X_digits)
+X_pca50 = PCA(n_components=50, random_state=42).fit_transform(X_sc)
+
+if UMAP_AVAILABLE:
+    # ── Fit UMAP ──
+    t0 = time.time()
+    reducer = umap.UMAP(
+        n_components=2,
+        n_neighbors=15,      # local vs global structure tradeoff
+        min_dist=0.1,        # how tightly packed the embedding is
+        metric='euclidean',
+        random_state=42
+    )
+    X_umap = reducer.fit_transform(X_pca50)
+    elapsed = time.time() - t0
+    print(f"\nUMAP completed in {elapsed:.1f}s")
+    print(f"Output shape: {X_umap.shape}")
+
+    # ── UMAP CAN transform new data ──
+    X_new = np.random.randn(5, 50)  # 5 new points in PCA-50 space
+    X_new_embedded = reducer.transform(X_new)  # Works! (unlike t-SNE)
+    print(f"Transformed 5 new points: {X_new_embedded.shape}")
+
+    # ── Visualise ──
+    colors = plt.cm.tab10(np.linspace(0, 1, 10))
+    plt.figure(figsize=(10, 8))
+    for digit in range(10):
+        mask = y_digits == digit
+        plt.scatter(X_umap[mask, 0], X_umap[mask, 1],
+                    c=[colors[digit]], alpha=0.7, s=15, label=str(digit))
+        centroid = X_umap[mask].mean(axis=0)
+        plt.annotate(str(digit), centroid, fontsize=11, fontweight='bold',
+                     ha='center', va='center',
+                     bbox=dict(boxstyle='round,pad=0.2', facecolor='white', alpha=0.8))
+    plt.title('UMAP of MNIST Digits\nLocal AND global structure preserved')
+    plt.legend(title='Digit', bbox_to_anchor=(1.02, 1), loc='upper left', fontsize=9)
+    plt.axis('off')
+    plt.tight_layout()
+    plt.savefig('umap_digits.png', dpi=150)
+else:
+    print("\n--- Conceptual UMAP code (install umap-learn to run) ---")
+    print("import umap")
+    print("reducer = umap.UMAP(n_components=2, n_neighbors=15, min_dist=0.1, random_state=42)")
+    print("X_umap = reducer.fit_transform(X_pca50)")
+    print("X_new_embedded = reducer.transform(X_new)  # CAN embed new points")</code></pre>
+</div>
+
+<!-- ── Section 6 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">6</span> UMAP Key Parameters</h2>
+
+  <p>UMAP has two primary parameters that control the structure of the embedding:</p>
+
+  <pre><code class="language-python">try:
+    import umap
+    import numpy as np
+    import matplotlib.pyplot as plt
+    from sklearn.preprocessing import StandardScaler
+    from sklearn.decomposition import PCA
+    from sklearn.datasets import load_digits
+
+    X_digits, y_digits = load_digits(return_X_y=True)
+    X_pca50 = PCA(n_components=50, random_state=42).fit_transform(
+        StandardScaler().fit_transform(X_digits))
+
+    # ── Effect of n_neighbors ──
+    fig, axes = plt.subplots(2, 3, figsize=(18, 10))
+    colors = plt.cm.tab10(np.linspace(0, 1, 10))
+
+    for i, n_neigh in enumerate([3, 10, 30]):
+        reducer_n = umap.UMAP(n_components=2, n_neighbors=n_neigh, min_dist=0.1, random_state=42)
+        X_n = reducer_n.fit_transform(X_pca50)
+        for d in range(10):
+            mask = y_digits == d
+            axes[0, i].scatter(X_n[mask, 0], X_n[mask, 1], c=[colors[d]], alpha=0.6, s=8)
+        axes[0, i].set_title(f'n_neighbors={n_neigh}')
+        axes[0, i].axis('off')
+
+    # ── Effect of min_dist ──
+    for i, min_d in enumerate([0.0, 0.1, 0.8]):
+        reducer_d = umap.UMAP(n_components=2, n_neighbors=15, min_dist=min_d, random_state=42)
+        X_d = reducer_d.fit_transform(X_pca50)
+        for d in range(10):
+            mask = y_digits == d
+            axes[1, i].scatter(X_d[mask, 0], X_d[mask, 1], c=[colors[d]], alpha=0.6, s=8)
+        axes[1, i].set_title(f'min_dist={min_d}')
+        axes[1, i].axis('off')
+
+    axes[0, 0].set_ylabel('Effect of n_neighbors', fontsize=11, rotation=90)
+    axes[1, 0].set_ylabel('Effect of min_dist', fontsize=11, rotation=90)
+    plt.suptitle('UMAP Parameter Effects', fontsize=13)
+    plt.tight_layout()
+    plt.savefig('umap_params.png', dpi=150)
+
+except ImportError:
+    pass
+
+# ── Parameter guide ──
+umap_params = {
+    'n_neighbors':  ('5–50 (default=15)',   'Small → captures fine local structure; large → captures global topology'),
+    'min_dist':     ('0.0–0.99 (default=0.1)', 'Small → tighter, more clumped clusters; large → more spread out'),
+    'n_components': ('2 (viz) or 2–50 (preprocessing)', 'Can use UMAP with n_components > 2 for downstream tasks'),
+    'metric':       ("'euclidean', 'cosine', 'manhattan', etc.", 'Distance metric for high-dim space; cosine good for text'),
+    'random_state': ('Integer for reproducibility', 'UMAP has less stochasticity than t-SNE but still varies'),
+    'n_epochs':     ('200–500 (default=None=auto)', 'More epochs = more refined embedding; auto-set by n_samples'),
+    'spread':       ('1.0 (default)',        'Scale of embedding — works with min_dist'),
+}
+
+print("UMAP Parameter Guide:")
+for param, (default_range, desc) in umap_params.items():
+    print(f"  {param:<15} {default_range:<40} {desc}")</code></pre>
+
+  <div class="callout callout-key">
+    <span class="callout-icon">🔑</span>
+    <div class="callout-body">
+      <strong>n_neighbors: The Most Important UMAP Parameter</strong>
+      <p>Small <code>n_neighbors</code> (e.g., 2–5): UMAP only considers very local structure, producing many small, tightly separated clusters. Use when you want fine-grained local relationships. Large <code>n_neighbors</code> (e.g., 50–200): UMAP uses global context, producing a more spread-out, globally-coherent embedding. Use for large datasets where global topology matters. The default of 15 is a reasonable starting point for most datasets.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 7 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">7</span> Practical Comparison: PCA vs t-SNE vs UMAP</h2>
+
+  <pre><code class="language-python">import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.decomposition import PCA
+from sklearn.manifold import TSNE
+from sklearn.preprocessing import StandardScaler
+from sklearn.datasets import load_digits
+import time
+
+X_digits, y_digits = load_digits(return_X_y=True)
+scaler = StandardScaler()
+X_sc = scaler.fit_transform(X_digits)
+X_pca50 = PCA(n_components=50, random_state=42).fit_transform(X_sc)
+
+# ── Run all three methods ──
+results = {}
+
+# PCA
+t0 = time.time()
+pca_viz = PCA(n_components=2, random_state=42)
+results['PCA\n(linear)'] = {
+    'embedding': pca_viz.fit_transform(X_sc),
+    'time': time.time() - t0,
+    'var': f"{pca_viz.explained_variance_ratio_.sum()*100:.1f}% var"
+}
+
+# t-SNE
+t0 = time.time()
+tsne = TSNE(n_components=2, perplexity=30, n_iter=1000,
+            learning_rate='auto', init='pca', random_state=42)
+results['t-SNE\n(non-linear, stochastic)'] = {
+    'embedding': tsne.fit_transform(X_pca50),
+    'time': time.time() - t0,
+    'var': f"KL={tsne.kl_divergence_:.3f}"
+}
+
+# UMAP (if available)
+try:
+    import umap
+    t0 = time.time()
+    reducer = umap.UMAP(n_components=2, n_neighbors=15, min_dist=0.1, random_state=42)
+    results['UMAP\n(non-linear, fast)'] = {
+        'embedding': reducer.fit_transform(X_pca50),
+        'time': time.time() - t0,
+        'var': 'local+global'
+    }
+except ImportError:
+    results['UMAP\n(install umap-learn)'] = {
+        'embedding': np.zeros((len(X_digits), 2)),
+        'time': 0,
+        'var': 'N/A'
+    }
+
+# ── Plot all three side by side ──
+fig, axes = plt.subplots(1, len(results), figsize=(17, 6))
+colors = plt.cm.tab10(np.linspace(0, 1, 10))
+
+for ax, (name, result) in zip(axes, results.items()):
+    X_emb = result['embedding']
+    for digit in range(10):
+        mask = y_digits == digit
+        ax.scatter(X_emb[mask, 0], X_emb[mask, 1],
+                   c=[colors[digit]], alpha=0.6, s=10, label=str(digit))
+    ax.set_title(f'{name}\nt={result["time"]:.1f}s | {result["var"]}', fontsize=10)
+    ax.axis('off')
+    ax.legend(title='Digit', fontsize=7, loc='best', ncol=2)
+
+plt.suptitle('PCA vs t-SNE vs UMAP on MNIST Digits (n=1797, d=64)', fontsize=12)
+plt.tight_layout()
+plt.savefig('three_methods_comparison.png', dpi=150)
+
+# ── Print timing and quality summary ──
+print("\n=== Method Comparison Summary ===")
+for name, result in results.items():
+    name_clean = name.replace('\n', ' ')
+    print(f"{name_clean:<35}: {result['time']:.2f}s  {result['var']}")</code></pre>
+
+  <table style="width:100%; border-collapse: collapse; margin: 1.25rem 0; font-size: 0.85rem;">
+    <thead>
+      <tr style="background: var(--bg-alt); text-align: left;">
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Property</th>
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">PCA</th>
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">t-SNE</th>
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">UMAP</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Speed</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">✅ Very fast O(nd²)</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">❌ Slow O(n²)</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">✅ Fast O(n log n)</td>
+      </tr>
+      <tr style="background: var(--bg-subtle);">
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Local structure</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">❌ Linear only</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">✅ Excellent</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">✅ Excellent</td>
+      </tr>
+      <tr>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Global structure</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">✅ Linear only</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">❌ Distorted</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">✅ Good</td>
+      </tr>
+      <tr style="background: var(--bg-subtle);">
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Reproducible?</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">✅ Deterministic</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">⚠️ Stochastic (use random_state)</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">✅ Mostly deterministic</td>
+      </tr>
+      <tr>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Transform new data?</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">✅ Yes (.transform)</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">❌ No (must refit)</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">✅ Yes (.transform)</td>
+      </tr>
+      <tr style="background: var(--bg-subtle);">
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Usable for preprocessing?</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">✅ Excellent</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">❌ No</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">✅ Yes</td>
+      </tr>
+      <tr>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Dataset size</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Any size</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Best ≤ 10,000</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Up to millions</td>
+      </tr>
+      <tr style="background: var(--bg-subtle);">
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Interpretability</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">✅ Loadings explain PCs</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">❌ Black box</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">❌ Black box</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+<!-- ── Section 8 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">8</span> When to Use Each Method</h2>
+
+  <p>The right choice depends on your dataset size, whether you need to embed new data, and what you're trying to accomplish:</p>
+
+  <pre><code class="language-python">import numpy as np
+import time
+from sklearn.preprocessing import StandardScaler
+from sklearn.decomposition import PCA
+from sklearn.manifold import TSNE
+from sklearn.pipeline import Pipeline
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.model_selection import cross_val_score
+from sklearn.datasets import load_digits
+
+X_digits, y_digits = load_digits(return_X_y=True)
+
+# ── Use Case 1: Quick Data Exploration — PCA first ──
+print("=== Use Case 1: Quick Exploration ===")
+pca_quick = Pipeline([('sc', StandardScaler()), ('pca', PCA(n_components=2))])
+X_2d_pca = pca_quick.fit_transform(X_digits)
+print(f"PCA 2D: done in milliseconds, great for first look")
+
+# ── Use Case 2: Beautiful Publication Visualisation — t-SNE or UMAP ──
+print("\n=== Use Case 2: Publication Visualisation (small dataset) ===")
+X_pca50 = PCA(n_components=50, random_state=42).fit_transform(
+    StandardScaler().fit_transform(X_digits))
+t0 = time.time()
+tsne = TSNE(n_components=2, perplexity=30, n_iter=2000,
+            learning_rate='auto', init='pca', random_state=42)
+X_tsne_viz = tsne.fit_transform(X_pca50)
+print(f"t-SNE: {time.time()-t0:.1f}s — use for final paper figures, not iterative exploration")
+
+# ── Use Case 3: Preprocessing Before a Classifier — PCA or UMAP ──
+print("\n=== Use Case 3: Preprocessing for Downstream ML ===")
+# PCA as preprocessing
+pipe_pca = Pipeline([
+    ('sc', StandardScaler()),
+    ('pca', PCA(n_components=0.95)),
+    ('knn', KNeighborsClassifier(n_neighbors=5))
+])
+cv_pca = cross_val_score(pipe_pca, X_digits, y_digits, cv=5)
+print(f"PCA + KNN: {cv_pca.mean():.4f} ± {cv_pca.std():.4f}")
+
+# UMAP as preprocessing (when installed)
+try:
+    import umap
+    from sklearn.base import BaseEstimator, TransformerMixin
+    class UMAPTransformer(BaseEstimator, TransformerMixin):
+        def __init__(self, n_components=10, n_neighbors=15, min_dist=0.1, random_state=42):
+            self.n_components = n_components
+            self.n_neighbors = n_neighbors
+            self.min_dist = min_dist
+            self.random_state = random_state
+        def fit(self, X, y=None):
+            self.reducer_ = umap.UMAP(
+                n_components=self.n_components,
+                n_neighbors=self.n_neighbors,
+                min_dist=self.min_dist,
+                random_state=self.random_state
+            )
+            self.reducer_.fit(X)
+            return self
+        def transform(self, X):
+            return self.reducer_.transform(X)
+
+    pipe_umap = Pipeline([
+        ('sc', StandardScaler()),
+        ('umap', UMAPTransformer(n_components=10)),
+        ('knn', KNeighborsClassifier(n_neighbors=5))
+    ])
+    cv_umap = cross_val_score(pipe_umap, X_digits, y_digits, cv=5)
+    print(f"UMAP + KNN: {cv_umap.mean():.4f} ± {cv_umap.std():.4f}")
+except ImportError:
+    print("UMAP + KNN: (install umap-learn to test)")
+
+# ── Decision guide ──
+print("\n=== Decision Guide ===")
+guide = [
+    ("Fast exploration, any size",           "PCA"),
+    ("Visualisation, n < 5,000",             "t-SNE (perplexity=30, init='pca')"),
+    ("Visualisation, n > 5,000",             "UMAP (faster, global structure preserved)"),
+    ("Preprocessing + pipeline",             "PCA or UMAP (both have .transform())"),
+    ("Need to embed new points later",       "PCA or UMAP (t-SNE CANNOT)"),
+    ("Non-linear structure, small dataset",  "t-SNE"),
+    ("Non-linear structure, large dataset",  "UMAP"),
+    ("Interpretable features needed",        "PCA (loadings are meaningful)"),
+]
+for situation, recommendation in guide:
+    print(f"  {situation:<45} → {recommendation}")</code></pre>
+</div>
+
+<!-- ── Real-World Spotlight ── -->
+<div class="use-case-section">
+  <div class="use-case-header">
+    <span style="font-size:1.5rem">🌍</span>
+    <h2>Real-World Spotlight: Visualising Word Embeddings and Single-Cell RNA-seq</h2>
+  </div>
+  <p>Two of the most impactful real-world applications of t-SNE and UMAP are <strong>NLP word embedding visualisation</strong> (revealing semantic structure in language models) and <strong>single-cell RNA sequencing</strong> analysis (the dominant visualisation in modern biology).</p>
+  <pre><code class="language-python">import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.preprocessing import StandardScaler
+from sklearn.decomposition import PCA
+from sklearn.manifold import TSNE
+
+np.random.seed(42)
+
+# ── Application 1: Word Embedding Visualisation ──
+print("=== Word Embedding Visualisation ===")
+
+# Simulate 100-dimensional GloVe-like word embeddings
+word_categories = {
+    'animals':    ['cat', 'dog', 'lion', 'tiger', 'elephant', 'wolf', 'fox', 'bear'],
+    'countries':  ['france', 'germany', 'japan', 'brazil', 'india', 'china', 'usa', 'australia'],
+    'verbs':      ['run', 'jump', 'eat', 'sleep', 'think', 'speak', 'write', 'read'],
+    'colors':     ['red', 'blue', 'green', 'yellow', 'purple', 'orange', 'black', 'white'],
+    'numbers':    ['one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight'],
+}
+
+all_words = []
+all_labels = []
+all_embeddings = []
+n_dims = 100
+
+for cat_idx, (category, words) in enumerate(word_categories.items()):
+    # Each category has a cluster centre in embedding space
+    centre = np.random.randn(n_dims) * 3
+    for word in words:
+        all_words.append(word)
+        all_labels.append(category)
+        embedding = centre + np.random.randn(n_dims) * 0.5  # small noise around centre
+        all_embeddings.append(embedding)
+
+X_words = np.array(all_embeddings)
+print(f"Word embeddings: {X_words.shape} ({len(all_words)} words, {n_dims} dims)")
+
+# PCA init → t-SNE
+X_pca_words = PCA(n_components=20, random_state=42).fit_transform(
+    StandardScaler().fit_transform(X_words))
+
+tsne_words = TSNE(n_components=2, perplexity=10, n_iter=1000,
+                  learning_rate='auto', init='pca', random_state=42)
+X_tsne_words = tsne_words.fit_transform(X_pca_words)
+
+# Plot
+cat_colors = {'animals': '#e41a1c', 'countries': '#377eb8', 'verbs': '#4daf4a',
+              'colors': '#984ea3', 'numbers': '#ff7f00'}
+
+fig, axes = plt.subplots(1, 2, figsize=(16, 6))
+
+for cat in word_categories:
+    mask = [l == cat for l in all_labels]
+    mask = np.array(mask)
+    axes[0].scatter(X_tsne_words[mask, 0], X_tsne_words[mask, 1],
+                    c=cat_colors[cat], s=80, alpha=0.8, label=cat)
+    for i, word in enumerate(all_words):
+        if all_labels[i] == cat:
+            axes[0].annotate(word, X_tsne_words[i], fontsize=7, alpha=0.7)
+
+axes[0].set_title('Word Embeddings: t-SNE Reveals Semantic Clusters\n'
+                  'Nearby words share meaning; cluster = semantic category')
+axes[0].legend(fontsize=9)
+axes[0].axis('off')
+
+# ── Application 2: Single-Cell RNA-seq ──
+print("\n=== Single-Cell RNA-seq (scRNA-seq) UMAP ===")
+
+n_cells, n_genes = 1000, 500
+# Simulate 5 cell types with different gene expression profiles
+cell_types = ['T-cells', 'B-cells', 'NK-cells', 'Macrophages', 'Monocytes']
+n_per_type = n_cells // len(cell_types)
+
+X_rna = np.zeros((n_cells, n_genes))
+y_rna = []
+
+for ct_idx, cell_type in enumerate(cell_types):
+    start = ct_idx * n_per_type
+    end   = start + n_per_type
+    # Each cell type expresses a subset of genes highly
+    marker_genes = slice(ct_idx * 80, (ct_idx + 1) * 80)
+    X_rna[start:end, marker_genes] = np.abs(np.random.randn(n_per_type, 80)) * 5
+    X_rna[start:end] += np.abs(np.random.randn(n_per_type, n_genes)) * 0.3
+    y_rna.extend([cell_type] * n_per_type)
+
+y_rna = np.array(y_rna)
+print(f"scRNA-seq data: {X_rna.shape} ({n_cells} cells, {n_genes} genes)")
+print(f"Cell types: {dict(zip(*np.unique(y_rna, return_counts=True)))}")
+
+# Standard scRNA-seq preprocessing pipeline (simplified)
+# 1. Log normalisation (count data → log-scale)
+X_log = np.log1p(X_rna)
+# 2. Scale (per gene)
+X_scaled_rna = StandardScaler().fit_transform(X_log)
+# 3. PCA to 50 components
+X_pca_rna = PCA(n_components=50, random_state=42).fit_transform(X_scaled_rna)
+# 4. t-SNE for visualisation
+tsne_rna = TSNE(n_components=2, perplexity=30, n_iter=1000,
+                learning_rate='auto', init='pca', random_state=42)
+X_tsne_rna = tsne_rna.fit_transform(X_pca_rna)
+
+cell_colors = {'T-cells': '#e41a1c', 'B-cells': '#377eb8', 'NK-cells': '#4daf4a',
+               'Macrophages': '#984ea3', 'Monocytes': '#ff7f00'}
+
+for ct in cell_types:
+    mask = y_rna == ct
+    axes[1].scatter(X_tsne_rna[mask, 0], X_tsne_rna[mask, 1],
+                    c=cell_colors[ct], s=15, alpha=0.7, label=ct)
+    centroid = X_tsne_rna[mask].mean(axis=0)
+    axes[1].annotate(ct, centroid, fontsize=9, fontweight='bold',
+                     bbox=dict(boxstyle='round,pad=0.2', facecolor='white', alpha=0.8))
+
+axes[1].set_title('Single-Cell RNA-seq: UMAP/t-SNE Standard Pipeline\n'
+                  'Each dot = one cell; clusters = distinct cell types')
+axes[1].legend(fontsize=8)
+axes[1].axis('off')
+
+plt.suptitle('t-SNE & UMAP in Practice: NLP and Genomics', fontsize=12)
+plt.tight_layout()
+plt.savefig('tsne_umap_applications.png', dpi=150)
+
+print(f"\nscRNA-seq t-SNE complete: {n_cells} cells from {n_genes} genes → 2D")
+print("This same pipeline (log → scale → PCA-50 → UMAP/t-SNE) is used in:")
+print("  - Seurat (R), Scanpy (Python): the standard single-cell analysis frameworks")
+print("  - Papers in Nature, Cell, Science that study cancer, development, immunology")</code></pre>
+  <p>In genomics, UMAP has become the <strong>de facto standard visualisation</strong> for single-cell RNA-seq experiments. Where a traditional bulk RNA-seq experiment gave you the average gene expression of millions of cells, scRNA-seq gives you individual cell profiles — and the UMAP plot reveals the cell type landscape of a tissue. Researchers use it to identify previously unknown cell subtypes, trace developmental trajectories, and compare tumour cell compositions across patients. UMAP is preferred over t-SNE in this context because of its speed (datasets routinely have 50,000–500,000 cells) and because it better preserves the continuous developmental trajectories between cell states.</p>
+</div>
+
+<!-- ── Quiz ── -->
+<div class="quiz-section">
+  <div id="lesson-31-quiz"></div>
+</div>
+
+<!-- ── Practice ── -->
+<div class="practice-card">
+  <h2>✍️ Practice Exercises</h2>
+  <ol>
+    <li>Run t-SNE on the Digits dataset with perplexity values of 5, 15, 30, 50, and 100. Plot all five side-by-side. What changes? Which perplexity gives the clearest separation? Note how the same digits (e.g., 4 and 9) relate to each other across perplexity values.</li>
+    <li>Run t-SNE five times on the same Digits data with different <code>random_state</code> values (but the same perplexity). Save each plot. Do the digit clusters appear in the same spatial arrangement each time? What <em>is</em> the same across runs?</li>
+    <li>If you have <code>umap-learn</code> installed: compare PCA, t-SNE, and UMAP side-by-side on the Wine dataset (13 features, 3 wine types). Which method gives the clearest 3-class separation? Time each method.</li>
+    <li>Attempt to use t-SNE in a Pipeline with a KNeighborsClassifier. What error do you get? Then replace t-SNE with PCA (or UMAP) and observe that the pipeline works. Explain why t-SNE cannot be used in a Pipeline.</li>
+  </ol>
+
+  <details>
+    <summary>▶ Hint for Exercise 4</summary>
+    <pre><code class="language-python">from sklearn.pipeline import Pipeline
+from sklearn.manifold import TSNE
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.datasets import load_digits
+
+X, y = load_digits(return_X_y=True)
+
+# This FAILS — TSNE has no .transform() method
+pipe_tsne = Pipeline([('tsne', TSNE(n_components=2)), ('knn', KNeighborsClassifier())])
+try:
+    pipe_tsne.fit(X, y)
+except Exception as e:
+    print(f"Error: {type(e).__name__}: {e}")
+    # NotFittedError or AttributeError: 'TSNE' object has no attribute 'transform'
+
+# This WORKS
+from sklearn.decomposition import PCA
+from sklearn.preprocessing import StandardScaler
+pipe_pca = Pipeline([('sc', StandardScaler()), ('pca', PCA(n_components=20)), ('knn', KNeighborsClassifier())])
+pipe_pca.fit(X, y)
+print(f"PCA pipeline score: {pipe_pca.score(X, y):.4f}")</code></pre>
+  </details>
+</div>
+
+<!-- ── Primary Source ── -->
+<div class="primary-source">
+  <h2>📚 Primary Source for This Lesson</h2>
+  <p><a href="https://scikit-learn.org/stable/modules/manifold.html#t-sne" target="_blank"><strong>scikit-learn: t-SNE</strong></a> — API reference and usage notes, including the recommendation to use PCA preprocessing.<br>
+  <a href="https://umap-learn.readthedocs.io/en/latest/" target="_blank"><strong>UMAP documentation</strong></a> — comprehensive guide with interactive examples of n_neighbors and min_dist effects.<br>
+  Original papers: van der Maaten &amp; Hinton (2008) "Visualizing data using t-SNE" (JMLR); McInnes et al. (2018) "UMAP: Uniform Manifold Approximation and Projection for Dimension Reduction" (arXiv 1802.03426).<br>
+  Essential reading on t-SNE pitfalls: Wattenberg et al. (2016) "How to Use t-SNE Effectively" — distill.pub.</p>
+</div>
+
+<!-- ── Ask Tutor ── -->
+<div class="ask-tutor">
+  <span class="icon">💬</span>
+  <span>t-SNE producing a single blob with no cluster structure? UMAP crashing with import errors? Confused about why cluster distances "don't mean anything" in t-SNE? Your AI tutor can walk through the algorithm details, diagnose your specific output, and help you interpret what you're seeing.</span>
+</div>
+
+<!-- ── Navigation ── -->
+<nav class="lesson-nav">
+  <a href="./0030-pca.html" class="nav-btn">← Lesson 30: Principal Component Analysis</a>
+  <a href="./0032-anomaly-detection.html" class="nav-btn nav-btn-next">Lesson 32: Anomaly Detection →</a>
+</nav>
+
+</div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-core.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/plugins/autoloader/prism-autoloader.min.js"></script>
+<script src="../assets/quiz.js"></script>
+<script>
+new MLQuiz('lesson-31-quiz', [
+  {
+    question: "Can you apply t-SNE to new data points without retraining the full embedding?",
+    options: [
+      "No — t-SNE optimises the layout for all points jointly; it cannot embed new points without refitting",
+      "Yes — sklearn's TSNE has a .transform() method for this purpose",
+      "Yes — but only if the new points are within the bounding box of the original embedding",
+      "Yes — use TSNE.fit() first, then TSNE.predict() on new points"
+    ],
+    correct: 0,
+    explanation: "t-SNE has no .transform() method. The algorithm jointly optimises the positions of ALL n points simultaneously to minimise KL divergence — there is no way to embed a new point without rerunning the entire optimisation with that point included. This is a fundamental limitation that makes t-SNE unsuitable as a preprocessing step in a pipeline. TSNE objects in sklearn have only .fit_transform(), not separate .fit() and .transform()."
+  },
+  {
+    question: "In t-SNE, what does a larger perplexity value do?",
+    options: [
+      "It considers more neighbors when computing similarities — appropriate for larger or denser datasets; too large can destroy local structure",
+      "It increases the number of optimisation iterations for a more refined embedding",
+      "It makes the clusters tighter and more separated in the 2D output",
+      "It reduces the computational cost by approximating more similarity pairs"
+    ],
+    correct: 0,
+    explanation: "Perplexity sets the effective number of neighbours used when modelling high-dimensional similarities. Larger perplexity → the Gaussian kernel considers more points as 'neighbours' → more global context. Small perplexity (5–10): fine-grained local clusters, possibly fragmented. Large perplexity (50–100): smoother global structure but local details may blur. For n > 5000 samples, use perplexity in the 50–100 range. Never set perplexity larger than about n/3 or the math breaks down."
+  },
+  {
+    question: "What is the key advantage of UMAP over t-SNE?",
+    options: [
+      "UMAP is faster, preserves global structure better, and can transform new data without refitting",
+      "UMAP is guaranteed to find the global optimum while t-SNE gets stuck in local minima",
+      "UMAP requires no hyperparameters while t-SNE requires careful perplexity tuning",
+      "UMAP is implemented in sklearn while t-SNE requires a separate installation"
+    ],
+    correct: 0,
+    explanation: "UMAP's three key advantages over t-SNE: (1) Speed — O(n log n) vs O(n²), making UMAP practical for hundreds of thousands of points; (2) Global structure — UMAP better preserves the relative positions of clusters, so inter-cluster distances are more meaningful; (3) Transformability — UMAP has a .transform() method allowing it to embed new data points and be used in sklearn Pipelines. t-SNE is available in sklearn without any extra install; UMAP requires 'pip install umap-learn'."
+  },
+  {
+    question: "After running t-SNE, can you interpret the distance between two clusters as their 'true' dissimilarity?",
+    options: [
+      "No — inter-cluster distances in t-SNE are distorted and not meaningful; only local neighborhoods are reliable",
+      "Yes — t-SNE minimises KL divergence which guarantees that global distances are preserved",
+      "Yes — but only when perplexity is set above 50, which enables global structure preservation",
+      "Yes — the distance between cluster centroids in t-SNE space exactly corresponds to high-dimensional distance"
+    ],
+    correct: 0,
+    explanation: "t-SNE uses a heavy-tailed Student's t-distribution for the 2D similarities specifically to create 'room' for moderately-close clusters to spread out — meaning that clusters that are actually somewhat similar in high dimensions may be pushed far apart in the 2D embedding. Only local structure (which points are close to which other points within a cluster) is reliably preserved. Cluster positions, orientations, sizes, and inter-cluster distances are artifacts of the optimisation process and should not be interpreted as data properties."
+  },
+  {
+    question: "Which of the three (PCA, t-SNE, UMAP) is best for use as a preprocessing step before training a classifier?",
+    options: [
+      "UMAP or PCA — t-SNE cannot transform new data, making it unsuitable as a preprocessing step",
+      "t-SNE — it produces the clearest cluster separation, maximising classifier accuracy",
+      "PCA only — UMAP cannot be integrated into sklearn Pipelines",
+      "All three are equally valid as preprocessing steps when combined with cross-validation"
+    ],
+    correct: 0,
+    explanation: "A preprocessing step must be able to transform new test data using parameters learned from training data (.fit() + .transform()). t-SNE has no .transform() method — it requires all data at once. PCA and UMAP both support the standard fit/transform pattern: PCA natively in sklearn, and UMAP via a custom wrapper (or directly using umap.UMAP in a Pipeline). t-SNE should be used exclusively for visualisation and exploratory analysis, never in a prediction pipeline."
+  }
+]);
+</script>
+
+</body>
+</html>

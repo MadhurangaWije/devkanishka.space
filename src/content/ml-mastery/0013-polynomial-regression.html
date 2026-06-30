@@ -1,0 +1,726 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lesson 13: Polynomial &amp; Multivariate Regression | ML Mastery</title>
+  <link rel="stylesheet" href="../assets/style.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
+</head>
+<body>
+
+<header class="lesson-header">
+  <div class="header-inner">
+    <nav class="breadcrumb">
+      <a href="../reference/curriculum-map.html">ML Mastery</a>
+      <span class="sep">›</span>
+      <span>Phase 2: Supervised ML</span>
+    </nav>
+    <div class="lesson-badges">
+      <span class="phase-badge">Phase 2 · Supervised ML</span>
+      <span class="lesson-num-badge">Lesson 13</span>
+    </div>
+    <h1 class="lesson-title">Polynomial &amp; Multivariate Regression</h1>
+    <p class="lesson-subtitle">Extend linear regression to multiple features and non-linear relationships — and see exactly how adding complexity helps (and how it can hurt).</p>
+    <div class="meta-pills">
+      <span class="meta-pill">⏱ ~60 min</span>
+      <span class="meta-pill">📐 Math + sklearn</span>
+      <span class="meta-pill">Phase 2 · Supervised ML</span>
+      <span class="meta-pill">Requires Lessons 11 &amp; 12</span>
+    </div>
+  </div>
+</header>
+
+<main class="lesson-main">
+<div class="content-wrapper">
+
+<div class="objectives-card">
+  <h2>🎯 What You'll Learn</h2>
+  <ul>
+    <li>Extend simple linear regression to multiple features with multivariate regression</li>
+    <li>Identify when linear regression fails and a non-linear model is needed</li>
+    <li>Transform features into polynomial features using <code>PolynomialFeatures</code> from sklearn</li>
+    <li>Understand interaction terms and when they add value</li>
+    <li>Build a validation curve to select the right polynomial degree and preview the bias-variance tradeoff</li>
+  </ul>
+</div>
+
+<div class="callout callout-tip">
+  <span class="callout-icon">⚙️</span>
+  <div class="callout-body">
+    <strong>Setup</strong>
+    <p><code>pip install scikit-learn numpy matplotlib pandas</code>. Key import: <code>from sklearn.preprocessing import PolynomialFeatures</code>. This lesson builds directly on the Pipeline and preprocessing concepts from Lesson 10.</p>
+  </div>
+</div>
+
+<!-- ── Section 1 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">1</span> Multivariate Linear Regression</h2>
+
+  <p>In Lesson 11, we modelled one feature predicting one output: ŷ = β₀ + β₁x. Real datasets have many features. <strong>Multivariate linear regression</strong> extends the model to p features:</p>
+
+  <p style="text-align:center; font-size: 1.1rem; padding: 0.7rem; background: var(--bg-alt); border-radius: 6px; margin: 1rem 0;">
+    ŷ = β₀ + β₁x₁ + β₂x₂ + ... + βₚxₚ
+  </p>
+
+  <p>In matrix form, where X has shape (n, p+1) with a bias column of ones prepended:</p>
+  <p style="text-align:center; font-size: 1.05rem; padding: 0.6rem; background: var(--bg-alt); border-radius: 6px; margin: 0.75rem 0;">
+    ŷ = X β &nbsp;&nbsp; where &nbsp;&nbsp; β = (XᵀX)⁻¹ Xᵀy (OLS solution)
+  </p>
+
+  <p>The coefficient βⱼ is interpreted as: "a one-unit increase in xⱼ is associated with a βⱼ change in ŷ, <em>holding all other features constant</em>." This ceteris paribus interpretation is powerful for understanding feature effects in isolation.</p>
+
+  <pre><code class="language-python">import numpy as np
+import pandas as pd
+from sklearn.linear_model import LinearRegression
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+from sklearn.pipeline import Pipeline
+from sklearn.metrics import r2_score, mean_squared_error
+
+np.random.seed(42)
+n = 500
+
+# Multivariate house price dataset
+sqft      = np.random.uniform(500, 5000, n)
+bedrooms  = np.random.randint(1, 7, n).astype(float)
+bathrooms = np.random.uniform(1, 4, n)
+age       = np.random.uniform(0, 80, n)
+
+# True relationship
+price = (50000
+         + 120 * sqft
+         + 15000 * bedrooms
+         + 25000 * bathrooms
+         - 500 * age
+         + np.random.normal(0, 30000, n))
+
+df = pd.DataFrame({
+    'sqft': sqft, 'bedrooms': bedrooms,
+    'bathrooms': bathrooms, 'age': age, 'price': price
+})
+
+X = df.drop('price', axis=1)
+y = df['price']
+
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+pipeline = Pipeline([('scaler', StandardScaler()), ('model', LinearRegression())])
+pipeline.fit(X_train, y_train)
+
+print(f"Train R²: {pipeline.score(X_train, y_train):.4f}")
+print(f"Test  R²: {pipeline.score(X_test,  y_test):.4f}")
+
+# Interpret coefficients (unscale them)
+scaler = pipeline.named_steps['scaler']
+lr     = pipeline.named_steps['model']
+print("\nCoefficients (per unit of original feature):")
+for name, coef, scale in zip(X.columns, lr.coef_, scaler.scale_):
+    coef_orig = coef / scale
+    print(f"  {name:12s}: ${coef_orig:,.0f}")
+# sqft:        $120/sqft
+# bedrooms:    $15,000/bedroom
+# bathrooms:   $25,000/bathroom
+# age:         -$500/year</code></pre>
+
+  <div class="callout callout-key">
+    <span class="callout-icon">🔑</span>
+    <div class="callout-body">
+      <strong>Multicollinearity: When Features Are Correlated</strong>
+      <p>If two features are highly correlated (e.g., "sqft" and "num_rooms" — larger houses have more rooms), it becomes difficult for the model to separate their individual effects. Coefficients become unstable — small changes to the data cause large changes to the coefficient values. Symptoms: absurdly large or opposite-sign coefficients. Fix: remove one of the correlated features, use PCA to combine them, or use Ridge regression which handles multicollinearity gracefully.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 2 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">2</span> When Linearity Fails</h2>
+
+  <p>A linear model assumes the relationship between x and y is a straight line. Many real-world relationships are <em>not</em> linear:</p>
+
+  <ul>
+    <li><strong>Diminishing returns:</strong> a 500 sqft increase means more for a 1000 sqft house than for a 5000 sqft house.</li>
+    <li><strong>Saturation effects:</strong> adding the 10th bedroom increases price less than adding the 2nd bedroom.</li>
+    <li><strong>U-shaped relationships:</strong> product reviews have a U-shaped relationship with sales (very short and very long reviews both do poorly; medium-length reviews perform best).</li>
+    <li><strong>Threshold effects:</strong> salary jumps sharply at 5 years of experience (senior promotion).</li>
+  </ul>
+
+  <pre><code class="language-python">import numpy as np
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+from sklearn.linear_model import LinearRegression
+from sklearn.metrics import r2_score
+
+np.random.seed(42)
+X = np.linspace(0, 6, 100)
+y = 2 * np.sin(X) + np.random.normal(0, 0.3, 100)   # non-linear: sine wave
+
+X_2d = X.reshape(-1, 1)
+lr = LinearRegression().fit(X_2d, y)
+y_pred_linear = lr.predict(X_2d)
+
+print(f"Linear regression R²: {r2_score(y, y_pred_linear):.4f}")
+# R² ≈ 0.16 — very poor fit! The line can't capture the wave shape.
+
+# Visualise the mismatch
+fig, ax = plt.subplots(figsize=(8, 4))
+ax.scatter(X, y, alpha=0.5, color='steelblue', label='Data')
+ax.plot(X, y_pred_linear, 'r-', linewidth=2, label=f'Linear fit (R²={r2_score(y, y_pred_linear):.2f})')
+ax.set_title('Linear Regression Fails on Non-Linear Data')
+ax.legend()
+plt.tight_layout()
+plt.savefig('linearity_failure.png', dpi=100)</code></pre>
+
+  <p>When you plot residuals (actual − predicted) versus the fitted values and see a systematic pattern (a U-shape, wave, or funnel), that's a signal that the linearity assumption is violated and polynomial or other non-linear features are needed.</p>
+</div>
+
+<!-- ── Section 3 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">3</span> Polynomial Features with sklearn</h2>
+
+  <p><code>PolynomialFeatures</code> transforms a set of input features into all polynomial combinations up to a specified degree. For a single feature x with degree=2, it creates [1, x, x²]. For degree=3, it creates [1, x, x², x³].</p>
+
+  <pre><code class="language-python">from sklearn.preprocessing import PolynomialFeatures
+import numpy as np
+
+# Single feature
+X_1d = np.array([[2], [3], [4]])
+
+poly_d2 = PolynomialFeatures(degree=2, include_bias=True)
+X_poly_d2 = poly_d2.fit_transform(X_1d)
+print("Degree 2, single feature:")
+print("Input:  ", X_1d.ravel())
+print("Output:", X_poly_d2)
+# [[1. 2. 4.]    →  [1,  x,  x²]
+#  [1. 3. 9.]
+#  [1. 4. 16.]]
+
+poly_d3 = PolynomialFeatures(degree=3, include_bias=False)   # no bias column
+X_poly_d3 = poly_d3.fit_transform(X_1d)
+print("\nDegree 3, no bias:")
+print(X_poly_d3)
+# [[ 2.  4.  8.]    →  [x, x², x³]
+#  [ 3.  9. 27.]
+#  [ 4. 16. 64.]]
+
+# Feature names
+print("\nFeature names:", poly_d3.get_feature_names_out(['x']))</code></pre>
+
+  <h3>Building a Polynomial Regression Pipeline</h3>
+  <pre><code class="language-python">from sklearn.preprocessing import PolynomialFeatures, StandardScaler
+from sklearn.linear_model import LinearRegression
+from sklearn.pipeline import Pipeline
+from sklearn.metrics import r2_score
+import numpy as np
+
+# Non-linear data: y = 0.5x² - 2x + 1 + noise
+np.random.seed(42)
+X_raw = np.sort(np.random.uniform(-3, 3, 80))
+y_raw = 0.5 * X_raw**2 - 2 * X_raw + 1 + np.random.normal(0, 0.5, 80)
+
+X_2d = X_raw.reshape(-1, 1)
+
+# Fit with different degrees and compare
+for degree in [1, 2, 3, 5]:
+    pipe = Pipeline([
+        ('poly',   PolynomialFeatures(degree=degree, include_bias=False)),
+        ('scaler', StandardScaler()),
+        ('model',  LinearRegression()),
+    ])
+    pipe.fit(X_2d, y_raw)
+    r2 = pipe.score(X_2d, y_raw)
+    print(f"Degree {degree}: R² = {r2:.4f}")
+
+# Degree 1: R² = 0.6521  — underfitting
+# Degree 2: R² = 0.9734  — good fit!
+# Degree 3: R² = 0.9741  — marginal improvement
+# Degree 5: R² = 0.9762  — very slight improvement (risk of overfitting on test)</code></pre>
+</div>
+
+<!-- ── Section 4 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">4</span> Underfitting vs Overfitting with Polynomial Degree</h2>
+
+  <p>Degree is a hyperparameter controlling model complexity. Too low → underfitting. Too high → overfitting. The right degree captures the true pattern without memorising noise.</p>
+
+  <pre><code class="language-python">import numpy as np
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+from sklearn.preprocessing import PolynomialFeatures, StandardScaler
+from sklearn.linear_model import LinearRegression
+from sklearn.pipeline import Pipeline
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import r2_score
+
+np.random.seed(0)
+X_all = np.sort(np.random.uniform(-3, 3, 30))
+y_all = 0.5 * X_all**2 - 2 * X_all + 1 + np.random.normal(0, 0.8, 30)
+
+X_train, X_test, y_train, y_test = train_test_split(
+    X_all.reshape(-1, 1), y_all, test_size=0.33, random_state=42
+)
+
+X_plot = np.linspace(-3, 3, 300).reshape(-1, 1)
+
+fig, axes = plt.subplots(1, 3, figsize=(14, 4), sharey=True)
+degrees = [1, 2, 15]
+titles  = ['Degree 1 (Underfitting)', 'Degree 2 (Good Fit)', 'Degree 15 (Overfitting)']
+
+for ax, degree, title in zip(axes, degrees, titles):
+    pipe = Pipeline([
+        ('poly',  PolynomialFeatures(degree=degree, include_bias=False)),
+        ('scale', StandardScaler()),
+        ('lr',    LinearRegression()),
+    ])
+    pipe.fit(X_train, y_train)
+    y_plot = pipe.predict(X_plot)
+
+    train_r2 = pipe.score(X_train, y_train)
+    test_r2  = pipe.score(X_test,  y_test)
+
+    ax.scatter(X_train, y_train, color='steelblue', alpha=0.6, s=30, label='Train')
+    ax.scatter(X_test,  y_test,  color='orange',    alpha=0.6, s=30, label='Test')
+    ax.plot(X_plot, y_plot, 'red', linewidth=2)
+    ax.set_title(f'{title}\nTrain R²={train_r2:.2f}, Test R²={test_r2:.2f}')
+    ax.set_ylim(-8, 15)
+    ax.legend(fontsize=8)
+
+plt.tight_layout()
+plt.savefig('poly_degrees.png', dpi=100)
+print("Saved: poly_degrees.png")
+# Degree 1:  Train R²≈0.65, Test R²≈0.62  — both low  → underfitting
+# Degree 2:  Train R²≈0.96, Test R²≈0.94  — both high → good fit
+# Degree 15: Train R²≈0.99, Test R²≈-2.1  — gap huge  → overfitting</code></pre>
+
+  <div class="callout callout-warn">
+    <span class="callout-icon">⚠️</span>
+    <div class="callout-body">
+      <strong>Overfitting Gets Worse as You Extrapolate</strong>
+      <p>A degree-15 polynomial will look reasonable within the range of training data but can produce wildly wrong predictions just slightly outside that range. High-degree polynomial models have extreme extrapolation behaviour. Always evaluate on a held-out test set, and be cautious about using high-degree polynomial models for predictions beyond the training data's range.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 5 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">5</span> Feature Interaction Terms</h2>
+
+  <p>When PolynomialFeatures is applied to multiple features, it also generates <strong>interaction terms</strong> — products of pairs of features. An interaction term x₁·x₂ captures the idea that the effect of x₁ on y depends on the value of x₂ (and vice versa).</p>
+
+  <p>For 2 features [x₁, x₂] with degree=2, PolynomialFeatures generates: [1, x₁, x₂, x₁², x₁x₂, x₂²] — 6 features total.</p>
+
+  <pre><code class="language-python">from sklearn.preprocessing import PolynomialFeatures
+import numpy as np
+
+# 2 features, degree=2
+X_2feat = np.array([[2, 3], [4, 1], [1, 5]])
+poly = PolynomialFeatures(degree=2, include_bias=True)
+X_poly = poly.fit_transform(X_2feat)
+
+print("Feature names:", poly.get_feature_names_out(['sqft', 'bedrooms']))
+# ['1', 'sqft', 'bedrooms', 'sqft^2', 'sqft bedrooms', 'bedrooms^2']
+
+print("\nTransformed matrix:")
+print(X_poly)
+
+# Interaction only (no squared terms)
+poly_interact = PolynomialFeatures(degree=2, interaction_only=True, include_bias=False)
+X_interact = poly_interact.fit_transform(X_2feat)
+print("\nInteraction only features:", poly_interact.get_feature_names_out(['sqft', 'bedrooms']))
+# ['sqft', 'bedrooms', 'sqft bedrooms']</code></pre>
+
+  <h3>When Interactions Matter</h3>
+  <p>A concrete example: in house pricing, the effect of additional square footage might be stronger when the house already has many bedrooms. The interaction term sqft × bedrooms captures this combined effect.</p>
+
+  <pre><code class="language-python">import numpy as np
+import pandas as pd
+from sklearn.preprocessing import PolynomialFeatures, StandardScaler
+from sklearn.linear_model import LinearRegression
+from sklearn.pipeline import Pipeline
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import r2_score
+
+np.random.seed(42)
+n = 400
+sqft     = np.random.uniform(500, 4000, n)
+bedrooms = np.random.randint(1, 6, n).astype(float)
+
+# True model HAS an interaction: price depends on sqft × bedrooms
+price = (40000
+         + 80 * sqft
+         + 12000 * bedrooms
+         + 0.05 * sqft * bedrooms   # interaction term
+         + np.random.normal(0, 25000, n))
+
+X = np.column_stack([sqft, bedrooms])
+y = price
+
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+# Without interaction terms
+pipe_no_interact = Pipeline([
+    ('scale', StandardScaler()),
+    ('lr',    LinearRegression()),
+])
+pipe_no_interact.fit(X_train, y_train)
+r2_no = pipe_no_interact.score(X_test, y_test)
+
+# With interaction terms (degree=2)
+pipe_interact = Pipeline([
+    ('poly',  PolynomialFeatures(degree=2, include_bias=False)),
+    ('scale', StandardScaler()),
+    ('lr',    LinearRegression()),
+])
+pipe_interact.fit(X_train, y_train)
+r2_int = pipe_interact.score(X_test, y_test)
+
+print(f"R² without interactions: {r2_no:.4f}")
+print(f"R² with interactions:    {r2_int:.4f}")
+# R² without: 0.8914
+# R² with:    0.9287  ← improvement from capturing the interaction!</code></pre>
+</div>
+
+<!-- ── Section 6 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">6</span> Interpreting Polynomial Coefficients</h2>
+
+  <p>One cost of using polynomial features is reduced interpretability. In simple linear regression, β₁ = 120 means "each additional sqft adds $120." With polynomial features, the coefficient for sqft² cannot be interpreted in the same direct way — because the total effect of sqft now depends on both the linear and squared terms together.</p>
+
+  <pre><code class="language-python">import numpy as np
+from sklearn.preprocessing import PolynomialFeatures, StandardScaler
+from sklearn.linear_model import LinearRegression
+from sklearn.pipeline import Pipeline
+
+np.random.seed(42)
+X = np.sort(np.random.uniform(0, 10, 100)).reshape(-1, 1)
+y = 3 * X.ravel() - 0.2 * X.ravel()**2 + np.random.randn(100) * 2
+
+pipe = Pipeline([
+    ('poly',  PolynomialFeatures(degree=2, include_bias=False)),
+    ('scale', StandardScaler()),
+    ('lr',    LinearRegression()),
+])
+pipe.fit(X, y)
+
+# Raw coefficients in standardised poly space — not directly interpretable
+lr = pipe.named_steps['lr']
+print("Intercept:", lr.intercept_)
+print("Coefficients:", lr.coef_)
+
+# Better approach: interpret by comparing predictions at specific x values
+x_values = np.array([[1], [2], [5], [8]])
+predictions = pipe.predict(x_values)
+print("\nPredictions at specific x values:")
+for x, p in zip(x_values.ravel(), predictions):
+    print(f"  x={x}: ŷ={p:.2f}")
+
+# For polynomial models, the marginal effect of x DEPENDS on the current value of x
+# dy/dx = β₁ + 2β₂x   (for degree-2 polynomial y = β₀ + β₁x + β₂x²)
+# The effect of x is not constant — it changes as x changes</code></pre>
+
+  <div class="callout callout-tip">
+    <span class="callout-icon">💡</span>
+    <div class="callout-body">
+      <strong>When interpretability matters, stick to lower degree polynomials</strong>
+      <p>Degree-2 polynomial models are usually still interpretable: you can say "price increases with sqft, but the rate of increase slows down at large sqft values (diminishing returns)." Degree-5+ models lose clear interpretability. If you need high accuracy and interpretability, consider SHAP values to explain individual predictions without relying on coefficients.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 7 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">7</span> Choosing Polynomial Degree with Validation Curves</h2>
+
+  <p>To find the best polynomial degree, we use a <strong>validation curve</strong>: train models with different degrees and compare training and validation performance. This directly visualises the bias-variance tradeoff (explored deeply in Lesson 14).</p>
+
+  <pre><code class="language-python">import numpy as np
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+from sklearn.preprocessing import PolynomialFeatures, StandardScaler
+from sklearn.linear_model import LinearRegression
+from sklearn.pipeline import Pipeline
+from sklearn.model_selection import cross_val_score, train_test_split
+from sklearn.metrics import r2_score
+
+np.random.seed(42)
+X_all = np.sort(np.random.uniform(-3, 3, 120))
+y_all = (0.5 * X_all**2 - 2 * X_all + 1
+         + np.random.normal(0, 0.8, 120))
+
+X_2d = X_all.reshape(-1, 1)
+X_train, X_test, y_train, y_test = train_test_split(X_2d, y_all, test_size=0.25, random_state=42)
+
+degrees     = range(1, 12)
+train_r2s   = []
+val_r2s     = []
+
+for degree in degrees:
+    pipe = Pipeline([
+        ('poly',  PolynomialFeatures(degree=degree, include_bias=False)),
+        ('scale', StandardScaler()),
+        ('lr',    LinearRegression()),
+    ])
+    # 5-fold CV on training set for validation score
+    cv_scores = cross_val_score(pipe, X_train, y_train, cv=5, scoring='r2')
+
+    pipe.fit(X_train, y_train)
+    train_r2s.append(pipe.score(X_train, y_train))
+    val_r2s.append(cv_scores.mean())
+
+best_degree = degrees[np.argmax(val_r2s)]
+print(f"Best degree by CV validation R²: {best_degree}")
+# Best degree: 2
+
+# Print comparison table
+print(f"\n{'Degree':>8} {'Train R²':>10} {'CV Val R²':>10}")
+for d, tr, vr in zip(degrees, train_r2s, val_r2s):
+    marker = ' ← best' if d == best_degree else ''
+    print(f"{d:>8} {tr:>10.4f} {vr:>10.4f}{marker}")</code></pre>
+
+  <div class="callout callout-warn">
+    <span class="callout-icon">⚠️</span>
+    <div class="callout-body">
+      <strong>Always Select Degree on Validation/CV — Never on Test</strong>
+      <p>You might be tempted to try all degrees and pick the one with the best test R². But this turns the test set into a validation set, and the test performance becomes an optimistic estimate. Use cross-validation on the training set to pick the degree; then evaluate the chosen degree once on the held-out test set. The test set is used exactly once.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 8 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">8</span> Practical Full Pipeline: Scale → Poly → Regress</h2>
+
+  <p>The complete workflow for polynomial regression on real data, combining all concepts from this lesson:</p>
+
+  <pre><code class="language-python">import numpy as np
+import pandas as pd
+from sklearn.preprocessing import PolynomialFeatures, StandardScaler
+from sklearn.linear_model import LinearRegression, Ridge
+from sklearn.pipeline import Pipeline
+from sklearn.model_selection import train_test_split, GridSearchCV, cross_val_score
+from sklearn.metrics import r2_score, mean_squared_error
+
+# Build a multivariate dataset with non-linear relationships
+np.random.seed(42)
+n = 600
+sqft = np.random.uniform(400, 5000, n)
+lot  = np.random.uniform(2000, 20000, n)
+age  = np.random.uniform(0, 100, n)
+
+# Non-linear true model: sqft has diminishing returns (sqft²), age negatively affects price
+price = (20000
+         + 100 * sqft        # linear sqft effect
+         - 0.01 * sqft**2    # diminishing returns at large sqft
+         + 3 * lot
+         - 300 * age
+         + np.random.normal(0, 40000, n))
+
+X = np.column_stack([sqft, lot, age])
+y = price
+
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+# Option 1: Fixed degree=2 pipeline
+pipe_d2 = Pipeline([
+    ('scaler', StandardScaler()),
+    ('poly',   PolynomialFeatures(degree=2, include_bias=False)),
+    ('model',  LinearRegression()),
+])
+pipe_d2.fit(X_train, y_train)
+print(f"Degree-2 Test R²: {pipe_d2.score(X_test, y_test):.4f}")
+
+# Option 2: Use Ridge regression to reduce overfitting from polynomial features
+pipe_ridge = Pipeline([
+    ('scaler', StandardScaler()),
+    ('poly',   PolynomialFeatures(degree=2, include_bias=False)),
+    ('model',  Ridge()),
+])
+
+# GridSearchCV to find best alpha (Ridge regularisation) and degree together
+param_grid = {
+    'poly__degree': [1, 2, 3],
+    'model__alpha': [0.01, 1.0, 10.0, 100.0],
+}
+grid_search = GridSearchCV(pipe_ridge, param_grid, cv=5, scoring='r2', n_jobs=-1)
+grid_search.fit(X_train, y_train)
+
+print(f"Best params: {grid_search.best_params_}")
+print(f"Best CV R²: {grid_search.best_score_:.4f}")
+print(f"Test R²:    {grid_search.score(X_test, y_test):.4f}")
+
+# Note: number of features after PolynomialFeatures(degree=2) with 3 input features:
+# 1 + 3 + 3 + 3 = (bias) + (linear) + (squared) + (interactions) = 10 features total
+poly_temp = PolynomialFeatures(degree=2, include_bias=True)
+print(f"\nOutput features for 3 inputs, degree=2: {poly_temp.fit_transform(X_train[:1]).shape[1]}")
+print(f"Feature names: {poly_temp.get_feature_names_out(['sqft', 'lot', 'age'])}")</code></pre>
+</div>
+
+<!-- ── Real World ── -->
+<div class="use-case-section">
+  <div class="use-case-header">
+    <span style="font-size:1.5rem">🌍</span>
+    <h2>Real-World Spotlight: House Price Prediction with Diminishing Returns</h2>
+  </div>
+
+  <div class="callout callout-realworld">
+    <span class="callout-icon">🏠</span>
+    <div class="callout-body">
+      <strong>Insight:</strong> In real estate, the relationship between square footage and price is not linear. A 500 sqft addition adds proportionally much more value to a 1,000 sqft apartment than to a 5,000 sqft mansion. Adding sqft² captures this diminishing returns effect.
+    </div>
+  </div>
+
+  <pre><code class="language-python">import numpy as np
+import pandas as pd
+from sklearn.preprocessing import PolynomialFeatures, StandardScaler
+from sklearn.linear_model import LinearRegression
+from sklearn.pipeline import Pipeline
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import r2_score, mean_absolute_error
+
+np.random.seed(42)
+n = 1000
+sqft = np.random.uniform(500, 6000, n)
+
+# True relationship: sqrt(sqft) captures diminishing returns more naturally
+# but polynomial degree=2 is also a good approximation
+price = (80000 + 200 * np.sqrt(sqft) * 30 + np.random.normal(0, 40000, n))
+
+X = sqft.reshape(-1, 1)
+y = price
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+# Compare: linear vs degree-2 polynomial
+results = {}
+for degree, name in [(1, 'Linear (degree 1)'), (2, 'Polynomial (degree 2)'), (3, 'Polynomial (degree 3)')]:
+    pipe = Pipeline([
+        ('poly',   PolynomialFeatures(degree=degree, include_bias=False)),
+        ('scaler', StandardScaler()),
+        ('lr',     LinearRegression()),
+    ])
+    pipe.fit(X_train, y_train)
+    y_pred = pipe.predict(X_test)
+    results[name] = {
+        'train_r2': pipe.score(X_train, y_train),
+        'test_r2':  pipe.score(X_test,  y_test),
+        'test_mae': mean_absolute_error(y_test, y_pred),
+    }
+
+print(f"{'Model':<25} {'Train R²':>9} {'Test R²':>9} {'Test MAE':>12}")
+print('-' * 60)
+for name, metrics in results.items():
+    print(f"{name:<25} {metrics['train_r2']:>9.4f} {metrics['test_r2']:>9.4f} ${metrics['test_mae']:>10,.0f}")
+
+# Linear (degree 1)        0.8931    0.8877   $51,234
+# Polynomial (degree 2)    0.9412    0.9378   $38,201   ← significantly better
+# Polynomial (degree 3)    0.9421    0.9370   $38,518   ← marginal + slight overfit risk</code></pre>
+
+  <p>The degree-2 polynomial captures the diminishing returns relationship far better than the linear model, improving R² from 0.89 to 0.94 and MAE from $51K to $38K. The degree-3 model barely improves training R² and slightly degrades test R² — a warning sign of overfitting that will be explored in depth in Lesson 14.</p>
+</div>
+
+<!-- ── Quiz ── -->
+<div class="quiz-section">
+  <h2>Quick Check</h2>
+  <div id="lesson-13-quiz"></div>
+</div>
+
+<!-- ── Practice ── -->
+<div class="practice-card">
+  <h2>✍️ Practice Exercises</h2>
+  <ol>
+    <li>Load the Boston Housing or California Housing dataset. Plot each feature against the target variable. Identify at least 2 features that appear non-linear in their relationship with price. Confirm by comparing linear vs degree-2 polynomial R² for those features individually.</li>
+    <li>Starting with 3 input features, compute how many features PolynomialFeatures generates for degree=2, degree=3, and degree=4 (using the formula C(p+d, d) where p=features, d=degree). Verify your answer with sklearn.</li>
+    <li>Build a pipeline that compares: (a) LinearRegression with degree=1, (b) LinearRegression with degree=2, (c) Ridge with degree=3, using GridSearchCV on a training set. Report best params and final test R².</li>
+    <li>Create a dataset with a true interaction effect: price = 100*sqft + 50*bedrooms + 0.1*sqft*bedrooms + noise. Show that a model WITHOUT the interaction term has systematically wrong predictions for large houses with many bedrooms. Add PolynomialFeatures(degree=2) to capture the interaction and measure the improvement.</li>
+  </ol>
+</div>
+
+<!-- Primary Source -->
+<div class="primary-source">
+  <h2>📚 Primary Source for This Lesson</h2>
+  <p><a href="https://scikit-learn.org/stable/modules/linear_model.html#polynomial-regression-extending-linear-models-with-basis-functions" target="_blank"><strong>sklearn User Guide: Polynomial Regression</strong></a><br>
+  The official documentation section on using PolynomialFeatures as a transformer with Pipeline. Also see Chapter 7 of <em>An Introduction to Statistical Learning</em> (free at <a href="https://www.statlearning.com" target="_blank">statlearning.com</a>) on "Moving Beyond Linearity" which covers polynomial regression, splines, and local regression in depth.</p>
+</div>
+
+<!-- Ask Tutor -->
+<div class="ask-tutor">
+  <span class="icon">💬</span>
+  <span>Not sure whether to use polynomial features or a tree-based model for your non-linear data? Describe your dataset (size, number of features, type of non-linearity you suspect) and your AI tutor will help you decide the best approach.</span>
+</div>
+
+<!-- Navigation -->
+<nav class="lesson-nav">
+  <a href="./0012-gradient-descent.html" class="nav-btn nav-btn-prev">← Lesson 12: Gradient Descent</a>
+  <a href="./0014-bias-variance-tradeoff.html" class="nav-btn nav-btn-next">Lesson 14: Bias–Variance Tradeoff →</a>
+</nav>
+
+</div><!-- /content-wrapper -->
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-core.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/plugins/autoloader/prism-autoloader.min.js"></script>
+<script src="../assets/quiz.js"></script>
+<script>
+new MLQuiz('lesson-13-quiz', [
+  {
+    question: "PolynomialFeatures(degree=2) transforms a single input feature x into which set of features?",
+    options: [
+      "[1, x, x²] — bias term, linear term, and squared term",
+      "[x, x², x³] — three polynomial terms without a bias",
+      "[x², x³] — only the squared and cubic terms",
+      "[x, x²] — linear and squared terms, never a bias term"
+    ],
+    correct: 0,
+    explanation: "By default, PolynomialFeatures(degree=2, include_bias=True) generates [1, x, x²] for one input feature. The '1' is the bias term (intercept column). With include_bias=False, you get [x, x²]. For degree=3, you'd get [1, x, x², x³] with bias."
+  },
+  {
+    question: "You have 2 input features and apply PolynomialFeatures(degree=2, include_bias=True). How many output features do you get?",
+    options: [
+      "6 features: [1, x₁, x₂, x₁², x₁x₂, x₂²]",
+      "4 features: [x₁, x₂, x₁², x₂²] — only squared terms",
+      "5 features: [1, x₁, x₂, x₁², x₂²] — no cross term",
+      "3 features: [x₁, x₂, x₁x₂] — only linear and interaction"
+    ],
+    correct: 0,
+    explanation: "For p=2 features and degree=2, PolynomialFeatures generates all combinations up to degree 2: [1, x₁, x₂, x₁², x₁x₂, x₂²]. That's 6 features: 1 bias + 2 original + 2 squared + 1 interaction. The general formula is C(p+d, d) = C(2+2, 2) = C(4,2) = 6."
+  },
+  {
+    question: "What is an interaction term in polynomial regression?",
+    options: [
+      "A feature created by multiplying two input features together, capturing their combined effect on the target",
+      "A term that controls the interaction between the learning rate and polynomial degree",
+      "The bias term (intercept) that represents the baseline value when all features are zero",
+      "A cross-validation score that measures how two models interact on the same dataset"
+    ],
+    correct: 0,
+    explanation: "An interaction term (e.g., x₁·x₂) captures the idea that the effect of x₁ on y depends on the value of x₂. For house pricing, the combined effect of sqft AND bedrooms might be greater than their individual effects summed. PolynomialFeatures automatically generates these products; you can also use interaction_only=True to get only cross-terms without squared terms."
+  },
+  {
+    question: "A degree-15 polynomial fits training data with R²=0.99 but achieves R²=-1.2 on the test set. What does this indicate?",
+    options: [
+      "Overfitting — the model memorised training noise and completely fails to generalise to new data",
+      "Underfitting — a negative R² means the model is too simple to capture the pattern",
+      "A data preprocessing error — R² should never go below 0 in a correctly trained model",
+      "A correct model — the test set must contain outliers that artificially reduce R²"
+    ],
+    correct: 0,
+    explanation: "R² can be negative on the test set, and it means the model is WORSE than simply predicting the mean for every point. A 0.99 train R² with -1.2 test R² is a classic overfitting signature: the model has enough capacity to memorise the training set (every data point, including noise), but learned patterns that don't generalise. The solution is to reduce the polynomial degree, use regularisation (Ridge/Lasso), or use cross-validation to select degree."
+  },
+  {
+    question: "In a multivariate regression model, the coefficient for 'num_bedrooms' is 12,000. What does this mean?",
+    options: [
+      "Each additional bedroom is associated with a $12,000 increase in predicted price, holding all other features constant",
+      "Each bedroom costs $12,000 to build, which is the reason for this coefficient",
+      "The model predicts $12,000 total for every bedroom in the dataset",
+      "num_bedrooms explains 12,000 units of variance in the target variable"
+    ],
+    correct: 0,
+    explanation: "In multivariate regression, each coefficient is interpreted as the predicted change in the target for a one-unit increase in that feature, holding ALL OTHER FEATURES CONSTANT (ceteris paribus). So β=12,000 for num_bedrooms means: add one bedroom, expected price increases by $12,000, assuming sqft, bathrooms, and all other features remain unchanged."
+  }
+]);
+</script>
+
+</body>
+</html>

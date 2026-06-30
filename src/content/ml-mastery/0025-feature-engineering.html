@@ -1,0 +1,677 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lesson 25: Feature Engineering — Cleaning, Creation &amp; Selection | ML Mastery</title>
+  <link rel="stylesheet" href="../assets/style.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
+</head>
+<body>
+
+<header class="lesson-header">
+  <div class="header-inner">
+    <nav class="breadcrumb">
+      <a href="../reference/curriculum-map.html">ML Mastery</a>
+      <span class="sep">›</span>
+      <span>Phase 2: Supervised ML</span>
+    </nav>
+    <div class="lesson-badges">
+      <span class="phase-badge">Phase 2 · Supervised ML</span>
+      <span class="lesson-num-badge">Lesson 25</span>
+    </div>
+    <h1 class="lesson-title">Feature Engineering: Cleaning, Creation &amp; Selection</h1>
+    <p class="lesson-subtitle">The part of ML where domain knowledge meets creativity — transforming raw data into signals that models can actually learn from.</p>
+    <div class="meta-pills">
+      <span class="meta-pill">⏱ ~60 min</span>
+      <span class="meta-pill">🐍 Pandas · scikit-learn</span>
+      <span class="meta-pill">🔧 Supervised ML</span>
+      <span class="meta-pill">Requires Lessons 04–24</span>
+    </div>
+  </div>
+</header>
+
+<main class="lesson-main">
+<div class="content-wrapper">
+
+<div class="objectives-card">
+  <h2>🎯 What You'll Learn</h2>
+  <ul>
+    <li>Apply log, square root, and Box-Cox transforms to correct skewed distributions</li>
+    <li>Create new features using domain knowledge: ratios, date components, and aggregation features</li>
+    <li>Build polynomial and interaction features with <code>PolynomialFeatures</code> and manual creation</li>
+    <li>Remove low-information features with <code>VarianceThreshold</code>, <code>SelectKBest</code>, and correlation filtering</li>
+    <li>Use wrapper and embedded methods — RFE, RFECV, Lasso, and <code>SelectFromModel</code></li>
+  </ul>
+</div>
+
+<!-- ── Section 1 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">1</span> Why Feature Engineering?</h2>
+
+  <p>"Garbage in, garbage out" is the most important phrase in applied ML. A brilliant algorithm trained on poorly-crafted features will lose to a simple model trained on well-crafted ones. The winning solutions on Kaggle competitions are rarely about exotic algorithms — they are almost always about creative, domain-informed feature engineering.</p>
+
+  <p>Feature engineering encompasses two distinct activities:</p>
+  <ul>
+    <li><strong>Feature creation</strong>: generating new columns that make the signal more explicit for the model — transforming raw values, creating ratios, extracting temporal patterns, or computing group statistics</li>
+    <li><strong>Feature selection</strong>: removing columns that add noise, redundancy, or multicollinearity — keeping only the features that genuinely help the model generalise</li>
+  </ul>
+
+  <pre><code class="language-python">import pandas as pd
+import numpy as np
+from sklearn.linear_model import Ridge
+from sklearn.model_selection import cross_val_score
+from sklearn.datasets import fetch_california_housing
+
+housing = fetch_california_housing()
+X_raw = pd.DataFrame(housing.data, columns=housing.feature_names)
+y = housing.target
+
+# Baseline: raw features
+baseline_score = cross_val_score(
+    Ridge(alpha=1.0), X_raw, y, cv=5, scoring='r2'
+).mean()
+print(f"Baseline R² (raw features): {baseline_score:.4f}")
+
+# Add engineered features
+X_eng = X_raw.copy()
+X_eng['rooms_per_household']   = X_eng['AveRooms'] / X_eng['HouseAge'].clip(1)
+X_eng['bedrooms_per_room']     = X_eng['AveBedrms'] / X_eng['AveRooms'].clip(0.1)
+X_eng['population_per_household'] = X_eng['Population'] / X_eng['AveOccup'].clip(1)
+X_eng['log_MedInc']            = np.log1p(X_eng['MedInc'])
+
+engineered_score = cross_val_score(
+    Ridge(alpha=1.0), X_eng, y, cv=5, scoring='r2'
+).mean()
+print(f"Engineered R²:              {engineered_score:.4f}")
+print(f"Improvement:                {(engineered_score - baseline_score):.4f}")
+# Baseline R²: 0.6010
+# Engineered R²: 0.6441  ← meaningful lift from 4 simple domain features</code></pre>
+
+  <div class="callout callout-key">
+    <span class="callout-icon">🔑</span>
+    <div class="callout-body">
+      <strong>Feature Engineering vs Feature Selection</strong>
+      <p>These are complementary, not competing: <em>create many features first</em> (feature engineering), then <em>select the most useful subset</em> (feature selection). Creating fewer but better-targeted features reduces the selection burden. The typical workflow: domain knowledge → create 50–100 candidates → filter to 20–30 best features via selection methods.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 2 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">2</span> Feature Cleaning &amp; Transformation</h2>
+
+  <p>Many features in real data violate the distributional assumptions that linear models rely on (roughly normal distribution, constant variance). Transformations fix this and also improve the quality of distance-based models like KNN and SVM.</p>
+
+  <pre><code class="language-python">import numpy as np
+import pandas as pd
+from scipy.stats import boxcox, skew
+import matplotlib.pyplot as plt
+
+np.random.seed(42)
+n = 5000
+
+# Simulate heavily right-skewed features (common in financial/demographic data)
+income    = np.random.lognormal(10.8, 0.8, n)   # income: median ~$54k, max ~$2M
+house_val = np.random.lognormal(12.2, 0.6, n)   # house values
+
+print("Before transformation:")
+for name, arr in [('income', income), ('house_val', house_val)]:
+    print(f"  {name:12s}: mean={arr.mean():>10.0f}  std={arr.std():>10.0f}  skewness={skew(arr):>6.2f}")
+
+# Log transform: compresses the long right tail
+income_log    = np.log1p(income)     # log1p = log(1+x), safe for zero values
+house_val_log = np.log(house_val)    # log is fine; values are always positive
+
+print("\nAfter log transform:")
+for name, arr in [('income_log', income_log), ('house_val_log', house_val_log)]:
+    print(f"  {name:14s}: mean={arr.mean():>8.4f}  std={arr.std():>8.4f}  skewness={skew(arr):>6.3f}")
+
+# Box-Cox transform: finds the optimal power transformation automatically
+income_bc, lambda_bc = boxcox(income + 1)  # boxcox requires positive values
+print(f"\nBox-Cox: optimal lambda = {lambda_bc:.3f}  (close to 0 means log is optimal)")
+print(f"  skewness after Box-Cox: {skew(income_bc):.4f}")
+
+# Handling outliers: clipping vs winsorizing
+def winsorize(arr, lower=0.01, upper=0.99):
+    """Cap at lower and upper percentiles."""
+    lo = np.percentile(arr, lower * 100)
+    hi = np.percentile(arr, upper * 100)
+    return np.clip(arr, lo, hi)
+
+income_w = winsorize(income, lower=0.01, upper=0.99)
+print(f"\nBefore winsorize: max = {income.max():>10.0f}")
+print(f"After winsorize:  max = {income_w.max():>10.0f}  (99th percentile cap)")</code></pre>
+
+  <div class="callout callout-tip">
+    <span class="callout-icon">💡</span>
+    <div class="callout-body">
+      <strong>When to Apply Log Transforms</strong>
+      <p>Apply <code>np.log1p</code> when: (1) the feature is always positive, (2) its distribution is right-skewed (skewness &gt; 1.0 is a good heuristic), and (3) you're using a linear model, KNN, or SVM. Tree-based models (Random Forest, XGBoost) don't need log transforms because their splits naturally handle skewed distributions. However, log-transforming the <em>target</em> variable for regression is useful for all model types.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 3 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">3</span> Feature Creation: Domain-Specific</h2>
+
+  <p>The most impactful features come from understanding your domain. A financial analyst knows that debt-to-income ratio matters more than raw debt or raw income separately. A marketing analyst knows that recency × frequency matters more than either alone. These cannot be learned automatically — they require human insight.</p>
+
+  <pre><code class="language-python">import pandas as pd
+import numpy as np
+
+np.random.seed(42)
+n = 10000
+
+# E-commerce customer dataset
+df = pd.DataFrame({
+    'customer_id':     range(n),
+    'signup_date':     pd.date_range('2021-01-01', periods=n, freq='1H'),
+    'last_purchase':   pd.date_range('2024-01-01', periods=n, freq='2H'),
+    'total_spent':     np.random.lognormal(5, 1.2, n),
+    'num_orders':      np.random.poisson(8, n).clip(1),
+    'debt':            np.random.lognormal(9, 1.0, n),
+    'annual_income':   np.random.lognormal(10.8, 0.7, n),
+    'living_area_sqft': np.random.normal(1800, 400, n).clip(400),
+    'num_bedrooms':    np.random.choice([1,2,3,4,5], n, p=[0.1,0.3,0.4,0.15,0.05]),
+    'year_sold':       2024,
+    'year_built':      np.random.randint(1950, 2020, n),
+    'year_remodeled':  np.random.randint(1970, 2024, n),
+})
+
+# ── Ratio features (often more informative than raw values) ──
+df['debt_to_income']      = df['debt'] / df['annual_income'].clip(1)
+df['sqft_per_bedroom']    = df['living_area_sqft'] / df['num_bedrooms'].clip(1)
+df['avg_order_value']     = df['total_spent'] / df['num_orders']
+
+# ── Date/time features ──
+reference_date = pd.Timestamp('2024-12-01')
+df['days_since_signup']   = (reference_date - df['signup_date']).dt.days
+df['days_since_purchase'] = (reference_date - df['last_purchase']).dt.days
+df['signup_month']        = df['signup_date'].dt.month
+df['signup_dayofweek']    = df['signup_date'].dt.dayofweek
+df['is_weekend_signup']   = df['signup_dayofweek'].isin([5, 6]).astype(int)
+
+# ── Age features ──
+df['house_age']    = df['year_sold'] - df['year_built']
+df['remodel_age']  = df['year_sold'] - df['year_remodeled']
+df['years_since_remodel'] = (df['year_sold'] - df['year_remodeled']).clip(0)
+
+# ── Binning continuous variables ──
+# Equal-width bins: cut the range into N equal-sized buckets
+df['income_band'] = pd.cut(
+    df['annual_income'],
+    bins=[0, 30000, 60000, 100000, 200000, np.inf],
+    labels=['very_low', 'low', 'medium', 'high', 'very_high']
+)
+
+# Equal-frequency bins: each bucket has roughly the same number of samples
+df['income_quartile'] = pd.qcut(
+    df['annual_income'], q=4, labels=['Q1', 'Q2', 'Q3', 'Q4']
+)
+
+print("New features created:", [
+    'debt_to_income', 'sqft_per_bedroom', 'avg_order_value',
+    'days_since_purchase', 'signup_month', 'is_weekend_signup',
+    'house_age', 'remodel_age', 'income_band', 'income_quartile'
+])
+print(df[['debt_to_income', 'avg_order_value', 'house_age', 'income_quartile']].head())</code></pre>
+</div>
+
+<!-- ── Section 4 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">4</span> Feature Creation: Polynomial &amp; Interaction Features</h2>
+
+  <p>Linear models can only learn linear relationships. If the true relationship between a feature and the target is quadratic (e.g., the effect of temperature on ice cream sales) or multiplicative (e.g., price × quantity = revenue), you need to create those terms explicitly.</p>
+
+  <pre><code class="language-python">import numpy as np
+import pandas as pd
+from sklearn.preprocessing import PolynomialFeatures
+from sklearn.linear_model import Ridge
+from sklearn.model_selection import cross_val_score
+
+np.random.seed(42)
+n = 1000
+
+# True model: y = 2*x1 + 3*x2 + 5*x1*x2 + error (interaction term!)
+x1 = np.random.uniform(-2, 2, n)
+x2 = np.random.uniform(-2, 2, n)
+y_poly = 2*x1 + 3*x2 + 5*x1*x2 + np.random.randn(n) * 0.5
+
+X_linear   = np.column_stack([x1, x2])
+
+# Without interaction term
+r2_linear = cross_val_score(Ridge(alpha=0.1), X_linear, y_poly, cv=5, scoring='r2').mean()
+print(f"Linear features only (no interaction): R² = {r2_linear:.4f}")
+
+# With interaction term added manually
+X_interact = np.column_stack([x1, x2, x1*x2])
+r2_interact = cross_val_score(Ridge(alpha=0.1), X_interact, y_poly, cv=5, scoring='r2').mean()
+print(f"With x1*x2 interaction:                R² = {r2_interact:.4f}")
+
+# Sklearn PolynomialFeatures: systematically creates all powers and interactions
+poly = PolynomialFeatures(degree=2, include_bias=False, interaction_only=False)
+X_poly = poly.fit_transform(X_linear)
+print(f"\nPolynomialFeatures(degree=2) output shape: {X_poly.shape}")
+print(f"Feature names: {poly.get_feature_names_out(['x1', 'x2'])}")
+# ['x1', 'x2', 'x1^2', 'x1 x2', 'x2^2']
+
+r2_poly = cross_val_score(Ridge(alpha=0.1), X_poly, y_poly, cv=5, scoring='r2').mean()
+print(f"With all degree-2 features:            R² = {r2_poly:.4f}")
+
+# r2 without interaction: 0.8401
+# r2 with x1*x2 only:     0.9997  ← perfect because we added the true term
+# r2 with all degree-2:   0.9997  ← same, extra x1² and x2² don't hurt much
+
+# ── Manual domain-informed interactions ──
+df_house = pd.DataFrame({'sqft': x1 * 500 + 1500, 'price_per_sqft': x2 * 50 + 200})
+# Domain knowledge: total price ≈ sqft × price_per_sqft
+df_house['estimated_price'] = df_house['sqft'] * df_house['price_per_sqft']
+df_house['log_sqft']        = np.log(df_house['sqft'])
+df_house['price_sqft_ratio'] = df_house['price_per_sqft'] / df_house['sqft'].clip(1)
+print(f"\nDomain-informed interactions created: {df_house.columns.tolist()}")</code></pre>
+</div>
+
+<!-- ── Section 5 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">5</span> Feature Selection: Filter Methods</h2>
+
+  <p>Filter methods evaluate features independently of the model, using statistical properties. They are fast and work as a first-pass removal of clearly useless features.</p>
+
+  <pre><code class="language-python">import numpy as np
+import pandas as pd
+from sklearn.feature_selection import VarianceThreshold, SelectKBest, f_classif, chi2
+from sklearn.preprocessing import MinMaxScaler
+
+np.random.seed(42)
+n, p = 1000, 30
+X_sel = np.random.randn(n, p)
+# Feature 0 is constant (zero variance)
+X_sel[:, 0] = 5.0
+# Features 1-4 have near-zero variance
+X_sel[:, 1:5] = np.random.randn(n, 4) * 0.001
+# True signal in features 5-9
+true_coefs = np.zeros(p)
+true_coefs[5:10] = np.random.randn(5) * 2
+y_sel = (X_sel @ true_coefs + np.random.randn(n) > 0).astype(int)
+
+# ── Step 1: Remove constant and near-zero variance features ──
+vt = VarianceThreshold(threshold=0.01)
+X_vt = vt.fit_transform(X_sel)
+print(f"Before VarianceThreshold: {X_sel.shape[1]} features")
+print(f"After  VarianceThreshold: {X_vt.shape[1]} features")
+print(f"Removed: {np.where(~vt.get_support())[0]}")  # features 0-4 removed
+
+# ── Step 2: Correlation with target ──
+df_sel = pd.DataFrame(X_vt)
+df_sel['target'] = y_sel
+corr_with_target = df_sel.corr()['target'].drop('target').abs()
+print(f"\nTop 5 features by |correlation with target|:")
+print(corr_with_target.nlargest(5).round(4))
+
+# ── Step 3: Remove multicollinear features ──
+df_feats = pd.DataFrame(X_vt)
+corr_matrix = df_feats.corr().abs()
+# Find pairs with correlation > 0.85
+upper_triangle = corr_matrix.where(np.triu(np.ones(corr_matrix.shape), k=1).astype(bool))
+to_drop = [col for col in upper_triangle.columns if any(upper_triangle[col] > 0.85)]
+df_feats_clean = df_feats.drop(columns=to_drop)
+print(f"\nAfter multicollinearity removal: {df_feats_clean.shape[1]} features")
+
+# ── Step 4: SelectKBest — ANOVA F-test for classification ──
+selector = SelectKBest(score_func=f_classif, k=10)
+X_kbest = selector.fit_transform(X_vt, y_sel)
+selected_indices = np.where(selector.get_support())[0]
+print(f"\nSelectKBest (top 10): selected indices = {selected_indices}")
+print(f"F-scores for top features: {selector.scores_[selector.get_support()].round(2)}")</code></pre>
+
+  <div class="callout callout-warn">
+    <span class="callout-icon">⚠️</span>
+    <div class="callout-body">
+      <strong>Fit Feature Selectors on Training Data Only</strong>
+      <p>Filter methods compute statistics from data (variance, correlation, F-scores). If you compute these on the full dataset including the test set, test information leaks into your feature selection decisions. Always use a Pipeline: <code>Pipeline([('select', SelectKBest(f_classif, k=10)), ('model', LogisticRegression())])</code>. When used inside cross-validation, the Pipeline recomputes the selector on each training fold independently.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 6 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">6</span> Feature Selection: Wrapper Methods (RFE)</h2>
+
+  <p>Wrapper methods evaluate feature subsets by actually training a model on them. Recursive Feature Elimination (RFE) is the most practical: train a model, identify the least important feature, remove it, retrain — repeat until you have the desired number of features.</p>
+
+  <pre><code class="language-python">from sklearn.feature_selection import RFE, RFECV
+from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import StratifiedKFold
+import numpy as np
+
+# RFE: specify how many features to keep
+lr = LogisticRegression(max_iter=1000, random_state=42)
+rfe = RFE(estimator=lr, n_features_to_select=10, step=1)
+rfe.fit(X_vt, y_sel)
+
+print(f"RFE selected features: {np.where(rfe.support_)[0]}")
+print(f"Feature rankings (1=selected, higher=eliminated earlier):")
+print(rfe.ranking_[:15])  # first 15 features
+# Features with ranking=1 are the 10 selected
+# Higher ranking = eliminated earlier (less important)
+
+# RFECV: auto-selects the optimal k via cross-validation
+rfecv = RFECV(
+    estimator=LogisticRegression(max_iter=1000, random_state=42),
+    step=1,
+    cv=StratifiedKFold(5),
+    scoring='roc_auc',
+    min_features_to_select=3,
+    n_jobs=-1
+)
+rfecv.fit(X_vt, y_sel)
+print(f"\nRFECV optimal number of features: {rfecv.n_features_}")
+print(f"RFECV selected features: {np.where(rfecv.support_)[0]}")
+
+import matplotlib.pyplot as plt
+plt.figure(figsize=(8, 4))
+plt.plot(range(1, len(rfecv.cv_results_['mean_test_score']) + 1),
+         rfecv.cv_results_['mean_test_score'])
+plt.xlabel('Number of features selected')
+plt.ylabel('Cross-validation AUC')
+plt.title('RFECV: Performance vs Number of Features')
+plt.axvline(x=rfecv.n_features_, color='red', linestyle='--',
+            label=f'Optimal: {rfecv.n_features_} features')
+plt.legend()
+plt.tight_layout()
+plt.savefig('rfecv.png', dpi=150, bbox_inches='tight')</code></pre>
+</div>
+
+<!-- ── Section 7 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">7</span> Feature Selection: Embedded Methods</h2>
+
+  <p>Embedded methods perform feature selection as an integral part of model training — not before or after. The main two approaches: Lasso (L1) regularization zeroes out unimportant feature coefficients, and tree-based models compute impurity-based feature importance during fitting.</p>
+
+  <pre><code class="language-python">from sklearn.feature_selection import SelectFromModel
+from sklearn.linear_model import Lasso, LassoCV
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
+import numpy as np
+
+# ── Method 1: Lasso — L1 regularization zeroes out irrelevant features ──
+lasso_sel = Pipeline([
+    ('scaler', StandardScaler()),
+    ('lasso',  Lasso(alpha=0.05, max_iter=5000))
+])
+lasso_sel.fit(X_vt, y_sel.astype(float))  # Lasso for regression; approx for binary
+
+lasso_coefs = lasso_sel.named_steps['lasso'].coef_
+lasso_selected = np.where(np.abs(lasso_coefs) > 1e-4)[0]
+print(f"Lasso selected {len(lasso_selected)} features: {lasso_selected}")
+
+# SelectFromModel: wrapper that extracts features above threshold
+sfm_lasso = SelectFromModel(Lasso(alpha=0.05), threshold=1e-4)
+sfm_lasso.fit(
+    StandardScaler().fit_transform(X_vt), y_sel.astype(float))
+X_lasso_sel = sfm_lasso.transform(StandardScaler().fit_transform(X_vt))
+print(f"SelectFromModel(Lasso): {X_lasso_sel.shape[1]} features")
+
+# ── Method 2: Tree-based embedded feature selection ──
+rf_sel = RandomForestClassifier(n_estimators=200, n_jobs=-1, random_state=42)
+rf_sel.fit(X_vt, y_sel)
+
+sfm_rf = SelectFromModel(rf_sel, threshold='mean')  # keep above-average importance
+X_rf_sel = sfm_rf.transform(X_vt)
+print(f"\nSelectFromModel(RF, threshold='mean'): {X_rf_sel.shape[1]} features")
+selected_rf_idx = np.where(sfm_rf.get_support())[0]
+print(f"Selected feature indices: {selected_rf_idx}")
+print(f"Their importances: {rf_sel.feature_importances_[selected_rf_idx].round(4)}")
+
+# ── Combined Pipeline ──
+from sklearn.linear_model import LogisticRegression
+from sklearn.model_selection import cross_val_score
+
+pipeline_complete = Pipeline([
+    ('scaler',   StandardScaler()),
+    ('selector', SelectFromModel(Lasso(alpha=0.05), threshold=1e-4)),
+    ('model',    LogisticRegression(max_iter=1000, random_state=42))
+])
+auc_pipeline = cross_val_score(
+    pipeline_complete, X_vt, y_sel, cv=5, scoring='roc_auc').mean()
+print(f"\nFull pipeline (Lasso select + LR) CV-AUC: {auc_pipeline:.4f}")</code></pre>
+
+  <div class="callout callout-key">
+    <span class="callout-icon">🔑</span>
+    <div class="callout-body">
+      <strong>Pipeline Prevents Leakage in Feature Selection</strong>
+      <p>If you fit a <code>SelectKBest</code> on all data, then cross-validate the model, the selector has already seen the test fold. Wrapping selection in a <code>Pipeline</code> and then cross-validating the pipeline recomputes the selector fresh on each training fold — the test fold never influences which features are selected. This is the only leakage-free way to do feature selection with cross-validation.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 8 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">8</span> Practical Feature Engineering Workflow</h2>
+
+  <p>Here is a recommended end-to-end workflow for feature engineering in practice:</p>
+
+  <pre><code class="language-python">import numpy as np
+import pandas as pd
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
+from sklearn.feature_selection import VarianceThreshold, SelectKBest, f_regression
+from sklearn.linear_model import Ridge
+from sklearn.model_selection import cross_val_score
+
+# Step 1: Start with domain knowledge — create candidate features
+# (done in Section 3 above)
+
+# Step 2: Remove constant and near-zero variance features (fast filter)
+vt = VarianceThreshold(threshold=0.005)
+
+# Step 3: Scale features (required for linear models and distance-based methods)
+scaler = StandardScaler()
+
+# Step 4: Statistical filter — keep top k by F-score with target
+# (adjust k based on your problem; use RFECV for more rigorous selection)
+kbest = SelectKBest(f_regression, k=20)
+
+# Step 5: Model
+model = Ridge(alpha=1.0)
+
+# Assemble everything into one clean Pipeline
+full_pipeline = Pipeline([
+    ('variance_filter', vt),
+    ('scaler',          scaler),
+    ('k_best',          kbest),
+    ('model',           model),
+])
+
+# Step 6: Validate on held-out test set (train/val/test split)
+np.random.seed(42)
+n_samples = 2000
+n_feats_raw = 50
+X_workflow = np.random.randn(n_samples, n_feats_raw)
+true_c = np.zeros(n_feats_raw)
+true_c[:10] = np.random.randn(10) * 2
+y_workflow = X_workflow @ true_c + np.random.randn(n_samples)
+
+cv_r2 = cross_val_score(full_pipeline, X_workflow, y_workflow, cv=5, scoring='r2').mean()
+print(f"Full pipeline CV R²: {cv_r2:.4f}")
+
+# Step 7: Retrain on full training data after selecting the final pipeline
+# full_pipeline.fit(X_train, y_train)
+# predictions = full_pipeline.predict(X_test)
+print("\nWorkflow complete. Pipeline is leakage-free and production-ready.")</code></pre>
+</div>
+
+<!-- ── Real-World Spotlight ── -->
+<div class="use-case-section">
+  <div class="use-case-header">
+    <span style="font-size:1.5rem">🌍</span>
+    <h2>Real-World Spotlight: House Price Prediction Feature Engineering</h2>
+  </div>
+  <p>The Ames Housing dataset (used in the famous Kaggle competition) has 79 raw features. The winning solutions all involved extensive feature engineering — creating composite features that capture the combined effect of multiple raw variables in ways that better represent what drives price.</p>
+  <pre><code class="language-python">import numpy as np
+import pandas as pd
+from sklearn.linear_model import Ridge
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.feature_selection import SelectKBest, f_regression
+from sklearn.preprocessing import StandardScaler
+from sklearn.pipeline import Pipeline
+from sklearn.model_selection import cross_val_score
+from sklearn.datasets import fetch_california_housing
+
+# Using California Housing as a proxy (Ames is not in sklearn)
+housing = fetch_california_housing()
+df_h = pd.DataFrame(housing.data, columns=housing.feature_names)
+df_h['target'] = housing.target  # median house value in $100k
+
+# ── Feature Engineering ──
+df_h['rooms_per_person']   = df_h['AveRooms']   / df_h['AveOccup'].clip(1)
+df_h['bedrooms_ratio']     = df_h['AveBedrms']  / df_h['AveRooms'].clip(0.1)
+df_h['population_density'] = df_h['Population'] / df_h['AveOccup'].clip(1)
+df_h['log_MedInc']         = np.log1p(df_h['MedInc'])
+df_h['MedInc_sq']          = df_h['MedInc'] ** 2
+df_h['income_x_rooms']     = df_h['MedInc'] * df_h['AveRooms']
+df_h['lat_lng_interact']   = df_h['Latitude']  * df_h['Longitude']
+
+feature_cols_raw = housing.feature_names
+feature_cols_eng = list(df_h.columns.drop('target'))
+
+X_raw_h  = df_h[feature_cols_raw].values
+X_eng_h  = df_h[feature_cols_eng].values
+y_h      = df_h['target'].values
+
+print(f"Raw features:        {len(feature_cols_raw)}")
+print(f"Engineered features: {len(feature_cols_eng)}")
+
+# Compare raw vs engineered features
+for name, X_curr in [('Raw features', X_raw_h), ('Engineered features', X_eng_h)]:
+    pipe = Pipeline([
+        ('vt',    SelectKBest(f_regression, k=min(10, X_curr.shape[1]))),
+        ('scale', StandardScaler()),
+        ('model', Ridge(alpha=1.0))
+    ])
+    r2 = cross_val_score(pipe, X_curr, y_h, cv=5, scoring='r2').mean()
+    rmse_scores = cross_val_score(pipe, X_curr, y_h, cv=5, scoring='neg_root_mean_squared_error')
+    rmse = -rmse_scores.mean() * 100  # in $1000s (target is in $100k units)
+    print(f"  {name:25s}: R²={r2:.4f}  RMSE≈${rmse:.1f}k")
+
+# ── SelectKBest to find top 10 features ──
+skb = SelectKBest(f_regression, k=10)
+skb.fit(X_eng_h, y_h)
+selected_cols = [feature_cols_eng[i] for i in np.argsort(-skb.scores_)[:10]]
+print(f"\nTop 10 features by F-score:")
+for i, col in enumerate(selected_cols, 1):
+    score = sorted(skb.scores_, reverse=True)[i-1]
+    print(f"  {i:2d}. {col:30s}  F={score:.1f}")
+
+# Raw features            : R²=0.5974  RMSE≈$84.1k
+# Engineered features     : R²=0.6432  RMSE≈$78.9k  ← $5.2k improvement!</code></pre>
+  <p>Five engineered features — <code>log_MedInc</code>, <code>income_x_rooms</code>, <code>rooms_per_person</code>, <code>bedrooms_ratio</code>, and <code>lat_lng_interact</code> — reduced test RMSE by over $5,000 per prediction compared to raw features, using the same Ridge regression model. The interaction between income and rooms captured a combined effect that neither feature could represent alone.</p>
+</div>
+
+<!-- ── Quiz ── -->
+<div class="quiz-section">
+  <div id="lesson-25-quiz"></div>
+</div>
+
+<!-- ── Practice ── -->
+<div class="practice-card">
+  <h2>✍️ Practice Exercises</h2>
+  <ol>
+    <li>Load the Titanic dataset. Create these new features: <code>family_size = SibSp + Parch + 1</code>, <code>is_alone = (family_size == 1).astype(int)</code>, <code>title</code> (extracted from Name). Does adding these features improve logistic regression accuracy?</li>
+    <li>On the Breast Cancer dataset, apply <code>VarianceThreshold</code> followed by <code>SelectKBest(f_classif, k=10)</code> inside a Pipeline. Compare the AUC to using all 30 raw features. What is the accuracy-vs-simplicity tradeoff?</li>
+    <li>Use <code>RFECV</code> with a <code>RandomForestClassifier</code> on the Wine dataset. How many features does it select? Does removing the others hurt accuracy?</li>
+    <li>Create a polynomial degree-2 feature set on the Boston/California housing data and compare Ridge regression with and without polynomial features.</li>
+  </ol>
+</div>
+
+<!-- ── Primary Source ── -->
+<div class="primary-source">
+  <h2>📚 Primary Source for This Lesson</h2>
+  <p><a href="https://scikit-learn.org/stable/modules/feature_selection.html" target="_blank"><strong>scikit-learn: Feature Selection</strong></a><br>
+  The official guide covers all selection methods with code examples and guidance on choosing between them. Also highly recommended: the Kaggle notebook by abhishek "Approaching (almost) Any Machine Learning Problem" — it contains a practical, battle-tested feature engineering workflow from a competition grandmaster.</p>
+</div>
+
+<!-- ── Ask Tutor ── -->
+<div class="ask-tutor">
+  <span class="icon">💬</span>
+  <span>Unsure whether a feature you engineered actually helps? Seeing worse performance after adding more features? Paste your code and scores — your tutor will help you diagnose signal vs noise.</span>
+</div>
+
+<!-- ── Navigation ── -->
+<nav class="lesson-nav">
+  <a href="./0024-boosting.html" class="nav-btn">← Lesson 24: Boosting</a>
+  <a href="./0026-imbalanced-datasets.html" class="nav-btn nav-btn-next">Lesson 26: Imbalanced Datasets →</a>
+</nav>
+
+</div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-core.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/plugins/autoloader/prism-autoloader.min.js"></script>
+<script src="../assets/quiz.js"></script>
+<script>
+new MLQuiz('lesson-25-quiz', [
+  {
+    question: "Why apply a log transform to a right-skewed feature like income?",
+    options: [
+      "To compress the long tail and make the distribution more symmetric, which benefits linear models and improves coefficient interpretability",
+      "To normalise the feature to [0, 1] range, which all ML models require",
+      "To remove outliers from the training data before fitting",
+      "Log transforms are required only for tree-based models, not linear models"
+    ],
+    correct: 0,
+    explanation: "A right-skewed distribution has a few very high values (e.g., billionaires) that pull the mean far from the median. A linear model assigns a single coefficient to the raw feature — a $1 increase at $10,000 is treated the same as a $1 increase at $1,000,000. Log-transforming compresses the tail: a 10% increase in income always maps to the same log-scale increase, regardless of the starting value. Tree models don't need this as their splits naturally handle skew."
+  },
+  {
+    question: "What does VarianceThreshold(threshold=0.01) do?",
+    options: [
+      "Removes features whose variance across all training samples is below 0.01 — they contain almost no information",
+      "Scales all features so their variance equals 0.01",
+      "Removes features that are correlated with other features by more than 0.01",
+      "Drops the bottom 1% of features ranked by their correlation with the target"
+    ],
+    correct: 0,
+    explanation: "VarianceThreshold removes features that don't vary enough to carry signal. A constant feature (all values identical) has variance=0 and is useless. A feature with variance=0.001 barely changes across samples and provides almost no discrimination. Setting threshold=0.01 removes all features where the variance of the (ideally standardised) feature is below 0.01. This is a fast, model-agnostic first-pass cleanup."
+  },
+  {
+    question: "Recursive Feature Elimination (RFE) works by doing what?",
+    options: [
+      "Iteratively training a model and removing the least important feature each round, until the desired number remains",
+      "Ranking features by correlation with the target and selecting the top k",
+      "Training a Lasso model and selecting features with non-zero coefficients",
+      "Randomly sampling feature subsets and selecting the one that maximises validation performance"
+    ],
+    correct: 0,
+    explanation: "RFE fits a model (e.g., LogisticRegression or SVM), reads the feature importances or coefficients, removes the feature with the lowest importance, then repeats. This process continues until n_features_to_select features remain. RFECV wraps this in cross-validation to automatically find the optimal number of features. It's more powerful than filter methods because it accounts for feature interactions."
+  },
+  {
+    question: "What is multicollinearity and why is it a problem in linear models?",
+    options: [
+      "When two or more features are highly correlated, making it impossible to isolate their individual effects and causing unstable, inflated coefficients",
+      "When a feature has more than one mode in its distribution, creating ambiguity in its encoding",
+      "When the target variable is correlated with too many features simultaneously",
+      "When feature scales differ by multiple orders of magnitude, causing gradient descent issues"
+    ],
+    correct: 0,
+    explanation: "Multicollinearity means two features carry nearly identical information. In linear regression, the coefficient for feature A answers 'how much does the target change when A increases by 1, holding everything else constant?' — but if A and B are perfectly correlated, you can never hold B constant while changing A. This causes the coefficient estimates to be numerically unstable (huge confidence intervals) and flip sign with small data changes. Ridge regression handles this by distributing weight across correlated features."
+  },
+  {
+    question: "SelectFromModel(Lasso(alpha=0.1)) selects features based on what criterion?",
+    options: [
+      "Features with non-zero Lasso coefficients after fitting — Lasso's L1 penalty zeros out uninformative features",
+      "Features whose variance exceeds the Lasso alpha threshold",
+      "Features with a coefficient magnitude greater than alpha=0.1 in the Lasso model",
+      "The top 10% of features ranked by their Lasso regularization path length"
+    ],
+    correct: 0,
+    explanation: "SelectFromModel wraps any fitted estimator and extracts features whose importance/coefficient exceeds a threshold. When used with Lasso, it fits the Lasso model (which zeroes out unimportant coefficients) and then retains only features where the absolute coefficient > threshold (default: 1e-5). This is embedded feature selection — selection happens as part of the Lasso fitting process itself, not as a separate step."
+  }
+]);
+</script>
+
+</body>
+</html>

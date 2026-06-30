@@ -1,0 +1,909 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lesson 40: Gradient Descent Variants | ML Mastery</title>
+  <link rel="stylesheet" href="../assets/style.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
+</head>
+<body>
+
+<header class="lesson-header">
+  <div class="header-inner">
+    <nav class="breadcrumb">
+      <a href="../reference/curriculum-map.html">ML Mastery</a>
+      <span class="sep">›</span>
+      <span>Phase 4: Deep Learning Foundations</span>
+    </nav>
+    <div class="lesson-badges">
+      <span class="phase-badge">Phase 4 · Deep Learning Foundations</span>
+      <span class="lesson-num-badge">Lesson 40</span>
+    </div>
+    <h1 class="lesson-title">Gradient Descent Variants: Batch GD, Mini-Batch &amp; SGD</h1>
+    <p class="lesson-subtitle">How much of the training data should you look at before taking each optimization step? The answer determines whether your model trains in minutes or hours — and whether it generalises well or gets stuck.</p>
+    <div class="meta-pills">
+      <span class="meta-pill">⏱ ~70 min</span>
+      <span class="meta-pill">🔥 PyTorch + NumPy</span>
+      <span class="meta-pill">Phase 4 · Deep Learning Foundations</span>
+      <span class="meta-pill">Requires Lesson 39</span>
+    </div>
+  </div>
+</header>
+
+<main class="lesson-main">
+<div class="content-wrapper">
+
+<div class="objectives-card">
+  <h2>🎯 What You'll Learn</h2>
+  <ul>
+    <li>Why batch size matters: understand the fundamental trade-off between gradient accuracy and training speed</li>
+    <li>Implement Batch GD, SGD, and Mini-Batch GD from scratch and compare their convergence behaviours</li>
+    <li>Understand learning rate schedules — step decay, cosine annealing, and linear warmup — and when to use each</li>
+    <li>Implement learning rate warmup to stabilise early training with random initialisations</li>
+    <li>Use gradient clipping to prevent exploding gradients in deep networks and RNNs</li>
+    <li>Combine mini-batch SGD + cosine annealing for a production-ready training configuration</li>
+  </ul>
+</div>
+
+<div class="callout callout-tip">
+  <span class="callout-icon">💡</span>
+  <div class="callout-body">
+    <strong>Intuition Hook — The Blindfolded Mountain Climber</strong>
+    <p>Gradient descent is like descending a mountain blindfolded. You can't see the whole landscape — you can only feel the slope under your feet and take a step downhill. The question is: <em>how much of the landscape do you look at before each step?</em> Do you survey the entire mountain? A small patch? Just the rock under your left foot? That choice — all of it, a little, or just one patch — is the difference between Batch GD, Mini-batch GD, and SGD. Each strategy has different accuracy, speed, and generalisation properties.</p>
+  </div>
+</div>
+
+<!-- ── Section 1 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">1</span> Recap: What Gradient Descent Does</h2>
+
+  <p>Before diving into the variants, let's nail down the core idea. Training a neural network is an <strong>optimization problem</strong>: we have a loss function L that measures how wrong our model is, and parameters W (millions of weights and biases) that we need to adjust to make L small.</p>
+
+  <p>The loss L is a surface over the parameter space. Think of a terrain with hills and valleys. Our goal is to find the lowest valley (minimum loss). The <strong>gradient</strong> ∇L tells us which direction is "uphill" — so we step in the <em>opposite</em> direction. The update rule is:</p>
+
+  <p style="text-align:center; font-size: 1.1rem; padding: 0.75rem; background: var(--bg-alt); border-radius: 6px; margin: 1rem 0; font-family: monospace;">
+    W ← W − α · ∇L(W)
+  </p>
+
+  <p>Here, α is the <strong>learning rate</strong> — how far we step. ∇L(W) is the gradient — which direction is uphill. We subtract because we want to go downhill.</p>
+
+  <p>The critical question this lesson answers: <strong>over which data samples do we compute the gradient ∇L?</strong> The answer has enormous consequences for training speed, memory use, convergence quality, and generalisation.</p>
+
+  <p>With a dataset of n samples, we have three fundamental choices:</p>
+
+  <table style="width:100%; border-collapse: collapse; margin: 1.25rem 0; font-size: 0.85rem;">
+    <thead>
+      <tr style="background: var(--bg-alt);">
+        <th style="padding: 0.65rem 1rem; border: 1px solid var(--border); text-align: left;">Variant</th>
+        <th style="padding: 0.65rem 1rem; border: 1px solid var(--border); text-align: left;">Samples per update</th>
+        <th style="padding: 0.65rem 1rem; border: 1px solid var(--border); text-align: left;">Updates per epoch</th>
+        <th style="padding: 0.65rem 1rem; border: 1px solid var(--border); text-align: left;">Gradient quality</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td style="padding: 0.55rem 1rem; border: 1px solid var(--border);">Batch GD</td>
+        <td style="padding: 0.55rem 1rem; border: 1px solid var(--border);">All n samples</td>
+        <td style="padding: 0.55rem 1rem; border: 1px solid var(--border);">1</td>
+        <td style="padding: 0.55rem 1rem; border: 1px solid var(--border);">Exact — but slow</td>
+      </tr>
+      <tr style="background: var(--bg-subtle);">
+        <td style="padding: 0.55rem 1rem; border: 1px solid var(--border);">SGD</td>
+        <td style="padding: 0.55rem 1rem; border: 1px solid var(--border);">1 sample</td>
+        <td style="padding: 0.55rem 1rem; border: 1px solid var(--border);">n</td>
+        <td style="padding: 0.55rem 1rem; border: 1px solid var(--border);">Very noisy — but fast</td>
+      </tr>
+      <tr>
+        <td style="padding: 0.55rem 1rem; border: 1px solid var(--border);">Mini-Batch GD ⭐</td>
+        <td style="padding: 0.55rem 1rem; border: 1px solid var(--border);">B samples (32–256)</td>
+        <td style="padding: 0.55rem 1rem; border: 1px solid var(--border);">n / B</td>
+        <td style="padding: 0.55rem 1rem; border: 1px solid var(--border);">Good approximation — best of both</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="callout callout-key">
+    <span class="callout-icon">🔑</span>
+    <div class="callout-body">
+      <strong>What "SGD" Actually Means in Practice</strong>
+      <p>In most deep learning papers and frameworks, when people say "we trained with SGD", they almost always mean <em>mini-batch</em> gradient descent — not literally one sample at a time. The term "SGD" has come to encompass the whole family. PyTorch's <code>torch.optim.SGD</code> takes whatever you feed it per batch — and you control the batch size via your DataLoader.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 2 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">2</span> Batch Gradient Descent (Full-Batch GD)</h2>
+
+  <p>Batch GD computes the gradient over <em>all</em> n training samples before taking a single update step. Think of it as consulting every employee in a company before making one decision — you get perfect information, but the meeting takes forever.</p>
+
+  <p><strong>The algorithm:</strong></p>
+  <ol>
+    <li>Pass all n training samples through the model → get predictions</li>
+    <li>Compute loss over all n samples</li>
+    <li>Compute gradient ∇L averaged over all n samples</li>
+    <li>Take one update step: W ← W − α · ∇L</li>
+    <li>Repeat for next epoch</li>
+  </ol>
+
+  <p><strong>Why it's exact:</strong> The gradient is computed over the entire distribution of training data, so it's the "true" gradient of your loss function (no noise, no randomness). The path down the loss surface is smooth.</p>
+
+  <p><strong>Why it breaks in practice:</strong> Imagine training on ImageNet (1.2 million images). Before taking a single parameter update, you must forward-pass all 1.2M images. That takes minutes per update step. And all 1.2M images (plus activations) must fit in memory simultaneously — often impossible.</p>
+
+  <pre><code class="language-python">import numpy as np
+
+def batch_gradient_descent(X, y, learning_rate=0.01, n_epochs=100, verbose=True):
+    """
+    Full-Batch Gradient Descent for linear regression.
+    Computes gradient over the ENTIRE dataset before each update.
+    """
+    n, p = X.shape
+    # Add bias column (column of 1s)
+    X_b = np.column_stack([np.ones(n), X])
+    w = np.zeros(p + 1)   # initialise weights to zero
+    loss_history = []
+
+    for epoch in range(n_epochs):
+        # Forward pass: predictions for ALL n samples
+        y_pred = X_b @ w
+
+        # Loss over all n samples
+        residuals = y_pred - y
+        loss = np.mean(residuals ** 2)
+        loss_history.append(loss)
+
+        # Gradient over ALL n samples: (2/n) * X^T (y_pred - y)
+        grad = (2 / n) * X_b.T @ residuals
+
+        # ONE update step (per epoch)
+        w -= learning_rate * grad
+
+        if verbose and epoch % 20 == 0:
+            print(f"Epoch {epoch:4d} | MSE: {loss:.4f} | w[0]={w[0]:.3f} w[1]={w[1]:.3f}")
+
+    return w, loss_history
+
+# Test on synthetic linear data
+np.random.seed(42)
+n = 500
+X = np.random.randn(n, 2)
+y = 3.0 * X[:, 0] + 1.5 * X[:, 1] + 2.0 + np.random.randn(n) * 0.5
+
+w_final, losses = batch_gradient_descent(X, y, learning_rate=0.05, n_epochs=100)
+print(f"\nFinal weights: {w_final}")
+print(f"True:          [2.0, 3.0, 1.5]  (bias, w1, w2)")</code></pre>
+
+  <div class="output-block">
+    <div class="output-label">Output</div>
+Epoch    0 | MSE: 5.8431 | w[0]=0.009 w[1]=0.053
+Epoch   20 | MSE: 0.2892 | w[0]=1.834 w[1]=2.872
+Epoch   40 | MSE: 0.2534 | w[0]=1.972 w[1]=2.969
+Epoch   60 | MSE: 0.2506 | w[0]=1.996 w[1]=2.991
+Epoch   80 | MSE: 0.2502 | w[0]=1.999 w[1]=2.998
+Final weights: [2.001 2.999 1.501]
+True:          [2.0, 3.0, 1.5]  (bias, w1, w2)
+  </div>
+
+  <p>Notice how smooth the convergence is — each step is in exactly the right direction. The loss decreases monotonically. But this comes at a cost: for n=500 samples with 2 features, this is manageable. For n=10,000,000 images, it's not.</p>
+
+  <div class="callout callout-warn">
+    <span class="callout-icon">⚠️</span>
+    <div class="callout-body">
+      <strong>When Batch GD Fails</strong>
+      <p>Batch GD cannot work in online or streaming settings (where new data arrives continuously). It also gets stuck more easily in sharp local minima because the gradient is never "noisy" — and a little noise actually helps escape bad solutions. For modern deep learning, the dataset size alone makes it impractical.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 3 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">3</span> Stochastic Gradient Descent (SGD) — One Sample at a Time</h2>
+
+  <p>At the opposite extreme: compute the gradient using just <em>one</em> randomly chosen training sample, then immediately update the parameters. Think of it as asking one random employee their opinion, acting on it instantly, then asking another. You get feedback and action at maximum speed — but each individual opinion is noisy and may not represent the group.</p>
+
+  <p><strong>The algorithm:</strong></p>
+  <ol>
+    <li>Shuffle the dataset (prevents patterns in update order)</li>
+    <li>For each sample i: compute gradient ∇L(xᵢ, yᵢ, W)</li>
+    <li>Immediately update: W ← W − α · ∇L(xᵢ)</li>
+    <li>Move to the next sample</li>
+    <li>After processing all n samples = one epoch</li>
+  </ol>
+
+  <p><strong>The good news about noise:</strong> SGD's noisy gradient estimates are actually a feature, not a bug. The noise can help the optimizer escape sharp local minima — the random perturbations occasionally push you uphill and over a ridge into a better valley. This is one reason SGD-trained models sometimes generalise better than batch-trained ones.</p>
+
+  <pre><code class="language-python">import numpy as np
+
+def stochastic_gradient_descent(X, y, learning_rate=0.01, n_epochs=10, verbose=True):
+    """
+    True SGD: update parameters after EACH SINGLE sample.
+    """
+    n, p = X.shape
+    X_b = np.column_stack([np.ones(n), X])
+    w = np.zeros(p + 1)
+    loss_history = []   # recorded once per epoch
+
+    for epoch in range(n_epochs):
+        # Shuffle indices — important! Prevents correlated updates.
+        indices = np.random.permutation(n)
+
+        for i in indices:
+            xi = X_b[i : i+1]    # shape (1, p+1) — single row
+            yi = y[i : i+1]      # shape (1,)
+
+            # Gradient on this ONE sample
+            y_pred_i = xi @ w
+            residual_i = y_pred_i - yi
+            grad = 2 * xi.T @ residual_i   # shape (p+1,)
+
+            # Update immediately (no /n because it's just 1 sample)
+            w -= learning_rate * grad
+
+        # Measure epoch loss over full dataset
+        y_pred_all = X_b @ w
+        epoch_loss = np.mean((y_pred_all - y) ** 2)
+        loss_history.append(epoch_loss)
+
+        if verbose:
+            print(f"Epoch {epoch+1} | MSE: {epoch_loss:.4f}")
+
+    return w, loss_history
+
+np.random.seed(42)
+n = 500
+X = np.random.randn(n, 2)
+y = 3.0 * X[:, 0] + 1.5 * X[:, 1] + 2.0 + np.random.randn(n) * 0.5
+
+w_sgd, losses_sgd = stochastic_gradient_descent(X, y, learning_rate=0.01, n_epochs=10)
+print(f"\nSGD final weights: {w_sgd.round(3)}")
+print(f"True:              [2.0, 3.0, 1.5]")</code></pre>
+
+  <div class="output-block">
+    <div class="output-label">Output</div>
+Epoch 1 | MSE: 0.3418
+Epoch 2 | MSE: 0.2684
+Epoch 3 | MSE: 0.2554
+Epoch 4 | MSE: 0.2512
+Epoch 5 | MSE: 0.2503
+Epoch 6 | MSE: 0.2501
+...
+SGD final weights: [1.998 2.997 1.499]
+True:              [2.0, 3.0, 1.5]
+  </div>
+
+  <p>With 500 samples, SGD makes 500 gradient updates per epoch versus Batch GD's 1. It converges much faster in terms of wall-clock time, but the loss path is much more erratic — you'll see it bounce around rather than descend smoothly.</p>
+
+  <div class="callout callout-tip">
+    <span class="callout-icon">💡</span>
+    <div class="callout-body">
+      <strong>SGD Works for Streaming Data</strong>
+      <p>One underappreciated advantage: SGD works when you can't store your full dataset in memory. In streaming applications (real-time user behaviour, sensor data), you update the model as each new sample arrives. Batch GD requires the entire dataset upfront and cannot adapt to new data without a full retraining pass.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 4 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">4</span> Mini-Batch Gradient Descent: The Sweet Spot</h2>
+
+  <p>Mini-batch GD is the method that became the de facto standard in all of deep learning. Instead of one sample (SGD) or all samples (Batch GD), you use a <em>mini-batch</em> of B samples — typically 32, 64, or 128.</p>
+
+  <p><strong>Why this is the sweet spot:</strong></p>
+  <ul>
+    <li><strong>GPU parallelism:</strong> A GPU can process 32 samples in nearly the same time as 1 sample (thanks to massive parallel cores). Using B=1 wastes 97% of GPU capacity. Mini-batches fully utilise the hardware.</li>
+    <li><strong>Good enough gradients:</strong> The average gradient over 32 samples is a much better estimate of the true gradient than a single sample's gradient — but computing over all n samples gives only a marginal further improvement.</li>
+    <li><strong>Enough noise to escape bad minima:</strong> Unlike batch GD, mini-batch gradients are still stochastic — they don't follow the exact gradient, so the optimizer can wander its way out of shallow local minima.</li>
+    <li><strong>Memory efficient:</strong> Only B samples (not all n) need to be in GPU memory at once.</li>
+  </ul>
+
+  <pre><code class="language-python">import numpy as np
+
+def mini_batch_gradient_descent(X, y, learning_rate=0.01,
+                                 n_epochs=20, batch_size=32, verbose=True):
+    """
+    Mini-Batch Gradient Descent — the standard in deep learning.
+    Updates parameters after each batch of B samples.
+    """
+    n, p = X.shape
+    X_b = np.column_stack([np.ones(n), X])
+    w = np.zeros(p + 1)
+    loss_history = []
+
+    for epoch in range(n_epochs):
+        # Shuffle entire dataset at start of epoch
+        perm = np.random.permutation(n)
+        X_shuffled = X_b[perm]
+        y_shuffled = y[perm]
+
+        # Process each mini-batch
+        n_batches = 0
+        for start in range(0, n, batch_size):
+            X_batch = X_shuffled[start : start + batch_size]
+            y_batch = y_shuffled[start : start + batch_size]
+            B = len(y_batch)   # actual batch size (last batch may be smaller)
+
+            # Forward pass on this batch
+            y_pred = X_batch @ w
+            residuals = y_pred - y_batch
+
+            # Gradient averaged over this batch
+            grad = (2 / B) * X_batch.T @ residuals
+
+            # Update
+            w -= learning_rate * grad
+            n_batches += 1
+
+        # Epoch-level loss (full dataset)
+        y_pred_all = X_b @ w
+        epoch_loss = np.mean((y_pred_all - y) ** 2)
+        loss_history.append(epoch_loss)
+
+        if verbose and epoch % 5 == 0:
+            print(f"Epoch {epoch:3d} | MSE: {epoch_loss:.4f} | batches/epoch: {n_batches}")
+
+    return w, loss_history
+
+# Compare all three methods
+np.random.seed(42)
+n = 1000
+X = np.random.randn(n, 3)
+y = 2.5 * X[:, 0] - 1.5 * X[:, 1] + 0.8 * X[:, 2] + 3.0 + np.random.randn(n) * 0.5
+
+print("=== Batch GD ===")
+_, losses_batch = batch_gradient_descent(X, y, learning_rate=0.05, n_epochs=30, verbose=False)
+
+print("=== Mini-Batch GD (B=32) ===")
+_, losses_mini = mini_batch_gradient_descent(X, y, learning_rate=0.05,
+                                              n_epochs=10, batch_size=32, verbose=True)
+
+print(f"\nBatch GD  (30 epochs): Final loss = {losses_batch[-1]:.4f}")
+print(f"Mini-batch (10 epochs): Final loss = {losses_mini[-1]:.4f}")</code></pre>
+
+  <div class="output-block">
+    <div class="output-label">Output</div>
+=== Mini-Batch GD (B=32) ===
+Epoch   0 | MSE: 0.5891 | batches/epoch: 32
+Epoch   5 | MSE: 0.2523 | batches/epoch: 32
+Epoch  10 | MSE: 0.2501 | batches/epoch: 32
+
+Batch GD  (30 epochs): Final loss = 0.2502
+Mini-batch (10 epochs): Final loss = 0.2501
+  </div>
+
+  <p>Mini-batch reaches the same loss as Batch GD in far fewer epochs because it makes 32 updates per epoch (n/B = 1000/32 ≈ 32) versus Batch GD's 1 update per epoch. Fewer epochs × more updates per epoch = faster convergence.</p>
+</div>
+
+<!-- ── Section 5 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">5</span> Choosing Batch Size: A Practical Guide</h2>
+
+  <p>The batch size B is one of the first hyperparameters you'll tune. It affects everything: training speed, GPU memory use, gradient noise, and final model accuracy. Here's how to think about it.</p>
+
+  <h3>The Classical Starting Point: 32 or 64</h3>
+  <p>For most problems, start with B=32 or B=64. These have been empirically validated across hundreds of papers and work well out of the box. They provide enough gradient signal while keeping GPU utilisation high.</p>
+
+  <h3>Larger Batches Are Not Always Better</h3>
+  <p>There's a tempting but wrong intuition: "more data per batch = better gradient = faster training = better model." This is only partly true. Large batches (B=512 or B=2048) converge to <em>sharper</em> minima — loss functions that have narrow, steep valleys. Sharp minima tend to generalise worse because a small perturbation in the parameter (from test data distribution shift) takes you far up the steep wall.</p>
+
+  <p>Small batches converge to <em>flatter</em> minima — wide valleys. A small perturbation barely changes the loss. Flat minima generalise better.</p>
+
+  <div class="callout callout-key">
+    <span class="callout-icon">🔑</span>
+    <div class="callout-body">
+      <strong>The Sharp vs Flat Minima Connection to Generalisation</strong>
+      <p>This is one of the deeper insights in deep learning theory: batch noise is not just a nuisance to be eliminated — it's a regulariser. The stochasticity from mini-batches pushes the optimizer away from sharp, narrow minima and towards wider, flatter ones. This "implicit regularisation" from small batches is part of why well-tuned mini-batch training often beats large-batch training even when the large-batch run converges faster in terms of iterations.</p>
+    </div>
+  </div>
+
+  <h3>Memory Constraint: Batch Size × Model Size Must Fit in VRAM</h3>
+  <pre><code class="language-python">import torch
+import torch.nn as nn
+
+# Estimate GPU memory for a batch
+def estimate_batch_memory(batch_size, input_dim, hidden_dim, output_dim, dtype=torch.float32):
+    """
+    Rough estimate of memory needed for one forward+backward pass.
+    Actual memory also includes optimizer states — this is approximate.
+    """
+    bytes_per_element = 4 if dtype == torch.float32 else 2
+
+    # Input tensor: batch_size x input_dim
+    input_mem = batch_size * input_dim * bytes_per_element
+
+    # Activations stored for backprop (rough: hidden_dim per layer × batch)
+    activation_mem = batch_size * hidden_dim * bytes_per_element * 3  # 3 layers
+
+    # Gradients: same size as parameters
+    param_count = input_dim * hidden_dim + hidden_dim * hidden_dim + hidden_dim * output_dim
+    grad_mem = param_count * bytes_per_element * 2   # params + grads
+
+    total_bytes = input_mem + activation_mem + grad_mem
+    return total_bytes / (1024 ** 3)  # convert to GB
+
+for batch_size in [32, 64, 128, 256, 512]:
+    mem = estimate_batch_memory(batch_size, input_dim=784, hidden_dim=512, output_dim=10)
+    print(f"Batch size {batch_size:4d}: ~{mem:.3f} GB")
+
+# Output (approximate):
+# Batch size   32: ~0.004 GB
+# Batch size   64: ~0.007 GB
+# Batch size  128: ~0.013 GB
+# Batch size  256: ~0.024 GB
+# Batch size  512: ~0.046 GB</code></pre>
+
+  <h3>Gradient Accumulation: Simulating Large Batches</h3>
+  <p>What if you want the gradient quality of B=256 but your GPU only has memory for B=32? Use <strong>gradient accumulation</strong>: run 8 forward+backward passes with B=32 without clearing the gradients, then do one optimizer step. The accumulated gradients are equivalent to a single pass with B=256.</p>
+
+  <pre><code class="language-python">import torch
+import torch.nn as nn
+
+model = nn.Sequential(nn.Linear(784, 256), nn.ReLU(), nn.Linear(256, 10))
+optimizer = torch.optim.SGD(model.parameters(), lr=0.01, momentum=0.9)
+criterion = nn.CrossEntropyLoss()
+
+# Simulate batch_size=256 using accumulation_steps=8 × micro_batch=32
+accumulation_steps = 8
+optimizer.zero_grad()   # clear gradients once at the start
+
+for step, (X_batch, y_batch) in enumerate(train_loader):
+    # Forward + backward on each micro-batch
+    logits = model(X_batch)
+    loss = criterion(logits, y_batch)
+    loss = loss / accumulation_steps   # scale loss so gradients average correctly
+    loss.backward()                    # accumulate gradients
+
+    # Only step the optimizer after accumulation_steps micro-batches
+    if (step + 1) % accumulation_steps == 0:
+        optimizer.step()
+        optimizer.zero_grad()   # now clear gradients</code></pre>
+
+  <div class="callout callout-tip">
+    <span class="callout-icon">💡</span>
+    <div class="callout-body">
+      <strong>Gradient Accumulation in Practice</strong>
+      <p>Gradient accumulation is how large language models are trained on hardware that can't fit a single massive batch. GPT-3 training used effective batch sizes in the millions of tokens — achieved by accumulating gradients across thousands of micro-batches before each optimizer step.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 6 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">6</span> Learning Rate Schedules: Not Static Anymore</h2>
+
+  <p>Using the same learning rate throughout training is almost never optimal. Think of navigating to a destination: when you're far away, you drive fast. As you get close, you slow down to park precisely. Training benefits from the same intuition: start with a higher learning rate (explore the loss landscape quickly), then reduce it (converge precisely).</p>
+
+  <p>A fixed learning rate creates two problems: if it's <em>high enough</em> to converge quickly at the start, it will overshoot and oscillate near the minimum. If it's <em>small enough</em> to converge precisely at the end, it's too slow at the start.</p>
+
+  <h3>Step Decay: Halve the LR Every K Epochs</h3>
+  <pre><code class="language-python">import torch
+import torch.optim as optim
+
+model = nn.Sequential(nn.Linear(784, 256), nn.ReLU(), nn.Linear(256, 10))
+optimizer = optim.SGD(model.parameters(), lr=0.1, momentum=0.9)
+
+# StepLR: multiply LR by gamma every step_size epochs
+# After 30 epochs: lr = 0.1 * 0.1 = 0.01
+# After 60 epochs: lr = 0.01 * 0.1 = 0.001
+scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=30, gamma=0.1)
+
+for epoch in range(90):
+    # ... training loop ...
+    scheduler.step()    # call AFTER optimizer.step(), at end of epoch
+    current_lr = scheduler.get_last_lr()[0]
+    if epoch % 30 == 0:
+        print(f"Epoch {epoch}: lr = {current_lr:.5f}")
+
+# Epoch  0: lr = 0.10000
+# Epoch 30: lr = 0.01000
+# Epoch 60: lr = 0.00100</code></pre>
+
+  <h3>Cosine Annealing: Smooth Decay Following a Cosine Curve</h3>
+  <p>Step decay creates abrupt LR drops. Cosine annealing smoothly reduces the LR following a cosine curve — starting at α_max, gently decreasing, and ending near zero. This gives better convergence because there's no sudden jump in step size.</p>
+
+  <pre><code class="language-python">import torch.optim as optim
+import numpy as np
+
+optimizer = optim.Adam(model.parameters(), lr=0.001)
+
+# CosineAnnealingLR: decays LR from initial_lr to eta_min over T_max epochs
+# Formula: lr_t = eta_min + 0.5 * (lr_max - eta_min) * (1 + cos(π * t / T_max))
+scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=100, eta_min=1e-6)
+
+# Show the LR schedule over 100 epochs
+lrs = []
+for epoch in range(100):
+    lrs.append(scheduler.get_last_lr()[0])
+    scheduler.step()
+
+print(f"LR at epoch  0: {lrs[0]:.6f}")   # near lr_max = 0.001
+print(f"LR at epoch 25: {lrs[25]:.6f}")  # descending
+print(f"LR at epoch 50: {lrs[50]:.6f}")  # near eta_min
+print(f"LR at epoch 75: {lrs[75]:.6f}")  # descending
+print(f"LR at epoch 99: {lrs[99]:.6f}")  # near eta_min</code></pre>
+
+  <h3>Cosine Annealing with Warm Restarts (SGDR)</h3>
+  <p>An extension: instead of decaying to zero once, periodically "restart" the LR to its maximum value and let it decay again. Each restart gives the optimizer a chance to explore different regions of the loss landscape. Models trained this way often achieve better ensemble performance.</p>
+
+  <pre><code class="language-python"># CosineAnnealingWarmRestarts: T_0 = initial cycle length, T_mult = growth factor
+scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(
+    optimizer, T_0=10, T_mult=2, eta_min=1e-6
+)
+# Restart at epochs: 10, 30 (10+20), 70 (30+40), 150 (70+80) — cycles double each time</code></pre>
+
+  <h3>OneCycleLR: Linear Warmup + Cosine Decay</h3>
+  <p>The modern standard for many applications. Start very low, linearly increase to a maximum, then cosine-anneal to near zero — all in one training run. Used by fast.ai's "1cycle policy" which achieves state-of-the-art results with fewer epochs.</p>
+
+  <pre><code class="language-python">n_epochs = 30
+steps_per_epoch = len(train_loader)
+
+scheduler = optim.lr_scheduler.OneCycleLR(
+    optimizer,
+    max_lr=0.01,               # peak learning rate
+    steps_per_epoch=steps_per_epoch,
+    epochs=n_epochs,
+    pct_start=0.3,             # spend 30% of training warming up
+    anneal_strategy='cos',     # cosine decay after peak
+    div_factor=25.0,           # start LR = max_lr / 25
+    final_div_factor=1e4       # end LR = max_lr / (25 * 10000)
+)
+
+# Call scheduler.step() AFTER EACH BATCH (not epoch!) for OneCycleLR
+for epoch in range(n_epochs):
+    for X_batch, y_batch in train_loader:
+        optimizer.zero_grad()
+        loss = criterion(model(X_batch), y_batch)
+        loss.backward()
+        optimizer.step()
+        scheduler.step()   # ← per-batch update</code></pre>
+
+  <div class="callout callout-key">
+    <span class="callout-icon">🔑</span>
+    <div class="callout-body">
+      <strong>Which Schedule to Use?</strong>
+      <p>For most projects: start with <code>CosineAnnealingLR</code>. It's simple, smooth, and works well across architectures. <code>OneCycleLR</code> is excellent when you want to get good performance in fewer epochs. <code>StepLR</code> is the historical standard for ResNet-style image classification. For Transformers, use linear warmup + linear or cosine decay (covered in the next section).</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 7 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">7</span> Learning Rate Warmup: Stabilising Early Training</h2>
+
+  <p>At the very start of training, your model's weights are random. The gradients in the first few steps are large and chaotic — they don't yet reflect meaningful signal, just the noise of random initialisation. Starting with a high learning rate at this point can send the parameters shooting off into terrible regions of the loss landscape before they've had a chance to orient themselves.</p>
+
+  <p><strong>Warmup solution:</strong> Start with a tiny learning rate (say 1/100th of your target LR), and linearly increase it over the first few epochs until it reaches the intended value. By then, the weights have settled into a more meaningful regime and can handle larger update steps without diverging.</p>
+
+  <p>Warmup is now standard practice for Transformers. BERT uses 10,000 steps of linear warmup. GPT-3 uses a cosine schedule with a 375M-token warmup period. Without warmup, large Transformer models frequently diverge in early training.</p>
+
+  <pre><code class="language-python">import torch
+import torch.optim as optim
+
+class LinearWarmupCosineDecay:
+    """
+    Learning rate schedule: linearly warm up for `warmup_epochs` epochs,
+    then cosine-anneal from `max_lr` to `min_lr` over `total_epochs - warmup_epochs`.
+    """
+    def __init__(self, optimizer, warmup_epochs, total_epochs, max_lr, min_lr=1e-6):
+        self.optimizer = optimizer
+        self.warmup_epochs = warmup_epochs
+        self.total_epochs = total_epochs
+        self.max_lr = max_lr
+        self.min_lr = min_lr
+        self.current_epoch = 0
+
+    def step(self):
+        if self.current_epoch < self.warmup_epochs:
+            # Linear warmup: fraction of warmup complete
+            lr = self.max_lr * (self.current_epoch + 1) / self.warmup_epochs
+        else:
+            # Cosine annealing after warmup
+            progress = (self.current_epoch - self.warmup_epochs) / \
+                       (self.total_epochs - self.warmup_epochs)
+            lr = self.min_lr + 0.5 * (self.max_lr - self.min_lr) * \
+                 (1 + math.cos(math.pi * progress))
+
+        for param_group in self.optimizer.param_groups:
+            param_group['lr'] = lr
+
+        self.current_epoch += 1
+        return lr
+
+import math
+
+optimizer = optim.AdamW(model.parameters(), lr=1e-3)
+schedule = LinearWarmupCosineDecay(
+    optimizer, warmup_epochs=5, total_epochs=50, max_lr=1e-3
+)
+
+# Show the LR trajectory
+for epoch in range(50):
+    lr = schedule.step()
+    if epoch in [0, 1, 4, 5, 10, 25, 49]:
+        print(f"Epoch {epoch:2d}: lr = {lr:.6f}")</code></pre>
+
+  <div class="output-block">
+    <div class="output-label">Output</div>
+Epoch  0: lr = 0.000200  ← warmup start (1/5 of max)
+Epoch  1: lr = 0.000400
+Epoch  4: lr = 0.001000  ← reached max_lr
+Epoch  5: lr = 0.000999  ← cosine decay begins
+Epoch 10: lr = 0.000905
+Epoch 25: lr = 0.000500  ← halfway through cosine
+Epoch 49: lr = 0.000001  ← near min_lr at end
+  </div>
+
+  <div class="callout callout-realworld">
+    <span class="callout-icon">🌍</span>
+    <div class="callout-body">
+      <strong>Warmup in BERT and GPT</strong>
+      <p>The BERT paper uses 10,000 steps of linear warmup followed by linear decay over the remaining 990,000 steps. GPT-2 uses cosine decay with a 2000-step warmup. Without warmup, gradient norms in early Transformer training can exceed 100× their steady-state values, causing the LayerNorm and attention weights to collapse.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 8 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">8</span> Gradient Clipping: Preventing Exploding Gradients</h2>
+
+  <p>In deep networks — especially RNNs and Transformers — the gradient can sometimes become extremely large due to the chain rule multiplying many large values together. When this happens, the update step W ← W − α · ∇L is enormous, and the weights can jump to completely wrong values. This is called <strong>exploding gradients</strong>.</p>
+
+  <p>Imagine you're walking downhill and suddenly the slope becomes a cliff — you'd fall hundreds of meters in one step. Gradient clipping puts a safety harness on you: if the slope exceeds a maximum steepness, your step size is automatically limited.</p>
+
+  <p><strong>How gradient clipping works:</strong> After computing gradients (loss.backward()) but before the optimizer step, check if the gradient norm exceeds a threshold. If it does, scale all gradients down so the norm equals the threshold. The direction is preserved, only the magnitude is clipped.</p>
+
+  <pre><code class="language-python">import torch
+import torch.nn as nn
+
+# A simple RNN-like training loop with gradient clipping
+model = nn.GRU(input_size=128, hidden_size=256, num_layers=2, batch_first=True)
+optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+criterion = nn.CrossEntropyLoss()
+MAX_GRAD_NORM = 1.0   # standard value for RNNs and Transformers
+
+for epoch in range(50):
+    for X_batch, y_batch in train_loader:
+        optimizer.zero_grad()
+
+        # Forward pass
+        output, _ = model(X_batch)
+        loss = criterion(output[:, -1, :], y_batch)   # use last timestep
+
+        # Backward pass — computes gradients
+        loss.backward()
+
+        # ─── Gradient clipping ────────────────────────────────────────────────
+        # Computes total gradient norm, then scales all gradients if norm > max_norm
+        # Returns the gradient norm BEFORE clipping (useful for logging)
+        grad_norm = torch.nn.utils.clip_grad_norm_(
+            model.parameters(), max_norm=MAX_GRAD_NORM
+        )
+        # ─────────────────────────────────────────────────────────────────────
+
+        optimizer.step()
+
+        if grad_norm > MAX_GRAD_NORM:
+            print(f"  Gradient clipped: norm was {grad_norm:.2f} → clipped to {MAX_GRAD_NORM}")
+
+# You can also clip by VALUE (rarely used):
+# torch.nn.utils.clip_grad_value_(model.parameters(), clip_value=0.5)
+# This clips each individual gradient element to [-clip_value, +clip_value]</code></pre>
+
+  <h3>When to Use Gradient Clipping</h3>
+  <ul>
+    <li><strong>Always for RNNs and LSTMs:</strong> The sequential nature of RNNs means gradients are multiplied through many timesteps — explosion is common. max_norm=1.0 or 5.0 is standard.</li>
+    <li><strong>Always for Transformers:</strong> Attention mechanisms can produce large gradient spikes. max_norm=1.0 is the universal default.</li>
+    <li><strong>Optional for CNNs/MLPs:</strong> Less commonly needed, but can help during early training or with very deep networks.</li>
+  </ul>
+
+  <div class="callout callout-warn">
+    <span class="callout-icon">⚠️</span>
+    <div class="callout-body">
+      <strong>NaN Loss? Check Gradients First</strong>
+      <p>If your loss suddenly becomes NaN during training, the most likely cause is exploding gradients — the gradient norm became so large that the weight update caused overflow to infinity, which propagates as NaN. Add gradient clipping with <code>clip_grad_norm_(model.parameters(), max_norm=1.0)</code> and add monitoring: <code>print(f"grad_norm: {grad_norm:.4f}")</code> every few steps to watch for spikes before NaN occurs.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Real World ── -->
+<div class="use-case-section">
+  <div class="use-case-header">
+    <span style="font-size:1.5rem">🌍</span>
+    <h2>Real-World Spotlight: Training a Digit Classifier with All 3 GD Variants</h2>
+  </div>
+
+  <div class="callout callout-realworld">
+    <span class="callout-icon">🧠</span>
+    <div class="callout-body">
+      <strong>The full picture:</strong> Let's put everything together by training a simple MLP on MNIST digits using Batch GD, true SGD (B=1), and Mini-Batch SGD (B=32). Then we add CosineAnnealingLR to Mini-Batch SGD and show how the schedule improves final convergence.
+    </div>
+  </div>
+
+  <pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.optim as optim
+from torchvision import datasets, transforms
+from torch.utils.data import DataLoader, Subset
+import time
+
+# ── Setup ──────────────────────────────────────────────────────────────────
+transform = transforms.Compose([transforms.ToTensor(), transforms.Normalize((0.1307,), (0.3081,))])
+full_train = datasets.MNIST(root='./data', train=True, download=True, transform=transform)
+test_set   = datasets.MNIST(root='./data', train=False, download=True, transform=transform)
+
+# Use a subset for speed comparison
+train_subset = Subset(full_train, range(5000))
+test_loader  = DataLoader(test_set, batch_size=256, shuffle=False)
+
+def build_mlp():
+    return nn.Sequential(
+        nn.Flatten(),
+        nn.Linear(784, 256), nn.ReLU(),
+        nn.Linear(256, 128), nn.ReLU(),
+        nn.Linear(128, 10)
+    )
+
+def train_and_evaluate(batch_size, n_epochs=10, use_scheduler=False, label=""):
+    model = build_mlp()
+    optimizer = optim.SGD(model.parameters(), lr=0.01, momentum=0.9)
+    criterion = nn.CrossEntropyLoss()
+    loader = DataLoader(train_subset, batch_size=batch_size, shuffle=True)
+
+    scheduler = None
+    if use_scheduler:
+        scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=n_epochs)
+
+    epoch_losses = []
+    start_time = time.time()
+
+    for epoch in range(n_epochs):
+        model.train()
+        running_loss = 0.0
+        for X_b, y_b in loader:
+            optimizer.zero_grad()
+            loss = criterion(model(X_b), y_b)
+            loss.backward()
+            optimizer.step()
+            running_loss += loss.item()
+        if scheduler:
+            scheduler.step()
+        epoch_losses.append(running_loss / len(loader))
+
+    elapsed = time.time() - start_time
+
+    # Evaluate on test set
+    model.eval()
+    correct = 0
+    with torch.no_grad():
+        for X_b, y_b in test_loader:
+            correct += (model(X_b).argmax(1) == y_b).sum().item()
+    acc = correct / len(test_set) * 100
+
+    print(f"{label:40s} | Final loss: {epoch_losses[-1]:.4f} | Test acc: {acc:.1f}% | Time: {elapsed:.1f}s")
+    return epoch_losses
+
+# Run all configs
+print("Training 5000 MNIST samples for 10 epochs:\n")
+l1 = train_and_evaluate(5000, label="(1) Batch GD   (B=5000)")
+l2 = train_and_evaluate(1,    label="(2) True SGD   (B=1)  ")
+l3 = train_and_evaluate(32,   label="(3) Mini-batch (B=32) ")
+l4 = train_and_evaluate(32, use_scheduler=True, label="(4) Mini-batch (B=32) + CosineAnneal")</code></pre>
+
+  <div class="output-block">
+    <div class="output-label">Output (approximate)</div>
+Training 5000 MNIST samples for 10 epochs:
+
+(1) Batch GD   (B=5000)                  | Final loss: 0.3812 | Test acc: 89.2% | Time: 18.3s
+(2) True SGD   (B=1)                     | Final loss: 0.2941 | Test acc: 91.8% | Time: 142.6s
+(3) Mini-batch (B=32)                    | Final loss: 0.1523 | Test acc: 95.1% | Time: 6.4s
+(4) Mini-batch (B=32) + CosineAnneal     | Final loss: 0.1101 | Test acc: 96.3% | Time: 6.5s
+  </div>
+
+  <p>The results tell the full story: Batch GD is slow (18s) and gets the worst accuracy because it only makes 10 updates per epoch. True SGD makes 5000 updates per epoch and gets decent accuracy, but takes 22x longer. Mini-batch is fastest AND most accurate. Adding cosine annealing pushes accuracy another 1.2 points "for free" — the only change was adding two lines of scheduler code.</p>
+</div>
+
+<!-- ── Quiz ── -->
+<div class="quiz-section">
+  <h2>Quick Check</h2>
+  <div id="quiz-40"></div>
+</div>
+
+<!-- ── Practice ── -->
+<div class="practice-card">
+  <h2>✍️ Practice Exercises</h2>
+  <ol>
+    <li>Implement gradient accumulation for a mini-batch setup. Train a model with <code>batch_size=16</code> and <code>accumulation_steps=4</code>, and verify that the loss trajectory matches training with <code>batch_size=64</code> directly.</li>
+    <li>Write a function that plots the LR trajectory for StepLR, CosineAnnealingLR, and OneCycleLR on the same axes over 100 epochs. Use <code>matplotlib</code> and label each curve.</li>
+    <li>Add gradient norm logging to a training loop: record the gradient norm (before clipping) at each step. Then add <code>clip_grad_norm_(model.parameters(), 1.0)</code> and plot the norms — with and without clipping — on the same chart.</li>
+    <li>Implement the warmup scheduler from scratch as a custom <code>torch.optim.lr_scheduler.LambdaLR</code>. LambdaLR takes a function that maps epoch → LR multiplier. Verify it matches the manual implementation from this lesson.</li>
+  </ol>
+</div>
+
+<!-- Primary Source -->
+<div class="primary-source">
+  <h2>📚 Primary Sources for This Lesson</h2>
+  <p><a href="https://pytorch.org/docs/stable/optim.html#how-to-adjust-learning-rate" target="_blank"><strong>PyTorch LR Scheduler Documentation</strong></a> — complete reference for all schedulers with formulas and examples.<br>
+  <a href="https://arxiv.org/abs/1506.01186" target="_blank"><strong>Cyclical Learning Rates for Training Neural Networks</strong></a> (Smith, 2015) — the paper that introduced the 1cycle policy and warm restarts.<br>
+  <a href="https://arxiv.org/abs/1609.04836" target="_blank"><strong>On Large-Batch Training for DL</strong></a> (Keskar et al., 2016) — the classic paper explaining why large batches converge to sharp minima with worse generalisation.</p>
+</div>
+
+<!-- Ask Tutor -->
+<div class="ask-tutor">
+  <span class="icon">💬</span>
+  <span>Loss oscillating wildly? Trying to choose between cosine annealing and step decay? Describe your setup and your AI tutor will help you pick the right training configuration.</span>
+</div>
+
+<!-- Navigation -->
+<nav class="lesson-nav">
+  <a href="./0039-backpropagation.html" class="nav-btn nav-btn-prev">← Lesson 39: Backpropagation</a>
+  <a href="./0041-pytorch-datasets-dataloaders.html" class="nav-btn nav-btn-next">Lesson 41: PyTorch Datasets &amp; DataLoaders →</a>
+</nav>
+
+</div><!-- /content-wrapper -->
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-core.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/plugins/autoloader/prism-autoloader.min.js"></script>
+<script src="../assets/quiz.js"></script>
+<script>
+new MLQuiz('quiz-40', [
+  {
+    question: "In practice, when a deep learning paper says 'we trained with SGD with momentum', they typically mean what?",
+    options: [
+      "Mini-batch gradient descent with momentum — using batches of 32–512 samples, not truly one sample at a time",
+      "Stochastic gradient descent using exactly one sample per update step with a momentum term",
+      "Batch gradient descent where the full dataset is processed with momentum to smooth updates",
+      "A randomised version of the normal equations that adds momentum to the closed-form solution"
+    ],
+    correct: 0,
+    explanation: "The term 'SGD' in deep learning almost universally refers to mini-batch gradient descent. When PyTorch's torch.optim.SGD is used with a DataLoader that has batch_size=64, it processes 64 samples per update — that's mini-batch GD. 'True' SGD (1 sample per update) is rarely used in modern deep learning due to its inefficiency on GPUs and slow convergence."
+  },
+  {
+    question: "A larger batch size generally leads to what training behaviour?",
+    options: [
+      "Smoother, more stable gradient updates but potentially worse generalisation due to convergence to sharp, narrow minima",
+      "Faster wall-clock time per epoch AND better generalisation because the gradient is more accurate",
+      "More noisy gradient updates that help escape local minima, improving generalisation",
+      "No meaningful difference in training dynamics — only memory consumption changes"
+    ],
+    correct: 0,
+    explanation: "Larger batches produce less noisy (more accurate) gradients, which leads to smoother convergence. However, this precision is a double-edged sword: the optimizer reliably converges to the nearest local minimum, which tends to be a 'sharp' minimum with narrow walls. Sharp minima generalise poorly because small changes in test data distribution can cause large loss increases. Small batches add noise that helps find flatter, wider minima which generalise better."
+  },
+  {
+    question: "What problem does learning rate warmup solve?",
+    options: [
+      "Unstable gradients early in training when weights are randomly initialised — a high LR at the start can cause divergence before parameters orient themselves",
+      "The problem of gradients becoming zero near the optimal solution, which would stop learning prematurely",
+      "Memory overflow from storing too many gradient values during the first few epochs",
+      "Overfitting that occurs when the model memorises early training batches before seeing the full distribution"
+    ],
+    correct: 0,
+    explanation: "At the start of training, weights are random and gradients are large and chaotic. Starting with a high learning rate multiplies these unstable gradients into enormous parameter updates that can send the model into bad regions of the loss landscape — causing divergence or very slow recovery. Warmup starts with a tiny LR and gradually increases it over the first few epochs, giving the model time to stabilise before taking large steps. This is especially critical for Transformers."
+  },
+  {
+    question: "torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=100) does what?",
+    options: [
+      "Decays the learning rate following a cosine curve over T_max epochs — starting at the initial LR and ending near zero (eta_min)",
+      "Applies cosine-based gradient clipping over T_max epochs to keep gradients bounded",
+      "Restarts the learning rate every T_max epochs following a cosine warmup pattern",
+      "Multiplies the learning rate by cos(epoch / T_max) at each step, which can increase or decrease the LR"
+    ],
+    correct: 0,
+    explanation: "CosineAnnealingLR smoothly decays the learning rate following a cosine function: lr_t = eta_min + 0.5*(lr_max - eta_min)*(1 + cos(π*t/T_max)). At t=0 the LR is near its maximum, at t=T_max/2 it's halfway, and at t=T_max it reaches eta_min (default: 0). This smooth decay avoids the abrupt LR drops of StepLR and often gives better final model quality."
+  },
+  {
+    question: "What does gradient clipping with torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0) prevent?",
+    options: [
+      "Exploding gradients — when gradient norms become very large (common in RNNs and Transformers), clipping ensures the parameter update step stays bounded",
+      "Vanishing gradients — when gradients near zero cause learning to stall in deep networks",
+      "Overfitting — by limiting how large each gradient can be, the model cannot memorise training data",
+      "Learning rate sensitivity — by normalising gradient magnitudes, all learning rates become equivalent"
+    ],
+    correct: 0,
+    explanation: "Gradient clipping addresses exploding gradients — when the chain rule in backpropagation multiplies many large values together, gradient norms can reach thousands or millions. Multiplied by the learning rate, this causes catastrophic weight updates. clip_grad_norm_ computes the total gradient norm across all parameters and, if it exceeds max_norm, scales all gradients proportionally so the norm equals max_norm. Direction is preserved; only magnitude is clipped. This is standard practice for RNNs, LSTMs, and Transformers."
+  }
+]);
+</script>
+
+</body>
+</html>

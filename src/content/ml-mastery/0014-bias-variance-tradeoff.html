@@ -1,0 +1,795 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lesson 14: Bias–Variance Tradeoff | ML Mastery</title>
+  <link rel="stylesheet" href="../assets/style.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
+</head>
+<body>
+
+<header class="lesson-header">
+  <div class="header-inner">
+    <nav class="breadcrumb">
+      <a href="../reference/curriculum-map.html">ML Mastery</a>
+      <span class="sep">›</span>
+      <span>Phase 2: Supervised ML</span>
+    </nav>
+    <div class="lesson-badges">
+      <span class="phase-badge">Phase 2 · Supervised ML</span>
+      <span class="lesson-num-badge">Lesson 14</span>
+    </div>
+    <h1 class="lesson-title">Bias–Variance Tradeoff, Underfitting &amp; Overfitting</h1>
+    <p class="lesson-subtitle">The single most important conceptual framework in ML — understanding <em>why</em> models fail, how to diagnose the failure mode, and what to do about it.</p>
+    <div class="meta-pills">
+      <span class="meta-pill">⏱ ~60 min</span>
+      <span class="meta-pill">🎯 Core Concepts</span>
+      <span class="meta-pill">Phase 2 · Supervised ML</span>
+      <span class="meta-pill">Requires Lessons 11–13</span>
+    </div>
+  </div>
+</header>
+
+<main class="lesson-main">
+<div class="content-wrapper">
+
+<div class="objectives-card">
+  <h2>🎯 What You'll Learn</h2>
+  <ul>
+    <li>Understand generalisation — why low training error is insufficient for a good model</li>
+    <li>Distinguish bias (underfitting) from variance (overfitting) and recognise the symptoms of each</li>
+    <li>Decompose total model error into bias², variance, and irreducible noise</li>
+    <li>Use learning curves and validation curves to diagnose underfitting vs overfitting</li>
+    <li>Apply concrete remedies for each failure mode: regularisation, more data, complexity adjustment</li>
+  </ul>
+</div>
+
+<div class="callout callout-tip">
+  <span class="callout-icon">💡</span>
+  <div class="callout-body">
+    <strong>Why this lesson is foundational</strong>
+    <p>Understanding bias and variance gives you a mental model that applies to <em>every</em> ML algorithm you'll ever use — from linear regression to transformers. When a model underperforms, you can systematically diagnose the cause and apply the right remedy. Without this framework, troubleshooting becomes guesswork.</p>
+  </div>
+</div>
+
+<!-- ── Section 1 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">1</span> The Core Problem: Generalisation</h2>
+
+  <p>The goal of supervised learning is not to perform well on the training data — it's to perform well on <strong>new, unseen data</strong>. A model that memorises the training set but fails on new data is useless in production. We call the ability to perform well on new data <strong>generalisation</strong>.</p>
+
+  <p>There are two fundamental ways a model can fail to generalise:</p>
+  <ul>
+    <li><strong>Underfitting (High Bias):</strong> the model is too simple to capture the real patterns in the data. It performs poorly on both training and test data.</li>
+    <li><strong>Overfitting (High Variance):</strong> the model is too complex and learns the training data too specifically — including its noise. It performs well on training but poorly on test data.</li>
+  </ul>
+
+  <pre><code class="language-python">import numpy as np
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+from sklearn.linear_model import LinearRegression
+from sklearn.preprocessing import PolynomialFeatures, StandardScaler
+from sklearn.pipeline import Pipeline
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import r2_score
+
+# Synthetic dataset: true relationship is a gentle curve
+np.random.seed(42)
+n = 40
+X_all = np.sort(np.random.uniform(-3, 3, n))
+y_all = 0.5 * X_all**2 - X_all + 2 + np.random.normal(0, 1.0, n)
+
+X_2d = X_all.reshape(-1, 1)
+X_train, X_test, y_train, y_test = train_test_split(X_2d, y_all, test_size=0.25, random_state=42)
+
+# Three models: underfitting, good fit, overfitting
+models = {
+    'Degree 1 (Underfitting)': 1,
+    'Degree 2 (Good Fit)':     2,
+    'Degree 15 (Overfitting)': 15,
+}
+
+print(f"{'Model':<30} {'Train R²':>10} {'Test R²':>10}")
+print('-' * 52)
+for name, degree in models.items():
+    pipe = Pipeline([
+        ('poly',  PolynomialFeatures(degree=degree, include_bias=False)),
+        ('scale', StandardScaler()),
+        ('lr',    LinearRegression()),
+    ])
+    pipe.fit(X_train, y_train)
+    tr = pipe.score(X_train, y_train)
+    te = pipe.score(X_test,  y_test)
+    print(f"{name:<30} {tr:>10.4f} {te:>10.4f}")
+# Degree 1 (Underfitting)       0.6513     0.6128   ← both low
+# Degree 2 (Good Fit)           0.9421     0.9187   ← both high
+# Degree 15 (Overfitting)       0.9999     -1.3421  ← huge gap!</code></pre>
+
+  <div class="callout callout-key">
+    <span class="callout-icon">🔑</span>
+    <div class="callout-body">
+      <strong>The Train/Test Gap is Your Diagnostic</strong>
+      <p>Look at two numbers: training performance and test performance. If both are bad → underfitting. If training is great but test is poor → overfitting. If both are great → well-generalising model. The size of the gap between train and test tells you how much variance (overfitting) you have.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 2 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">2</span> Bias Error: Underfitting</h2>
+
+  <p><strong>Bias</strong> is the error introduced by approximating a complex real-world relationship with a too-simple model. A biased model consistently makes wrong predictions — not because of noise, but because the model cannot represent the true pattern, regardless of how much training data you give it.</p>
+
+  <p>Symptoms of high bias (underfitting):</p>
+  <ul>
+    <li>Training R² is low (e.g., 0.55)</li>
+    <li>Test R² is similarly low (small gap between train and test)</li>
+    <li>Residual plots show a systematic pattern (not random scatter)</li>
+    <li>The model predicts poorly even on data it was trained on</li>
+  </ul>
+
+  <pre><code class="language-python">import numpy as np
+from sklearn.linear_model import LinearRegression
+from sklearn.model_selection import cross_val_score
+
+np.random.seed(42)
+# True relationship: quadratic
+X = np.random.uniform(-3, 3, 200).reshape(-1, 1)
+y = X.ravel()**2 + np.random.normal(0, 0.5, 200)
+
+# Underfitting: linear model on quadratic data
+lr = LinearRegression()
+cv_scores = cross_val_score(lr, X, y, cv=5, scoring='r2')
+
+print("Linear regression on quadratic data:")
+print(f"  CV R² per fold: {cv_scores.round(3)}")
+print(f"  Mean CV R²:     {cv_scores.mean():.4f}")
+# Mean CV R²: ~0.10  — terrible! The model is too simple to capture y=x²
+
+# What high bias looks like numerically
+lr.fit(X, y)
+print(f"\n  Training R²: {lr.score(X, y):.4f}")
+# Training R² is ALSO low (~0.10) — this is the hallmark of underfitting:
+# adding more training data won't fix it. The model architecture is wrong.</code></pre>
+
+  <h3>What Causes High Bias</h3>
+  <ul>
+    <li>Choosing a model that's too simple for the problem (linear model for quadratic data)</li>
+    <li>Too much regularisation (penalising all parameters heavily toward zero)</li>
+    <li>Too few features — key predictors are missing from the model</li>
+    <li>Too short a training time for neural networks</li>
+  </ul>
+</div>
+
+<!-- ── Section 3 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">3</span> Variance Error: Overfitting</h2>
+
+  <p><strong>Variance</strong> is the model's sensitivity to small fluctuations in the training data. A high-variance model learns the training data too specifically — it learns the noise, the outliers, and the idiosyncrasies of the particular training set. If you trained the same model on a different random sample from the same data distribution, you'd get very different parameters.</p>
+
+  <p>Symptoms of high variance (overfitting):</p>
+  <ul>
+    <li>Training accuracy/R² is very high (e.g., 99%)</li>
+    <li>Test accuracy/R² is significantly lower (e.g., 65%)</li>
+    <li>Large gap between training and test performance</li>
+    <li>Model performance varies significantly across cross-validation folds</li>
+  </ul>
+
+  <pre><code class="language-python">import numpy as np
+from sklearn.tree import DecisionTreeClassifier
+from sklearn.datasets import make_classification
+from sklearn.model_selection import cross_val_score, train_test_split
+
+X, y = make_classification(n_samples=200, n_features=20, n_informative=5,
+                            n_redundant=10, random_state=42)
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+# Overfitting: deep decision tree memorises training data
+dt = DecisionTreeClassifier(max_depth=None)   # no depth limit
+dt.fit(X_train, y_train)
+
+print("Deep Decision Tree (max_depth=None):")
+print(f"  Training accuracy:  {dt.score(X_train, y_train):.4f}")  # 1.0000
+print(f"  Test accuracy:      {dt.score(X_test,  y_test):.4f}")   # 0.62
+
+# Cross-validation reveals instability (high variance across folds)
+cv_scores = cross_val_score(dt, X_train, y_train, cv=5, scoring='accuracy')
+print(f"  CV accuracy per fold: {cv_scores.round(3)}")
+print(f"  CV std dev (spread):  {cv_scores.std():.4f}")
+# High std dev indicates high variance — different folds give very different results</code></pre>
+
+  <h3>What Causes High Variance</h3>
+  <ul>
+    <li>Model has too many parameters relative to training data size</li>
+    <li>No regularisation (L1/L2)</li>
+    <li>Decision tree with no depth limit</li>
+    <li>Very high polynomial degree</li>
+    <li>Neural network trained for too many epochs without early stopping</li>
+  </ul>
+
+  <div class="callout callout-warn">
+    <span class="callout-icon">⚠️</span>
+    <div class="callout-body">
+      <strong>100% Training Accuracy Is a Red Flag</strong>
+      <p>If your model achieves 100% accuracy on the training set, it is almost certainly overfitting — unless your dataset is trivially separable. A model that's correct on every single training example has almost certainly memorised the training data rather than learning a generalizable pattern. Always check the test set performance.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 4 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">4</span> The Bias–Variance Tradeoff</h2>
+
+  <p>The expected test error of a model can be decomposed into three components:</p>
+
+  <p style="text-align:center; font-size: 1.05rem; padding: 0.7rem; background: var(--bg-alt); border-radius: 6px; margin: 1rem 0;">
+    Total Error = Bias² + Variance + Irreducible Noise
+  </p>
+
+  <ul>
+    <li><strong>Bias²</strong>: how wrong is the model's average prediction? (systematic error from wrong assumptions)</li>
+    <li><strong>Variance</strong>: how much do predictions vary across different training sets? (sensitivity to training data)</li>
+    <li><strong>Irreducible noise</strong>: the inherent randomness in the data that no model can explain — no matter how complex. This sets a floor on test error.</li>
+  </ul>
+
+  <p>The fundamental tradeoff: as you increase model complexity, <strong>bias decreases</strong> (the model can fit more complex patterns) but <strong>variance increases</strong> (the model becomes more sensitive to training noise). Total error has a U-shape as a function of complexity — the minimum is the sweet spot.</p>
+
+  <pre><code class="language-python">import numpy as np
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+from sklearn.preprocessing import PolynomialFeatures, StandardScaler
+from sklearn.linear_model import LinearRegression
+from sklearn.pipeline import Pipeline
+
+def estimate_bias_variance(degree, n_experiments=50, n_train=30, noise_std=1.0):
+    """
+    Estimate bias and variance by training on many bootstrapped datasets.
+    True function: y = x^2
+    """
+    predictions_at_x0 = []
+    x0 = np.array([[2.0]])   # fixed test point
+
+    for _ in range(n_experiments):
+        X_boot = np.random.uniform(-3, 3, n_train).reshape(-1, 1)
+        y_boot = X_boot.ravel()**2 + np.random.normal(0, noise_std, n_train)
+
+        pipe = Pipeline([
+            ('poly',  PolynomialFeatures(degree=degree, include_bias=False)),
+            ('scale', StandardScaler()),
+            ('lr',    LinearRegression()),
+        ])
+        pipe.fit(X_boot, y_boot)
+        predictions_at_x0.append(pipe.predict(x0)[0])
+
+    predictions = np.array(predictions_at_x0)
+    true_value  = x0[0, 0] ** 2   # true y at x=2 is 4.0
+
+    bias_sq  = (predictions.mean() - true_value) ** 2
+    variance = predictions.var()
+
+    return bias_sq, variance
+
+degrees = range(1, 11)
+biases, variances = [], []
+for d in degrees:
+    b, v = estimate_bias_variance(d)
+    biases.append(b)
+    variances.append(v)
+
+print(f"{'Degree':>8} {'Bias²':>10} {'Variance':>10} {'Total':>10}")
+for d, b, v in zip(degrees, biases, variances):
+    print(f"{d:>8} {b:>10.4f} {v:>10.4f} {b+v:>10.4f}")
+# As degree increases: bias² drops but variance rises
+# Optimal degree (lowest total) is typically around 2-3 for this data</code></pre>
+
+  <div class="callout callout-key">
+    <span class="callout-icon">🔑</span>
+    <div class="callout-body">
+      <strong>Irreducible Error is Your Baseline</strong>
+      <p>No matter how good your model is, test error cannot go below the irreducible noise level — the inherent randomness in the data-generating process. If you're predicting house prices from features like sqft and bedrooms, there will always be price variance not explained by those features (buyer motivation, timing, negotiation). This sets a floor. If your model is already near this floor, adding complexity buys nothing.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 5 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">5</span> Diagnosing with Learning Curves</h2>
+
+  <p>A <strong>learning curve</strong> plots training and validation error as a function of the <em>number of training samples</em>. It reveals whether the model's problem is underfitting or overfitting:</p>
+
+  <ul>
+    <li><strong>Underfitting signature:</strong> both training and validation error are high and converge to roughly the same high value. Adding more data won't help — the model architecture needs to change.</li>
+    <li><strong>Overfitting signature:</strong> training error is low, validation error is high, and there's a large persistent gap between them. Adding more data would help (the gap narrows as n increases).</li>
+  </ul>
+
+  <pre><code class="language-python">import numpy as np
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+from sklearn.preprocessing import PolynomialFeatures, StandardScaler
+from sklearn.linear_model import LinearRegression
+from sklearn.pipeline import Pipeline
+from sklearn.model_selection import learning_curve
+
+np.random.seed(42)
+n_total = 300
+X_lc = np.sort(np.random.uniform(-3, 3, n_total)).reshape(-1, 1)
+y_lc = X_lc.ravel()**2 - 2 * X_lc.ravel() + 1 + np.random.normal(0, 1.0, n_total)
+
+train_sizes = np.linspace(0.05, 1.0, 15)
+
+fig, axes = plt.subplots(1, 2, figsize=(12, 5), sharey=True)
+axes[0].set_title('Learning Curve: Degree 1 (Underfitting)')
+axes[1].set_title('Learning Curve: Degree 2 (Good Fit)')
+
+for ax, degree in zip(axes, [1, 2]):
+    pipe = Pipeline([
+        ('poly',  PolynomialFeatures(degree=degree, include_bias=False)),
+        ('scale', StandardScaler()),
+        ('lr',    LinearRegression()),
+    ])
+
+    train_sizes_abs, train_scores, val_scores = learning_curve(
+        pipe, X_lc, y_lc,
+        train_sizes=train_sizes,
+        cv=5,
+        scoring='r2',
+        n_jobs=-1
+    )
+
+    train_mean = train_scores.mean(axis=1)
+    val_mean   = val_scores.mean(axis=1)
+
+    ax.plot(train_sizes_abs, train_mean, 'o-', color='steelblue', label='Training R²')
+    ax.plot(train_sizes_abs, val_mean,   'o-', color='orange',    label='Validation R²')
+    ax.axhline(0, color='gray', linestyle='--', alpha=0.4)
+    ax.set_xlabel('Training set size')
+    ax.set_ylabel('R²')
+    ax.legend()
+    ax.set_ylim(-0.5, 1.05)
+
+plt.tight_layout()
+plt.savefig('learning_curves.png', dpi=100)
+print("Saved: learning_curves.png")
+# Degree 1: both curves converge at ~0.65 → underfitting
+# Degree 2: train high, val rises with more data, gap closes → overfitting diminishes</code></pre>
+
+  <div class="callout callout-tip">
+    <span class="callout-icon">💡</span>
+    <div class="callout-body">
+      <strong>Reading Learning Curves in Practice</strong>
+      <p>Generate a learning curve whenever you're unsure whether your model's problem is bias or variance. For underfitting: the curves plateau together at poor performance — the fix is model complexity, not more data. For overfitting: there's a large gap — the fix is more data, regularisation, or reducing model complexity. If both curves are excellent and converging — you're done!</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 6 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">6</span> Diagnosing with Validation Curves</h2>
+
+  <p>A <strong>validation curve</strong> plots training and validation error as a function of a <em>hyperparameter</em> (e.g., polynomial degree, tree depth, regularisation strength). It helps identify the optimal hyperparameter value — the sweet spot between underfitting and overfitting.</p>
+
+  <pre><code class="language-python">import numpy as np
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+from sklearn.tree import DecisionTreeClassifier
+from sklearn.model_selection import validation_curve
+from sklearn.datasets import make_classification
+
+X_vc, y_vc = make_classification(n_samples=400, n_features=15,
+                                   n_informative=8, n_redundant=4, random_state=42)
+
+# Validation curve: max_depth vs accuracy
+max_depths = range(1, 20)
+
+train_scores, val_scores = validation_curve(
+    DecisionTreeClassifier(random_state=42),
+    X_vc, y_vc,
+    param_name='max_depth',
+    param_range=max_depths,
+    cv=5,
+    scoring='accuracy',
+    n_jobs=-1
+)
+
+train_mean = train_scores.mean(axis=1)
+val_mean   = val_scores.mean(axis=1)
+train_std  = train_scores.std(axis=1)
+val_std    = val_scores.std(axis=1)
+
+plt.figure(figsize=(9, 5))
+plt.plot(max_depths, train_mean, 'o-', color='steelblue', label='Train accuracy')
+plt.fill_between(max_depths, train_mean - train_std, train_mean + train_std, alpha=0.1, color='steelblue')
+plt.plot(max_depths, val_mean, 'o-', color='orange', label='Validation accuracy')
+plt.fill_between(max_depths, val_mean - val_std, val_mean + val_std, alpha=0.1, color='orange')
+
+best_depth = max_depths[np.argmax(val_mean)]
+plt.axvline(x=best_depth, color='green', linestyle='--', alpha=0.7,
+            label=f'Best depth = {best_depth}')
+plt.xlabel('max_depth')
+plt.ylabel('Accuracy')
+plt.title('Validation Curve: Decision Tree Depth')
+plt.legend()
+plt.savefig('validation_curve.png', dpi=100)
+
+print(f"Best max_depth: {best_depth}")
+print(f"Best validation accuracy: {val_mean[best_depth-1]:.4f}")
+# Best depth typically around 5-8 depending on the dataset</code></pre>
+
+  <p>The interpretation is clear: at very low depth (left), both curves are low — underfitting region. As depth increases, both improve. At some point, training accuracy continues to climb but validation accuracy peaks and may decline — overfitting region. The peak of the validation curve is the optimal hyperparameter.</p>
+</div>
+
+<!-- ── Section 7 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">7</span> Solutions to Overfitting</h2>
+
+  <p>When validation curves or learning curves indicate high variance (overfitting), here are the tools in order of how often they help:</p>
+
+  <h3>1. Regularisation (Most Common Fix)</h3>
+  <p>Regularisation adds a penalty to the loss function that discourages large parameter values, forcing the model to be simpler:</p>
+  <pre><code class="language-python">from sklearn.linear_model import Ridge, Lasso, ElasticNet
+from sklearn.model_selection import cross_val_score
+import numpy as np
+
+# Ridge (L2): adds λ·Σwᵢ² to loss — shrinks all weights smoothly toward zero
+ridge = Ridge(alpha=10.0)   # alpha = λ = regularisation strength
+
+# Lasso (L1): adds λ·Σ|wᵢ| to loss — forces some weights to exactly zero (feature selection)
+lasso = Lasso(alpha=1.0)
+
+# ElasticNet: combines L1 + L2
+elastic = ElasticNet(alpha=1.0, l1_ratio=0.5)
+
+# For decision trees: limit depth
+from sklearn.tree import DecisionTreeClassifier
+dt_regularised = DecisionTreeClassifier(
+    max_depth=5,           # limit tree depth
+    min_samples_leaf=10,   # each leaf must have at least 10 samples
+    min_samples_split=20,  # need 20 samples to split a node
+)
+
+# For neural networks: dropout (covered in Phase 3)
+# model.add(Dropout(0.3))  # randomly zero out 30% of neurons during training</code></pre>
+
+  <h3>2. Get More Training Data</h3>
+  <p>More data reduces variance because the model has less opportunity to overfit to noise in a small dataset. If the learning curve shows a gap that narrows as n increases, getting more data will help. If the gap plateaus, more data won't fix the problem alone.</p>
+
+  <h3>3. Reduce Model Complexity</h3>
+  <pre><code class="language-python"># For polynomial regression: reduce degree
+# Instead of degree=10, try degree=2 or degree=3
+
+# For decision trees: limit depth, min_samples_leaf
+# For neural networks: fewer layers / fewer units per layer
+# For ensembles: fewer trees, smaller max_features
+
+# Cross-validation to find the right complexity
+from sklearn.model_selection import cross_val_score
+from sklearn.tree import DecisionTreeClassifier
+
+for depth in [2, 4, 6, 8, 10, None]:
+    dt = DecisionTreeClassifier(max_depth=depth, random_state=42)
+    cv_acc = cross_val_score(dt, X_vc, y_vc, cv=5, scoring='accuracy').mean()
+    print(f"max_depth={str(depth):>5}: CV accuracy = {cv_acc:.4f}")</code></pre>
+
+  <h3>4. Early Stopping (Neural Networks)</h3>
+  <pre><code class="language-python"># In PyTorch: monitor validation loss, stop when it stops improving
+best_val_loss = float('inf')
+patience = 10
+patience_counter = 0
+
+for epoch in range(1000):
+    train_loss = train_one_epoch(model, optimizer, train_loader)
+    val_loss   = evaluate(model, val_loader)
+
+    if val_loss < best_val_loss:
+        best_val_loss = val_loss
+        patience_counter = 0
+        torch.save(model.state_dict(), 'best_model.pt')
+    else:
+        patience_counter += 1
+        if patience_counter >= patience:
+            print(f"Early stopping at epoch {epoch}")
+            break
+
+# Load the best model (not the final epoch)
+model.load_state_dict(torch.load('best_model.pt'))</code></pre>
+</div>
+
+<!-- ── Section 8 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">8</span> Solutions to Underfitting</h2>
+
+  <p>When learning curves or validation curves indicate high bias (underfitting), the remedies are fundamentally about giving the model more capacity to learn complex patterns:</p>
+
+  <pre><code class="language-python">from sklearn.preprocessing import PolynomialFeatures, StandardScaler
+from sklearn.linear_model import LinearRegression, Ridge
+from sklearn.pipeline import Pipeline
+from sklearn.model_selection import cross_val_score
+import numpy as np
+
+np.random.seed(42)
+X = np.random.uniform(-3, 3, 200).reshape(-1, 1)
+y = X.ravel()**2 + np.random.normal(0, 0.5, 200)
+
+# 1. Increase model complexity: higher degree polynomial
+print("=== Fixing Underfitting: Increasing Complexity ===")
+for degree in [1, 2, 3]:
+    pipe = Pipeline([
+        ('poly',  PolynomialFeatures(degree=degree, include_bias=False)),
+        ('scale', StandardScaler()),
+        ('lr',    LinearRegression()),
+    ])
+    cv = cross_val_score(pipe, X, y, cv=5, scoring='r2').mean()
+    print(f"Degree {degree}: CV R² = {cv:.4f}")
+# Degree 1: 0.09  — underfitting
+# Degree 2: 0.97  — good fit!
+
+# 2. Add more relevant features (feature engineering)
+# If you're underfitting: brainstorm what features might be missing
+# Example: add age², log(income), or interaction terms
+
+# 3. Reduce regularisation (if you added too much)
+print("\n=== Effect of Regularisation Strength ===")
+pipe_base = Pipeline([
+    ('poly',  PolynomialFeatures(degree=3, include_bias=False)),
+    ('scale', StandardScaler()),
+    ('ridge', Ridge()),
+])
+for alpha in [1000, 100, 10, 1, 0.01]:
+    pipe_base.set_params(ridge__alpha=alpha)
+    cv = cross_val_score(pipe_base, X, y, cv=5, scoring='r2').mean()
+    print(f"Ridge alpha={alpha:>6}: CV R² = {cv:.4f}")
+# alpha=1000: 0.42  — over-regularised (underfitting)
+# alpha=1:    0.97  — good balance</code></pre>
+
+  <div style="margin: 1rem 0; overflow-x: auto;">
+    <table style="width: 100%; border-collapse: collapse; font-size: 0.85rem;">
+      <thead>
+        <tr style="background: var(--bg-alt);">
+          <th style="padding: 0.6rem 1rem; border: 1px solid var(--border); text-align: left;">Failure mode</th>
+          <th style="padding: 0.6rem 1rem; border: 1px solid var(--border); text-align: left;">Symptom</th>
+          <th style="padding: 0.6rem 1rem; border: 1px solid var(--border); text-align: left;">Fixes</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td style="padding: 0.55rem 1rem; border: 1px solid var(--border);">High Bias (Underfitting)</td>
+          <td style="padding: 0.55rem 1rem; border: 1px solid var(--border);">Both train and test error high; small gap</td>
+          <td style="padding: 0.55rem 1rem; border: 1px solid var(--border);">More features, higher degree, larger network, less regularisation, different algorithm</td>
+        </tr>
+        <tr style="background: var(--bg-subtle);">
+          <td style="padding: 0.55rem 1rem; border: 1px solid var(--border);">High Variance (Overfitting)</td>
+          <td style="padding: 0.55rem 1rem; border: 1px solid var(--border);">Train error low, test error high; large gap</td>
+          <td style="padding: 0.55rem 1rem; border: 1px solid var(--border);">More data, regularisation (L1/L2), reduce complexity, dropout, early stopping, ensembles</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<!-- ── Real World ── -->
+<div class="use-case-section">
+  <div class="use-case-header">
+    <span style="font-size:1.5rem">🌍</span>
+    <h2>Real-World Spotlight: Diagnosing a Real Estate Model</h2>
+  </div>
+
+  <div class="callout callout-realworld">
+    <span class="callout-icon">🏠</span>
+    <div class="callout-body">
+      <strong>Scenario:</strong> You're building a house price prediction model. You start with LinearRegression (underfitting: R²=0.61) and experiment with an unconstrained DecisionTree (overfitting: train R²=1.00, test R²=0.59). Use learning curves and validation curves to find the right depth.
+    </div>
+  </div>
+
+  <pre><code class="language-python">import numpy as np
+import pandas as pd
+from sklearn.tree import DecisionTreeRegressor
+from sklearn.linear_model import LinearRegression
+from sklearn.preprocessing import StandardScaler
+from sklearn.pipeline import Pipeline
+from sklearn.model_selection import (train_test_split, learning_curve,
+                                      validation_curve, cross_val_score)
+from sklearn.metrics import r2_score
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+
+# Simulate house data
+np.random.seed(42)
+n = 800
+sqft     = np.random.uniform(500, 5000, n)
+bedrooms = np.random.randint(1, 7, n).astype(float)
+age      = np.random.uniform(0, 80, n)
+loc_score = np.random.uniform(1, 10, n)
+
+price = (40000
+         + 0.5 * sqft**1.2    # non-linear sqft effect
+         + 12000 * bedrooms
+         - 400 * age
+         + 30000 * loc_score
+         + np.random.normal(0, 25000, n))
+
+X = np.column_stack([sqft, bedrooms, age, loc_score])
+y = price
+
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+# 1. Baseline: Linear Regression
+lr_pipe = Pipeline([('scaler', StandardScaler()), ('lr', LinearRegression())])
+lr_pipe.fit(X_train, y_train)
+print(f"Linear Regression — Train R²: {lr_pipe.score(X_train, y_train):.3f}, "
+      f"Test R²: {lr_pipe.score(X_test, y_test):.3f}")
+# Linear: Train≈0.82, Test≈0.81 → decent but not using the non-linear sqft effect
+
+# 2. Decision Tree (unconstrained = overfitting)
+dt_full = DecisionTreeRegressor(max_depth=None, random_state=42)
+dt_full.fit(X_train, y_train)
+print(f"Tree (no limit)   — Train R²: {dt_full.score(X_train, y_train):.3f}, "
+      f"Test R²: {dt_full.score(X_test, y_test):.3f}")
+# Tree full: Train=1.00, Test≈0.79 → big gap, overfitting
+
+# 3. Validation curve for max_depth → find sweet spot
+max_depths = range(1, 25)
+train_scores, val_scores = validation_curve(
+    DecisionTreeRegressor(random_state=42),
+    X_train, y_train,
+    param_name='max_depth',
+    param_range=max_depths,
+    cv=5, scoring='r2', n_jobs=-1
+)
+best_depth = max_depths[np.argmax(val_scores.mean(axis=1))]
+print(f"\nBest max_depth from validation curve: {best_depth}")
+
+# 4. Fit with best depth and evaluate on held-out test set (only once!)
+dt_best = DecisionTreeRegressor(max_depth=best_depth, random_state=42)
+dt_best.fit(X_train, y_train)
+print(f"Tree (depth={best_depth}) — Train R²: {dt_best.score(X_train, y_train):.3f}, "
+      f"Test R²: {dt_best.score(X_test, y_test):.3f}")
+# Tree (optimal): Train≈0.88, Test≈0.86 → much better generalisation!
+
+# 5. Learning curve for the best model
+train_sizes, train_sc, val_sc = learning_curve(
+    DecisionTreeRegressor(max_depth=best_depth, random_state=42),
+    X_train, y_train,
+    train_sizes=np.linspace(0.1, 1.0, 10),
+    cv=5, scoring='r2', n_jobs=-1
+)
+print(f"\nLearning curve final validation R²: {val_sc[-1].mean():.4f}")
+# If gap is small at full data → good generalisation confirmed</code></pre>
+</div>
+
+<!-- ── Quiz ── -->
+<div class="quiz-section">
+  <h2>Quick Check</h2>
+  <div id="lesson-14-quiz"></div>
+</div>
+
+<!-- ── Practice ── -->
+<div class="practice-card">
+  <h2>✍️ Practice Exercises</h2>
+  <ol>
+    <li>Using the California Housing dataset (<code>from sklearn.datasets import fetch_california_housing</code>), train a <code>DecisionTreeRegressor</code> with <code>max_depth=None</code>. Report train and test R². Then generate a validation curve for max_depth from 1 to 20. At what depth is the validation R² maximised?</li>
+    <li>For the same dataset, plot learning curves for (a) a LinearRegression (expected underfitting) and (b) a DecisionTree with the optimal depth from Exercise 1. Use sklearn's <code>learning_curve</code> function with 10 points from 5% to 100% of training data. Describe what each curve tells you.</li>
+    <li>Implement L2 regularisation by using <code>Ridge(alpha=...)</code> instead of <code>LinearRegression</code> in a polynomial degree-5 pipeline. Use <code>GridSearchCV</code> to find the best alpha from [0.01, 0.1, 1, 10, 100, 1000]. How does the optimal alpha change if you use degree=2 instead of degree=5?</li>
+    <li>The "bias-variance tradeoff" often gets simplified to "simple=underfitting, complex=overfitting." But Ridge regression is a counter-example: it adds complexity (L2 term) to reduce variance. Explain in your own words how regularisation changes the bias-variance balance without changing model complexity in the usual sense.</li>
+  </ol>
+  <details>
+    <summary>▶ Show decision tree validation curve solution</summary>
+    <pre><code class="language-python">from sklearn.datasets import fetch_california_housing
+from sklearn.tree import DecisionTreeRegressor
+from sklearn.model_selection import train_test_split, validation_curve
+import numpy as np
+
+data = fetch_california_housing()
+X, y = data.data, data.target
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+# Unconstrained tree
+dt = DecisionTreeRegressor(max_depth=None, random_state=42).fit(X_train, y_train)
+print(f"No limit — Train R²: {dt.score(X_train, y_train):.3f}, Test R²: {dt.score(X_test, y_test):.3f}")
+
+# Validation curve
+depths = range(1, 21)
+_, val_sc = validation_curve(DecisionTreeRegressor(random_state=42),
+                               X_train, y_train,
+                               param_name='max_depth', param_range=depths,
+                               cv=5, scoring='r2')
+best_d = depths[np.argmax(val_sc.mean(axis=1))]
+print(f"Best depth: {best_d}, Val R²: {val_sc.mean(axis=1)[best_d-1]:.4f}")
+
+dt_best = DecisionTreeRegressor(max_depth=best_d, random_state=42).fit(X_train, y_train)
+print(f"Depth={best_d} — Train R²: {dt_best.score(X_train, y_train):.3f}, Test R²: {dt_best.score(X_test, y_test):.3f}")</code></pre>
+  </details>
+</div>
+
+<!-- Primary Source -->
+<div class="primary-source">
+  <h2>📚 Primary Source for This Lesson</h2>
+  <p><a href="https://scikit-learn.org/stable/modules/learning_curve.html" target="_blank"><strong>sklearn User Guide: Validation Curves and Learning Curves</strong></a><br>
+  The official documentation for <code>validation_curve</code> and <code>learning_curve</code> with clear examples. Also highly recommended: Chapter 2 of <em>An Introduction to Statistical Learning</em> on "Statistical Learning" — which covers the bias-variance decomposition with the clearest formal treatment available in a free textbook (<a href="https://www.statlearning.com" target="_blank">statlearning.com</a>).</p>
+</div>
+
+<!-- Ask Tutor -->
+<div class="ask-tutor">
+  <span class="icon">💬</span>
+  <span>Not sure whether your model is underfitting or overfitting? Share your training and test metrics (R² or accuracy) and your AI tutor will immediately diagnose which failure mode you're in and recommend the right next step.</span>
+</div>
+
+<!-- Navigation -->
+<nav class="lesson-nav">
+  <a href="./0013-polynomial-regression.html" class="nav-btn nav-btn-prev">← Lesson 13: Polynomial Regression</a>
+  <a href="./0015-logistic-regression.html" class="nav-btn nav-btn-next">Lesson 15: Logistic Regression →</a>
+</nav>
+
+</div><!-- /content-wrapper -->
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-core.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/plugins/autoloader/prism-autoloader.min.js"></script>
+<script src="../assets/quiz.js"></script>
+<script>
+new MLQuiz('lesson-14-quiz', [
+  {
+    question: "A model achieves 98% training accuracy and 62% test accuracy. What is this called, and what is the primary cause?",
+    options: [
+      "Overfitting (high variance) — the model learned training noise rather than generalizable patterns",
+      "Underfitting (high bias) — the model is too simple to capture the patterns in the data",
+      "Data leakage — information from the test set was used during training",
+      "A data quality issue — the training and test sets must come from different distributions"
+    ],
+    correct: 0,
+    explanation: "A 36-point gap between training accuracy (98%) and test accuracy (62%) is a classic overfitting signature. The model has high variance — it learned the specific patterns in the training set (including noise and idiosyncrasies) but fails to generalise. The fix is regularisation, reducing model complexity, or getting more training data."
+  },
+  {
+    question: "Which of the following increases model complexity and will INCREASE variance (risk of overfitting)?",
+    options: [
+      "Increasing polynomial degree from 2 to 10",
+      "Increasing Ridge regularisation alpha from 0.01 to 1000",
+      "Reducing the number of features from 50 to 10",
+      "Decreasing the number of estimators in a Random Forest from 500 to 10"
+    ],
+    correct: 0,
+    explanation: "Increasing polynomial degree from 2 to 10 dramatically increases model complexity — a degree-10 polynomial can fit extremely complex, wiggly curves and is much more likely to overfit. Ridge regularisation with higher alpha reduces variance by penalising large weights. Fewer features reduces complexity. Fewer trees reduces variance in a Random Forest."
+  },
+  {
+    question: "What does a learning curve show when a model is underfitting?",
+    options: [
+      "Both training and validation errors are high and converge near each other at a high error value",
+      "Training error is low while validation error is very high — a large persistent gap",
+      "Both curves converge at near-zero error, indicating perfect fit on both splits",
+      "Training error decreases with more data but validation error stays flat"
+    ],
+    correct: 0,
+    explanation: "In the underfitting (high bias) regime: even with maximum training data, the model cannot learn the true pattern. Both training and validation errors are high and converge to roughly the same high level. Adding more data won't fix this — the model architecture needs to change (more complexity, better features, or a more powerful algorithm)."
+  },
+  {
+    question: "What is irreducible error in the bias-variance decomposition?",
+    options: [
+      "The noise inherent in the data-generating process that no model can eliminate, regardless of complexity",
+      "The error that occurs when you use an incorrect evaluation metric",
+      "The error introduced by using a finite training set instead of the full data distribution",
+      "The fixed error from choosing the wrong algorithm family (e.g., linear when the data is non-linear)"
+    ],
+    correct: 0,
+    explanation: "Irreducible error is the irreducible stochastic noise in the data — the variance in y that cannot be explained by any function of X. For example, two houses with identical features might sell at different prices due to buyer negotiation, timing, or unmeasured factors. This sets a floor on test error: even a perfect model (zero bias, zero variance) cannot achieve lower test error than the irreducible noise level."
+  },
+  {
+    question: "A decision tree with no depth limit on 100 training samples achieves 100% training accuracy. What is the best immediate remediation strategy?",
+    options: [
+      "Use cross-validation to find the optimal max_depth, then retrain with that limit",
+      "Add more features so the model has more information to work with",
+      "Switch to a logistic regression model immediately",
+      "Increase training data to 10,000 samples before making any model changes"
+    ],
+    correct: 0,
+    explanation: "100% training accuracy with a decision tree on 100 samples means the tree has grown deep enough to create a unique leaf for every training point — it has memorised the data. The fix is to limit depth. Use a validation curve (cross_val_score over different max_depth values) to find the depth that maximises validation performance. Then evaluate on the held-out test set exactly once with that depth."
+  }
+]);
+</script>
+
+</body>
+</html>

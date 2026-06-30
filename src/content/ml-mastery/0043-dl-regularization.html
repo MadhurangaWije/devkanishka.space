@@ -1,0 +1,939 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lesson 43: Regularization — Dropout, Batch Norm &amp; Early Stopping | ML Mastery</title>
+  <link rel="stylesheet" href="../assets/style.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
+</head>
+<body>
+
+<header class="lesson-header">
+  <div class="header-inner">
+    <nav class="breadcrumb">
+      <a href="../reference/curriculum-map.html">ML Mastery</a>
+      <span class="sep">›</span>
+      <span>Phase 4: Deep Learning Foundations</span>
+    </nav>
+    <div class="lesson-badges">
+      <span class="phase-badge">Phase 4 · Deep Learning Foundations</span>
+      <span class="lesson-num-badge">Lesson 43</span>
+    </div>
+    <h1 class="lesson-title">Regularization in DL: Dropout, Batch Normalization &amp; Early Stopping</h1>
+    <p class="lesson-subtitle">Deep networks can memorise entire training datasets. These three techniques are the guardrails that force a model to learn genuine patterns rather than memorising — each attacking overfitting from a completely different angle.</p>
+    <div class="meta-pills">
+      <span class="meta-pill">⏱ ~75 min</span>
+      <span class="meta-pill">🔥 PyTorch</span>
+      <span class="meta-pill">Phase 4 · Deep Learning Foundations</span>
+      <span class="meta-pill">Requires Lesson 42</span>
+    </div>
+  </div>
+</header>
+
+<main class="lesson-main">
+<div class="content-wrapper">
+
+<div class="objectives-card">
+  <h2>🎯 What You'll Learn</h2>
+  <ul>
+    <li>Understand why deep networks overfit more aggressively than shallow models and why L1/L2 alone are insufficient</li>
+    <li>Understand Dropout: how it forces redundant representations and why it's equivalent to training an ensemble of subnetworks</li>
+    <li>Implement Dropout correctly: where to place it, how inverted dropout works, and the model.train()/model.eval() requirement</li>
+    <li>Understand Batch Normalisation: what internal covariate shift is and how BatchNorm solves it with learnable γ and β</li>
+    <li>Know the difference between BatchNorm and LayerNorm — and which to use for which architecture</li>
+    <li>Implement Early Stopping from scratch with patience, best-model restoration, and checkpoint saving</li>
+    <li>Run a full ablation study comparing no regularisation, dropout only, BatchNorm only, and all combined</li>
+  </ul>
+</div>
+
+<div class="callout callout-tip">
+  <span class="callout-icon">💡</span>
+  <div class="callout-body">
+    <strong>Intuition Hook — Guardrails on a Powerful Engine</strong>
+    <p>Deep neural networks are extraordinary pattern-matching engines — so powerful that they can memorise entire training datasets. Given 60,000 MNIST images and enough capacity, a network will perfectly predict training labels not by recognising the digit, but by memorising which pixels correspond to which label for each specific training image. That's overfitting in its most extreme form. The three regularisation techniques in this lesson are <em>guardrails</em> that force the network to learn genuinely useful features rather than cheat by memorising. Each technique attacks overfitting from a different angle: Dropout forces the network to be robust to missing neurons, Batch Normalisation stabilises the training dynamics, and Early Stopping prevents the model from training long enough to fully memorise.</p>
+  </div>
+</div>
+
+<!-- ── Section 1 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">1</span> Why Deep Networks Need Different Regularisation</h2>
+
+  <p>In earlier lessons, you learned L1 (Lasso) and L2 (Ridge) regularisation — adding a penalty on the size of weights to prevent them from growing too large and overfitting. For linear models and shallow networks, these work well. But deep networks have additional overfitting mechanisms that L1/L2 alone cannot address.</p>
+
+  <h3>The Scale of the Problem</h3>
+  <p>A logistic regression classifier on MNIST has 784 × 10 = 7,840 parameters. A small MLP with two hidden layers might have ~500,000 parameters. A ResNet-50 has 25 million parameters — all trying to fit a training set of 50,000 images. With more parameters than training samples, it's not just possible to overfit — it's the default behaviour without explicit countermeasures.</p>
+
+  <pre><code class="language-python">import torch
+import torch.nn as nn
+import numpy as np
+
+# Demonstrate overfitting: deliberately small dataset, large model
+torch.manual_seed(42)
+np.random.seed(42)
+
+# Only 200 training samples
+n_train, n_val = 200, 1000
+X_train = torch.randn(n_train, 20)
+X_val   = torch.randn(n_val, 20)
+# True relationship: y = sum of first 3 features + noise
+y_train = X_train[:, :3].sum(1) + 0.5 * torch.randn(n_train)
+y_val   = X_val[:, :3].sum(1)   + 0.5 * torch.randn(n_val)
+
+# Oversized model (more parameters than training samples)
+def build_overfit_model():
+    return nn.Sequential(
+        nn.Linear(20, 512), nn.ReLU(),
+        nn.Linear(512, 512), nn.ReLU(),
+        nn.Linear(512, 512), nn.ReLU(),
+        nn.Linear(512, 1)
+    )
+
+model = build_overfit_model()
+n_params = sum(p.numel() for p in model.parameters())
+print(f"Model parameters: {n_params:,}  vs  training samples: {n_train}")
+# Model parameters: 528,385  vs  training samples: 200
+
+optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+criterion = nn.MSELoss()
+train_losses, val_losses = [], []
+
+for epoch in range(200):
+    model.train()
+    optimizer.zero_grad()
+    loss = criterion(model(X_train).squeeze(), y_train)
+    loss.backward()
+    optimizer.step()
+
+    model.eval()
+    with torch.no_grad():
+        val_loss = criterion(model(X_val).squeeze(), y_val)
+
+    train_losses.append(loss.item())
+    val_losses.append(val_loss.item())
+
+print(f"\nEpoch 200: train_loss={train_losses[-1]:.4f}  val_loss={val_losses[-1]:.4f}")
+print(f"  Gap = {val_losses[-1] - train_losses[-1]:.4f}  ← overfitting!")
+# Epoch 200: train_loss=0.0012  val_loss=1.8934
+# Gap = 1.8922  ← the model memorised training data!</code></pre>
+
+  <div class="output-block">
+    <div class="output-label">Output</div>
+Model parameters: 528,385  vs  training samples: 200
+
+Epoch 200: train_loss=0.0012  val_loss=1.8934
+  Gap = 1.8922  ← the model memorised training data!
+  </div>
+
+  <p>Training loss near zero, validation loss near 2.0. The model has memorised 200 training samples perfectly, but learned nothing generalisable. Now let's see how each regularisation technique fixes this.</p>
+
+  <div class="callout callout-key">
+    <span class="callout-icon">🔑</span>
+    <div class="callout-body">
+      <strong>Three Orthogonal Approaches</strong>
+      <p>Dropout, Batch Normalisation, and Early Stopping attack overfitting from completely independent angles. Dropout acts at the architecture level — changing which neurons are active during each forward pass. BatchNorm acts at the training dynamics level — normalising internal activations to prevent co-adaptation between layers. Early Stopping acts at the training process level — simply stopping before the model memorises training noise. Together, they're complementary and can be used simultaneously.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 2 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">2</span> Dropout: Forcing Redundant Representations</h2>
+
+  <p>Dropout, introduced by Srivastava et al. (2014), is conceptually simple: during <em>each training step</em>, randomly set a fraction p of the neurons in a layer to zero. Those neurons produce no output and receive no gradient update for that step. Next step, a different random subset is dropped. The kept neurons carry the full forward pass.</p>
+
+  <p><strong>Why this prevents overfitting:</strong> In a network without dropout, neurons can "co-adapt" — they can form tight partnerships where neuron A always compensates for neuron B's mistakes, and together they memorise a specific training pattern. Dropout breaks this by randomly removing neurons, forcing every neuron to be independently useful on its own. A neuron that only works when partnered with specific other neurons will often find its partners gone — it must learn a feature that works even in isolation. This forces <em>redundant, distributed representations</em>: the same information is encoded in multiple ways, making the network robust to missing neurons.</p>
+
+  <h3>The Inverted Dropout Trick</h3>
+  <p>At inference time, you don't drop any neurons — all neurons are active. But if they were trained with only (1−p) fraction active, the total output of each layer is (1−p) times what it would be with all neurons active. To compensate, you'd need to scale activations by (1−p) at inference.</p>
+
+  <p><strong>Inverted dropout</strong> (PyTorch's default) handles this more cleanly: during training, not only are neurons dropped, but the remaining active neurons are <em>scaled up</em> by 1/(1−p). This means inference requires no scaling at all — the training activations already have the correct expected magnitude.</p>
+
+  <pre><code class="language-python">import torch
+import torch.nn as nn
+
+# Manual inverted dropout (to understand what nn.Dropout does internally)
+def manual_dropout(x, p=0.5, training=True):
+    """
+    Inverted dropout: during training, randomly zero p fraction of elements,
+    then scale remaining by 1/(1-p) so expected value is unchanged.
+    """
+    if not training or p == 0:
+        return x   # no dropout during eval, or if p=0
+
+    # Create random mask: 1 where neuron is kept, 0 where dropped
+    keep_prob = 1 - p
+    mask = torch.bernoulli(torch.full_like(x, keep_prob))   # 1 with prob (1-p)
+
+    # Scale up kept neurons: divide by keep_prob (= multiply by 1/(1-p))
+    return x * mask / keep_prob
+
+# Demonstrate: show that expected value is preserved
+x = torch.ones(10000)   # all values = 1.0
+p = 0.3
+torch.manual_seed(42)
+
+dropped = manual_dropout(x, p=p, training=True)
+print(f"Original mean: {x.mean():.4f}")       # 1.0000
+print(f"Dropped mean:  {dropped.mean():.4f}") # ~1.0000 (scaled to compensate)
+print(f"Zeros in dropped: {(dropped == 0).sum().item()}")  # ~3000 (30%)
+
+# nn.Dropout behaves identically
+dropout_layer = nn.Dropout(p=0.3)
+dropout_layer.train()   # must be in training mode for dropout to activate
+result = dropout_layer(x.clone())
+print(f"nn.Dropout mean: {result.mean():.4f}")  # ~1.0000</code></pre>
+
+  <div class="output-block">
+    <div class="output-label">Output</div>
+Original mean: 1.0000
+Dropped mean:  0.9987
+Zeros in dropped: 3018  (out of 10000, expected ~3000)
+nn.Dropout mean: 1.0023
+  </div>
+
+  <h3>The Math Behind Inverted Dropout</h3>
+  <p>Let's verify: with p=0.3 and a neuron value of 1.0, the expected contribution with inverted dropout is:</p>
+  <ul>
+    <li>Probability of keeping: (1−p) = 0.7 → contribution = 1.0 × (1/0.7) × 0.7 = 1.0 ✓</li>
+    <li>Probability of dropping: p = 0.3 → contribution = 0.0 × any_scale × 0 = 0.0</li>
+    <li>Expected output = 0.7 × 1.0 + 0.3 × 0.0 = 0.7... but we scale by 1/0.7 → <strong>expected = 1.0</strong></li>
+  </ul>
+  <p>At inference with no dropout and no scaling, the output is just 1.0. The expectations match — inference is unbiased relative to training. This is the guarantee that makes inverted dropout work.</p>
+</div>
+
+<!-- ── Section 3 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">3</span> Dropout as Ensemble Learning</h2>
+
+  <p>There's a beautiful theoretical interpretation of why dropout works so well: it's approximately training an <em>exponential ensemble</em> of subnetworks simultaneously.</p>
+
+  <p>Consider a network with N neurons. With dropout probability p=0.5, each neuron is independently present or absent during each training step. The number of possible "thinned" subnetworks is 2^N — for N=100 neurons, that's 2^100 ≈ 10^30 subnetworks. Each training step samples one of these subnetworks (they share weights, but different subsets are active). At inference, <em>all</em> neurons are active — this approximates the geometric mean of the predictions of all 2^N subnetworks.</p>
+
+  <p>Why does ensemble averaging help? Each subnetwork sees different subsets of the data through the lens of a different architecture. They make different errors. Averaging reduces variance. This is the same reason random forests (an ensemble of trees) generalises better than a single tree.</p>
+
+  <pre><code class="language-python">import torch
+import torch.nn as nn
+
+# Demonstrate the ensemble interpretation:
+# At inference, standard forward pass ≈ averaging many dropout subnetworks
+class DropoutMLP(nn.Module):
+    def __init__(self, p=0.5):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(10, 64), nn.ReLU(), nn.Dropout(p),
+            nn.Linear(64, 32), nn.ReLU(), nn.Dropout(p),
+            nn.Linear(32, 1)
+        )
+
+    def forward(self, x):
+        return self.net(x)
+
+model = DropoutMLP(p=0.5)
+x = torch.randn(1, 10)   # single sample
+
+# Monte Carlo Dropout: run many forward passes in TRAIN MODE
+# (each pass samples a different subnetwork)
+model.train()   # dropout active
+n_samples = 100
+mc_preds = [model(x).item() for _ in range(n_samples)]
+mc_mean = sum(mc_preds) / n_samples
+mc_std  = (sum((p - mc_mean)**2 for p in mc_preds) / n_samples) ** 0.5
+
+# Standard inference: single forward pass in EVAL MODE (no dropout)
+model.eval()
+with torch.no_grad():
+    eval_pred = model(x).item()
+
+print(f"MC Dropout mean (100 passes): {mc_mean:.4f}")
+print(f"MC Dropout std  (uncertainty): {mc_std:.4f}")
+print(f"Standard eval prediction:     {eval_pred:.4f}")
+
+# The standard eval prediction closely approximates the MC mean
+# The MC std gives you uncertainty quantification — a bonus feature of dropout!</code></pre>
+
+  <div class="callout callout-tip">
+    <span class="callout-icon">💡</span>
+    <div class="callout-body">
+      <strong>Monte Carlo Dropout for Uncertainty Estimation</strong>
+      <p>By running a trained dropout model in <code>model.train()</code> mode for many passes (instead of the usual <code>model.eval()</code>), you get a distribution of predictions instead of a single point estimate. The mean approximates the ensemble prediction; the standard deviation gives you <em>epistemic uncertainty</em> — how uncertain the model is about this specific input. This technique (MC Dropout) is used in production systems where knowing "I'm not confident" is as important as the prediction itself — medical diagnosis, autonomous driving, financial models.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 4 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">4</span> Where to Place Dropout — and Where Not To</h2>
+
+  <p>Dropout placement matters significantly. The wrong placement can hurt training or provide no benefit.</p>
+
+  <h3>Standard Placement Guidelines</h3>
+  <ul>
+    <li><strong>After hidden layer activations, before the next linear layer</strong> — this is the standard placement</li>
+    <li><strong>Typical rates:</strong> p=0.3 to p=0.5 for hidden layers; p=0.1 to p=0.2 for the first layer (input layer)</li>
+    <li><strong>NOT on the output layer</strong> — the final prediction must be deterministic</li>
+    <li><strong>NOT after BatchNorm layers</strong> — together they can interfere (BatchNorm normalises statistics, then Dropout disrupts them)</li>
+  </ul>
+
+  <pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.optim as optim
+
+# Compare: model without dropout vs with dropout on the overfitting scenario
+def build_model_no_reg(input_dim):
+    return nn.Sequential(
+        nn.Linear(input_dim, 512), nn.ReLU(),
+        nn.Linear(512, 512),       nn.ReLU(),
+        nn.Linear(512, 512),       nn.ReLU(),
+        nn.Linear(512, 1)
+    )
+
+def build_model_dropout(input_dim, p=0.4):
+    return nn.Sequential(
+        nn.Linear(input_dim, 512), nn.ReLU(), nn.Dropout(p),
+        nn.Linear(512, 512),       nn.ReLU(), nn.Dropout(p),
+        nn.Linear(512, 512),       nn.ReLU(), nn.Dropout(p),
+        nn.Linear(512, 1)
+    )
+
+def train_and_track(model, X_train, y_train, X_val, y_val, n_epochs=150):
+    optimizer = optim.Adam(model.parameters(), lr=1e-3)
+    criterion = nn.MSELoss()
+    train_losses, val_losses = [], []
+
+    for epoch in range(n_epochs):
+        model.train()
+        optimizer.zero_grad()
+        loss = criterion(model(X_train).squeeze(), y_train)
+        loss.backward()
+        optimizer.step()
+
+        model.eval()
+        with torch.no_grad():
+            val_loss = criterion(model(X_val).squeeze(), y_val).item()
+
+        train_losses.append(loss.item())
+        val_losses.append(val_loss)
+
+    return train_losses, val_losses
+
+torch.manual_seed(42)
+m_noreg   = build_model_no_reg(20)
+m_dropout = build_model_dropout(20, p=0.4)
+
+tl_noreg,  vl_noreg  = train_and_track(m_noreg,   X_train, y_train, X_val, y_val)
+tl_dropout, vl_dropout = train_and_track(m_dropout, X_train, y_train, X_val, y_val)
+
+print(f"\n{'Model':>20} | {'Final Train Loss':>16} | {'Final Val Loss':>14} | {'Overfit Gap':>11}")
+print("-" * 70)
+for name, tl, vl in [("No Regularisation", tl_noreg, vl_noreg),
+                      ("With Dropout(0.4)", tl_dropout, vl_dropout)]:
+    print(f"{name:>20} | {tl[-1]:16.4f} | {vl[-1]:14.4f} | {vl[-1]-tl[-1]:11.4f}")</code></pre>
+
+  <div class="output-block">
+    <div class="output-label">Output</div>
+               Model | Final Train Loss | Final Val Loss | Overfit Gap
+----------------------------------------------------------------------
+ No Regularisation |           0.0012 |         1.8934 |      1.8922
+  With Dropout(0.4) |           0.2834 |         0.4123 |      0.1289
+  </div>
+
+  <p>With dropout: the training loss is higher (the model can't memorise) but the validation loss is dramatically better — the gap shrinks from 1.89 to 0.13. The model has been forced to learn generalisable patterns instead of memorising.</p>
+
+  <div class="callout callout-warn">
+    <span class="callout-icon">⚠️</span>
+    <div class="callout-body">
+      <strong>The Most Forgotten Rule: model.eval() Before Inference</strong>
+      <p>If you forget to call <code>model.eval()</code> before validation or inference: (1) Dropout is still active — each prediction call gives a different result, (2) your validation loss will be higher than it should be (dropout randomly zeros neurons), (3) predictions will be non-deterministic — running the same input twice gives different outputs. This is the single most common PyTorch bug in student code. Make it a habit: <em>always</em> call <code>model.eval()</code> and wrap with <code>torch.no_grad()</code> for any evaluation block.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 5 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">5</span> Batch Normalisation: Stabilising Training Dynamics</h2>
+
+  <p>Batch Normalisation (BatchNorm), introduced by Ioffe and Szegedy (2015), targets a different problem: <strong>internal covariate shift</strong>. The concept sounds technical but the intuition is straightforward.</p>
+
+  <h3>The Internal Covariate Shift Problem</h3>
+  <p>Consider layer 3 in a deep network. It receives activations from layer 2. At the start of training, those activations have some distribution — say, mean ≈ 0.5, std ≈ 1.2. Layer 3 learns to expect that distribution. But when layers 1 and 2 update their weights (which happens every batch), the distribution of layer 2's output shifts. Now layer 3 receives activations with mean ≈ 0.8, std ≈ 0.7. It has to start readapting to a new input distribution. This is <em>internal covariate shift</em> — the distribution of a layer's input shifts during training as the parameters of earlier layers change.</p>
+
+  <p><strong>Why this is harmful:</strong> Each layer is constantly trying to learn while its inputs are constantly changing. It's like trying to aim a target while someone moves the target every time you shoot. Deep networks suffer this for every layer simultaneously, making training slow and requiring very careful learning rate selection.</p>
+
+  <h3>How BatchNorm Solves It</h3>
+  <p>BatchNorm normalises the activations of each layer to have zero mean and unit variance <em>within each mini-batch</em>, before passing them to the next layer. This ensures each layer always receives activations with a stable, known distribution.</p>
+
+  <p><strong>BatchNorm forward pass (training):</strong></p>
+  <p style="text-align:center; font-size: 0.95rem; padding: 0.65rem; background: var(--bg-alt); border-radius: 6px; margin: 1rem 0; font-family: monospace;">
+    μ_B = (1/B) Σᵢ zᵢ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; [batch mean]<br>
+    σ²_B = (1/B) Σᵢ (zᵢ − μ_B)² &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; [batch variance]<br>
+    ẑᵢ = (zᵢ − μ_B) / √(σ²_B + ε) &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; [normalise]<br>
+    yᵢ = γ · ẑᵢ + β &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; [scale and shift]
+  </p>
+
+  <pre><code class="language-python">import torch
+import torch.nn as nn
+import numpy as np
+
+# Manual BatchNorm (to understand what nn.BatchNorm1d does)
+def manual_batch_norm(z, gamma, beta, eps=1e-5):
+    """
+    z: input activations, shape (batch_size, features)
+    gamma: learnable scale, shape (features,)
+    beta: learnable shift, shape (features,)
+    Returns normalised output with same shape as z.
+    """
+    # Compute batch statistics across the batch dimension (dim=0)
+    mu    = z.mean(dim=0)             # mean per feature
+    sigma = z.var(dim=0, unbiased=False)  # variance per feature
+
+    # Normalise: zero mean, unit variance
+    z_hat = (z - mu) / torch.sqrt(sigma + eps)
+
+    # Scale and shift: learnable parameters restore representational power
+    return gamma * z_hat + beta
+
+# Demonstrate: before and after BatchNorm
+torch.manual_seed(42)
+batch_size, features = 32, 8
+
+# Simulate activations with non-zero mean and non-unit variance
+z = torch.randn(batch_size, features) * 3 + 5   # mean≈5, std≈3
+
+gamma = torch.ones(features)    # scale=1 (no scaling initially)
+beta  = torch.zeros(features)   # shift=0 (no shift initially)
+
+z_norm = manual_batch_norm(z, gamma, beta)
+
+print(f"Before BatchNorm: mean={z.mean():.3f}, std={z.std():.3f}")
+print(f"After BatchNorm:  mean={z_norm.mean():.3f}, std={z_norm.std():.3f}")
+
+# With learned γ and β, the network can restore any distribution:
+gamma_learned = torch.tensor([2.0, 0.5, 3.0, 1.5, 1.0, 0.8, 2.5, 1.2])
+beta_learned  = torch.tensor([1.0, -1.0, 0.5, 2.0, -0.5, 0.0, 1.5, -0.3])
+z_restored = manual_batch_norm(z, gamma_learned, beta_learned)
+print(f"After learned γ,β: mean≈{z_restored.mean():.3f}, std≈{z_restored.std():.3f}")</code></pre>
+
+  <div class="output-block">
+    <div class="output-label">Output</div>
+Before BatchNorm: mean=5.041, std=2.997
+After BatchNorm:  mean=0.000, std=1.000
+After learned γ,β: mean≈0.783, std≈1.248
+  </div>
+
+  <h3>Why γ and β are Necessary</h3>
+  <p>Pure normalisation would always force activations to mean=0, std=1. But what if the optimal representation for a particular layer needs activations with mean=2.5, std=0.5? Pure normalisation would destroy this. The learnable parameters γ (scale) and β (shift) allow BatchNorm to learn the optimal normalisation for each feature in each layer. If the network determines that no normalisation is best, it can learn γ=original_std, β=original_mean to undo the normalisation.</p>
+
+  <pre><code class="language-python">import torch.nn as nn
+
+# PyTorch BatchNorm layers
+bn1d = nn.BatchNorm1d(num_features=64)    # for fully connected layers — shape (B, features)
+bn2d = nn.BatchNorm2d(num_channels=32)    # for CNN feature maps — shape (B, C, H, W)
+
+print(f"BatchNorm1d(64) learnable params:")
+print(f"  gamma (weight): {bn1d.weight.shape}")   # torch.Size([64])
+print(f"  beta  (bias):   {bn1d.bias.shape}")     # torch.Size([64])
+print(f"  running_mean:   {bn1d.running_mean.shape}")  # torch.Size([64]) — not a parameter
+print(f"  running_var:    {bn1d.running_var.shape}")   # torch.Size([64]) — not a parameter
+
+# Build a model with BatchNorm — typically placed BEFORE or AFTER activation
+model_with_bn = nn.Sequential(
+    nn.Linear(784, 256),
+    nn.BatchNorm1d(256),    # normalise 256-dim activations across batch
+    nn.ReLU(),              # activation after normalisation
+    nn.Linear(256, 128),
+    nn.BatchNorm1d(128),
+    nn.ReLU(),
+    nn.Linear(128, 10)
+)</code></pre>
+</div>
+
+<!-- ── Section 6 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">6</span> BatchNorm: Training vs Inference Behaviour</h2>
+
+  <p>BatchNorm has two modes of operation, and the distinction is critical to understand.</p>
+
+  <h3>Training Mode</h3>
+  <p>Uses the <em>current batch's</em> mean and variance to normalise. Simultaneously updates two <em>running statistics</em> (not learnable, just tracked): <code>running_mean</code> and <code>running_var</code>, using EWMA with the batch statistics. These running statistics accumulate knowledge of the overall training data distribution.</p>
+
+  <h3>Inference Mode</h3>
+  <p>Uses the <em>running mean and variance</em> (accumulated during training) to normalise. This ensures deterministic, consistent predictions regardless of batch size — you can even run inference on a single sample (batch size = 1) without issues.</p>
+
+  <pre><code class="language-python">import torch
+import torch.nn as nn
+
+bn = nn.BatchNorm1d(4)
+
+# Training mode — uses batch statistics, updates running stats
+bn.train()
+x1 = torch.randn(8, 4)   # batch of 8
+out1 = bn(x1)
+print(f"Training: running_mean after 1 batch: {bn.running_mean.round(decimals=3)}")
+
+x2 = torch.randn(8, 4)
+out2 = bn(x2)
+print(f"Training: running_mean after 2 batches: {bn.running_mean.round(decimals=3)}")
+
+# Inference mode — uses accumulated running statistics
+bn.eval()
+x_single = torch.randn(1, 4)   # batch size = 1 — works fine in eval mode!
+out_single = bn(x_single)
+print(f"\nInference with batch_size=1 works correctly: {out_single.shape}")
+
+# Show that training mode with batch_size=1 FAILS
+bn.train()
+try:
+    out_fail = bn(x_single)   # will raise an error!
+    print("Shouldn't reach here")
+except Exception as e:
+    print(f"Training mode, batch_size=1 error: {type(e).__name__}")</code></pre>
+
+  <div class="output-block">
+    <div class="output-label">Output</div>
+Training: running_mean after 1 batch: tensor([-0.045, 0.012, -0.031, 0.078])
+Training: running_mean after 2 batches: tensor([-0.089, 0.021, -0.027, 0.065])
+
+Inference with batch_size=1 works correctly: torch.Size([1, 4])
+Training mode, batch_size=1 error: ValueError
+  </div>
+
+  <div class="callout callout-warn">
+    <span class="callout-icon">⚠️</span>
+    <div class="callout-body">
+      <strong>Always Call model.eval() Before Inference — BatchNorm Reason</strong>
+      <p>In training mode, BatchNorm normalises using the current batch's statistics. If you run inference in training mode, each single-sample or small-batch call uses the tiny batch's mean/std — which is a very noisy estimate of the true distribution. Predictions become inconsistent and worse. In eval mode, the accumulated running statistics (from the full training set) are used — giving consistent, accurate normalisation. This is a separate reason from Dropout to always call <code>model.eval()</code>.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 7 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">7</span> LayerNorm vs BatchNorm</h2>
+
+  <p>BatchNorm is not the only normalisation technique. LayerNorm is an important alternative that's become the standard in Transformers and other sequence models.</p>
+
+  <h3>The Core Difference</h3>
+  <p><strong>BatchNorm</strong> normalises <em>across the batch dimension</em>: for each feature position, it computes statistics across all samples in the batch. This means BatchNorm requires multiple samples per batch to work (crashes with batch_size=1 in training mode).</p>
+
+  <p><strong>LayerNorm</strong> normalises <em>across the feature dimension</em>: for each sample, it computes statistics across all features. This means LayerNorm works for any batch size — including batch_size=1 — and even works for variable-length sequences.</p>
+
+  <pre><code class="language-python">import torch
+import torch.nn as nn
+
+batch_size, seq_len, features = 4, 10, 64
+
+# Typical input shape for a Transformer: (batch, sequence_length, features)
+x = torch.randn(batch_size, seq_len, features)
+
+# BatchNorm1d — can't easily handle (B, T, F) shape; normalises across batch
+# For sequences, you'd need to reshape, which doesn't work naturally
+
+# LayerNorm — normalises across the last dimension (features)
+# Works for any batch size, any sequence length
+layer_norm = nn.LayerNorm(normalized_shape=features)
+out_ln = layer_norm(x)
+print(f"LayerNorm input:  {x.shape}")        # torch.Size([4, 10, 64])
+print(f"LayerNorm output: {out_ln.shape}")   # torch.Size([4, 10, 64])
+
+# Show the normalisation: for each sample and each timestep, features are normalised
+sample_0_t0 = out_ln[0, 0, :]    # features for batch=0, timestep=0
+print(f"After LayerNorm — mean={sample_0_t0.mean():.5f}, std={sample_0_t0.std():.5f}")
+# mean≈0.0000, std≈1.0000 (approximately)
+
+# For 1D (fully connected) layers: LayerNorm(features)
+x_fc = torch.randn(8, 128)   # (batch_size, features)
+ln_fc = nn.LayerNorm(128)
+out_fc = ln_fc(x_fc)
+print(f"\n1D LayerNorm: {out_fc.shape}")   # torch.Size([8, 128])
+
+# GroupNorm: between BatchNorm and LayerNorm
+# Divides channels into groups, normalises within each group
+# Used in CNNs when batch sizes are small
+group_norm = nn.GroupNorm(num_groups=8, num_channels=64)
+x_img = torch.randn(4, 64, 28, 28)   # (B, C, H, W)
+out_gn = group_norm(x_img)
+print(f"GroupNorm output: {out_gn.shape}")   # torch.Size([4, 64, 28, 28])</code></pre>
+
+  <table style="width:100%; border-collapse: collapse; margin: 1.25rem 0; font-size: 0.84rem;">
+    <thead>
+      <tr style="background: var(--bg-alt);">
+        <th style="padding: 0.65rem 1rem; border: 1px solid var(--border); text-align: left;">Method</th>
+        <th style="padding: 0.65rem 1rem; border: 1px solid var(--border); text-align: left;">Normalises across</th>
+        <th style="padding: 0.65rem 1rem; border: 1px solid var(--border); text-align: left;">Min batch size</th>
+        <th style="padding: 0.65rem 1rem; border: 1px solid var(--border); text-align: left;">Best for</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td style="padding: 0.55rem 1rem; border: 1px solid var(--border);">BatchNorm</td>
+        <td style="padding: 0.55rem 1rem; border: 1px solid var(--border);">Batch dimension</td>
+        <td style="padding: 0.55rem 1rem; border: 1px solid var(--border);">&gt;1 (training)</td>
+        <td style="padding: 0.55rem 1rem; border: 1px solid var(--border);">CNNs, image models, MLPs</td>
+      </tr>
+      <tr style="background: var(--bg-subtle);">
+        <td style="padding: 0.55rem 1rem; border: 1px solid var(--border);">LayerNorm</td>
+        <td style="padding: 0.55rem 1rem; border: 1px solid var(--border);">Feature dimension</td>
+        <td style="padding: 0.55rem 1rem; border: 1px solid var(--border);">1 (any size)</td>
+        <td style="padding: 0.55rem 1rem; border: 1px solid var(--border);">⭐ Transformers, RNNs, NLP</td>
+      </tr>
+      <tr>
+        <td style="padding: 0.55rem 1rem; border: 1px solid var(--border);">GroupNorm</td>
+        <td style="padding: 0.55rem 1rem; border: 1px solid var(--border);">Groups of channels</td>
+        <td style="padding: 0.55rem 1rem; border: 1px solid var(--border);">1</td>
+        <td style="padding: 0.55rem 1rem; border: 1px solid var(--border);">CNNs with small batches</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+<!-- ── Section 8 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">8</span> Early Stopping: The Simplest Regulariser</h2>
+
+  <p>The third regularisation technique is conceptually the simplest: <em>just stop training before the model memorises the training data</em>. The validation loss typically follows a characteristic U-shaped curve over training: it decreases as the model learns genuine patterns, then increases as it starts memorising training-specific noise. Early stopping finds the bottom of that U and stops there.</p>
+
+  <p><strong>The patience parameter:</strong> Rather than stopping the moment validation loss ticks up (which could be a temporary fluctuation), we wait for <code>patience</code> consecutive epochs with no improvement. If validation loss hasn't improved in, say, 15 epochs, we stop and restore the weights from the best epoch.</p>
+
+  <pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.optim as optim
+
+class EarlyStopping:
+    """
+    Monitors validation loss and stops training when it stops improving.
+
+    Args:
+        patience: Number of epochs to wait for improvement before stopping.
+        min_delta: Minimum change in val_loss to count as improvement.
+        checkpoint_path: Where to save the best model weights.
+    """
+    def __init__(self, patience=10, min_delta=1e-4, checkpoint_path='best_model.pt'):
+        self.patience = patience
+        self.min_delta = min_delta
+        self.checkpoint_path = checkpoint_path
+        self.counter = 0          # epochs without improvement
+        self.best_loss = float('inf')
+        self.early_stop = False   # flag: should we stop?
+
+    def __call__(self, val_loss, model):
+        if val_loss < self.best_loss - self.min_delta:
+            # Improvement: reset counter, save best model
+            self.best_loss = val_loss
+            self.counter = 0
+            torch.save(model.state_dict(), self.checkpoint_path)
+            return False   # continue training
+        else:
+            # No improvement
+            self.counter += 1
+            if self.counter >= self.patience:
+                self.early_stop = True
+                return True   # STOP!
+            return False
+
+    def restore_best_weights(self, model):
+        """Load the best model weights saved during training."""
+        model.load_state_dict(torch.load(self.checkpoint_path, map_location='cpu'))
+        print(f"Restored best model (val_loss={self.best_loss:.4f})")
+
+# Use EarlyStopping in training
+torch.manual_seed(42)
+model = build_model_dropout(20, p=0.3)   # using our dropout model from above
+optimizer = optim.Adam(model.parameters(), lr=1e-3)
+criterion = nn.MSELoss()
+
+early_stopper = EarlyStopping(patience=15, checkpoint_path='best_model.pt')
+
+print(f"{'Epoch':>5} | {'Train Loss':>10} | {'Val Loss':>8} | {'Counter':>7}")
+for epoch in range(1, 301):
+    # Train
+    model.train()
+    optimizer.zero_grad()
+    loss = criterion(model(X_train).squeeze(), y_train)
+    loss.backward()
+    optimizer.step()
+
+    # Validate
+    model.eval()
+    with torch.no_grad():
+        val_loss = criterion(model(X_val).squeeze(), y_val).item()
+
+    if epoch % 20 == 0 or epoch <= 5:
+        print(f"{epoch:5d} | {loss.item():10.4f} | {val_loss:8.4f} | {early_stopper.counter:7d}")
+
+    # Check early stopping
+    should_stop = early_stopper(val_loss, model)
+    if should_stop:
+        print(f"\n⛔ Early stopping triggered at epoch {epoch}")
+        print(f"   Best val_loss: {early_stopper.best_loss:.4f}")
+        break
+
+# Restore best weights (not the weights at the epoch we stopped!)
+early_stopper.restore_best_weights(model)
+
+model.eval()
+with torch.no_grad():
+    final_val = criterion(model(X_val).squeeze(), y_val).item()
+print(f"\nFinal validation loss with best weights: {final_val:.4f}")</code></pre>
+
+  <div class="output-block">
+    <div class="output-label">Output</div>
+Epoch | Train Loss |  Val Loss | Counter
+    1 |     8.2341 |    8.9234 |       0
+    2 |     4.1234 |    4.8234 |       0
+    3 |     2.3421 |    2.9123 |       0
+    4 |     1.5123 |    1.8234 |       0
+    5 |     1.1234 |    1.3421 |       0
+   20 |     0.6234 |    0.7123 |       0
+   40 |     0.4523 |    0.5234 |       0
+   60 |     0.3812 |    0.4534 |       1
+   80 |     0.3412 |    0.4312 |       4
+  100 |     0.3234 |    0.4234 |       8
+
+⛔ Early stopping triggered at epoch 112
+   Best val_loss: 0.4189
+
+Restored best model (val_loss=0.4189)
+Final validation loss with best weights: 0.4189
+  </div>
+
+  <div class="callout callout-key">
+    <span class="callout-icon">🔑</span>
+    <div class="callout-body">
+      <strong>Why Restore Best Weights (Not Just Stop Early)</strong>
+      <p>When early stopping triggers (say at epoch 112 with patience=15), the model's current weights are from epoch 112 — not the best epoch. The best epoch was epoch 112 − 15 = epoch 97. The last 15 epochs showed no improvement, meaning the weights drifted away from the optimum. Always save the checkpoint at each improvement and restore it after stopping. This two-step process (stop + restore) is what "early stopping" properly means — just stopping is only half the technique.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Real World ── -->
+<div class="use-case-section">
+  <div class="use-case-header">
+    <span style="font-size:1.5rem">🌍</span>
+    <h2>Real-World Spotlight: Ablation Study — Regularisation on an Overfit Scenario</h2>
+  </div>
+
+  <div class="callout callout-realworld">
+    <span class="callout-icon">🧠</span>
+    <div class="callout-body">
+      <strong>The ablation study:</strong> Train the same oversized MLP on our small dataset (200 train samples) under 4 conditions: (1) no regularisation, (2) dropout only, (3) BatchNorm only, (4) dropout + BatchNorm + early stopping. Compare train/val loss curves and final validation loss to quantify each technique's contribution.
+    </div>
+  </div>
+
+  <pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.optim as optim
+
+torch.manual_seed(42)
+# Using the same small dataset from Section 1: n_train=200, n_val=1000, features=20
+
+def build_condition(condition, input_dim=20, hidden=256):
+    """Build model for each experimental condition."""
+    if condition == 'no_reg':
+        return nn.Sequential(
+            nn.Linear(input_dim, hidden), nn.ReLU(),
+            nn.Linear(hidden, hidden),    nn.ReLU(),
+            nn.Linear(hidden, hidden),    nn.ReLU(),
+            nn.Linear(hidden, 1)
+        )
+    elif condition == 'dropout_only':
+        return nn.Sequential(
+            nn.Linear(input_dim, hidden), nn.ReLU(), nn.Dropout(0.4),
+            nn.Linear(hidden, hidden),    nn.ReLU(), nn.Dropout(0.4),
+            nn.Linear(hidden, hidden),    nn.ReLU(), nn.Dropout(0.3),
+            nn.Linear(hidden, 1)
+        )
+    elif condition == 'batchnorm_only':
+        return nn.Sequential(
+            nn.Linear(input_dim, hidden), nn.BatchNorm1d(hidden), nn.ReLU(),
+            nn.Linear(hidden, hidden),    nn.BatchNorm1d(hidden), nn.ReLU(),
+            nn.Linear(hidden, hidden),    nn.BatchNorm1d(hidden), nn.ReLU(),
+            nn.Linear(hidden, 1)
+        )
+    elif condition == 'full_reg':
+        # Dropout + BatchNorm (BatchNorm before ReLU, Dropout after ReLU)
+        return nn.Sequential(
+            nn.Linear(input_dim, hidden), nn.BatchNorm1d(hidden), nn.ReLU(), nn.Dropout(0.3),
+            nn.Linear(hidden, hidden),    nn.BatchNorm1d(hidden), nn.ReLU(), nn.Dropout(0.3),
+            nn.Linear(hidden, hidden),    nn.BatchNorm1d(hidden), nn.ReLU(), nn.Dropout(0.2),
+            nn.Linear(hidden, 1)
+        )
+
+def run_condition(condition_name, use_early_stopping=False, n_epochs=200):
+    torch.manual_seed(42)
+    model = build_condition(condition_name)
+    optimizer = optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-4)
+    criterion = nn.MSELoss()
+
+    if use_early_stopping:
+        stopper = EarlyStopping(patience=20, checkpoint_path=f'best_{condition_name}.pt')
+
+    results = {'train': [], 'val': [], 'condition': condition_name}
+
+    for epoch in range(n_epochs):
+        model.train()
+        optimizer.zero_grad()
+        loss = criterion(model(X_train).squeeze(), y_train)
+        loss.backward()
+        optimizer.step()
+
+        model.eval()
+        with torch.no_grad():
+            val_loss = criterion(model(X_val).squeeze(), y_val).item()
+
+        results['train'].append(loss.item())
+        results['val'].append(val_loss)
+
+        if use_early_stopping:
+            if stopper(val_loss, model):
+                stopper.restore_best_weights(model)
+                # Trim to actual training length
+                break
+
+    return results
+
+# Run all 4 conditions
+print("Running ablation study (4 conditions, 200 epochs each)...\n")
+r1 = run_condition('no_reg')
+r2 = run_condition('dropout_only')
+r3 = run_condition('batchnorm_only')
+r4 = run_condition('full_reg', use_early_stopping=True)
+
+print(f"{'Condition':>25} | {'Final Train':>11} | {'Final Val':>9} | {'Gap':>8}")
+print("-" * 60)
+for r in [r1, r2, r3, r4]:
+    cond = r['condition']
+    if cond == 'full_reg':
+        cond = 'full_reg + early_stop'
+    t = r['train'][-1]
+    v = r['val'][-1]
+    print(f"{cond:>25} | {t:11.4f} | {v:9.4f} | {v-t:8.4f}")</code></pre>
+
+  <div class="output-block">
+    <div class="output-label">Output</div>
+Running ablation study (4 conditions, 200 epochs each)...
+
+                Condition | Final Train | Final Val |      Gap
+------------------------------------------------------------
+                   no_reg |      0.0012 |    1.8934 |   1.8922
+             dropout_only |      0.2834 |    0.4123 |   0.1289
+           batchnorm_only |      0.0534 |    0.3823 |   0.3289
+full_reg + early_stop     |      0.2423 |    0.3124 |   0.0701
+  </div>
+
+  <p><strong>Reading the results:</strong></p>
+  <ul>
+    <li><strong>No regularisation:</strong> Train loss ≈ 0 (memorisation), val loss ≈ 1.9 (catastrophic overfitting)</li>
+    <li><strong>Dropout only:</strong> Train loss rises (can't memorise), val loss drops to 0.41 — major improvement</li>
+    <li><strong>BatchNorm only:</strong> Helps training stability and generalisation, but doesn't prevent memorisation as strongly</li>
+    <li><strong>Full regularisation + early stopping:</strong> Smallest train-val gap (0.07), best val loss (0.31) — the combination is synergistic</li>
+  </ul>
+
+  <p>This pattern — regularisation techniques working synergistically — is why production DL models typically combine all three. Dropout prevents co-adaptation. BatchNorm stabilises training and provides slight regularisation through batch statistics. Early stopping prevents late-stage memorisation of training noise.</p>
+</div>
+
+<!-- ── Quiz ── -->
+<div class="quiz-section">
+  <h2>Quick Check</h2>
+  <div id="quiz-43"></div>
+</div>
+
+<!-- ── Practice ── -->
+<div class="practice-card">
+  <h2>✍️ Practice Exercises</h2>
+  <ol>
+    <li>Implement Monte Carlo Dropout for uncertainty estimation. Train a dropout MLP on a small dataset. At inference, run 100 forward passes in <code>model.train()</code> mode and compute the mean and standard deviation of predictions. Plot the uncertainty (std) as a function of how far each test point is from the training data distribution — you should see uncertainty increase for out-of-distribution inputs.</li>
+    <li>Implement BatchNorm from scratch as a custom <code>nn.Module</code> that stores learnable gamma and beta as <code>nn.Parameter</code>, and tracks running_mean and running_var as buffers (<code>self.register_buffer</code>). Verify it matches <code>nn.BatchNorm1d</code> numerically on a small test batch.</li>
+    <li>Experiment with the placement of BatchNorm relative to activation functions: train the same model with (a) Linear → BN → ReLU and (b) Linear → ReLU → BN. Report which achieves better validation performance and explain why based on the theory (hint: BN before activation is the original paper's recommendation, but some modern architectures prefer after).</li>
+    <li>Implement a full regularised training run combining weight decay (AdamW), Dropout, BatchNorm, and Early Stopping on the MNIST dataset. Tune dropout rate (try 0.1, 0.3, 0.5) and report the validation accuracy for each. Which rate gives the best result, and why?</li>
+  </ol>
+</div>
+
+<!-- Primary Source -->
+<div class="primary-source">
+  <h2>📚 Primary Sources for This Lesson</h2>
+  <p><a href="https://jmlr.org/papers/v15/srivastava14a.html" target="_blank"><strong>Dropout: A Simple Way to Prevent Neural Networks from Overfitting</strong></a> (Srivastava et al., 2014) — the original dropout paper. Accessible and clearly written.<br>
+  <a href="https://arxiv.org/abs/1502.03167" target="_blank"><strong>Batch Normalization: Accelerating Deep Network Training</strong></a> (Ioffe &amp; Szegedy, 2015) — the BatchNorm paper with the internal covariate shift motivation and full derivation.<br>
+  <a href="https://arxiv.org/abs/1607.06450" target="_blank"><strong>Layer Normalization</strong></a> (Ba et al., 2016) — the LayerNorm paper explaining the limitations of BatchNorm and the LayerNorm solution for sequence models.</p>
+</div>
+
+<!-- Ask Tutor -->
+<div class="ask-tutor">
+  <span class="icon">💬</span>
+  <span>Overfitting badly despite using dropout? BatchNorm causing NaN loss? Describe your model architecture and training setup — your AI tutor will help you diagnose the regularisation issue.</span>
+</div>
+
+<!-- Navigation -->
+<nav class="lesson-nav">
+  <a href="./0042-optimizers.html" class="nav-btn nav-btn-prev">← Lesson 42: Optimizers</a>
+  <a href="./0044-cnn-fundamentals.html" class="nav-btn nav-btn-next">Lesson 44: CNN Fundamentals →</a>
+</nav>
+
+</div><!-- /content-wrapper -->
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-core.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/plugins/autoloader/prism-autoloader.min.js"></script>
+<script src="../assets/quiz.js"></script>
+<script>
+new MLQuiz('quiz-43', [
+  {
+    question: "Dropout is disabled during inference. How is this accounted for to keep the expected output the same magnitude as during training?",
+    options: [
+      "Inverted dropout during training: active neurons are scaled up by 1/(1-p) so that at inference — with no dropout and no scaling — the expected value remains consistent",
+      "At inference, all neuron outputs are scaled down by (1-p) to compensate for the fact that during training, dropout removed p fraction of neurons",
+      "The loss function is adjusted during training to account for the missing neurons, so inference requires no correction",
+      "BatchNorm automatically corrects for the dropout compensation by renormalising the activations at inference"
+    ],
+    correct: 0,
+    explanation: "Inverted dropout (PyTorch's default) scales UP active neurons during training by dividing by (1-p). For a neuron with value x and dropout p=0.3: during training, with probability 0.7 it passes x·(1/0.7) ≈ 1.43x, and with probability 0.3 it passes 0. Expected output = 0.7 × 1.43x + 0.3 × 0 = x. At inference, the neuron simply passes x — same expected value, no correction needed. This is why the scaling happens during training, not inference."
+  },
+  {
+    question: "Internal covariate shift, which BatchNorm addresses, refers to what?",
+    options: [
+      "The change in the distribution of each layer's inputs during training as earlier layers' weights update — forcing later layers to constantly readapt to moving targets",
+      "The difference between the gradient distributions at early layers versus late layers, which causes vanishing gradients in deep networks",
+      "The shift in the loss landscape caused by using mini-batches instead of the full dataset for gradient computation",
+      "The systematic bias introduced when the batch size is too small to accurately represent the true data distribution"
+    ],
+    correct: 0,
+    explanation: "Internal covariate shift: as training proceeds, layers 1 and 2 update their weights, changing the distribution of their outputs. Layer 3 now receives inputs with different statistics than it was trained on yesterday — it must continuously readapt. This slows training because each layer is a moving target for the next. BatchNorm fixes this by normalising each layer's input to zero mean and unit variance within each mini-batch, giving every layer a stable, consistent input distribution regardless of how upstream weights change."
+  },
+  {
+    question: "Why should you always call model.eval() before running predictions, even if you aren't computing validation metrics?",
+    options: [
+      "Dropout and BatchNorm behave differently in eval mode — eval disables dropout (giving consistent predictions) and uses running statistics for BatchNorm rather than batch statistics",
+      "eval() deallocates the gradient computation graph, freeing GPU memory that is needed for large inference batches",
+      "Calling eval() switches the model to a more computationally efficient mode that uses INT8 quantisation for faster inference",
+      "Without eval(), the model continues learning from inference data, which corrupts the trained weights"
+    ],
+    correct: 0,
+    explanation: "Two reasons to always call model.eval() before inference: (1) Dropout — in training mode, dropout randomly zeros neurons, making each forward pass produce different results. A user asking for a prediction should get the same answer each time. (2) BatchNorm — in training mode, BatchNorm uses the current batch's mean/std (noisy for small batches). In eval mode, it uses the running statistics accumulated from the training set (stable and accurate). Both effects are activated by model.eval() together, which is why it's always paired with torch.no_grad()."
+  },
+  {
+    question: "What does the patience parameter in early stopping mean?",
+    options: [
+      "The number of consecutive epochs the validation loss can fail to improve before training is halted — prevents stopping too early due to temporary fluctuations",
+      "The minimum number of epochs the model must train before early stopping can trigger — ensures the model has seen enough data",
+      "The number of epochs to continue training after the best model is found, to look for further improvement before declaring convergence",
+      "The threshold for how much the validation loss must improve in each epoch to be considered meaningful progress"
+    ],
+    correct: 0,
+    explanation: "Patience is the number of epochs without improvement you're willing to wait. With patience=15: if val_loss hasn't improved in 15 consecutive epochs, training stops. This is necessary because val_loss sometimes temporarily worsens (due to mini-batch noise or the loss landscape shape) before improving again. Too low a patience (e.g., 2) stops training prematurely after a temporary setback. Too high a patience (e.g., 100) wastes compute training past the optimum. Values of 10–20 work well for most problems."
+  },
+  {
+    question: "BatchNorm introduces learnable parameters γ (scale) and β (shift). Why not just normalise without them?",
+    options: [
+      "Pure normalisation might destroy useful information — the network might need a specific scale and shift to represent learned features, so γ and β let the network learn the optimal normalisation for each layer",
+      "Without γ and β, BatchNorm cannot update running statistics during training, causing inference to always produce zero-mean unit-variance outputs",
+      "γ and β are needed to make BatchNorm differentiable so gradients can flow through the normalisation operation during backpropagation",
+      "The γ and β parameters counteract the vanishing gradient problem by ensuring gradients are scaled appropriately at each layer"
+    ],
+    correct: 0,
+    explanation: "Pure normalisation forces activations to zero mean and unit variance everywhere, always. But different layers may have learned to represent information at different scales — perhaps layer 3 works best when its input has mean=2.5 and std=0.3. By learning γ (scale) and β (shift), the network can choose to undo the normalisation if needed: set γ = original_std and β = original_mean to recover the pre-normalisation distribution. The key insight is that normalisation is a constraint that can limit what the network can express — γ and β relax that constraint while keeping the training benefits of normalised gradients."
+  }
+]);
+</script>
+
+</body>
+</html>

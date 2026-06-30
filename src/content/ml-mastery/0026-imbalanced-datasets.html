@@ -1,0 +1,633 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lesson 26: Handling Imbalanced Datasets — SMOTE, Class Weights &amp; Resampling | ML Mastery</title>
+  <link rel="stylesheet" href="../assets/style.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
+</head>
+<body>
+
+<header class="lesson-header">
+  <div class="header-inner">
+    <nav class="breadcrumb">
+      <a href="../reference/curriculum-map.html">ML Mastery</a>
+      <span class="sep">›</span>
+      <span>Phase 2: Supervised ML</span>
+    </nav>
+    <div class="lesson-badges">
+      <span class="phase-badge">Phase 2 · Supervised ML</span>
+      <span class="lesson-num-badge">Lesson 26</span>
+    </div>
+    <h1 class="lesson-title">Handling Imbalanced Datasets: SMOTE, Class Weights &amp; Resampling</h1>
+    <p class="lesson-subtitle">Why 99% accuracy can be completely useless, and how to build models that actually detect the rare class you care about.</p>
+    <div class="meta-pills">
+      <span class="meta-pill">⏱ ~60 min</span>
+      <span class="meta-pill">🐍 scikit-learn · imbalanced-learn</span>
+      <span class="meta-pill">⚖️ Supervised ML</span>
+      <span class="meta-pill">Requires Lessons 15–25</span>
+    </div>
+  </div>
+</header>
+
+<main class="lesson-main">
+<div class="content-wrapper">
+
+<div class="objectives-card">
+  <h2>🎯 What You'll Learn</h2>
+  <ul>
+    <li>Diagnose class imbalance and understand why accuracy is a misleading metric for imbalanced problems</li>
+    <li>Apply random oversampling and undersampling from <code>imbalanced-learn</code></li>
+    <li>Generate synthetic minority samples with SMOTE and its variants (ADASYN, Borderline-SMOTE)</li>
+    <li>Use <code>class_weight='balanced'</code> for any sklearn classifier without resampling</li>
+    <li>Combine techniques (SMOTE + Tomek Links) and evaluate correctly using precision, recall, F1, and AUC</li>
+  </ul>
+</div>
+
+<!-- ── Section 1 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">1</span> The Imbalance Problem</h2>
+
+  <p>In the real world, the events we most want to detect are often the rarest: 0.1% of medical tests are positive for a rare disease, 0.5% of credit card transactions are fraudulent, 1–5% of customers churn in a given month. These are <strong>imbalanced classification</strong> problems.</p>
+
+  <p>The danger: a model that simply predicts "not fraud" for every transaction achieves 99.5% accuracy on a dataset with 0.5% fraud — but catches exactly zero fraudulent transactions. This model is worse than useless in production.</p>
+
+  <pre><code class="language-python">import numpy as np
+import pandas as pd
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import (classification_report, confusion_matrix,
+                              roc_auc_score, accuracy_score)
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+
+np.random.seed(42)
+n = 10000
+n_fraud = 50  # 0.5% fraud rate
+
+# Generate imbalanced dataset
+X_legit = np.random.randn(n - n_fraud, 10)
+X_fraud = np.random.randn(n_fraud, 10) + 1.5  # slightly shifted signal
+X_all = np.vstack([X_legit, X_fraud])
+y_all = np.array([0] * (n - n_fraud) + [1] * n_fraud)
+
+# Check imbalance
+print("Class distribution:")
+unique, counts = np.unique(y_all, return_counts=True)
+for cls, cnt in zip(unique, counts):
+    print(f"  Class {cls}: {cnt:6d} samples ({cnt/len(y_all):.2%})")
+
+# Shuffle
+idx = np.random.permutation(len(y_all))
+X_all, y_all = X_all[idx], y_all[idx]
+
+X_tr, X_te, y_tr, y_te = train_test_split(X_all, y_all, test_size=0.2,
+                                             stratify=y_all, random_state=42)
+sc = StandardScaler()
+X_tr_s = sc.fit_transform(X_tr)
+X_te_s  = sc.transform(X_te)
+
+# The "dumb" baseline: predict majority class always
+y_dummy = np.zeros_like(y_te)
+print(f"\nDumb baseline (all zeros):")
+print(f"  Accuracy: {accuracy_score(y_te, y_dummy):.4f}")  # 99.5% ← misleading!
+print(f"  F1 (fraud class): {0.0:.4f}")  # catches no fraud
+
+# Naive logistic regression without any imbalance handling
+lr_naive = LogisticRegression(max_iter=1000)
+lr_naive.fit(X_tr_s, y_tr)
+y_pred_naive = lr_naive.predict(X_te_s)
+print(f"\nNaive Logistic Regression:")
+print(f"  Accuracy: {accuracy_score(y_te, y_pred_naive):.4f}")
+print(classification_report(y_te, y_pred_naive, target_names=['Legit', 'Fraud']))</code></pre>
+
+  <div class="callout callout-warn">
+    <span class="callout-icon">⚠️</span>
+    <div class="callout-body">
+      <strong>Never Report Only Accuracy on Imbalanced Datasets</strong>
+      <p>Accuracy is useless when classes are imbalanced — it rewards the model for learning to ignore the minority class. Always report: <strong>precision</strong> (of all predicted positives, how many are real?), <strong>recall</strong> (of all real positives, how many did we find?), <strong>F1</strong> (harmonic mean of precision and recall), and <strong>AUC-ROC</strong> (threshold-independent). For very high imbalance (&lt;1%), also report Average Precision (AUC-PR).</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 2 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">2</span> Why Accuracy Fails with Imbalance</h2>
+
+  <p>Let's work through the mathematics of why accuracy misleads. With 9950 negatives and 50 positives (0.5% positive rate):</p>
+
+  <pre><code class="language-python">from sklearn.metrics import confusion_matrix, precision_score, recall_score, f1_score, roc_auc_score
+import numpy as np
+
+# Simulated predictions for a naive model that almost never predicts fraud
+y_true = np.array([0]*9950 + [1]*50)
+y_pred_bad = np.array([0]*9980 + [1]*20)  # predicts very few positives
+
+tn, fp, fn, tp = confusion_matrix(y_true, y_pred_bad).ravel()
+print(f"Confusion Matrix:")
+print(f"  TN={tn:6d}  FP={fp:6d}")
+print(f"  FN={fn:6d}  TP={tp:6d}")
+
+accuracy  = (tp + tn) / (tp + tn + fp + fn)
+precision = tp / (tp + fp) if (tp + fp) > 0 else 0
+recall    = tp / (tp + fn) if (tp + fn) > 0 else 0
+f1        = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
+
+print(f"\nAccuracy:  {accuracy:.4f}  ← looks great, almost useless")
+print(f"Precision: {precision:.4f}")
+print(f"Recall:    {recall:.4f}   ← only {recall*100:.0f}% of fraud cases caught")
+print(f"F1 Score:  {f1:.4f}")
+
+# What we WANT: high recall (catch most fraud) while controlling precision
+# AUC-ROC measures discrimination regardless of threshold
+y_scores = np.random.rand(10000)  # simulated probability scores
+y_scores[9950:] += 0.3  # fraud cases have slightly higher scores
+auc = roc_auc_score(y_true, y_scores)
+print(f"\nAUC-ROC:   {auc:.4f}  ← threshold-independent, always useful")
+print("Note: choose threshold based on business cost of FP vs FN")</code></pre>
+</div>
+
+<!-- ── Section 3 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">3</span> Random Oversampling</h2>
+
+  <p>The simplest approach: duplicate minority class samples at random until both classes are balanced. This is quick but risks overfitting to the exact duplicate points — the model may memorise specific minority examples rather than learning the class boundary.</p>
+
+  <pre><code class="language-python">from imblearn.over_sampling import RandomOverSampler
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import classification_report, roc_auc_score
+import numpy as np
+
+print(f"Before oversampling: {np.bincount(y_tr)}")
+# [9560   40]  ← 9560 legit, 40 fraud in training set
+
+ros = RandomOverSampler(random_state=42)
+X_ros, y_ros = ros.fit_resample(X_tr_s, y_tr)
+
+print(f"After oversampling:  {np.bincount(y_ros)}")
+# [9560 9560]  ← perfectly balanced by duplicating fraud 239×
+
+# Train on resampled data, evaluate on ORIGINAL imbalanced test set
+lr_ros = LogisticRegression(max_iter=1000)
+lr_ros.fit(X_ros, y_ros)
+y_pred_ros = lr_ros.predict(X_te_s)
+proba_ros  = lr_ros.predict_proba(X_te_s)[:, 1]
+
+print("\nLogistic Regression with Random Oversampling:")
+print(classification_report(y_te, y_pred_ros, target_names=['Legit', 'Fraud']))
+print(f"AUC-ROC: {roc_auc_score(y_te, proba_ros):.4f}")</code></pre>
+
+  <div class="callout callout-key">
+    <span class="callout-icon">🔑</span>
+    <div class="callout-body">
+      <strong>Always Resample the Training Set Only</strong>
+      <p>Resampling must happen <strong>after</strong> the train/test split, and only on the training data. If you resample before splitting, duplicate minority samples may appear in both train and test — the model will achieve artificially high test performance by recognising its own duplicates. The test set must always reflect the true real-world class distribution, never resampled.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 4 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">4</span> Random Undersampling</h2>
+
+  <p>Instead of adding minority samples, undersampling removes majority class samples until both classes are balanced. This is the right choice when you have millions of majority class examples and the information in the retained minority class captures the pattern adequately. The main risk is throwing away potentially useful majority class data.</p>
+
+  <pre><code class="language-python">from imblearn.under_sampling import RandomUnderSampler
+from sklearn.metrics import classification_report, roc_auc_score
+import numpy as np
+
+print(f"Before undersampling: {np.bincount(y_tr)}")
+# [9560   40]
+
+rus = RandomUnderSampler(random_state=42, sampling_strategy=1.0)
+X_rus, y_rus = rus.fit_resample(X_tr_s, y_tr)
+
+print(f"After undersampling:  {np.bincount(y_rus)}")
+# [40  40]  ← only 80 samples left! Most majority discarded
+
+lr_rus = LogisticRegression(max_iter=1000)
+lr_rus.fit(X_rus, y_rus)
+y_pred_rus = lr_rus.predict(X_te_s)
+proba_rus  = lr_rus.predict_proba(X_te_s)[:, 1]
+
+print("\nLogistic Regression with Random Undersampling:")
+print(classification_report(y_te, y_pred_rus, target_names=['Legit', 'Fraud']))
+print(f"AUC-ROC: {roc_auc_score(y_te, proba_rus):.4f}")
+
+# Note: high recall but potentially low precision — undersampling trains on
+# very few majority samples, so the model may overpredict the minority class</code></pre>
+</div>
+
+<!-- ── Section 5 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">5</span> SMOTE: Synthetic Minority Oversampling</h2>
+
+  <p>SMOTE (Chawla et al., 2002) generates <em>synthetic</em> minority samples rather than duplicating existing ones. For each minority sample, SMOTE:</p>
+  <ol>
+    <li>Finds its K nearest minority neighbours (default K=5)</li>
+    <li>Draws a random point along the line segment connecting the sample to one of its K neighbours</li>
+    <li>Adds this synthetic point to the training set</li>
+  </ol>
+  <p>This creates new minority samples in the <em>feature space neighbourhood</em> of existing minority samples, rather than exact duplicates, reducing the overfitting risk of random oversampling.</p>
+
+  <pre><code class="language-python">from imblearn.over_sampling import SMOTE
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import classification_report, roc_auc_score, f1_score
+import numpy as np
+
+print(f"Before SMOTE: {np.bincount(y_tr)}")
+
+# IMPORTANT: apply SMOTE to TRAINING data only — never the test set
+sm = SMOTE(
+    sampling_strategy=1.0,   # target ratio: minority/majority (1.0 = balanced)
+    k_neighbors=5,           # k nearest minority neighbours to use
+    random_state=42
+)
+X_smote, y_smote = sm.fit_resample(X_tr_s, y_tr)
+
+print(f"After SMOTE:  {np.bincount(y_smote)}")
+# [9560 9560]  ← balanced, but with SYNTHETIC points (not duplicates)
+
+# Verify: all original minority samples are still there
+print(f"\nOriginal minority samples: {(y_tr == 1).sum()}")
+print(f"Total minority after SMOTE: {(y_smote == 1).sum()}")
+# The extra 9520 minority samples are synthetic interpolations
+
+lr_smote = LogisticRegression(max_iter=1000)
+lr_smote.fit(X_smote, y_smote)
+
+y_pred_sm = lr_smote.predict(X_te_s)
+proba_sm  = lr_smote.predict_proba(X_te_s)[:, 1]
+
+print("\nLogistic Regression with SMOTE:")
+print(classification_report(y_te, y_pred_sm, target_names=['Legit', 'Fraud']))
+print(f"AUC-ROC: {roc_auc_score(y_te, proba_sm):.4f}")
+
+# Compare: minority class F1 across methods
+results = {
+    'No handling':      f1_score(y_te, lr_naive.predict(X_te_s)),
+    'Random Oversampling': f1_score(y_te, y_pred_ros),
+    'Random Undersampling': f1_score(y_te, y_pred_rus),
+    'SMOTE':            f1_score(y_te, y_pred_sm),
+}
+print("\nMinority class F1 comparison:")
+for name, f1 in sorted(results.items(), key=lambda x: -x[1]):
+    bar = '█' * int(f1 * 30)
+    print(f"  {name:25s}: {f1:.4f} {bar}")</code></pre>
+
+  <div class="callout callout-tip">
+    <span class="callout-icon">💡</span>
+    <div class="callout-body">
+      <strong>SMOTE Requires Preprocessing First</strong>
+      <p>SMOTE interpolates between feature vectors, so it implicitly assumes that a point halfway between two minority samples is also a plausible minority sample. This assumption is only meaningful if features are on the same scale. Always standardise or normalise features <em>before</em> applying SMOTE. For categorical features, use SMOTENC (SMOTE for Numerical and Categorical) from imbalanced-learn.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 6 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">6</span> SMOTE Variants</h2>
+
+  <p>The original SMOTE treats all minority samples equally. Several variants focus the synthetic generation on the most informative regions of the feature space:</p>
+
+  <pre><code class="language-python">from imblearn.over_sampling import ADASYN, BorderlineSMOTE, SVMSMOTE
+import numpy as np
+from sklearn.metrics import f1_score, roc_auc_score
+
+variants = {
+    'SMOTE (original)': SMOTE(random_state=42),
+    'ADASYN':           ADASYN(random_state=42),          # adaptive: more samples near difficult regions
+    'Borderline-SMOTE': BorderlineSMOTE(random_state=42), # focus on borderline minority samples
+    'SVM-SMOTE':        SVMSMOTE(random_state=42),        # focus near the SVM decision boundary
+}
+
+print(f"{'Method':25s}  {'Minority samples':>17}  {'F1':>8}  {'AUC':>8}")
+print("-" * 65)
+for name, sampler in variants.items():
+    try:
+        X_s, y_s = sampler.fit_resample(X_tr_s, y_tr)
+        lr = LogisticRegression(max_iter=1000)
+        lr.fit(X_s, y_s)
+        f1  = f1_score(y_te, lr.predict(X_te_s))
+        auc = roc_auc_score(y_te, lr.predict_proba(X_te_s)[:, 1])
+        n_min = (y_s == 1).sum()
+        print(f"{name:25s}  {n_min:>17}  {f1:>8.4f}  {auc:>8.4f}")
+    except Exception as e:
+        print(f"{name:25s}  Error: {e}")
+
+# Explanation of each:
+# ADASYN: generates more synthetic samples near harder-to-classify minority instances
+# Borderline-SMOTE: only generates from minority samples near the decision boundary
+# SVM-SMOTE: uses SVM's support vectors to identify the most informative boundary regions</code></pre>
+</div>
+
+<!-- ── Section 7 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">7</span> Class Weights: No Resampling Required</h2>
+
+  <p>Many sklearn estimators support a <code>class_weight</code> parameter that tells the optimizer to penalise errors on the minority class more heavily. This achieves a similar effect to oversampling without generating new samples — computationally efficient and no risk of interpolation artifacts.</p>
+
+  <pre><code class="language-python">from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
+from sklearn.svm import SVC
+from sklearn.metrics import f1_score, roc_auc_score, classification_report
+from sklearn.utils.class_weight import compute_class_weight
+import numpy as np
+
+# compute_class_weight: computes optimal weights for perfect balance
+classes = np.array([0, 1])
+weights = compute_class_weight(
+    class_weight='balanced',
+    classes=classes,
+    y=y_tr
+)
+print(f"Computed class weights: {dict(zip(classes, weights.round(2)))}")
+# {0: 0.52, 1: 119.50}  ← fraud gets 119.5× the weight!
+
+# class_weight='balanced' does this automatically
+models_cw = {
+    'LR balanced':      LogisticRegression(class_weight='balanced', max_iter=1000),
+    'RF balanced':      RandomForestClassifier(n_estimators=100, class_weight='balanced',
+                                               n_jobs=-1, random_state=42),
+    'GBM default':      GradientBoostingClassifier(n_estimators=100, random_state=42),
+}
+
+print(f"\n{'Model':25s}  {'Recall(fraud)':>14}  {'Precision(fraud)':>17}  {'F1(fraud)':>10}  {'AUC':>8}")
+print("-" * 82)
+for name, model in models_cw.items():
+    model.fit(X_tr_s, y_tr)
+    y_pred = model.predict(X_te_s)
+    proba  = model.predict_proba(X_te_s)[:, 1]
+    from sklearn.metrics import precision_score, recall_score
+    rec = recall_score(y_te, y_pred)
+    pre = precision_score(y_te, y_pred, zero_division=0)
+    f1  = f1_score(y_te, y_pred)
+    auc = roc_auc_score(y_te, proba)
+    print(f"{name:25s}  {rec:>14.4f}  {pre:>17.4f}  {f1:>10.4f}  {auc:>8.4f}")
+
+# XGBoost equivalent: scale_pos_weight = n_negative / n_positive
+import xgboost as xgb
+scale_pos_weight = (y_tr == 0).sum() / (y_tr == 1).sum()
+print(f"\nXGBoost scale_pos_weight = {scale_pos_weight:.1f}")
+xgb_cw = xgb.XGBClassifier(
+    n_estimators=100,
+    scale_pos_weight=scale_pos_weight,  # equivalent to class_weight='balanced'
+    n_jobs=-1, random_state=42
+)
+xgb_cw.fit(X_tr_s, y_tr)
+auc_xgb = roc_auc_score(y_te, xgb_cw.predict_proba(X_te_s)[:, 1])
+f1_xgb  = f1_score(y_te, xgb_cw.predict(X_te_s))
+print(f"XGBoost with scale_pos_weight: F1={f1_xgb:.4f}  AUC={auc_xgb:.4f}")</code></pre>
+</div>
+
+<!-- ── Section 8 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">8</span> Combining Techniques: SMOTE + Tomek Links</h2>
+
+  <p>Tomek Links are pairs of samples from opposite classes that are each other's nearest neighbour — they sit right at the decision boundary and often cause misclassifications. SMOTETomek applies SMOTE to oversample, then removes ambiguous majority samples near the boundary (Tomek Links), creating a cleaner decision boundary.</p>
+
+  <pre><code class="language-python">from imblearn.combine import SMOTETomek, SMOTEENN
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import f1_score, roc_auc_score, classification_report
+import numpy as np
+
+# SMOTETomek: oversample minority + remove ambiguous boundary majority
+smt = SMOTETomek(random_state=42)
+X_smt, y_smt = smt.fit_resample(X_tr_s, y_tr)
+print(f"After SMOTETomek:   {np.bincount(y_smt)}")
+
+# SMOTEENN: SMOTE + Edited Nearest Neighbours (removes noisy samples from both classes)
+smoteenn = SMOTEENN(random_state=42)
+X_enn, y_enn = smoteenn.fit_resample(X_tr_s, y_tr)
+print(f"After SMOTEENN:     {np.bincount(y_enn)}")
+
+results_combined = {}
+for name, X_s, y_s in [
+    ('SMOTE',       X_smote,  y_smote),
+    ('SMOTETomek',  X_smt,    y_smt),
+    ('SMOTEENN',    X_enn,    y_enn),
+]:
+    lr = LogisticRegression(max_iter=1000)
+    lr.fit(X_s, y_s)
+    f1  = f1_score(y_te, lr.predict(X_te_s))
+    auc = roc_auc_score(y_te, lr.predict_proba(X_te_s)[:, 1])
+    results_combined[name] = (f1, auc)
+    print(f"{name:15s}: F1={f1:.4f}  AUC={auc:.4f}")
+
+# Choosing a strategy: use cross-validation to compare on a held-out validation set
+from sklearn.model_selection import StratifiedKFold, cross_val_score
+from imblearn.pipeline import Pipeline as ImbPipeline  # MUST use imblearn Pipeline!
+
+# imblearn Pipeline applies resampling INSIDE cross-validation folds correctly
+pipe_smote = ImbPipeline([
+    ('smote', SMOTE(random_state=42)),
+    ('lr',    LogisticRegression(max_iter=1000))
+])
+cv_scores = cross_val_score(
+    pipe_smote, X_tr_s, y_tr,
+    cv=StratifiedKFold(5), scoring='roc_auc'
+)
+print(f"\nSMOTE + LR CV-AUC: {cv_scores.mean():.4f} ± {cv_scores.std():.4f}")</code></pre>
+
+  <div class="callout callout-warn">
+    <span class="callout-icon">⚠️</span>
+    <div class="callout-body">
+      <strong>Use imblearn Pipeline, Not sklearn Pipeline</strong>
+      <p>When combining SMOTE with cross-validation, use <code>from imblearn.pipeline import Pipeline</code>, NOT <code>from sklearn.pipeline import Pipeline</code>. The imblearn Pipeline correctly applies resampling only to the training fold inside each CV split. The sklearn Pipeline doesn't know about resampling steps and may apply them incorrectly. This is a subtle but critical distinction that affects result validity.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Real-World Spotlight ── -->
+<div class="use-case-section">
+  <div class="use-case-header">
+    <span style="font-size:1.5rem">🌍</span>
+    <h2>Real-World Spotlight: Credit Card Fraud Detection</h2>
+  </div>
+  <p>A fintech company processes 500,000 daily transactions with a 0.5% fraud rate (2,500 fraudulent). The business objective: maximise fraud detection recall (catch as many fraudulent transactions as possible) while keeping precision above 30% (to avoid excessive false positives that irritate legitimate customers).</p>
+  <pre><code class="language-python">import numpy as np
+import pandas as pd
+import xgboost as xgb
+from imblearn.over_sampling import SMOTE
+from imblearn.pipeline import Pipeline as ImbPipeline
+from sklearn.linear_model import LogisticRegression
+from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import train_test_split, StratifiedKFold
+from sklearn.metrics import (roc_auc_score, average_precision_score,
+                              f1_score, classification_report)
+
+np.random.seed(42)
+n = 100_000
+n_fraud = 500   # 0.5% fraud
+
+# Synthetic credit card transaction features
+X_cc = np.random.randn(n, 28)   # 28 anonymised features (PCA'd in real datasets)
+# Fraud transactions have slightly different patterns
+fraud_idx = np.random.choice(n, n_fraud, replace=False)
+X_cc[fraud_idx, :5] += np.random.randn(n_fraud, 5) * 1.5  # signal in first 5 PCs
+y_cc = np.zeros(n)
+y_cc[fraud_idx] = 1
+
+Xcc_tr, Xcc_te, ycc_tr, ycc_te = train_test_split(
+    X_cc, y_cc, test_size=0.2, stratify=y_cc, random_state=42)
+sc_cc = StandardScaler()
+Xcc_tr_s = sc_cc.fit_transform(Xcc_tr)
+Xcc_te_s  = sc_cc.transform(Xcc_te)
+
+print(f"Training set: {(ycc_tr==0).sum()} legit  |  {(ycc_tr==1).sum()} fraud")
+print(f"Test set:     {(ycc_te==0).sum()} legit  |  {(ycc_te==1).sum()} fraud")
+
+def evaluate(name, model, X_te, y_te):
+    proba = model.predict_proba(X_te)[:, 1]
+    pred  = model.predict(X_te)
+    auc   = roc_auc_score(y_te, proba)
+    ap    = average_precision_score(y_te, proba)  # AUC-PR
+    f1    = f1_score(y_te, pred)
+    from sklearn.metrics import recall_score, precision_score
+    rec   = recall_score(y_te, pred)
+    pre   = precision_score(y_te, pred, zero_division=0)
+    print(f"{name:35s}: AUC={auc:.4f}  AP={ap:.4f}  F1={f1:.4f}  Recall={rec:.4f}  Prec={pre:.4f}")
+
+# ── Approach 1: Naive logistic regression ──
+lr_naive = LogisticRegression(max_iter=1000)
+lr_naive.fit(Xcc_tr_s, ycc_tr)
+evaluate("LR (no handling)", lr_naive, Xcc_te_s, ycc_te)
+
+# ── Approach 2: class_weight='balanced' ──
+lr_cw = LogisticRegression(class_weight='balanced', max_iter=1000)
+lr_cw.fit(Xcc_tr_s, ycc_tr)
+evaluate("LR class_weight='balanced'", lr_cw, Xcc_te_s, ycc_te)
+
+# ── Approach 3: SMOTE ──
+sm = SMOTE(random_state=42)
+Xcc_sm, ycc_sm = sm.fit_resample(Xcc_tr_s, ycc_tr)
+lr_smote = LogisticRegression(max_iter=1000)
+lr_smote.fit(Xcc_sm, ycc_sm)
+evaluate("LR + SMOTE", lr_smote, Xcc_te_s, ycc_te)
+
+# ── Approach 4: XGBoost with scale_pos_weight ──
+scale_w = (ycc_tr == 0).sum() / (ycc_tr == 1).sum()
+xgb_fraud = xgb.XGBClassifier(
+    n_estimators=200, learning_rate=0.1, max_depth=4,
+    scale_pos_weight=scale_w, n_jobs=-1, random_state=42
+)
+xgb_fraud.fit(Xcc_tr_s, ycc_tr)
+evaluate("XGBoost + scale_pos_weight", xgb_fraud, Xcc_te_s, ycc_te)
+
+# ── Approach 5: XGBoost + SMOTE ──
+Xcc_sm2, ycc_sm2 = sm.fit_resample(Xcc_tr_s, ycc_tr)
+xgb_smote = xgb.XGBClassifier(
+    n_estimators=200, learning_rate=0.1, max_depth=4,
+    n_jobs=-1, random_state=42
+)
+xgb_smote.fit(Xcc_sm2, ycc_sm2)
+evaluate("XGBoost + SMOTE", xgb_smote, Xcc_te_s, ycc_te)
+
+print(f"\n⚠️  Always evaluate on the ORIGINAL imbalanced test set!")
+print(f"     (never resample before evaluation — it inflates performance)")</code></pre>
+  <p>XGBoost with <code>scale_pos_weight</code> typically achieves the best AUC and Average Precision on fraud detection benchmarks. For fraud specifically, recall matters most (every missed fraud is a direct loss), so the final production threshold is typically lowered below 0.5 to increase recall at the cost of some precision — a business decision, not a purely technical one. The chosen model should be retrained monthly as fraud patterns evolve.</p>
+</div>
+
+<!-- ── Quiz ── -->
+<div class="quiz-section">
+  <div id="lesson-26-quiz"></div>
+</div>
+
+<!-- ── Practice ── -->
+<div class="practice-card">
+  <h2>✍️ Practice Exercises</h2>
+  <ol>
+    <li>Create a dataset with <code>make_classification(n_samples=10000, weights=[0.99, 0.01])</code>. Train a LogisticRegression without any handling. Report accuracy, recall for the minority class, and AUC. How misleading is accuracy here?</li>
+    <li>Apply <code>SMOTE</code>, <code>RandomOverSampler</code>, and <code>class_weight='balanced'</code> to the same dataset. Compare minority class F1 and AUC for each approach.</li>
+    <li>Use <code>from imblearn.pipeline import Pipeline</code> to create a SMOTE + RandomForest pipeline. Cross-validate it with <code>StratifiedKFold(5)</code> and report AUC.</li>
+    <li>Look up the real Kaggle Credit Card Fraud dataset (<a href="https://www.kaggle.com/datasets/mlg-ulb/creditcardfraud" target="_blank">available here</a>). Apply SMOTE and XGBoost with <code>scale_pos_weight</code>. What AUC and Average Precision do you achieve?</li>
+  </ol>
+</div>
+
+<!-- ── Primary Source ── -->
+<div class="primary-source">
+  <h2>📚 Primary Source for This Lesson</h2>
+  <p><a href="https://imbalanced-learn.org/stable/user_guide.html" target="_blank"><strong>imbalanced-learn: User Guide</strong></a><br>
+  The official guide for all resampling methods covered in this lesson, with detailed API documentation, mathematical explanations, and worked examples. The original SMOTE paper — Chawla et al. (2002) "SMOTE: Synthetic Minority Over-sampling Technique" (<em>JAIR</em> 16:321–357) — is readable and explains the geometric intuition clearly.</p>
+</div>
+
+<!-- ── Ask Tutor ── -->
+<div class="ask-tutor">
+  <span class="icon">💬</span>
+  <span>Getting ImportError for imbalanced-learn? Not sure which metric to optimise for your specific imbalance problem? Paste your setup — your tutor will help you choose the right approach and metrics for your use case.</span>
+</div>
+
+<!-- ── Navigation ── -->
+<nav class="lesson-nav">
+  <a href="./0025-feature-engineering.html" class="nav-btn">← Lesson 25: Feature Engineering</a>
+  <a href="./0027-hyperparameter-tuning.html" class="nav-btn nav-btn-next">Lesson 27: Hyperparameter Tuning →</a>
+</nav>
+
+</div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-core.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/plugins/autoloader/prism-autoloader.min.js"></script>
+<script src="../assets/quiz.js"></script>
+<script>
+new MLQuiz('lesson-26-quiz', [
+  {
+    question: "You have a dataset with 99% class 0 and 1% class 1. What is the most important thing to do BEFORE applying SMOTE?",
+    options: [
+      "Split into train and test sets first — SMOTE must only be applied to the training set, never the test set",
+      "Normalise features to [0, 1] range before applying SMOTE",
+      "Apply SMOTE to the full dataset to maximise the minority signal available to SMOTE",
+      "Remove all outliers from the minority class before SMOTE to avoid noisy synthetic samples"
+    ],
+    correct: 0,
+    explanation: "SMOTE must be applied only to the training set. If you apply SMOTE before splitting, synthetic samples derived from your test set's minority examples may end up in the training set — the model can then recognise patterns from data it 'shouldn't' have seen. The test set must always reflect the true real-world class distribution: imbalanced and untouched."
+  },
+  {
+    question: "What does SMOTE generate, and how?",
+    options: [
+      "Synthetic minority samples by interpolating between real minority samples and their K nearest minority neighbours",
+      "Exact duplicates of existing minority samples with random noise added to each feature",
+      "New majority samples removed from regions far from the decision boundary",
+      "Weighted average predictions from multiple minority-trained classifiers"
+    ],
+    correct: 0,
+    explanation: "SMOTE selects a minority sample, finds its K nearest minority-class neighbours (default K=5), and creates a new synthetic sample along the line segment connecting the original sample to one of its neighbours. Specifically: synthetic = original + λ × (neighbour - original), where λ is random in [0, 1]. This creates diversity in the synthetic data by placing new points in plausible minority-class regions of feature space."
+  },
+  {
+    question: "class_weight='balanced' in sklearn classifiers does what?",
+    options: [
+      "Automatically adjusts class weights inversely proportional to class frequencies, making minority errors more costly",
+      "Resamples the training data to make both classes exactly equal before fitting",
+      "Applies a fixed weight of 0.5 to both classes regardless of their frequencies",
+      "Duplicates the minority class samples until both classes are the same size"
+    ],
+    correct: 0,
+    explanation: "With class_weight='balanced', sklearn computes weights as: w_class = n_total / (n_classes × n_class_samples). For a 99/1 split: w_minority = 10000 / (2 × 100) = 50 and w_majority = 10000 / (2 × 9900) = 0.505. These weights are applied to each sample's contribution to the loss function — misclassifying the minority class is penalised 50÷0.505 ≈ 99× more heavily. No resampling occurs."
+  },
+  {
+    question: "What is the key risk of random oversampling compared to SMOTE?",
+    options: [
+      "Random oversampling duplicates exact existing samples (increasing overfitting risk); SMOTE creates diverse synthetic samples in feature space",
+      "Random oversampling changes the test set distribution, while SMOTE only modifies the training set",
+      "Random oversampling is slower than SMOTE because it must compute K-nearest neighbours for each sample",
+      "Random oversampling applies only to numerical features; SMOTE can handle categorical features"
+    ],
+    correct: 0,
+    explanation: "Random oversampling creates exact copies of existing minority samples. The model may learn to recognise these specific duplicates rather than learning the general minority class boundary — a form of overfitting. SMOTE creates synthetic samples by interpolating between existing minority samples, adding diversity to the minority class representation. SMOTE generally outperforms random oversampling, especially when the minority class is very small."
+  },
+  {
+    question: "What evaluation metric set should you use for imbalanced classification?",
+    options: [
+      "Precision, Recall, and F1 for the minority class, plus AUC-ROC — never just accuracy",
+      "Accuracy and top-5 accuracy, as these are the most statistically robust metrics",
+      "Accuracy and confusion matrix only — F1 cannot be computed with class imbalance",
+      "Only AUC-ROC, since all other metrics depend on choosing a threshold"
+    ],
+    correct: 0,
+    explanation: "Accuracy is useless with imbalance (a model predicting all-majority gets near-100% accuracy). The correct set: Precision = TP/(TP+FP) [quality of positive predictions], Recall = TP/(TP+FN) [fraction of positives caught], F1 = harmonic mean of the two, and AUC-ROC [threshold-independent ranking quality]. For very high imbalance (<1%), also report Average Precision (AUC-PR), which is more discriminating at extreme ratios."
+  }
+]);
+</script>
+
+</body>
+</html>

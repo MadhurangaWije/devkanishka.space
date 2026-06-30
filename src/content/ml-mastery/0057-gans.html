@@ -1,0 +1,888 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lesson 57: Generative Adversarial Networks (GANs) | ML Mastery</title>
+  <link rel="stylesheet" href="../assets/style.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
+</head>
+<body>
+
+<!-- ── Header ── -->
+<header class="lesson-header">
+  <div class="header-inner">
+    <nav class="breadcrumb">
+      <a href="../reference/curriculum-map.html">ML Mastery</a>
+      <span class="sep">›</span>
+      <span>Phase 5: Advanced Deep Learning &amp; NLP</span>
+    </nav>
+    <div class="lesson-badges">
+      <span class="phase-badge">Phase 5 · Advanced Deep Learning &amp; NLP</span>
+      <span class="lesson-num-badge">Lesson 57</span>
+    </div>
+    <h1 class="lesson-title">Generative Adversarial Networks (GANs)</h1>
+    <p class="lesson-subtitle">Two neural networks in competitive training — one forger, one detective — whose adversarial competition produces strikingly realistic synthetic images, data augmentation, and creative AI outputs.</p>
+    <div class="meta-pills">
+      <span class="meta-pill">⏱ ~70 min</span>
+      <span class="meta-pill">🐍 Python + PyTorch</span>
+      <span class="meta-pill">🔬 Generative Models</span>
+      <span class="meta-pill">Requires Lesson 56</span>
+    </div>
+  </div>
+</header>
+
+<main class="lesson-main">
+<div class="content-wrapper">
+
+<!-- Objectives -->
+<div class="objectives-card">
+  <h2>🎯 What You'll Learn</h2>
+  <ul>
+    <li>Understand the GAN min-max objective and the Nash equilibrium goal</li>
+    <li>Write the GAN training loop: alternating Discriminator and Generator updates</li>
+    <li>Build a DCGAN (Deep Convolutional GAN) for image generation in PyTorch</li>
+    <li>Diagnose and address common GAN failure modes: mode collapse, vanishing gradients, non-convergence</li>
+    <li>Understand Conditional GAN (cGAN) for controlled generation</li>
+    <li>Understand Progressive GANs and StyleGAN for high-resolution synthesis</li>
+    <li>Evaluate GAN quality with FID (Fréchet Inception Distance)</li>
+  </ul>
+</div>
+
+<div class="callout callout-key">
+  <span class="callout-icon">💡</span>
+  <div class="callout-body">
+    <strong>The Big Intuition</strong>
+    <p>Imagine a forger trying to fake paintings, and an expert art detective trying to spot fakes. The forger gets better by studying what mistakes the detective catches. The detective gets better by studying more real and fake paintings. This adversarial competition drives BOTH to improve. When the forger is so good that the detective can no longer tell real from fake — the forger has succeeded. That's exactly how GANs work. The Generator creates fake data, the Discriminator tries to catch it, and their competition produces astonishingly realistic outputs.</p>
+  </div>
+</div>
+
+<!-- ── Section 1 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">1</span> The Generative Modelling Problem</h2>
+
+  <p>Most ML models we have studied are <strong>discriminative</strong>: they learn P(y|x) — given input x, predict label y. A cat/dog classifier, a spam filter, a sentiment analyser. These models draw decision boundaries in feature space but don't model what the data itself looks like.</p>
+
+  <p><strong>Generative models</strong> are different: they learn P(x) — the probability distribution over the data itself. Once you have a good generative model, you can <em>sample</em> new data points from it. For images, this means generating new images that look statistically identical to the training set. For molecules, this means generating new drug candidates. For text, this means generating coherent paragraphs.</p>
+
+  <h3>Why Generative Modelling Is Hard</h3>
+  <p>The space of natural images is astronomically large. A 64×64 RGB image has 64×64×3 = 12,288 pixel values, each 0–255. That is 256^12288 possible images — a number with nearly 30,000 digits. The vast majority of these are pure noise. Natural images occupy a tiny, complex, high-dimensional manifold within this space. Learning the distribution of this manifold — well enough to draw new samples from it — is one of the hardest problems in machine learning.</p>
+
+  <h3>Approaches to Generative Modelling</h3>
+  <table style="width:100%; border-collapse: collapse; margin: 1.25rem 0; font-size: 0.85rem;">
+    <thead>
+      <tr style="background: var(--bg-alt); text-align: left;">
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Approach</th>
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Key Idea</th>
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Strengths</th>
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Weaknesses</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">GAN</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Adversarial game</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Sharp images, fast sampling</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Mode collapse, unstable training</td>
+      </tr>
+      <tr style="background: var(--bg-subtle);">
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">VAE</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Encode to latent, decode back</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Stable, meaningful latent space</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Blurry outputs</td>
+      </tr>
+      <tr>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Diffusion</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Learn to denoise</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Best quality, mode coverage</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Slow sampling (many steps)</td>
+      </tr>
+      <tr style="background: var(--bg-subtle);">
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Flow Models</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Invertible transformations</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Exact likelihood, invertible</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Constrained architectures</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <p>This lesson focuses on GANs. While diffusion models have largely superseded them for image quality, GANs remain widely used for fast generation, data augmentation, and as a foundation for understanding adversarial training principles that appear throughout deep learning.</p>
+</div>
+
+<!-- ── Section 2 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">2</span> The GAN Framework: Min-Max Game</h2>
+
+  <p>A GAN consists of two neural networks trained in competition:</p>
+
+  <ul>
+    <li><strong>Generator G</strong>: Takes a random noise vector <em>z</em> sampled from a simple distribution (typically N(0,1)) and outputs a fake sample G(z). The generator never sees real data — it learns only from the discriminator's feedback.</li>
+    <li><strong>Discriminator D</strong>: Takes a sample (either real from the dataset or fake from G) and outputs a scalar probability of being real. D(x) ≈ 1 means "this looks real"; D(G(z)) ≈ 0 means "this is clearly fake".</li>
+  </ul>
+
+  <h3>The Objective Function</h3>
+  <p>The GAN training objective is a <strong>minimax game</strong>:</p>
+  <div style="background: var(--bg-alt); padding: 1rem 1.5rem; border-radius: 0.5rem; font-family: monospace; margin: 1rem 0; font-size: 0.9rem;">
+    min<sub>G</sub> max<sub>D</sub> &nbsp; E[log D(x)] + E[log(1 − D(G(z)))]
+  </div>
+
+  <p>Breaking this apart: <code>D</code> wants to <em>maximise</em> this expression — maximise <code>log D(x)</code> (correctly classifying real samples as real) and maximise <code>log(1 − D(G(z)))</code> (correctly classifying fake samples as fake). <code>G</code> wants to <em>minimise</em> the same expression — specifically, minimise <code>log(1 − D(G(z)))</code>, which means making <code>D(G(z)) → 1</code> (fooling D into thinking generated samples are real).</p>
+
+  <p>The theoretical <strong>Nash equilibrium</strong>: G generates samples from exactly the real data distribution (indistinguishable from real), and D outputs exactly 0.5 for every sample (it can't do better than random guessing). In practice, GANs rarely reach this perfect equilibrium — training is more of an iterative approximation.</p>
+
+  <div class="callout callout-tip">
+    <span class="callout-icon">💡</span>
+    <div class="callout-body">
+      <strong>Why G Doesn't Directly Minimise Cross-Entropy</strong>
+      <p>The theoretical G loss is <code>log(1 − D(G(z)))</code>. But in early training, D is good and D(G(z)) ≈ 0, making <code>log(1 − D(G(z))) ≈ log(1) = 0</code> — nearly constant with near-zero gradient. In practice, G is trained to <em>maximise</em> <code>log(D(G(z)))</code> instead (the "non-saturating" loss). These are theoretically equivalent at equilibrium but the non-saturating version provides stronger gradients early in training.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 3 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">3</span> Training a GAN Step by Step</h2>
+
+  <p>GAN training alternates between updating the Discriminator and the Generator. They are never updated simultaneously — each update is computed with the other network frozen.</p>
+
+  <h3>The Training Loop</h3>
+  <pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.optim as optim
+
+def train_gan_epoch(generator, discriminator, dataloader,
+                    opt_G, opt_D, latent_dim, device):
+    """
+    One epoch of GAN training.
+    Standard practice: update D once, then G once per batch.
+    """
+    criterion = nn.BCEWithLogitsLoss()  # numerically stable binary cross-entropy
+
+    for batch_idx, (real_imgs, _) in enumerate(dataloader):
+        batch_size = real_imgs.size(0)
+        real_imgs = real_imgs.to(device)
+
+        # Labels: real=1, fake=0 (smooth labels help stability)
+        real_labels = torch.ones(batch_size, 1, device=device)  * 0.9  # label smoothing
+        fake_labels = torch.zeros(batch_size, 1, device=device) + 0.1
+
+        # ─────────────────────────────────────
+        # STEP 1: Train Discriminator
+        # ─────────────────────────────────────
+        discriminator.zero_grad()
+
+        # Real images loss: D should output ~1 for real images
+        d_real = discriminator(real_imgs)
+        loss_real = criterion(d_real, real_labels)
+
+        # Fake images loss: D should output ~0 for generated images
+        z = torch.randn(batch_size, latent_dim, device=device)
+        fake_imgs = generator(z).detach()  # detach: don't backprop through G yet
+        d_fake = discriminator(fake_imgs)
+        loss_fake = criterion(d_fake, fake_labels)
+
+        loss_D = (loss_real + loss_fake) / 2
+        loss_D.backward()
+        opt_D.step()
+
+        # ─────────────────────────────────────
+        # STEP 2: Train Generator
+        # ─────────────────────────────────────
+        generator.zero_grad()
+
+        z = torch.randn(batch_size, latent_dim, device=device)
+        fake_imgs = generator(z)
+        d_fake_for_g = discriminator(fake_imgs)
+
+        # Generator wants D to output 1 for its fake images (fool D)
+        # Use real_labels here: G is trying to make D think fakes are real
+        loss_G = criterion(d_fake_for_g, torch.ones(batch_size, 1, device=device))
+        loss_G.backward()
+        opt_G.step()
+
+        if batch_idx % 100 == 0:
+            print(f"  Batch {batch_idx:04d}  |  D loss: {loss_D.item():.4f}  "
+                  f"G loss: {loss_G.item():.4f}  "
+                  f"D(real): {d_real.mean().item():.3f}  "
+                  f"D(fake): {d_fake.mean().item():.3f}")
+
+    return loss_D.item(), loss_G.item()</code></pre>
+
+  <div class="callout callout-key">
+    <span class="callout-icon">🔑</span>
+    <div class="callout-body">
+      <strong>Monitoring GAN Training</strong>
+      <p>The key diagnostic signals are D(real) and D(fake). Healthy training: D(real) ≈ 0.7–0.9 (D correctly identifies real images), D(fake) ≈ 0.1–0.4 (D partially fools, G is learning). Red flags: D(real) → 1.0 and D(fake) → 0.0 simultaneously (D is too powerful, G gets no gradient). D(real) ≈ D(fake) ≈ 0.5 already at epoch 1 (D is too weak, meaningless signal). G loss consistently increasing (mode collapse or training instability).</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 4 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">4</span> DCGAN: Deep Convolutional GAN</h2>
+
+  <p>The original GAN used fully connected layers for both G and D — fine for MNIST but terrible for natural images. DCGAN (Radford et al., 2015) established architectural guidelines for stable GAN training on images that remain influential today.</p>
+
+  <h3>DCGAN Design Rules</h3>
+  <ul>
+    <li>Replace pooling with strided convolutions (in D) and transposed convolutions (in G)</li>
+    <li>Use BatchNorm in both G and D (except G output layer and D input layer)</li>
+    <li>Use ReLU in G for all layers except the output (use Tanh)</li>
+    <li>Use LeakyReLU in D for all layers (slope 0.2)</li>
+    <li>No fully connected layers except at the input (G) and output (D)</li>
+  </ul>
+
+  <pre><code class="language-python">import torch
+import torch.nn as nn
+
+LATENT_DIM  = 100   # noise vector dimension
+IMAGE_SIZE  = 64    # 64x64 output images
+N_CHANNELS  = 3     # RGB
+N_FEATURES  = 64    # base channel count (multiplied per stage)
+
+
+class DCGANGenerator(nn.Module):
+    """
+    DCGAN Generator: noise vector (100,) → image (3, 64, 64)
+    Uses transposed convolutions to progressively upsample:
+    4x4 → 8x8 → 16x16 → 32x32 → 64x64
+    """
+    def __init__(self, latent_dim=LATENT_DIM, ngf=N_FEATURES):
+        super().__init__()
+        self.net = nn.Sequential(
+            # Input: (latent_dim,) → (ngf*8, 4, 4)
+            nn.ConvTranspose2d(latent_dim, ngf * 8, 4, 1, 0, bias=False),
+            nn.BatchNorm2d(ngf * 8),
+            nn.ReLU(True),
+            # (ngf*8, 4, 4) → (ngf*4, 8, 8)
+            nn.ConvTranspose2d(ngf * 8, ngf * 4, 4, 2, 1, bias=False),
+            nn.BatchNorm2d(ngf * 4),
+            nn.ReLU(True),
+            # (ngf*4, 8, 8) → (ngf*2, 16, 16)
+            nn.ConvTranspose2d(ngf * 4, ngf * 2, 4, 2, 1, bias=False),
+            nn.BatchNorm2d(ngf * 2),
+            nn.ReLU(True),
+            # (ngf*2, 16, 16) → (ngf, 32, 32)
+            nn.ConvTranspose2d(ngf * 2, ngf, 4, 2, 1, bias=False),
+            nn.BatchNorm2d(ngf),
+            nn.ReLU(True),
+            # (ngf, 32, 32) → (3, 64, 64)
+            nn.ConvTranspose2d(ngf, N_CHANNELS, 4, 2, 1, bias=False),
+            nn.Tanh(),  # output in [-1, 1] — normalise your real images the same way!
+        )
+
+    def forward(self, z):
+        # z: (batch, latent_dim, 1, 1)
+        if z.dim() == 2:
+            z = z.unsqueeze(-1).unsqueeze(-1)
+        return self.net(z)
+
+
+class DCGANDiscriminator(nn.Module):
+    """
+    DCGAN Discriminator: image (3, 64, 64) → scalar probability of being real
+    Uses strided convolutions to progressively downsample:
+    64x64 → 32x32 → 16x16 → 8x8 → 4x4 → 1x1
+    """
+    def __init__(self, ndf=N_FEATURES):
+        super().__init__()
+        self.net = nn.Sequential(
+            # Input: (3, 64, 64) → (ndf, 32, 32)
+            # No BatchNorm on first layer (per DCGAN paper)
+            nn.Conv2d(N_CHANNELS, ndf, 4, 2, 1, bias=False),
+            nn.LeakyReLU(0.2, inplace=True),
+            # (ndf, 32, 32) → (ndf*2, 16, 16)
+            nn.Conv2d(ndf, ndf * 2, 4, 2, 1, bias=False),
+            nn.BatchNorm2d(ndf * 2),
+            nn.LeakyReLU(0.2, inplace=True),
+            # (ndf*2, 16, 16) → (ndf*4, 8, 8)
+            nn.Conv2d(ndf * 2, ndf * 4, 4, 2, 1, bias=False),
+            nn.BatchNorm2d(ndf * 4),
+            nn.LeakyReLU(0.2, inplace=True),
+            # (ndf*4, 8, 8) → (ndf*8, 4, 4)
+            nn.Conv2d(ndf * 4, ndf * 8, 4, 2, 1, bias=False),
+            nn.BatchNorm2d(ndf * 8),
+            nn.LeakyReLU(0.2, inplace=True),
+            # (ndf*8, 4, 4) → (1, 1, 1)
+            # No Sigmoid here — use BCEWithLogitsLoss for numerical stability
+            nn.Conv2d(ndf * 8, 1, 4, 1, 0, bias=False),
+            nn.Flatten(),
+        )
+
+    def forward(self, x):
+        return self.net(x)
+
+
+# Instantiate and test
+G = DCGANGenerator(LATENT_DIM)
+D = DCGANDiscriminator()
+
+z = torch.randn(8, LATENT_DIM)
+fake_images = G(z)
+d_scores    = D(fake_images)
+
+print(f"Noise shape:       {z.shape}")
+print(f"Generated images:  {fake_images.shape}")
+print(f"D output shape:    {d_scores.shape}")
+print(f"G parameters:      {sum(p.numel() for p in G.parameters())/1e6:.2f}M")
+print(f"D parameters:      {sum(p.numel() for p in D.parameters())/1e6:.2f}M")</code></pre>
+
+  <div class="output-block">
+    <div class="output-label">Output</div>
+Noise shape:       torch.Size([8, 100])
+Generated images:  torch.Size([8, 3, 64, 64])
+D output shape:    torch.Size([8, 1])
+G parameters:      3.58M
+D parameters:      2.77M
+  </div>
+</div>
+
+<!-- ── Section 5 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">5</span> GAN Training Challenges and Solutions</h2>
+
+  <p>GAN training is notoriously difficult. Understanding the failure modes is as important as understanding the architecture — you'll encounter them in practice.</p>
+
+  <h3>Mode Collapse</h3>
+  <p>Mode collapse occurs when the Generator learns to produce only one or a few types of samples that reliably fool the Discriminator. Imagine training a GAN on MNIST digits (0–9). If G notices that generating "6" always fools D, it stops exploring other digits and produces only "6" variations — 100% of its output is the same class. This is mode collapse: the model captures one "mode" of the distribution and ignores the rest. The GAN technically wins its game (D can't distinguish this fake 6 from a real 6) but fails at the goal of learning the full data distribution.</p>
+
+  <h3>Vanishing Gradients for the Generator</h3>
+  <p>If the Discriminator becomes too accurate too quickly, D(G(z)) ≈ 0 for all generated samples. The gradient of the BCE loss <code>log(1 − D(G(z)))</code> with respect to G's parameters becomes vanishingly small near 0 — the Generator receives essentially no gradient signal. It cannot improve. This is why training G with the non-saturating loss <code>−log(D(G(z)))</code> helps: its gradient is large when D(G(z)) is small.</p>
+
+  <h3>Wasserstein GAN (WGAN)</h3>
+  <p>WGAN (Arjovsky et al., 2017) replaces the binary cross-entropy loss with the Wasserstein distance — a smoother, more meaningful measure of distribution distance. Instead of a probability (clamped to [0,1]), the Discriminator (now called the "Critic") outputs an unbounded real number. The Critic is not trained to classify real/fake but to maximise the difference between its scores for real and fake samples. WGAN-GP adds a gradient penalty instead of weight clipping, producing more stable training.</p>
+
+  <pre><code class="language-python">import torch
+import torch.nn as nn
+
+def gradient_penalty(critic, real_imgs, fake_imgs, device):
+    """WGAN-GP gradient penalty — enforces Lipschitz constraint on the critic."""
+    batch_size = real_imgs.size(0)
+
+    # Interpolate between real and fake
+    alpha = torch.rand(batch_size, 1, 1, 1, device=device)
+    interpolated = (alpha * real_imgs + (1 - alpha) * fake_imgs).requires_grad_(True)
+
+    # Critic score on interpolated samples
+    interp_score = critic(interpolated)
+
+    # Gradient of critic output with respect to interpolated input
+    grad = torch.autograd.grad(
+        outputs=interp_score,
+        inputs=interpolated,
+        grad_outputs=torch.ones_like(interp_score),
+        create_graph=True,
+        retain_graph=True,
+    )[0]
+
+    # Gradient norm — should be 1 for Lipschitz constraint
+    grad_norm = grad.view(batch_size, -1).norm(2, dim=1)
+    penalty   = ((grad_norm - 1) ** 2).mean()
+    return penalty
+
+
+def train_wgan_gp_step(generator, critic, real_imgs, opt_G, opt_C,
+                        latent_dim, lambda_gp=10, n_critic=5, device='cpu'):
+    """
+    WGAN-GP update step.
+    n_critic: number of critic updates per generator update (typically 5)
+    lambda_gp: weight of gradient penalty (typically 10)
+    """
+    batch_size = real_imgs.size(0)
+    real_imgs = real_imgs.to(device)
+
+    # ── Train Critic (n_critic times) ──
+    for _ in range(n_critic):
+        z = torch.randn(batch_size, latent_dim, device=device)
+        fake_imgs = generator(z).detach()
+
+        critic.zero_grad()
+
+        # WGAN loss: maximise E[C(real)] - E[C(fake)]
+        # (minimise its negative)
+        c_real = critic(real_imgs).mean()
+        c_fake = critic(fake_imgs).mean()
+        gp     = gradient_penalty(critic, real_imgs, fake_imgs, device)
+
+        loss_C = -(c_real - c_fake) + lambda_gp * gp
+        loss_C.backward()
+        opt_C.step()
+
+    # ── Train Generator (once) ──
+    generator.zero_grad()
+    z         = torch.randn(batch_size, latent_dim, device=device)
+    fake_imgs = generator(z)
+    loss_G    = -critic(fake_imgs).mean()   # maximise C(fake) → fool critic
+    loss_G.backward()
+    opt_G.step()
+
+    return loss_C.item(), loss_G.item()
+
+print("WGAN-GP: more stable training than standard GAN")
+print("Key change: critic outputs unconstrained real numbers, not probabilities")
+print("Gradient penalty: ensures the critic function is 1-Lipschitz")</code></pre>
+
+  <h3>Practical Stabilisation Tricks</h3>
+  <pre><code class="language-python"># Trick 1: Label Smoothing
+# Instead of real=1.0, use real=0.9 (one-sided label smoothing)
+# Prevents D from becoming over-confident, maintains gradient flow to G
+real_labels = torch.full((batch_size, 1), 0.9, device=device)  # not 1.0
+
+# Trick 2: Add Noise to D Inputs
+# Add small Gaussian noise to both real and fake images fed to D
+# Blurs the decision boundary slightly, preventing D from memorising
+noise_std = 0.05
+noisy_real = real_imgs + noise_std * torch.randn_like(real_imgs)
+noisy_fake = fake_imgs + noise_std * torch.randn_like(fake_imgs)
+
+# Trick 3: Spectral Normalisation on D
+# Normalise D's weight matrices by their spectral norm → bounds the Lipschitz constant
+# from torch.nn.utils import spectral_norm
+# self.conv1 = spectral_norm(nn.Conv2d(in_ch, out_ch, 3, padding=1))
+
+# Trick 4: Different Learning Rates
+# G typically: lr=2e-4, betas=(0.5, 0.999)
+# D typically: lr=2e-4, betas=(0.5, 0.999)  or slightly lower than G
+opt_G = torch.optim.Adam(None, lr=2e-4, betas=(0.5, 0.999))  # β1=0.5, not 0.9
+opt_D = torch.optim.Adam(None, lr=2e-4, betas=(0.5, 0.999))
+
+# Why beta1=0.5? Standard 0.9 makes Adam accumulate gradient history too aggressively
+# for GAN training — 0.5 is more responsive to recent gradient changes</code></pre>
+
+  <div class="callout callout-warn">
+    <span class="callout-icon">⚠️</span>
+    <div class="callout-body">
+      <strong>GAN Loss Curves Don't Look Like Regular Training Curves</strong>
+      <p>In standard supervised learning, loss decreases over time. In GAN training, the losses oscillate throughout training — this is normal and expected. A <em>decreasing</em> G loss isn't necessarily good (it might mean D is too weak). A <em>stable</em> G loss near log(2) ≈ 0.693 and D loss near 0 is actually a healthy sign that D correctly classifies real/fake most of the time. Use visual inspection of generated samples as your primary quality metric, not loss values.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 6 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">6</span> Conditional GAN (cGAN): Controlled Generation</h2>
+
+  <p>A vanilla GAN generates samples randomly — you have no control over which kind of sample is generated. A Conditional GAN (cGAN) gives you control by conditioning both the Generator and the Discriminator on a class label (or any other conditioning signal).</p>
+
+  <h3>How Conditioning Works</h3>
+  <p>For the Generator: the class label <em>y</em> is embedded to a vector and concatenated with the noise vector <em>z</em> before generation. For the Discriminator: the class label is embedded and concatenated with the image features. Now D must not only ask "is this real?" but "is this a real example of class y?"</p>
+
+  <pre><code class="language-python">import torch
+import torch.nn as nn
+
+
+class ConditionalGenerator(nn.Module):
+    """
+    cGAN Generator: (noise, label) → image
+    Conditions on class label via embedding concatenation.
+    """
+    def __init__(self, latent_dim=100, num_classes=10, img_size=28, channels=1):
+        super().__init__()
+        self.img_size  = img_size
+        self.channels  = channels
+
+        # Learnable label embedding (one vector per class)
+        self.label_emb = nn.Embedding(num_classes, num_classes)
+
+        self.net = nn.Sequential(
+            nn.Linear(latent_dim + num_classes, 256),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.BatchNorm1d(256),
+            nn.Linear(256, 512),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.BatchNorm1d(512),
+            nn.Linear(512, 1024),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.BatchNorm1d(1024),
+            nn.Linear(1024, channels * img_size * img_size),
+            nn.Tanh(),
+        )
+
+    def forward(self, z, labels):
+        # Embed the label and concatenate with noise
+        label_emb = self.label_emb(labels)   # (batch, num_classes)
+        gen_input = torch.cat([z, label_emb], dim=1)
+        img = self.net(gen_input)
+        return img.view(-1, self.channels, self.img_size, self.img_size)
+
+
+class ConditionalDiscriminator(nn.Module):
+    """
+    cGAN Discriminator: (image, label) → real/fake probability
+    """
+    def __init__(self, num_classes=10, img_size=28, channels=1):
+        super().__init__()
+        self.img_size  = img_size
+
+        self.label_emb = nn.Embedding(num_classes, num_classes)
+
+        self.net = nn.Sequential(
+            nn.Linear(channels * img_size * img_size + num_classes, 512),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Linear(512, 256),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Linear(256, 128),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Linear(128, 1),
+        )
+
+    def forward(self, img, labels):
+        flat_img  = img.view(img.size(0), -1)
+        label_emb = self.label_emb(labels)
+        d_input   = torch.cat([flat_img, label_emb], dim=1)
+        return self.net(d_input)
+
+
+# Test conditional generation
+cG = ConditionalGenerator(latent_dim=100, num_classes=10)
+cD = ConditionalDiscriminator(num_classes=10)
+
+z      = torch.randn(16, 100)
+labels = torch.randint(0, 10, (16,))   # which digit to generate
+
+fake_imgs = cG(z, labels)
+d_scores  = cD(fake_imgs, labels)
+
+print(f"Generated images shape:  {fake_imgs.shape}")    # (16, 1, 28, 28)
+print(f"Discriminator scores:    {d_scores.shape}")     # (16, 1)
+
+# Generate a specific digit on demand:
+z_digit7 = torch.randn(1, 100)
+label_7  = torch.tensor([7])
+generated_7 = cG(z_digit7, label_7)
+print(f"Generated digit 7 image shape: {generated_7.shape}")  # (1, 1, 28, 28)</code></pre>
+
+  <h3>Image-to-Image Translation: pix2pix</h3>
+  <p>cGANs can also condition on images instead of class labels, enabling image-to-image translation. Pix2pix (Isola et al., 2017) is a cGAN where the condition is an input image: sketch → realistic photo, aerial map → street map, day → night scene, black-and-white → colour. The Generator produces the translated image, and the Discriminator judges whether the translated image matches the conditioning image in a realistic way.</p>
+
+  <div class="callout callout-realworld">
+    <span class="callout-icon">🌍</span>
+    <div class="callout-body">
+      <strong>cGANs in Practice</strong>
+      <p>Adobe Photoshop's Content-Aware Fill uses a cGAN conditioned on the surrounding image context to fill in selected regions. NVIDIA's GauGAN (now Canvas) lets you draw a rough semantic map (blue = sky, green = grass, grey = rock) and a cGAN translates it into a photorealistic landscape. DALL·E's predecessor used a cGAN conditioned on text descriptions to generate images from text before diffusion models took over. Medical imaging synthesis: generate T2 MRI from T1 MRI to avoid the patient needing a second scan.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 7 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">7</span> Progressive Growing and StyleGAN</h2>
+
+  <p>Training a GAN directly on 1024×1024 images is extremely unstable. The discriminator easily distinguishes real from fake high-resolution images early in training, leaving the generator with vanishing gradients before it has learned anything useful.</p>
+
+  <h3>Progressive Growing of GANs (ProGAN)</h3>
+  <p>ProGAN (Karras et al., 2018) solves this with a curriculum: start training at 4×4 resolution, where both G and D are tiny and easy to train. Once stable, progressively add new convolutional layers to both G and D that double the resolution. At each transition, new layers are faded in gradually using a blending parameter α. By the time the model reaches 1024×1024, G and D have co-evolved through all intermediate scales and both are fully capable at the final resolution. ProGAN produced the most realistic synthetic faces seen at that time.</p>
+
+  <h3>StyleGAN: Style-Based Generator</h3>
+  <p>StyleGAN (Karras et al., 2019) introduced a fundamentally different Generator architecture. Instead of feeding noise directly to the first convolutional layer, it processes noise through a mapping network (8-layer MLP) to produce a style vector <em>w</em>. This style vector is then fed to each convolutional layer via learned affine transformations (AdaIN — Adaptive Instance Normalisation). Each layer of G responds to the style vector at a different level of detail: early layers control coarse features (head shape, pose), middle layers control medium features (hair, facial features), late layers control fine features (freckles, pore texture). StyleGAN2 fixed some aliasing artifacts. The website <a href="https://thispersondoesnotexist.com" target="_blank">thispersondoesnotexist.com</a> uses StyleGAN2.</p>
+
+  <pre><code class="language-python"># StyleGAN-style AdaIN (Adaptive Instance Normalisation) block
+# The key mechanism: style vector controls per-channel mean and variance
+import torch
+import torch.nn as nn
+
+class AdaIN(nn.Module):
+    """
+    Adaptive Instance Normalisation: applies style to feature maps.
+    Normalises feature map, then affine-transforms with style-derived params.
+    """
+    def __init__(self, n_channels, style_dim):
+        super().__init__()
+        self.norm  = nn.InstanceNorm2d(n_channels)
+        # Map style vector to per-channel scale (gamma) and shift (beta)
+        self.style_scale = nn.Linear(style_dim, n_channels)
+        self.style_bias  = nn.Linear(style_dim, n_channels)
+
+    def forward(self, x, style):
+        # x: (B, C, H, W); style: (B, style_dim)
+        x_norm = self.norm(x)
+
+        gamma = self.style_scale(style).view(-1, x.size(1), 1, 1)
+        beta  = self.style_bias(style).view(-1, x.size(1), 1, 1)
+
+        return gamma * x_norm + beta   # modulate the feature map with style
+
+
+# Demo
+adain = AdaIN(n_channels=64, style_dim=512)
+features = torch.randn(2, 64, 32, 32)
+style    = torch.randn(2, 512)
+out      = adain(features, style)
+print(f"AdaIN input:  {features.shape}")  # (2, 64, 32, 32)
+print(f"AdaIN output: {out.shape}")       # (2, 64, 32, 32) — same shape, different style</code></pre>
+
+  <div class="callout callout-key">
+    <span class="callout-icon">🔑</span>
+    <div class="callout-body">
+      <strong>Why StyleGAN's Latent Space Is So Useful</strong>
+      <p>StyleGAN separates the input noise from the style vector via the mapping network. The mapping network transforms the isotropic Gaussian noise into a "disentangled" latent space W, where different dimensions control different visual attributes. This means you can do arithmetic in W space: interpolate between two faces (smooth morphing), mix the fine style of one face with the coarse structure of another, or find directions in W that correspond to specific attributes (age, smile, hair colour). This disentanglement makes StyleGAN far more controllable than earlier generators.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 8 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">8</span> Evaluating GANs: FID Score</h2>
+
+  <p>Training loss is not a reliable indicator of GAN quality. We need quantitative metrics that correlate with human judgement of image quality and diversity.</p>
+
+  <h3>FID: Fréchet Inception Distance</h3>
+  <p>FID (Heusel et al., 2017) works as follows: (1) Extract feature vectors from a pre-trained Inception network for both the real training images and the generated images. (2) Fit a multivariate Gaussian to each set of feature vectors, estimating mean (μ) and covariance (Σ) for each. (3) Compute the Fréchet distance between the two Gaussians:</p>
+  <div style="background: var(--bg-alt); padding: 0.75rem 1rem; border-radius: 0.5rem; font-family: monospace; margin: 1rem 0; font-size: 0.88rem;">
+    FID = ||μ_real − μ_fake||² + Tr(Σ_real + Σ_fake − 2·(Σ_real·Σ_fake)^½)
+  </div>
+  <p>Lower FID is better. A perfect generator (identical to real distribution) would have FID = 0. A generator producing pure noise would have FID in the thousands.</p>
+
+  <pre><code class="language-python"># FID computation using torch-fidelity (pip install torch-fidelity)
+from torchvision.utils import save_image
+import torch_fidelity
+
+# Step 1: Save real images to a directory
+# Step 2: Generate and save fake images to another directory
+# Step 3: Compute FID
+
+# Example with generated images saved to 'fake_images/' and real to 'real_images/'
+# metrics = torch_fidelity.calculate_metrics(
+#     input1='real_images/',
+#     input2='fake_images/',
+#     cuda=True,
+#     isc=True,    # also compute Inception Score
+#     fid=True,    # compute FID
+#     verbose=True
+# )
+# print(f"FID: {metrics['frechet_inception_distance']:.2f}")
+# print(f"IS:  {metrics['inception_score_mean']:.2f}")
+
+# Reference FID values for comparison:
+reference_fids = {
+    "Random noise":          10000,
+    "Vanilla GAN (MNIST)":   25,
+    "DCGAN (CelebA 64x64)":  12,
+    "Progressive GAN (1024)": 8.0,
+    "StyleGAN2 (FFHQ 1024)":  2.8,
+    "StyleGAN3 (FFHQ)":       2.1,
+    "Real images (lower bound)": 0.0,
+}
+
+print(f"{'Model':<35} {'FID':>8}")
+print("-" * 45)
+for name, fid in reference_fids.items():
+    bar = '█' * max(1, int(50 * min(fid, 100) / 100))
+    print(f"{name:<35} {fid:>8.1f}  {bar}")</code></pre>
+
+  <div class="output-block">
+    <div class="output-label">Output</div>
+Model                               FID
+---------------------------------------------
+Random noise                       10000.0  ██
+DCGAN (CelebA 64x64)                  12.0  ██████
+Progressive GAN (1024)                 8.0  ████
+StyleGAN2 (FFHQ 1024)                  2.8  █
+StyleGAN3 (FFHQ)                       2.1  █
+Real images (lower bound)              0.0  █
+  </div>
+
+  <div class="callout callout-warn">
+    <span class="callout-icon">⚠️</span>
+    <div class="callout-body">
+      <strong>FID Limitations</strong>
+      <p>FID measures the similarity between real and fake <em>distributions</em> as a whole — it rewards diversity (covering all modes) AND quality (realistic individual samples). However, FID is sensitive to the number of samples used (always use ≥ 50,000), the specific Inception version, and preprocessing. Two models can have the same FID with different failure modes: one might produce perfectly diverse but blurry images; another might produce photorealistic but limited-diversity images. Always use FID alongside visual inspection and, if possible, a human preference study.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Real-World ── -->
+<div class="use-case-section">
+  <div class="use-case-header">
+    <span style="font-size:1.5rem">🌍</span>
+    <h2>Real-World Spotlight: GANs in Production and the Dark Side</h2>
+  </div>
+
+  <h3>Legitimate Applications</h3>
+
+  <p><strong>Face generation and synthetic data</strong>: NVIDIA's StyleGAN2 generates photorealistic faces of non-existent people. Companies like Generated.Photos sell synthetic faces for advertising where using real people's photos would require model releases. The privacy benefit: no real person can be identified from purely synthetic training data.</p>
+
+  <p><strong>Medical imaging augmentation</strong>: A hospital has 200 examples of a rare cancer type — far too few to train a robust classifier. They train a conditional GAN on these 200 examples plus 5,000 normal cases, then generate 10,000 synthetic rare cancer images. The augmented dataset (200 real + 10,000 GAN) trains a classifier with 15% higher sensitivity than without GAN augmentation. This is one of the most valuable medical AI applications and is actively used in clinical research.</p>
+
+  <p><strong>Super-resolution</strong>: SRGAN and ESRGAN upscale low-resolution images 4× with photorealistic texture detail. Streaming services use GAN-based super-resolution to deliver 4K apparent quality over 1080p bandwidth. Forensic image enhancement uses similar techniques.</p>
+
+  <pre><code class="language-python"># ESRGAN super-resolution with Real-ESRGAN (pip install realesrgan)
+# from realesrgan import RealESRGANer
+# from basicsr.archs.rrdbnet_arch import RRDBNet
+# import cv2
+
+# model = RRDBNet(num_in_ch=3, num_out_ch=3, scale=4)
+# upsampler = RealESRGANer(scale=4, model_path='RealESRGAN_x4.pth', model=model)
+
+# low_res = cv2.imread('low_res.jpg')
+# high_res, _ = upsampler.enhance(low_res, outscale=4)
+# cv2.imwrite('super_res.jpg', high_res)
+
+print("Real-ESRGAN: 4x upscaling with GAN-generated photorealistic texture")
+print("Input: 256x256 → Output: 1024x1024 with new detail")</code></pre>
+
+  <h3>The Dark Side: Deepfakes</h3>
+  <p>The same technology that generates non-existent faces can also generate realistic videos of real people saying things they never said. Deepfake detection is now an active research area: Deepfake Detection Challenge (DFDC), FaceForensics++, and commercial deepfake detection APIs (Microsoft, Reality Defender). Current best detectors achieve ~90% accuracy on known deepfake methods but struggle with novel techniques. The arms race between generation and detection quality is ongoing.</p>
+
+  <div class="callout callout-realworld">
+    <span class="callout-icon">🌍</span>
+    <div class="callout-body">
+      <strong>Drug Discovery with MolGAN</strong>
+      <p>MolGAN generates novel molecular graphs with desired properties (high binding affinity to a target protein, low toxicity, synthesisability). The GAN operates on graph representations — atoms as nodes, bonds as edges — rather than images. Trained on existing drug databases, it generates molecules in regions of chemical space not explored by existing drugs. Vertex Pharmaceuticals and Insilico Medicine have both reported GAN-discovered drug candidates entering clinical trials. This represents perhaps the most consequential application of GAN technology.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Quiz ── -->
+<div class="quiz-section">
+  <div id="quiz57"></div>
+</div>
+
+<!-- ── Practice ── -->
+<div class="practice-card">
+  <h2>✍️ Practice Exercises</h2>
+  <ol>
+    <li>Implement the full DCGAN training loop using the Generator and Discriminator from Section 4. Train on MNIST for 20 epochs. Save a grid of 64 generated images after each epoch using <code>torchvision.utils.save_image</code>. Verify that images look recognisable by epoch 10.</li>
+    <li>Add label smoothing (real=0.9, fake=0.1) and Gaussian noise injection (std=0.05, annealed to 0 over 50 epochs) to the DCGAN training loop. Compare the final FID to training without these tricks on a 5,000-sample subset of CelebA.</li>
+    <li>Implement the ConditionalGenerator from Section 6 and train it on MNIST. After training, generate 10 images conditioned on each digit (0–9) and display them in a 10×10 grid. Verify class conditioning: every row should show the same digit.</li>
+    <li>Implement WGAN-GP from Section 5. Train it on CIFAR-10 for 50 epochs. Plot the Wasserstein distance (difference between critic scores for real and fake) over training. Compare stability to standard GAN training on the same dataset.</li>
+  </ol>
+  <details>
+    <summary>▶ Show Solution (Exercise 1 — DCGAN Training Loop)</summary>
+    <pre><code class="language-python">import torch, torchvision
+import torch.nn as nn
+import torch.optim as optim
+import torchvision.transforms as transforms
+from torchvision.utils import save_image
+import os
+
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+# Data
+transform = transforms.Compose([
+    transforms.Resize(64),
+    transforms.CenterCrop(64),
+    transforms.ToTensor(),
+    transforms.Normalize([0.5], [0.5]),
+])
+dataset = torchvision.datasets.MNIST('.', download=True, transform=transform)
+dataloader = torch.utils.data.DataLoader(dataset, batch_size=128, shuffle=True)
+
+# Models (from Section 4, adjusted for 1-channel MNIST)
+G = DCGANGenerator(latent_dim=100, ngf=32).to(device)
+D = DCGANDiscriminator(ndf=32).to(device)
+# (adjust N_CHANNELS=1 in the class definitions for MNIST)
+
+opt_G = optim.Adam(G.parameters(), lr=2e-4, betas=(0.5, 0.999))
+opt_D = optim.Adam(D.parameters(), lr=2e-4, betas=(0.5, 0.999))
+criterion = nn.BCEWithLogitsLoss()
+
+fixed_z = torch.randn(64, 100, device=device)  # fixed noise for tracking progress
+os.makedirs('gan_samples', exist_ok=True)
+
+for epoch in range(20):
+    loss_D_total, loss_G_total, n_batches = 0, 0, 0
+
+    for real_imgs, _ in dataloader:
+        bs = real_imgs.size(0)
+        real_imgs = real_imgs.to(device)
+
+        # Train D
+        D.zero_grad()
+        z         = torch.randn(bs, 100, device=device)
+        fake_imgs = G(z).detach()
+        loss_D    = (criterion(D(real_imgs), torch.full((bs,1), 0.9, device=device)) +
+                     criterion(D(fake_imgs), torch.zeros(bs, 1, device=device))) / 2
+        loss_D.backward(); opt_D.step()
+
+        # Train G
+        G.zero_grad()
+        z         = torch.randn(bs, 100, device=device)
+        fake_imgs = G(z)
+        loss_G    = criterion(D(fake_imgs), torch.ones(bs, 1, device=device))
+        loss_G.backward(); opt_G.step()
+
+        loss_D_total += loss_D.item(); loss_G_total += loss_G.item(); n_batches += 1
+
+    with torch.no_grad():
+        samples = G(fixed_z)
+        save_image(samples, f'gan_samples/epoch_{epoch:02d}.png',
+                   nrow=8, normalize=True)
+    print(f"Epoch {epoch:02d}  D={loss_D_total/n_batches:.4f}  G={loss_G_total/n_batches:.4f}")</code></pre>
+  </details>
+</div>
+
+<!-- Navigation -->
+<nav class="lesson-nav">
+  <a href="./0056-object-detection-segmentation.html" class="nav-btn">← Lesson 56: Object Detection &amp; Segmentation</a>
+  <a href="./0058-diffusion-models.html" class="nav-btn nav-btn-next">Lesson 58: Diffusion Models →</a>
+</nav>
+
+</div><!-- /content-wrapper -->
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-core.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/plugins/autoloader/prism-autoloader.min.js"></script>
+<script src="../assets/quiz.js"></script>
+<script>
+new MLQuiz('quiz57', [
+  {
+    question: "In a GAN, what is 'mode collapse' and why is it a problem?",
+    options: [
+      "The Generator learns to produce only one or a few types of samples that reliably fool the Discriminator — losing diversity; the model fails to capture the full distribution of real data",
+      "The model's training collapses when the learning rate is too high, causing the loss to diverge to infinity",
+      "The Discriminator's gradient signal collapses to zero, preventing the Generator from receiving any useful learning signal",
+      "Both networks converge to the same weight values, making them produce identical outputs"
+    ],
+    correct: 0,
+    explanation: "Mode collapse is when G finds a shortcut: instead of learning the full data distribution (all 10 digit classes, all face variations), it exploits D's weakness by generating only the samples D consistently misclassifies as real. The diversity of outputs collapses to one or a few 'modes'. The GAN technically wins its minimax game but fails at the actual goal. Symptoms: all generated samples look nearly identical; the Generator loss drops while diversity plummets."
+  },
+  {
+    question: "Why does training the Discriminator too well in early training hurt the Generator's training?",
+    options: [
+      "If D is perfect, D(G(z)) ≈ 0 for all generated samples → the gradient of G's loss vanishes → G receives no useful gradient signal and can't improve",
+      "A perfect Discriminator will overfit to the training data, so its gradients don't generalise to the Generator's outputs",
+      "If D always outputs 0 for fake images, BCE loss becomes undefined and throws a NaN error",
+      "A too-powerful Discriminator forces the Generator to increase its learning rate, causing instability"
+    ],
+    correct: 0,
+    explanation: "When D is very accurate, it assigns near-zero probability to all generated samples. The saturating Generator loss log(1 − D(G(z))) approaches log(1) = 0 — constant regardless of what G produces. The gradient with respect to G's parameters is near zero everywhere. G is stuck. This is why the non-saturating loss −log(D(G(z))) is preferred in practice: its gradient is large when D(G(z)) is small (D is confident the sample is fake), providing strong signal for G to improve."
+  },
+  {
+    question: "How does a Conditional GAN (cGAN) differ from a vanilla GAN?",
+    options: [
+      "cGAN conditions both the Generator and Discriminator on a class label — allowing controlled generation (e.g., generate a specific digit class) rather than uncontrolled generation",
+      "cGAN uses a conditional probability distribution instead of the standard BCE loss for more stable training",
+      "cGAN trains D for multiple steps before each G step, making training conditional on D's performance",
+      "cGAN adds a classification head to D that must correctly predict the class of generated images"
+    ],
+    correct: 0,
+    explanation: "A vanilla GAN generates random samples from the data distribution with no control over what is generated. cGAN incorporates a class label y: G(z, y) generates a specific class, and D(x, y) judges whether sample x is a realistic example of class y. The label is embedded and concatenated with the inputs. This enables on-demand generation of specific classes, and extends naturally to image conditioning (pix2pix) where the condition is another image rather than a class label."
+  },
+  {
+    question: "What does FID (Fréchet Inception Distance) measure?",
+    options: [
+      "The similarity between the distribution of generated images and real images — comparing Inception-extracted feature distributions; lower FID means the generated images are more realistic and diverse",
+      "The average pixel-level distance between generated images and their nearest real image neighbours in the training set",
+      "The frequency of mode collapse events during GAN training, measured as inception score variance",
+      "The distance in loss space between the Generator and Discriminator objectives at the end of training"
+    ],
+    correct: 0,
+    explanation: "FID extracts feature vectors from a pre-trained Inception network for both real and generated images. It models each set as a multivariate Gaussian and measures the Fréchet (Wasserstein-2) distance between the two Gaussians. A good GAN should produce feature statistics that match the real data. FID rewards both quality (low intra-class variance, realistic features) and diversity (covers all modes). StyleGAN2 achieves FID ≈ 2.8 on face generation; a random noise generator achieves FID in the thousands."
+  },
+  {
+    question: "Label smoothing in GAN training changes real target labels from 1.0 to 0.9. Why does this help?",
+    options: [
+      "It prevents the Discriminator from becoming over-confident, keeping gradients flowing to the Generator — confidence 1.0 can cause vanishing gradients near saturation",
+      "It makes the Discriminator slightly worse, creating a harder adversarial signal that forces the Generator to learn more",
+      "Fractional labels between 0 and 1 make the BCE loss differentiable everywhere, improving numerical stability",
+      "Smoothing the labels prevents the Discriminator from memorising individual training images"
+    ],
+    correct: 0,
+    explanation: "When the Discriminator is trained with target=1.0 for real images, it pushes its output toward 1.0, where the BCE loss gradient approaches zero (saturates). The D becomes very confident, providing diminishing gradient signal to the Generator. Using 0.9 instead prevents this saturation, keeping the gradient magnitude in a useful range. This is 'one-sided label smoothing' — only smooth the real labels (not the fake labels), because smoothing fake labels can let D assign high probability to the fake distribution."
+  }
+]);
+</script>
+
+</body>
+</html>

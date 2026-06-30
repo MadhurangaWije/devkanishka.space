@@ -1,0 +1,782 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lesson 28: K-Means Clustering | ML Mastery</title>
+  <link rel="stylesheet" href="../assets/style.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
+</head>
+<body>
+
+<header class="lesson-header">
+  <div class="header-inner">
+    <nav class="breadcrumb">
+      <a href="../reference/curriculum-map.html">ML Mastery</a>
+      <span class="sep">›</span>
+      <span>Phase 3: Unsupervised Learning</span>
+    </nav>
+    <div class="lesson-badges">
+      <span class="phase-badge">Phase 3 · Unsupervised Learning</span>
+      <span class="lesson-num-badge">Lesson 28</span>
+    </div>
+    <h1 class="lesson-title">K-Means Clustering</h1>
+    <p class="lesson-subtitle">No labels needed — how to discover natural groupings in data, measure cluster quality, and choose the right number of clusters using the elbow method and silhouette analysis.</p>
+    <div class="meta-pills">
+      <span class="meta-pill">⏱ ~60 min</span>
+      <span class="meta-pill">🐍 scikit-learn</span>
+      <span class="meta-pill">🔵 Unsupervised Learning</span>
+      <span class="meta-pill">Requires Lessons 1–27</span>
+    </div>
+  </div>
+</header>
+
+<main class="lesson-main">
+<div class="content-wrapper">
+
+<div class="objectives-card">
+  <h2>🎯 What You'll Learn</h2>
+  <ul>
+    <li>Understand what clustering is and how it differs from supervised classification</li>
+    <li>Walk through the K-Means algorithm step by step: centroid initialisation, assignment, and update</li>
+    <li>Minimise the Within-Cluster Sum of Squares (WCSS/inertia) objective and understand why K alone doesn't minimise it</li>
+    <li>Choose the optimal K using the elbow method and silhouette score</li>
+    <li>Implement K-Means++ with scikit-learn and apply it to a real customer segmentation problem</li>
+  </ul>
+</div>
+
+<!-- ── Section 1 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">1</span> What Is Clustering?</h2>
+
+  <p>Every algorithm we've seen so far in Phases 1 and 2 — linear regression, decision trees, SVMs, gradient boosting — requires <strong>labelled training data</strong>. A human expert provided the answers (house prices, disease diagnoses, customer churn outcomes) and the algorithm learned to replicate them. This is <em>supervised</em> learning.</p>
+
+  <p><strong>Clustering is unsupervised</strong>: you have a dataset with no labels at all, and your goal is to discover the hidden structure — the natural groupings — that exist within the data itself. No one tells the algorithm what a "group" is; the algorithm infers it purely from patterns in the feature space.</p>
+
+  <p>Clustering appears everywhere in practice:</p>
+  <ul>
+    <li><strong>Customer segmentation</strong>: group customers by purchase behaviour to personalise marketing campaigns</li>
+    <li><strong>Document clustering</strong>: group news articles or research papers by topic automatically</li>
+    <li><strong>Image compression</strong>: replace each pixel's colour with the nearest cluster centroid, reducing colour palette size</li>
+    <li><strong>Gene expression analysis</strong>: find groups of genes with similar expression patterns across conditions</li>
+    <li><strong>Anomaly detection</strong>: points that belong to no cluster (or very small clusters) are likely anomalies</li>
+  </ul>
+
+  <div class="callout callout-key">
+    <span class="callout-icon">🔑</span>
+    <div class="callout-body">
+      <strong>Clustering vs Classification</strong>
+      <p>Classification predicts which pre-defined category a new point belongs to — the categories were defined by the labelling process. Clustering <em>discovers</em> the categories themselves from unlabelled data. The clusters have no names until a human inspects them and decides what they represent. This is both the power and the challenge of unsupervised learning.</p>
+    </div>
+  </div>
+
+  <pre><code class="language-python">import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.datasets import make_blobs
+
+# Simulate unlabelled data — three natural clusters
+X, _ = make_blobs(n_samples=300, centers=3, cluster_std=0.8, random_state=42)
+
+print(f"Dataset shape: {X.shape}")     # (300, 2)
+print(f"No labels — purely X")
+
+# Visualise the raw (unlabelled) data
+plt.figure(figsize=(7, 5))
+plt.scatter(X[:, 0], X[:, 1], alpha=0.6, color='steelblue', edgecolors='white', linewidth=0.3)
+plt.title("Unlabelled Data — Can You See the Groups?")
+plt.xlabel("Feature 1")
+plt.ylabel("Feature 2")
+plt.tight_layout()
+plt.savefig('raw_data.png', dpi=150)</code></pre>
+</div>
+
+<!-- ── Section 2 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">2</span> The K-Means Algorithm</h2>
+
+  <p>K-Means is the most widely used clustering algorithm. Given a dataset of <em>n</em> points and a chosen number of clusters <em>K</em>, it finds K "centroids" (cluster centres) such that each data point is assigned to its nearest centroid.</p>
+
+  <p>The algorithm is beautifully simple — just four repeating steps:</p>
+  <ol>
+    <li><strong>Choose K</strong>: Decide how many clusters you want. This is your only required input.</li>
+    <li><strong>Initialise centroids</strong>: Randomly place K centroid positions in the feature space (or use K-Means++, covered in Section 6).</li>
+    <li><strong>Assign each point to the nearest centroid</strong>: Compute the Euclidean distance from each data point to every centroid; assign the point to the centroid it is closest to.</li>
+    <li><strong>Update centroids</strong>: Move each centroid to the mean (average position) of all points currently assigned to it.</li>
+    <li><strong>Repeat steps 3–4</strong> until no point changes its cluster assignment (convergence).</li>
+  </ol>
+
+  <pre><code class="language-python">import numpy as np
+
+def euclidean_distance(a, b):
+    return np.sqrt(np.sum((a - b) ** 2))
+
+def kmeans_from_scratch(X, K, max_iters=100, random_state=42):
+    """Minimal K-Means implementation to illustrate the algorithm."""
+    np.random.seed(random_state)
+    n_samples, n_features = X.shape
+
+    # Step 2: randomly choose K data points as initial centroids
+    idx = np.random.choice(n_samples, K, replace=False)
+    centroids = X[idx].copy()
+
+    labels = np.zeros(n_samples, dtype=int)
+
+    for iteration in range(max_iters):
+        # Step 3: assign each point to nearest centroid
+        new_labels = np.array([
+            np.argmin([euclidean_distance(x, c) for c in centroids])
+            for x in X
+        ])
+
+        # Check convergence
+        if np.all(new_labels == labels):
+            print(f"Converged after {iteration} iterations")
+            break
+        labels = new_labels
+
+        # Step 4: update centroids to cluster mean
+        for k in range(K):
+            mask = labels == k
+            if mask.sum() > 0:
+                centroids[k] = X[mask].mean(axis=0)
+
+    return labels, centroids
+
+# Test on synthetic data
+from sklearn.datasets import make_blobs
+X, y_true = make_blobs(n_samples=300, centers=3, cluster_std=0.8, random_state=42)
+
+labels, centroids = kmeans_from_scratch(X, K=3)
+print(f"Cluster sizes: {np.bincount(labels)}")
+print(f"Centroids:\n{centroids.round(3)}")
+# Converged after 5 iterations
+# Cluster sizes: [100 100 100]  (approximately)</code></pre>
+
+  <div class="callout callout-tip">
+    <span class="callout-icon">💡</span>
+    <div class="callout-body">
+      <strong>Convergence Is Guaranteed — But Not to the Global Optimum</strong>
+      <p>K-Means always converges because WCSS (see Section 3) decreases or stays the same at every step and is bounded below by 0. However, it may converge to a <em>local</em> minimum — a suboptimal assignment that depends on the random initialisation. This is why sklearn runs K-Means multiple times with different seeds (<code>n_init=10</code>) and keeps the best result.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 3 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">3</span> The Objective Function: WCSS</h2>
+
+  <p>K-Means is not just a heuristic — it is formally minimising a mathematical objective called the <strong>Within-Cluster Sum of Squares (WCSS)</strong>, also called <em>inertia</em>:</p>
+
+  <p style="text-align:center; font-style:italic; margin: 1.25rem 0; font-size: 1.1rem;">WCSS = Σₖ Σₓ∈Cₖ ‖x − μₖ‖²</p>
+
+  <p>Where <em>Cₖ</em> is the set of points in cluster <em>k</em> and <em>μₖ</em> is the centroid (mean) of cluster <em>k</em>. In plain English: for every point in every cluster, compute the squared distance to its cluster's centroid, then sum them all up. Lower WCSS means tighter, more compact clusters — a better solution.</p>
+
+  <pre><code class="language-python">import numpy as np
+from sklearn.cluster import KMeans
+from sklearn.datasets import make_blobs
+
+X, _ = make_blobs(n_samples=300, centers=3, cluster_std=0.8, random_state=42)
+
+# Fit K-Means with K=3
+model = KMeans(n_clusters=3, init='k-means++', n_init=10, random_state=42)
+model.fit(X)
+
+print(f"Cluster labels (first 10): {model.labels_[:10]}")
+print(f"Cluster centroids:\n{model.cluster_centers_.round(3)}")
+print(f"WCSS (inertia): {model.inertia_:.2f}")
+
+# Manually verify inertia
+wcss = 0
+for k in range(3):
+    mask = model.labels_ == k
+    cluster_points = X[mask]
+    centroid = model.cluster_centers_[k]
+    wcss += np.sum((cluster_points - centroid) ** 2)
+print(f"Manual WCSS:    {wcss:.2f}")   # should match model.inertia_
+
+# WCSS decreases as K increases — always!
+print("\nWCSS vs K:")
+for k in range(1, 8):
+    km = KMeans(n_clusters=k, n_init=10, random_state=42)
+    km.fit(X)
+    print(f"  K={k}: WCSS={km.inertia_:.1f}")</code></pre>
+
+  <div class="callout callout-warn">
+    <span class="callout-icon">⚠️</span>
+    <div class="callout-body">
+      <strong>WCSS Always Decreases With More Clusters</strong>
+      <p>K=n (one cluster per point) gives WCSS=0 — perfect, but useless. You cannot choose K simply by minimising WCSS. You need an external criterion — the elbow method or silhouette score — to find a <em>meaningful</em> K that balances compactness with simplicity.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 4 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">4</span> Choosing K: The Elbow Method</h2>
+
+  <p>The elbow method is the most intuitive approach for choosing K. The idea: plot WCSS against K for a range of values (say 1 to 15). As K increases, WCSS drops steeply at first — each new cluster genuinely helps. Once K exceeds the true number of clusters, adding more clusters gives diminishing returns. The plot "elbows" at the optimal K.</p>
+
+  <pre><code class="language-python">import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.cluster import KMeans
+from sklearn.datasets import make_blobs
+
+# Dataset with 4 natural clusters
+X, _ = make_blobs(n_samples=400, centers=4, cluster_std=0.9, random_state=42)
+
+# Compute WCSS for K = 1 to 15
+wcss_values = []
+K_range = range(1, 16)
+
+for k in K_range:
+    km = KMeans(n_clusters=k, init='k-means++', n_init=10, random_state=42)
+    km.fit(X)
+    wcss_values.append(km.inertia_)
+    print(f"K={k:2d}: WCSS={km.inertia_:8.1f}")
+
+# Plot the elbow curve
+plt.figure(figsize=(9, 5))
+plt.plot(K_range, wcss_values, 'bo-', markersize=8, linewidth=2)
+plt.axvline(x=4, color='red', linestyle='--', alpha=0.7, label='True K=4')
+plt.xlabel('Number of Clusters (K)', fontsize=12)
+plt.ylabel('WCSS (Inertia)', fontsize=12)
+plt.title('Elbow Method — Choosing Optimal K', fontsize=14)
+plt.xticks(K_range)
+plt.legend()
+plt.grid(alpha=0.3)
+plt.tight_layout()
+plt.savefig('elbow_method.png', dpi=150)
+
+# The "elbow" at K=4 — biggest rate of change drops off after K=4
+wcss_array = np.array(wcss_values)
+second_derivative = np.diff(np.diff(wcss_array))
+elbow_k = np.argmax(second_derivative) + 2   # +2 for offset
+print(f"\nElbow detected at K = {elbow_k}")</code></pre>
+
+  <div class="callout callout-tip">
+    <span class="callout-icon">💡</span>
+    <div class="callout-body">
+      <strong>When the Elbow Is Ambiguous</strong>
+      <p>Real-world data rarely has a sharp elbow. If the elbow plot looks like a smooth curve, use silhouette score (Section 5) as a second opinion. In practice, try 2–3 candidate K values from the elbow region, run silhouette analysis on each, and pick the one with the highest average silhouette score.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 5 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">5</span> Choosing K: Silhouette Score</h2>
+
+  <p>The silhouette score is a more principled metric that measures how well each point fits its assigned cluster compared to the next-best cluster. For a single point <em>i</em>:</p>
+  <ul>
+    <li><strong>a(i)</strong> = mean distance from point <em>i</em> to all other points in the same cluster (intra-cluster cohesion)</li>
+    <li><strong>b(i)</strong> = mean distance from point <em>i</em> to all points in the nearest different cluster (inter-cluster separation)</li>
+    <li><strong>s(i)</strong> = (b(i) − a(i)) / max(a(i), b(i))</li>
+  </ul>
+  <p>Silhouette scores range from <strong>-1 to +1</strong>: +1 means the point is perfectly placed in its cluster; 0 means it's on the boundary; -1 means it's likely in the wrong cluster. The overall silhouette score is the average over all points.</p>
+
+  <pre><code class="language-python">import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.cluster import KMeans
+from sklearn.metrics import silhouette_score, silhouette_samples
+from sklearn.datasets import make_blobs
+
+X, _ = make_blobs(n_samples=400, centers=4, cluster_std=0.9, random_state=42)
+
+# Silhouette score for K = 2 to 10
+print(f"{'K':>4}  {'Silhouette Score':>18}  {'WCSS':>12}")
+print("-" * 40)
+silhouette_scores = []
+
+for k in range(2, 11):
+    km = KMeans(n_clusters=k, init='k-means++', n_init=10, random_state=42)
+    labels = km.fit_predict(X)
+    sil_score = silhouette_score(X, labels)
+    silhouette_scores.append(sil_score)
+    print(f"K={k:2d}  {sil_score:>18.4f}  {km.inertia_:>12.1f}")
+
+# K=4 should show the highest silhouette score
+best_k = np.argmax(silhouette_scores) + 2
+print(f"\nBest K by silhouette: {best_k}")
+
+# Plot silhouette scores
+plt.figure(figsize=(9, 5))
+plt.plot(range(2, 11), silhouette_scores, 'go-', markersize=8, linewidth=2)
+plt.axvline(x=best_k, color='red', linestyle='--', alpha=0.7, label=f'Best K={best_k}')
+plt.xlabel('Number of Clusters (K)', fontsize=12)
+plt.ylabel('Average Silhouette Score', fontsize=12)
+plt.title('Silhouette Analysis for Choosing K', fontsize=14)
+plt.xticks(range(2, 11))
+plt.legend()
+plt.grid(alpha=0.3)
+plt.tight_layout()
+plt.savefig('silhouette_scores.png', dpi=150)
+
+# Per-sample silhouette values to diagnose cluster quality
+km_best = KMeans(n_clusters=best_k, init='k-means++', n_init=10, random_state=42)
+labels_best = km_best.fit_predict(X)
+sample_silhouette = silhouette_samples(X, labels_best)
+for k in range(best_k):
+    cluster_sil = sample_silhouette[labels_best == k]
+    print(f"Cluster {k}: mean silhouette = {cluster_sil.mean():.4f}, "
+          f"n_points = {(labels_best == k).sum()}")</code></pre>
+</div>
+
+<!-- ── Section 6 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">6</span> K-Means++ Initialisation</h2>
+
+  <p>Standard K-Means chooses initial centroids uniformly at random from the data points. This can lead to poor local minima — for example, if two initial centroids land in the same natural cluster, the algorithm may never recover the true structure.</p>
+
+  <p><strong>K-Means++</strong> (Arthur &amp; Vassilvitskii, 2007) uses a smarter initialisation: each new centroid is chosen with probability proportional to its squared distance from the nearest already-chosen centroid. Points far from existing centroids are more likely to be chosen. This spreads the initial centroids across the data, dramatically reducing the chance of bad local minima.</p>
+
+  <pre><code class="language-python">import numpy as np
+import time
+from sklearn.cluster import KMeans
+from sklearn.datasets import make_blobs
+
+# Difficult dataset: many clusters, some tight, some loose
+X, _ = make_blobs(n_samples=2000, centers=8, cluster_std=1.2, random_state=42)
+
+results = []
+for init_method in ['random', 'k-means++']:
+    wcss_list = []
+    times = []
+    for seed in range(20):
+        t0 = time.time()
+        km = KMeans(
+            n_clusters=8,
+            init=init_method,
+            n_init=1,          # single init to measure variance
+            max_iter=300,
+            random_state=seed
+        )
+        km.fit(X)
+        wcss_list.append(km.inertia_)
+        times.append(time.time() - t0)
+    results.append({
+        'init': init_method,
+        'mean_wcss': np.mean(wcss_list),
+        'std_wcss': np.std(wcss_list),
+        'min_wcss': np.min(wcss_list),
+        'mean_time': np.mean(times)
+    })
+    print(f"\n{init_method}:")
+    print(f"  Mean WCSS: {np.mean(wcss_list):.1f} ± {np.std(wcss_list):.1f}")
+    print(f"  Best WCSS: {np.min(wcss_list):.1f}")
+    print(f"  Worst WCSS: {np.max(wcss_list):.1f}")
+
+# K-Means++ production usage (recommended defaults)
+km_best = KMeans(
+    n_clusters=8,
+    init='k-means++',    # smarter initialisation (default in sklearn)
+    n_init=10,           # run 10 times, keep best result
+    max_iter=300,        # maximum iterations per run
+    tol=1e-4,            # convergence tolerance
+    random_state=42
+)
+km_best.fit(X)
+print(f"\nProduction KMeans++ (n_init=10): WCSS = {km_best.inertia_:.1f}")</code></pre>
+
+  <div class="callout callout-key">
+    <span class="callout-icon">🔑</span>
+    <div class="callout-body">
+      <strong>K-Means++ Is the Default in Scikit-learn</strong>
+      <p>Since sklearn 0.24, <code>init='k-means++'</code> is the default. Unless you have a specific reason to use random initialisation, always keep this default. The theoretical guarantee of K-Means++ is that its expected WCSS is at most O(log K) times the optimal WCSS — much better than random.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 7 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">7</span> Full Implementation with Scikit-learn</h2>
+
+  <p>Here is a complete, production-quality K-Means workflow: preprocessing, fitting, evaluating, and visualising clusters.</p>
+
+  <pre><code class="language-python">import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.cluster import KMeans
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import silhouette_score
+from sklearn.datasets import make_blobs
+
+# ── Step 1: Prepare data ──
+X, y_true = make_blobs(n_samples=500, centers=4, cluster_std=0.8, random_state=42)
+
+# Step 2: Scale features (CRITICAL — K-Means uses Euclidean distance)
+scaler = StandardScaler()
+X_scaled = scaler.fit_transform(X)
+
+# ── Step 3: Fit K-Means ──
+km = KMeans(
+    n_clusters=4,
+    init='k-means++',
+    n_init=10,
+    random_state=42
+)
+km.fit(X_scaled)
+
+# ── Step 4: Inspect results ──
+print("=== K-Means Results ===")
+print(f"Labels (first 10):  {km.labels_[:10]}")
+print(f"Inertia (WCSS):     {km.inertia_:.4f}")
+print(f"Iterations to conv: {km.n_iter_}")
+print(f"Cluster sizes:      {np.bincount(km.labels_)}")
+print(f"Silhouette score:   {silhouette_score(X_scaled, km.labels_):.4f}")
+
+# ── Step 5: Centroids in original feature space ──
+centroids_original = scaler.inverse_transform(km.cluster_centers_)
+print(f"\nCentroids (original scale):\n{centroids_original.round(3)}")
+
+# ── Step 6: Predict cluster for new data ──
+X_new = np.array([[0.5, 1.2], [-3.1, 2.8]])
+X_new_scaled = scaler.transform(X_new)
+new_labels = km.predict(X_new_scaled)
+print(f"\nNew point clusters: {new_labels}")
+
+# ── Step 7: Visualise ──
+fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+colors = ['#e41a1c', '#377eb8', '#4daf4a', '#984ea3']
+
+# True clusters
+for k in range(4):
+    mask = y_true == k
+    axes[0].scatter(X[mask, 0], X[mask, 1], c=colors[k], alpha=0.6, label=f'True {k}')
+axes[0].set_title('True Clusters (for reference)')
+axes[0].legend()
+
+# K-Means clusters
+for k in range(4):
+    mask = km.labels_ == k
+    axes[1].scatter(X_scaled[mask, 0], X_scaled[mask, 1], c=colors[k], alpha=0.6, label=f'Cluster {k}')
+axes[1].scatter(km.cluster_centers_[:, 0], km.cluster_centers_[:, 1],
+                c='black', marker='X', s=200, zorder=5, label='Centroids')
+axes[1].set_title('K-Means Clusters (scaled space)')
+axes[1].legend()
+plt.tight_layout()
+plt.savefig('kmeans_result.png', dpi=150)</code></pre>
+</div>
+
+<!-- ── Section 8 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">8</span> Limitations of K-Means</h2>
+
+  <p>K-Means works beautifully on globular, well-separated clusters of similar size. It struggles — and fails badly — in several common real-world situations:</p>
+
+  <table style="width:100%; border-collapse: collapse; margin: 1.25rem 0; font-size: 0.88rem;">
+    <thead>
+      <tr style="background: var(--bg-alt); text-align: left;">
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Limitation</th>
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Why it fails</th>
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Solution</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Non-convex shapes (crescents, rings)</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Assigns by Euclidean distance to centroid — can't follow curved manifolds</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">DBSCAN (Lesson 29)</td>
+      </tr>
+      <tr style="background: var(--bg-subtle);">
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Different cluster sizes</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Centroid-based assignment favours equal-sized clusters</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Gaussian Mixture Models</td>
+      </tr>
+      <tr>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Different cluster densities</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Dense small cluster may be split to balance another large cluster</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">DBSCAN, HDBSCAN</td>
+      </tr>
+      <tr style="background: var(--bg-subtle);">
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Unscaled features</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Large-scale features dominate Euclidean distance</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Always use StandardScaler first</td>
+      </tr>
+      <tr>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Outliers</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Outliers get absorbed into clusters and pull centroids away from true centres</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Remove outliers first; or use K-Medoids</td>
+      </tr>
+      <tr style="background: var(--bg-subtle);">
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">K must be specified</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">No automatic K discovery</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">DBSCAN, HDBSCAN (no K needed)</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <pre><code class="language-python">import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.cluster import KMeans
+from sklearn.datasets import make_moons, make_circles
+
+fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+
+datasets = [
+    ('Moons (non-convex)', make_moons(n_samples=300, noise=0.05, random_state=42)[0]),
+    ('Circles (concentric)', make_circles(n_samples=300, noise=0.05, factor=0.5, random_state=42)[0]),
+]
+
+for row, (name, X_fail) in enumerate(datasets):
+    # K-Means result
+    km = KMeans(n_clusters=2, n_init=10, random_state=42)
+    labels = km.fit_predict(X_fail)
+    colors = ['#e41a1c' if l == 0 else '#377eb8' for l in labels]
+
+    axes[row, 0].scatter(X_fail[:, 0], X_fail[:, 1], c=colors, alpha=0.7)
+    axes[row, 0].scatter(km.cluster_centers_[:, 0], km.cluster_centers_[:, 1],
+                         c='black', marker='X', s=200, zorder=5)
+    axes[row, 0].set_title(f'K-Means on {name} — FAILS')
+
+    # Show what K-Means "should" find
+    # (correct assignment using true labels for illustration)
+    from sklearn.datasets import make_moons, make_circles
+    if row == 0:
+        _, y_true = make_moons(n_samples=300, noise=0.05, random_state=42)
+    else:
+        _, y_true = make_circles(n_samples=300, noise=0.05, factor=0.5, random_state=42)
+    colors_true = ['#e41a1c' if l == 0 else '#377eb8' for l in y_true]
+    axes[row, 1].scatter(X_fail[:, 0], X_fail[:, 1], c=colors_true, alpha=0.7)
+    axes[row, 1].set_title(f'True Structure — what we want')
+
+plt.suptitle("K-Means Fails on Non-Convex Shapes → Use DBSCAN Instead", fontsize=13)
+plt.tight_layout()
+plt.savefig('kmeans_limitations.png', dpi=150)</code></pre>
+</div>
+
+<!-- ── Real-World Spotlight ── -->
+<div class="use-case-section">
+  <div class="use-case-header">
+    <span style="font-size:1.5rem">🌍</span>
+    <h2>Real-World Spotlight: Customer Segmentation with RFM Analysis</h2>
+  </div>
+  <p>One of the most impactful applications of K-Means in business is customer segmentation using <strong>RFM analysis</strong>: <strong>Recency</strong> (days since last purchase), <strong>Frequency</strong> (number of purchases in a period), and <strong>Monetary</strong> value (total spend). These three features capture a customer's engagement and value in a compact, interpretable way.</p>
+  <pre><code class="language-python">import numpy as np
+import pandas as pd
+from sklearn.cluster import KMeans
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import silhouette_score
+import matplotlib.pyplot as plt
+
+np.random.seed(42)
+n = 2000
+
+# Simulate RFM data for 2000 customers
+df = pd.DataFrame({
+    'customer_id': range(n),
+    'recency':    np.concatenate([
+        np.random.randint(1,  15, 500),   # Champions: bought very recently
+        np.random.randint(60, 120, 500),  # At Risk: haven't bought in a while
+        np.random.randint(1,  30, 500),   # New: just joined
+        np.random.randint(120, 365, 500), # Hibernating: not seen in months
+    ]),
+    'frequency':  np.concatenate([
+        np.random.randint(20, 50, 500),   # Champions: buy often
+        np.random.randint(5,  15, 500),   # At Risk: used to buy often
+        np.random.randint(1,   5, 500),   # New: few purchases
+        np.random.randint(1,   5, 500),   # Hibernating: rarely bought
+    ]),
+    'monetary':   np.concatenate([
+        np.random.uniform(500, 2000, 500),  # Champions: high spenders
+        np.random.uniform(200, 800,  500),  # At Risk: medium
+        np.random.uniform(50,  300,  500),  # New: low (just starting)
+        np.random.uniform(10,  200,  500),  # Hibernating: low
+    ]).round(2)
+})
+
+print("RFM Dataset:")
+print(df[['recency', 'frequency', 'monetary']].describe().round(2))
+
+# ── Scale features ──
+features = ['recency', 'frequency', 'monetary']
+scaler = StandardScaler()
+X_rfm = scaler.fit_transform(df[features])
+
+# ── Choose K with elbow + silhouette ──
+wcss, sil_scores = [], []
+K_range = range(2, 9)
+for k in K_range:
+    km = KMeans(n_clusters=k, init='k-means++', n_init=10, random_state=42)
+    labels = km.fit_predict(X_rfm)
+    wcss.append(km.inertia_)
+    sil_scores.append(silhouette_score(X_rfm, labels))
+
+print("\nK  WCSS      Silhouette")
+for k, w, s in zip(K_range, wcss, sil_scores):
+    marker = " ← best" if s == max(sil_scores) else ""
+    print(f"K={k}: {w:8.1f}  {s:.4f}{marker}")
+
+# ── Fit optimal K=4 ──
+km_final = KMeans(n_clusters=4, init='k-means++', n_init=10, random_state=42)
+df['segment'] = km_final.fit_predict(X_rfm)
+
+# ── Interpret segments by computing cluster means ──
+segment_profiles = df.groupby('segment')[features].mean().round(1)
+segment_profiles['count'] = df.groupby('segment').size()
+print("\nSegment Profiles (original scale):")
+print(segment_profiles.sort_values('recency'))
+
+# ── Name the segments ──
+# Low recency + high frequency + high monetary → Champions
+# High recency + medium everything → At Risk
+# Low recency + low frequency → New Customers
+# Very high recency + low everything → Hibernating
+segment_names = {
+    segment_profiles['recency'].idxmin(): 'Champions',
+    segment_profiles['monetary'].idxmax(): 'High Value',
+    segment_profiles['recency'].idxmax(): 'Hibernating',
+}
+# Fill remaining
+for s in range(4):
+    if s not in segment_names:
+        segment_names[s] = 'New / Growing'
+
+df['segment_name'] = df['segment'].map(segment_names)
+print("\nSegment distribution:")
+print(df['segment_name'].value_counts())
+
+# ── Visualise: Recency vs Monetary, colored by segment ──
+colors = {'Champions': '#2ecc71', 'High Value': '#3498db',
+          'New / Growing': '#f39c12', 'Hibernating': '#e74c3c'}
+plt.figure(figsize=(9, 6))
+for seg, grp in df.groupby('segment_name'):
+    plt.scatter(grp['recency'], grp['monetary'], label=seg,
+                alpha=0.4, c=colors.get(seg, 'gray'), s=20)
+plt.xlabel('Recency (days since last purchase)')
+plt.ylabel('Monetary Value ($)')
+plt.title('Customer Segments — RFM K-Means (K=4)')
+plt.legend()
+plt.tight_layout()
+plt.savefig('rfm_segments.png', dpi=150)
+
+# ── Business actions per segment ──
+actions = {
+    'Champions':     'Reward with loyalty programme; ask for reviews',
+    'High Value':    'Upsell premium products; priority support',
+    'New / Growing': 'Onboarding emails; first-purchase incentives',
+    'Hibernating':   'Win-back campaign: "We miss you" 30% discount'
+}
+print("\nMarketing Actions:")
+for seg, action in actions.items():
+    print(f"  {seg}: {action}")</code></pre>
+  <p>This pipeline transforms raw transaction logs into actionable customer intelligence. The "Champions" segment typically represents 15–20% of customers but 50–60% of revenue — making it critical to retain them. The "Hibernating" segment is the prime win-back opportunity. Without clustering, these segments would require manual rule-creation by a business analyst; K-Means discovers them automatically from the data.</p>
+</div>
+
+<!-- ── Quiz ── -->
+<div class="quiz-section">
+  <div id="lesson-28-quiz"></div>
+</div>
+
+<!-- ── Practice ── -->
+<div class="practice-card">
+  <h2>✍️ Practice Exercises</h2>
+  <ol>
+    <li>Load the Iris dataset (4 features, 3 known classes). Apply K-Means with K=3 after scaling. Compare cluster assignments to the true species labels using <code>adjusted_rand_score</code> from <code>sklearn.metrics</code>. How well did K-Means recover the true structure?</li>
+    <li>Run the elbow method on the Iris dataset (K=1 to 10). Does the elbow clearly indicate K=3? Then run silhouette analysis — does it agree?</li>
+    <li>Use <code>make_moons(n_samples=300, noise=0.05)</code> to create a crescent dataset. Apply K-Means with K=2 and visualise the result. Explain in one paragraph why K-Means fails here.</li>
+    <li>Implement mini-batch K-Means using <code>sklearn.cluster.MiniBatchKMeans</code> on a dataset of 100,000 points. Compare WCSS and runtime against standard <code>KMeans</code>. What trade-off are you making?</li>
+  </ol>
+
+  <details>
+    <summary>▶ Hints</summary>
+    <pre><code class="language-python">from sklearn.datasets import load_iris
+from sklearn.cluster import KMeans
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import adjusted_rand_score, silhouette_score
+
+iris = load_iris()
+X_iris = StandardScaler().fit_transform(iris.data)
+
+km = KMeans(n_clusters=3, init='k-means++', n_init=10, random_state=42)
+labels = km.fit_predict(X_iris)
+print(f"ARI: {adjusted_rand_score(iris.target, labels):.4f}")
+# ARI close to 1.0 = perfect recovery; 0 = random; negative = worse than random</code></pre>
+  </details>
+</div>
+
+<!-- ── Primary Source ── -->
+<div class="primary-source">
+  <h2>📚 Primary Source for This Lesson</h2>
+  <p><a href="https://scikit-learn.org/stable/modules/clustering.html#k-means" target="_blank"><strong>scikit-learn: K-Means Clustering</strong></a><br>
+  The official guide covers the algorithm, initialisation methods, mini-batch variant, and complexity analysis. For the K-Means++ initialisation paper, see Arthur &amp; Vassilvitskii (2007) "k-means++: The Advantages of Careful Seeding" (SODA 2007). For silhouette analysis, see Rousseeuw (1987) "Silhouettes: A graphical aid to the interpretation and validation of cluster analysis."</p>
+</div>
+
+<!-- ── Ask Tutor ── -->
+<div class="ask-tutor">
+  <span class="icon">💬</span>
+  <span>Getting very different clusters each run? Unsure why you need to scale? Confused by silhouette values? Paste your code and describe what you expected — your AI tutor can walk through the algorithm and explain exactly what's happening with your data.</span>
+</div>
+
+<!-- ── Navigation ── -->
+<nav class="lesson-nav">
+  <a href="./0027-hyperparameter-tuning.html" class="nav-btn">← Lesson 27: Hyperparameter Tuning</a>
+  <a href="./0029-hierarchical-dbscan-clustering.html" class="nav-btn nav-btn-next">Lesson 29: Hierarchical &amp; DBSCAN Clustering →</a>
+</nav>
+
+</div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-core.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/plugins/autoloader/prism-autoloader.min.js"></script>
+<script src="../assets/quiz.js"></script>
+<script>
+new MLQuiz('lesson-28-quiz', [
+  {
+    question: "What does K-Means minimise during training?",
+    options: [
+      "Within-Cluster Sum of Squares (WCSS / inertia) — the total squared distance from each point to its assigned centroid",
+      "The total Euclidean distance between all pairs of centroids",
+      "The number of iterations required for convergence",
+      "The entropy of the cluster assignment distribution"
+    ],
+    correct: 0,
+    explanation: "K-Means minimises WCSS (also called inertia in sklearn): for every point, compute its squared distance to its assigned centroid, then sum across all points and all clusters. This is why tighter, more compact clusters give lower inertia. Access it via model.inertia_ after fitting."
+  },
+  {
+    question: "Why does the elbow method work for choosing K?",
+    options: [
+      "Adding more clusters beyond the true K gives diminishing returns in WCSS reduction — the curve 'elbows' at the optimal K",
+      "WCSS stops decreasing at exactly the true K",
+      "The algorithm converges faster when K equals the true number of clusters",
+      "Silhouette scores are maximised at the same K as the elbow"
+    ],
+    correct: 0,
+    explanation: "When K is below the true number of clusters, each additional cluster absorbs a genuinely separate group and WCSS drops significantly. Once K exceeds the true number, new clusters just split existing natural groups — much smaller WCSS reduction. This rate-change creates the 'elbow'. Note: WCSS never stops decreasing; it keeps falling all the way to K=n."
+  },
+  {
+    question: "K-Means requires feature scaling. Why?",
+    options: [
+      "Euclidean distance is scale-sensitive — features with larger ranges dominate the distance calculation",
+      "K-Means uses gradient descent internally, which requires normalised inputs",
+      "sklearn's KMeans raises an error if features have different scales",
+      "Scaling improves centroid initialisation accuracy in K-Means++"
+    ],
+    correct: 0,
+    explanation: "K-Means assigns each point to its nearest centroid using Euclidean distance. A feature measured in thousands (e.g., annual salary) will have squared differences 1,000,000× larger than a feature measured 0–1 (e.g., a ratio). Without scaling, the high-scale feature completely dominates and the algorithm effectively ignores all other features. Always apply StandardScaler before KMeans."
+  },
+  {
+    question: "What is a silhouette score of 0 for a data point?",
+    options: [
+      "The point is on or near the boundary between two clusters",
+      "The point is perfectly placed — it is the centroid of its cluster",
+      "The point is assigned to the wrong cluster",
+      "All points in the cluster have the same silhouette score"
+    ],
+    correct: 0,
+    explanation: "Silhouette score s(i) = (b - a) / max(a, b). When s(i) = 0, we have b = a — the mean distance to the nearest other cluster equals the mean distance within the assigned cluster. The point is equally close to two clusters and sits on the decision boundary. Scores near +1 indicate well-separated clusters; scores near -1 suggest misassignment."
+  },
+  {
+    question: "K-Means with K=1 will always have what inertia?",
+    options: [
+      "The total squared distance from all points to the global mean — the maximum possible inertia for any K",
+      "Zero — one cluster trivially contains all points with no between-cluster variation",
+      "Undefined — K=1 is not a valid number of clusters for K-Means",
+      "Equal to the variance of the dataset multiplied by the number of features"
+    ],
+    correct: 0,
+    explanation: "With K=1, there is one centroid located at the mean of all data points. Inertia = Σ ||xᵢ − x̄||² — the total variance of the dataset (up to a factor of n). This is the highest possible inertia value, and every additional cluster can only reduce it. This is why the elbow curve starts high at K=1 and decreases monotonically."
+  }
+]);
+</script>
+
+</body>
+</html>

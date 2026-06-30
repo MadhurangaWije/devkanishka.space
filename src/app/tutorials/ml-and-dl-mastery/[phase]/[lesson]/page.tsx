@@ -6,19 +6,22 @@ import { MLLessonReader } from '@/components/course/MLLessonReader';
 import { ML_COURSE_CSS } from '@/lib/ml-course-styles';
 
 type Props = {
-  params: Promise<{ lesson: string }>;
+  params: Promise<{ phase: string; lesson: string }>;
 };
 
-const PHASE = ML_PHASES.find((p) => p.number === 1)!;
-const COURSE_BASE = '/tutorials/ml-and-dl-mastery';
-
 export function generateStaticParams() {
-  return PHASE.lessons.map((l) => ({ lesson: l.slug }));
+  return ML_PHASES.flatMap((phase) =>
+    phase.lessons.map((lesson) => ({
+      phase: phase.urlSegment,
+      lesson: lesson.slug,
+    }))
+  );
 }
 
 export async function generateMetadata({ params }: Props): Promise<Metadata> {
-  const { lesson: slug } = await params;
-  const meta = PHASE.lessons.find((l) => l.slug === slug);
+  const { phase: phaseSlug, lesson: slug } = await params;
+  const phase = ML_PHASES.find((p) => p.urlSegment === phaseSlug);
+  const meta = phase?.lessons.find((l) => l.slug === slug);
   if (!meta) return {};
   return {
     title: `${meta.title} — ML & DL Mastery`,
@@ -26,13 +29,17 @@ export async function generateMetadata({ params }: Props): Promise<Metadata> {
   };
 }
 
+const COURSE_BASE = '/tutorials/ml-and-dl-mastery';
+
 export default async function MLLessonPage({ params }: Props) {
-  const { lesson: slug } = await params;
-  if (!PHASE.lessons.find((l) => l.slug === slug)) notFound();
+  const { phase: phaseSlug, lesson: slug } = await params;
+
+  const phase = ML_PHASES.find((p) => p.urlSegment === phaseSlug);
+  if (!phase || !phase.lessons.find((l) => l.slug === slug)) notFound();
 
   let data;
   try {
-    data = getMLLessonData(1, slug);
+    data = getMLLessonData(phaseSlug, slug);
   } catch {
     notFound();
   }
@@ -70,8 +77,8 @@ export default async function MLLessonPage({ params }: Props) {
             </Link>
           ) : (
             <div className="ml-lesson-nav-link ml-lesson-nav-link--next ml-lesson-nav-link--complete">
-              <span className="ml-lesson-nav-dir">✓ Phase 1 complete</span>
-              <span className="ml-lesson-nav-title">Phase 2 coming soon</span>
+              <span className="ml-lesson-nav-dir">✓ Course complete</span>
+              <span className="ml-lesson-nav-title">All 60 lessons done</span>
             </div>
           )}
         </div>

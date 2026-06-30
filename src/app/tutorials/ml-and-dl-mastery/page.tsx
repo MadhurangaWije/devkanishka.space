@@ -15,6 +15,8 @@ export default function MLCourseOverviewPage() {
   const tutorial = tutorials.find((t) => t.slug === 'ml-and-dl-mastery');
   if (!tutorial) notFound();
 
+  const totalLessons = ML_PHASES.reduce((s, p) => s + p.lessons.length, 0);
+
   return (
     <div className="px-6 md:px-12 py-12 max-w-3xl">
       {/* Header */}
@@ -24,7 +26,7 @@ export default function MLCourseOverviewPage() {
             intermediate
           </span>
           <span className="font-mono text-xs text-text-muted">
-            {ML_PHASES.reduce((s, p) => s + p.lessons.length, 0)} lessons available · 6 phases total
+            {totalLessons} lessons · {ML_PHASES.length} of 6 phases available
           </span>
         </div>
         <h1 className="font-sans text-3xl md:text-4xl font-black tracking-tighter text-text-primary mb-4">
@@ -89,10 +91,10 @@ export default function MLCourseOverviewPage() {
 
       {/* Coming soon */}
       <div className="mt-12 border-t border-site-border pt-10">
-        <p className="font-mono text-xs text-text-muted uppercase tracking-widest mb-3">Phases 2–6</p>
+        <p className="font-mono text-xs text-text-muted uppercase tracking-widest mb-3">Phase 6 — MLOps &amp; Production</p>
         <p className="font-mono text-sm text-text-muted leading-relaxed">
-          Classical ML, Deep Learning, NLP & LLMs, Computer Vision, and MLOps &amp; Production
-          are being written. Master Phase 1 first — every later phase builds on NumPy and Pandas fluency.
+          Packaging, monitoring, and deploying ML models to production is being written.
+          Master Phases 1–5 first — MLOps only makes sense once you have a model worth shipping.
         </p>
       </div>
     </div>

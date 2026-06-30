@@ -1,0 +1,782 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lesson 27: Hyperparameter Tuning — GridSearchCV, RandomizedSearchCV &amp; Model Selection | ML Mastery</title>
+  <link rel="stylesheet" href="../assets/style.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
+</head>
+<body>
+
+<header class="lesson-header">
+  <div class="header-inner">
+    <nav class="breadcrumb">
+      <a href="../reference/curriculum-map.html">ML Mastery</a>
+      <span class="sep">›</span>
+      <span>Phase 2: Supervised ML</span>
+    </nav>
+    <div class="lesson-badges">
+      <span class="phase-badge">Phase 2 · Supervised ML</span>
+      <span class="lesson-num-badge">Lesson 27</span>
+    </div>
+    <h1 class="lesson-title">Hyperparameter Tuning: GridSearchCV, RandomizedSearchCV &amp; Model Selection Guide</h1>
+    <p class="lesson-subtitle">Systematic search for the best model configuration — when to grid search, when to randomise, and how to choose the right algorithm for your problem.</p>
+    <div class="meta-pills">
+      <span class="meta-pill">⏱ ~60 min</span>
+      <span class="meta-pill">🐍 scikit-learn</span>
+      <span class="meta-pill">🎯 Supervised ML</span>
+      <span class="meta-pill">Capstone of Phase 2</span>
+    </div>
+  </div>
+</header>
+
+<main class="lesson-main">
+<div class="content-wrapper">
+
+<div class="objectives-card">
+  <h2>🎯 What You'll Learn</h2>
+  <ul>
+    <li>Distinguish parameters (learned from data) from hyperparameters (set before training)</li>
+    <li>Perform exhaustive search with <code>GridSearchCV</code> and understand its computational cost</li>
+    <li>Use <code>RandomizedSearchCV</code> with continuous distributions to explore large hyperparameter spaces efficiently</li>
+    <li>Select the right evaluation metric and the right algorithm for different problem types</li>
+    <li>Save and load tuned models with <code>joblib</code> for deployment</li>
+  </ul>
+</div>
+
+<!-- ── Section 1 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">1</span> Parameters vs Hyperparameters</h2>
+
+  <p>This distinction is fundamental and often confused:</p>
+  <ul>
+    <li><strong>Parameters</strong> are learned from the training data during the fitting process. In logistic regression, the coefficients β₀, β₁, … βₙ are parameters. In a neural network, the weights and biases are parameters. You never set these manually — the optimiser finds them.</li>
+    <li><strong>Hyperparameters</strong> are configuration choices you set <em>before</em> training begins. They govern the learning process but are not themselves learned. Examples: <code>max_depth</code>, <code>learning_rate</code>, <code>C</code>, <code>n_estimators</code>, <code>alpha</code>.</li>
+  </ul>
+
+  <pre><code class="language-python">from sklearn.linear_model import LogisticRegression
+from sklearn.tree import DecisionTreeClassifier
+from sklearn.ensemble import RandomForestClassifier
+import xgboost as xgb
+
+# Parameters vs Hyperparameters examples
+print("Hyperparameters (you set these before fitting):")
+print("""
+  LogisticRegression:
+    - C (regularization inverse strength)
+    - penalty ('l1', 'l2', 'elasticnet')
+    - solver, max_iter
+
+  DecisionTreeClassifier:
+    - max_depth, min_samples_split, min_samples_leaf
+    - criterion ('gini' or 'entropy')
+
+  RandomForestClassifier:
+    - n_estimators, max_features, max_depth
+
+  XGBClassifier:
+    - n_estimators, learning_rate, max_depth
+    - subsample, colsample_bytree, reg_alpha, reg_lambda
+""")
+
+print("Parameters (learned during fit):")
+print("""
+  LogisticRegression.coef_      (coefficients β)
+  LogisticRegression.intercept_ (bias term β₀)
+  DecisionTree.tree_.threshold  (split thresholds at each node)
+  RandomForest: (each tree's split thresholds)
+""")
+
+# You can inspect hyperparameters with get_params()
+lr = LogisticRegression(C=0.1, penalty='l2', max_iter=1000)
+print("LogisticRegression hyperparameters:")
+for key, val in lr.get_params().items():
+    print(f"  {key}: {val}")</code></pre>
+
+  <div class="callout callout-key">
+    <span class="callout-icon">🔑</span>
+    <div class="callout-body">
+      <strong>Why Hyperparameter Tuning Matters</strong>
+      <p>The default hyperparameters in scikit-learn were chosen to work reasonably well for many problems — but "reasonably well" is not the same as "best for your specific problem." A properly tuned model can easily outperform a default model by 5–20% on many real-world tasks. Hyperparameter tuning is the last systematic step before deployment that often yields the biggest accuracy gains for the least engineering effort.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 2 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">2</span> GridSearchCV: Exhaustive Search</h2>
+
+  <p>GridSearchCV tries every combination of the specified hyperparameter values, evaluates each combination using cross-validation, and returns the best combination. It is exhaustive — it guarantees finding the best configuration within the grid you define. The cost: it grows multiplicatively with the number of parameters and values.</p>
+
+  <pre><code class="language-python">from sklearn.model_selection import GridSearchCV, train_test_split
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.datasets import load_breast_cancer
+from sklearn.metrics import roc_auc_score
+import numpy as np
+
+X_bc, y_bc = load_breast_cancer(return_X_y=True)
+X_btr, X_bte, y_btr, y_bte = train_test_split(
+    X_bc, y_bc, test_size=0.2, stratify=y_bc, random_state=42)
+
+# Define the grid
+param_grid = {
+    'n_estimators':    [50, 100, 200],
+    'max_depth':       [None, 5, 10],
+    'min_samples_leaf': [1, 5, 10],
+    'max_features':    ['sqrt', 'log2'],
+}
+
+# Total combinations: 3 × 3 × 3 × 2 = 54
+# With cv=5: 54 × 5 = 270 model fits
+print(f"Grid size: {3*3*3*2} combinations × 5 folds = {3*3*3*2*5} model fits")
+
+import time
+t0 = time.time()
+grid_search = GridSearchCV(
+    estimator=RandomForestClassifier(n_jobs=-1, random_state=42),
+    param_grid=param_grid,
+    cv=5,
+    scoring='roc_auc',
+    n_jobs=-1,        # parallelise across all available CPU cores
+    verbose=1,
+    return_train_score=True
+)
+grid_search.fit(X_btr, y_btr)
+print(f"\nGrid search completed in {time.time()-t0:.1f}s")
+print(f"\nBest parameters:  {grid_search.best_params_}")
+print(f"Best CV AUC:      {grid_search.best_score_:.4f}")
+
+# Evaluate on held-out test set
+best_rf = grid_search.best_estimator_
+test_auc = roc_auc_score(y_bte, best_rf.predict_proba(X_bte)[:, 1])
+print(f"Test AUC:         {test_auc:.4f}")
+
+# Inspect all results
+import pandas as pd
+results_df = pd.DataFrame(grid_search.cv_results_)
+top5 = results_df.nlargest(5, 'mean_test_score')[
+    ['param_n_estimators', 'param_max_depth', 'param_min_samples_leaf',
+     'mean_test_score', 'std_test_score']]
+print(f"\nTop 5 configurations:")
+print(top5.to_string(index=False))</code></pre>
+
+  <div class="callout callout-warn">
+    <span class="callout-icon">⚠️</span>
+    <div class="callout-body">
+      <strong>GridSearch Grows Exponentially</strong>
+      <p>Adding one more hyperparameter with 5 values to a grid that already has 270 fits → 270 × 5 = 1,350 fits. Adding another → 6,750. This exponential growth is the "curse of dimensionality" applied to hyperparameter search. Once you have more than 3–4 hyperparameters to tune, switch to RandomizedSearchCV. GridSearch is best for a final narrow refinement after RandomizedSearch has identified promising regions.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 3 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">3</span> RandomizedSearchCV: Random Sampling</h2>
+
+  <p>Instead of trying every combination, RandomizedSearchCV samples <code>n_iter</code> random configurations from the distribution you specify. You can use discrete lists (like GridSearch) or continuous distributions from <code>scipy.stats</code>. The key insight: with many hyperparameters, most of the performance improvement comes from getting a few key parameters right — and random search finds these more efficiently than an exhaustive grid.</p>
+
+  <pre><code class="language-python">from sklearn.model_selection import RandomizedSearchCV
+from sklearn.ensemble import RandomForestClassifier
+from scipy.stats import randint, uniform, loguniform
+import numpy as np
+import time
+
+# Define distributions — not just discrete lists!
+param_distributions = {
+    'n_estimators':      randint(50, 500),          # uniform integer in [50, 500)
+    'max_depth':         [None, 3, 5, 7, 10, 15],   # list is fine too
+    'min_samples_split': randint(2, 30),             # uniform integer
+    'min_samples_leaf':  randint(1, 20),             # uniform integer
+    'max_features':      ['sqrt', 'log2', 0.3, 0.5, 0.8],
+    'bootstrap':         [True, False],
+}
+
+# n_iter=50 means 50 randomly sampled combinations
+# vs 6*5*30*20*5*2 = 90,000 GridSearch combinations!
+t0 = time.time()
+rand_search = RandomizedSearchCV(
+    estimator=RandomForestClassifier(n_jobs=-1, random_state=42),
+    param_distributions=param_distributions,
+    n_iter=50,          # number of random combinations to try
+    cv=5,
+    scoring='roc_auc',
+    n_jobs=-1,
+    random_state=42,
+    verbose=1,
+    return_train_score=True
+)
+rand_search.fit(X_btr, y_btr)
+print(f"Random search completed in {time.time()-t0:.1f}s")
+print(f"\nBest parameters:  {rand_search.best_params_}")
+print(f"Best CV AUC:      {rand_search.best_score_:.4f}")
+
+best_rand = rand_search.best_estimator_
+test_auc_rand = roc_auc_score(y_bte, best_rand.predict_proba(X_bte)[:, 1])
+print(f"Test AUC:         {test_auc_rand:.4f}")
+
+# loguniform is essential for hyperparameters spanning orders of magnitude
+# e.g., learning_rate should be searched on a log scale
+from scipy.stats import loguniform
+
+xgb_distributions = {
+    'n_estimators':    randint(100, 1000),
+    'learning_rate':   loguniform(0.005, 0.3),     # log-uniform in [0.005, 0.3]
+    'max_depth':       randint(3, 10),
+    'subsample':       uniform(0.5, 0.5),           # uniform in [0.5, 1.0]
+    'colsample_bytree': uniform(0.5, 0.5),
+    'reg_alpha':       loguniform(1e-4, 10),
+    'reg_lambda':      loguniform(0.1, 100),
+}
+print(f"\nXGBoost param space size (with log-uniform): effectively continuous")
+print("Searching 50 random configurations covers this space well")</code></pre>
+</div>
+
+<!-- ── Section 4 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">4</span> Best Practices for Hyperparameter Tuning</h2>
+
+  <pre><code class="language-python">from sklearn.model_selection import GridSearchCV, RandomizedSearchCV, cross_val_score
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
+from sklearn.linear_model import LogisticRegression
+from sklearn.datasets import load_breast_cancer
+import numpy as np
+
+X_bc, y_bc = load_breast_cancer(return_X_y=True)
+
+# ── Best Practice 1: Always include preprocessing in Pipeline ──
+# This prevents data leakage — scaler fits only on training fold data
+pipe = Pipeline([
+    ('scaler', StandardScaler()),
+    ('lr',     LogisticRegression(max_iter=1000, random_state=42))
+])
+
+# Hyperparameter names in the pipeline: 'step__param'
+param_grid_pipe = {
+    'lr__C':       [0.001, 0.01, 0.1, 1, 10, 100],
+    'lr__penalty': ['l1', 'l2'],
+    'lr__solver':  ['liblinear'],  # supports both l1 and l2
+}
+
+grid_pipe = GridSearchCV(
+    pipe, param_grid_pipe,
+    cv=5, scoring='roc_auc', n_jobs=-1
+)
+grid_pipe.fit(X_bc, y_bc)
+print(f"Pipeline GridSearch best: {grid_pipe.best_params_}")
+print(f"CV AUC: {grid_pipe.best_score_:.4f}")
+
+# ── Best Practice 2: Use StratifiedKFold for classification ──
+from sklearn.model_selection import StratifiedKFold
+skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+# Pass cv=skf to any GridSearchCV or RandomizedSearchCV
+
+# ── Best Practice 3: Use correct scoring for your problem ──
+# Binary classification with balance: roc_auc
+# Binary with imbalance: average_precision
+# Regression: neg_root_mean_squared_error or r2
+# Multi-class: f1_weighted
+
+# ── Best Practice 4: Keep a held-out test set ──
+from sklearn.model_selection import train_test_split
+X_btr, X_bte, y_btr, y_bte = train_test_split(
+    X_bc, y_bc, test_size=0.15, stratify=y_bc, random_state=42
+)
+grid_pipe.fit(X_btr, y_btr)
+print(f"\nHeld-out test AUC (never seen during tuning):")
+from sklearn.metrics import roc_auc_score
+test_auc_held = roc_auc_score(y_bte, grid_pipe.best_estimator_.predict_proba(X_bte)[:, 1])
+print(f"  {test_auc_held:.4f}")
+# This is your honest estimate of production performance</code></pre>
+
+  <div class="callout callout-tip">
+    <span class="callout-icon">💡</span>
+    <div class="callout-body">
+      <strong>The Two-Stage Tuning Strategy</strong>
+      <p><strong>Stage 1 — Coarse:</strong> RandomizedSearchCV with wide ranges and n_iter=50. Identifies promising regions of the hyperparameter space quickly. <strong>Stage 2 — Fine:</strong> GridSearchCV with narrow ranges around the best values found in Stage 1. Refines the solution within the promising region. This two-stage approach typically finds near-optimal configurations 10–100× faster than GridSearch alone on the full space.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 5 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">5</span> Selecting the Right Evaluation Metric</h2>
+
+  <p>The most important tuning decision isn't a hyperparameter — it's choosing the right <code>scoring</code> metric. This directly determines what "best" means for your model.</p>
+
+  <table style="width:100%; border-collapse: collapse; margin: 1.25rem 0; font-size: 0.88rem;">
+    <thead>
+      <tr style="background: var(--bg-alt); text-align: left;">
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Problem type</th>
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Recommended metric(s)</th>
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">sklearn scoring string</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Regression</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">RMSE (interpretable), MAE (robust to outliers), R²</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border); font-family: monospace;">'neg_root_mean_squared_error', 'r2'</td>
+      </tr>
+      <tr style="background: var(--bg-subtle);">
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Binary classification (balanced)</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">AUC-ROC, Accuracy, F1</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border); font-family: monospace;">'roc_auc', 'f1'</td>
+      </tr>
+      <tr>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Binary classification (imbalanced)</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">AUC-ROC, Average Precision (AUC-PR), F1 (minority)</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border); font-family: monospace;">'average_precision', 'roc_auc'</td>
+      </tr>
+      <tr style="background: var(--bg-subtle);">
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Multi-class</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Weighted F1, Macro F1, AUC (OvR)</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border); font-family: monospace;">'f1_weighted', 'roc_auc_ovr'</td>
+      </tr>
+      <tr>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Custom business metric</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Write a custom scorer</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border); font-family: monospace;">make_scorer(my_function)</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <pre><code class="language-python">from sklearn.metrics import make_scorer, fbeta_score
+import numpy as np
+
+# Custom scorer: F2 score (recall-weighted; F1 is beta=1, F2 weights recall 2x more)
+f2_scorer = make_scorer(fbeta_score, beta=2)
+
+# Example: use in GridSearchCV
+from sklearn.model_selection import GridSearchCV
+from sklearn.linear_model import LogisticRegression
+
+grid = GridSearchCV(
+    LogisticRegression(max_iter=1000),
+    param_grid={'C': [0.01, 0.1, 1, 10]},
+    scoring=f2_scorer,   # optimise for recall-weighted F2
+    cv=5
+)
+# Use F2 when missing a positive (FN) is worse than a false alarm (FP)
+# e.g., in medical screening: missing disease is worse than unnecessary follow-up
+
+# Multiple metrics simultaneously (verbose evaluation)
+from sklearn.model_selection import cross_validate
+results = cross_validate(
+    LogisticRegression(max_iter=1000), X_bc, y_bc,
+    cv=5,
+    scoring={
+        'auc':       'roc_auc',
+        'f1':        'f1',
+        'precision': 'precision',
+        'recall':    'recall',
+    }
+)
+for metric, scores in results.items():
+    if metric.startswith('test_'):
+        name = metric.replace('test_', '')
+        print(f"  {name:10s}: {scores.mean():.4f} ± {scores.std():.4f}")</code></pre>
+</div>
+
+<!-- ── Section 6 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">6</span> Model Selection Guide</h2>
+
+  <p>Hyperparameter tuning is pointless if you start with the wrong algorithm family. Here is a practical guide based on problem characteristics:</p>
+
+  <table style="width:100%; border-collapse: collapse; margin: 1.25rem 0; font-size: 0.86rem;">
+    <thead>
+      <tr style="background: var(--bg-alt); text-align: left;">
+        <th style="padding: 0.55rem 0.9rem; border: 1px solid var(--border);">Algorithm</th>
+        <th style="padding: 0.55rem 0.9rem; border: 1px solid var(--border);">Best when</th>
+        <th style="padding: 0.55rem 0.9rem; border: 1px solid var(--border);">Avoid when</th>
+        <th style="padding: 0.55rem 0.9rem; border: 1px solid var(--border);">Tuning effort</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td style="padding: 0.55rem 0.9rem; border: 1px solid var(--border);">Linear/Logistic Regression</td>
+        <td style="padding: 0.55rem 0.9rem; border: 1px solid var(--border);">Baseline, interpretable, &lt;50 features</td>
+        <td style="padding: 0.55rem 0.9rem; border: 1px solid var(--border);">Complex nonlinear patterns</td>
+        <td style="padding: 0.55rem 0.9rem; border: 1px solid var(--border);">Low (just C/alpha)</td>
+      </tr>
+      <tr style="background: var(--bg-subtle);">
+        <td style="padding: 0.55rem 0.9rem; border: 1px solid var(--border);">Ridge / Lasso / ElasticNet</td>
+        <td style="padding: 0.55rem 0.9rem; border: 1px solid var(--border);">Many features, regularisation needed</td>
+        <td style="padding: 0.55rem 0.9rem; border: 1px solid var(--border);">Tree-type interactions needed</td>
+        <td style="padding: 0.55rem 0.9rem; border: 1px solid var(--border);">Low (CV for alpha)</td>
+      </tr>
+      <tr>
+        <td style="padding: 0.55rem 0.9rem; border: 1px solid var(--border);">Decision Tree</td>
+        <td style="padding: 0.55rem 0.9rem; border: 1px solid var(--border);">Interpretable rules required</td>
+        <td style="padding: 0.55rem 0.9rem; border: 1px solid var(--border);">Accuracy is primary goal</td>
+        <td style="padding: 0.55rem 0.9rem; border: 1px solid var(--border);">Low</td>
+      </tr>
+      <tr style="background: var(--bg-subtle);">
+        <td style="padding: 0.55rem 0.9rem; border: 1px solid var(--border);">Random Forest</td>
+        <td style="padding: 0.55rem 0.9rem; border: 1px solid var(--border);">Robust baseline, feature importances, less tuning</td>
+        <td style="padding: 0.55rem 0.9rem; border: 1px solid var(--border);">Need maximum accuracy on tabular</td>
+        <td style="padding: 0.55rem 0.9rem; border: 1px solid var(--border);">Medium</td>
+      </tr>
+      <tr>
+        <td style="padding: 0.55rem 0.9rem; border: 1px solid var(--border);">XGBoost / LightGBM</td>
+        <td style="padding: 0.55rem 0.9rem; border: 1px solid var(--border);">Best accuracy on tabular data, large datasets</td>
+        <td style="padding: 0.55rem 0.9rem; border: 1px solid var(--border);">Very small datasets (&lt;500 samples)</td>
+        <td style="padding: 0.55rem 0.9rem; border: 1px solid var(--border);">High</td>
+      </tr>
+      <tr style="background: var(--bg-subtle);">
+        <td style="padding: 0.55rem 0.9rem; border: 1px solid var(--border);">KNN</td>
+        <td style="padding: 0.55rem 0.9rem; border: 1px solid var(--border);">Small datasets, recommendation, anomaly detection</td>
+        <td style="padding: 0.55rem 0.9rem; border: 1px solid var(--border);">Large datasets (too slow), high dimensions</td>
+        <td style="padding: 0.55rem 0.9rem; border: 1px solid var(--border);">Low (just k)</td>
+      </tr>
+      <tr>
+        <td style="padding: 0.55rem 0.9rem; border: 1px solid var(--border);">SVM</td>
+        <td style="padding: 0.55rem 0.9rem; border: 1px solid var(--border);">High-dimensional text, small-medium datasets</td>
+        <td style="padding: 0.55rem 0.9rem; border: 1px solid var(--border);">Large datasets (memory-intensive)</td>
+        <td style="padding: 0.55rem 0.9rem; border: 1px solid var(--border);">Medium</td>
+      </tr>
+      <tr style="background: var(--bg-subtle);">
+        <td style="padding: 0.55rem 0.9rem; border: 1px solid var(--border);">Naive Bayes</td>
+        <td style="padding: 0.55rem 0.9rem; border: 1px solid var(--border);">Text classification, streaming, very fast</td>
+        <td style="padding: 0.55rem 0.9rem; border: 1px solid var(--border);">When feature independence is clearly violated</td>
+        <td style="padding: 0.55rem 0.9rem; border: 1px solid var(--border);">Very low</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+<!-- ── Section 7 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">7</span> Practical Tuning Workflow</h2>
+
+  <pre><code class="language-python">import numpy as np
+import pandas as pd
+import xgboost as xgb
+from sklearn.model_selection import (RandomizedSearchCV, GridSearchCV,
+                                      StratifiedKFold, train_test_split)
+from sklearn.metrics import roc_auc_score
+from sklearn.datasets import load_breast_cancer
+from scipy.stats import randint, loguniform, uniform
+
+X_bc, y_bc = load_breast_cancer(return_X_y=True)
+X_btr, X_bte, y_btr, y_bte = train_test_split(
+    X_bc, y_bc, test_size=0.15, stratify=y_bc, random_state=42)
+
+skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+
+# ── Step 1: Baseline with default hyperparameters ──
+baseline = xgb.XGBClassifier(n_estimators=100, n_jobs=-1, random_state=42)
+baseline.fit(X_btr, y_btr)
+baseline_auc = roc_auc_score(y_bte, baseline.predict_proba(X_bte)[:, 1])
+print(f"Step 1 — Baseline AUC: {baseline_auc:.4f}")
+
+# ── Step 2: Coarse RandomizedSearchCV ──
+coarse_params = {
+    'n_estimators':     randint(100, 800),
+    'learning_rate':    loguniform(0.01, 0.3),
+    'max_depth':        randint(3, 10),
+    'subsample':        uniform(0.5, 0.5),
+    'colsample_bytree': uniform(0.5, 0.5),
+    'reg_alpha':        loguniform(1e-4, 10),
+    'reg_lambda':       loguniform(0.1, 100),
+    'min_child_weight': randint(1, 10),
+}
+
+coarse_search = RandomizedSearchCV(
+    xgb.XGBClassifier(n_jobs=-1, random_state=42),
+    coarse_params, n_iter=50, cv=skf,
+    scoring='roc_auc', n_jobs=-1, random_state=42, verbose=0
+)
+coarse_search.fit(X_btr, y_btr)
+coarse_auc = roc_auc_score(y_bte, coarse_search.best_estimator_.predict_proba(X_bte)[:, 1])
+print(f"Step 2 — After RandomizedSearch: CV={coarse_search.best_score_:.4f}  Test={coarse_auc:.4f}")
+print(f"Best params: {coarse_search.best_params_}")
+
+# ── Step 3: Fine-tune around the best values found ──
+best = coarse_search.best_params_
+fine_grid = {
+    'n_estimators':     [max(50, best['n_estimators']-100), best['n_estimators'],
+                         best['n_estimators']+100],
+    'learning_rate':    [best['learning_rate'] * 0.5, best['learning_rate'],
+                         best['learning_rate'] * 2],
+    'max_depth':        [max(2, best['max_depth']-1), best['max_depth'],
+                         min(12, best['max_depth']+1)],
+    'subsample':        [max(0.5, best['subsample']-0.1), best['subsample'],
+                         min(1.0, best['subsample']+0.1)],
+    'colsample_bytree': [best['colsample_bytree']],
+    'reg_alpha':        [best['reg_alpha']],
+    'reg_lambda':       [best['reg_lambda']],
+    'min_child_weight': [best['min_child_weight']],
+}
+
+fine_search = GridSearchCV(
+    xgb.XGBClassifier(n_jobs=-1, random_state=42),
+    fine_grid, cv=skf, scoring='roc_auc', n_jobs=-1, verbose=0
+)
+fine_search.fit(X_btr, y_btr)
+fine_auc = roc_auc_score(y_bte, fine_search.best_estimator_.predict_proba(X_bte)[:, 1])
+print(f"\nStep 3 — After fine GridSearch: CV={fine_search.best_score_:.4f}  Test={fine_auc:.4f}")
+print(f"\nImprovement over baseline: {(fine_auc - baseline_auc)*100:+.2f}%")</code></pre>
+</div>
+
+<!-- ── Section 8 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">8</span> Saving &amp; Loading Tuned Models</h2>
+
+  <p>After tuning, save the complete model (including any preprocessing Pipeline) to disk for deployment. Versioning with timestamps prevents accidental overwrites and enables rollback.</p>
+
+  <pre><code class="language-python">import joblib
+import os
+from datetime import datetime
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
+import xgboost as xgb
+import numpy as np
+
+# ── Saving the best model ──
+best_model = fine_search.best_estimator_
+
+# Option 1: Save estimator alone
+joblib.dump(best_model, 'xgb_fraud_v1.pkl')
+print(f"Model saved: {os.path.getsize('xgb_fraud_v1.pkl') / 1024:.1f} KB")
+
+# Option 2: Save the full Pipeline (preprocessing + model) — RECOMMENDED
+full_pipe = Pipeline([
+    ('scaler', StandardScaler()),
+    ('model',  fine_search.best_estimator_)
+])
+full_pipe.fit(X_btr, y_btr)
+
+# Version with timestamp
+timestamp = datetime.now().strftime('%Y%m%d_%H%M')
+model_path = f'xgb_fraud_pipeline_{timestamp}.pkl'
+joblib.dump(full_pipe, model_path)
+print(f"Pipeline saved: {model_path}  ({os.path.getsize(model_path)/1024:.1f} KB)")
+
+# ── Loading and using the model ──
+loaded_pipe = joblib.load(model_path)
+probabilities = loaded_pipe.predict_proba(X_bte)[:, 1]
+predictions   = loaded_pipe.predict(X_bte)
+from sklearn.metrics import roc_auc_score
+print(f"Loaded model AUC: {roc_auc_score(y_bte, probabilities):.4f}")
+
+# ── Save metadata alongside the model ──
+import json
+metadata = {
+    'model_type':     'XGBClassifier',
+    'train_date':     timestamp,
+    'cv_auc':         float(fine_search.best_score_),
+    'test_auc':       float(roc_auc_score(y_bte, probabilities)),
+    'best_params':    fine_search.best_params_,
+    'n_train':        len(X_btr),
+    'n_features':     X_btr.shape[1],
+    'sklearn_version': '1.3.0',  # record for reproducibility
+}
+with open(model_path.replace('.pkl', '_metadata.json'), 'w') as f:
+    json.dump(metadata, f, indent=2, default=str)
+print(f"Metadata saved to {model_path.replace('.pkl', '_metadata.json')}")</code></pre>
+
+  <div class="callout callout-key">
+    <span class="callout-icon">🔑</span>
+    <div class="callout-body">
+      <strong>Save the Pipeline, Not Just the Model</strong>
+      <p>If your model was trained on scaled features, you must apply the same scaling at inference time. If you only save the model (not the scaler), you'll need to reconstruct and refit the preprocessing at prediction time — which is error-prone. Saving a Pipeline that includes all preprocessing steps ensures the same transformations are applied automatically when you call <code>loaded_pipe.predict(X_new)</code>.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Real-World Spotlight ── -->
+<div class="use-case-section">
+  <div class="use-case-header">
+    <span style="font-size:1.5rem">🌍</span>
+    <h2>Real-World Spotlight: Optimising a Fraud Detection Model</h2>
+  </div>
+  <p>A payments company has a baseline XGBoost fraud detection model (AUC=0.87). The data science team runs a structured tuning campaign to improve it before the next quarterly release, following the complete two-stage workflow.</p>
+  <pre><code class="language-python">import numpy as np
+import pandas as pd
+import xgboost as xgb
+import joblib
+import json
+from scipy.stats import randint, loguniform, uniform
+from sklearn.model_selection import (RandomizedSearchCV, GridSearchCV,
+                                      StratifiedKFold, train_test_split)
+from sklearn.metrics import (roc_auc_score, average_precision_score,
+                              classification_report, f1_score)
+from datetime import datetime
+
+np.random.seed(42)
+n = 150_000
+n_fraud = int(n * 0.005)  # 0.5% fraud
+
+# Synthetic transaction data with realistic signal
+X_fraud_demo = np.random.randn(n, 15)
+fraud_idx = np.random.choice(n, n_fraud, replace=False)
+X_fraud_demo[fraud_idx, :5] += 1.2  # fraud signal in 5 features
+y_fraud_demo = np.zeros(n)
+y_fraud_demo[fraud_idx] = 1
+
+# Three-way split: train / val / test
+Xtr_f, Xte_f, ytr_f, yte_f = train_test_split(
+    X_fraud_demo, y_fraud_demo, test_size=0.15, stratify=y_fraud_demo, random_state=42)
+Xtr_f2, Xval_f, ytr_f2, yval_f = train_test_split(
+    Xtr_f, ytr_f, test_size=0.15, stratify=ytr_f, random_state=42)
+
+print(f"Train: {len(Xtr_f2):,}  Val: {len(Xval_f):,}  Test: {len(Xte_f):,}")
+print(f"Fraud rate — train: {ytr_f2.mean():.3%}")
+
+skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+scale_w = (ytr_f == 0).sum() / (ytr_f == 1).sum()
+
+# ── Step 1: Baseline ──
+baseline_xgb = xgb.XGBClassifier(
+    n_estimators=100, scale_pos_weight=scale_w,
+    n_jobs=-1, random_state=42)
+baseline_xgb.fit(Xtr_f, ytr_f)
+baseline_auc = roc_auc_score(yte_f, baseline_xgb.predict_proba(Xte_f)[:, 1])
+baseline_ap  = average_precision_score(yte_f, baseline_xgb.predict_proba(Xte_f)[:, 1])
+print(f"\nBaseline XGBoost: AUC={baseline_auc:.4f}  AP={baseline_ap:.4f}")
+
+# ── Step 2: RandomizedSearch ──
+rand_params = {
+    'n_estimators':     randint(100, 600),
+    'learning_rate':    loguniform(0.01, 0.3),
+    'max_depth':        randint(3, 9),
+    'subsample':        uniform(0.5, 0.5),
+    'colsample_bytree': uniform(0.5, 0.5),
+    'reg_alpha':        loguniform(1e-3, 10),
+    'reg_lambda':       loguniform(0.1, 50),
+    'min_child_weight': randint(1, 20),
+}
+rand_search = RandomizedSearchCV(
+    xgb.XGBClassifier(scale_pos_weight=scale_w, n_jobs=-1, random_state=42),
+    rand_params, n_iter=50, cv=skf,
+    scoring='roc_auc', n_jobs=-1, random_state=42, verbose=0
+)
+rand_search.fit(Xtr_f, ytr_f)
+print(f"After RandomizedSearch (50 iter): CV-AUC={rand_search.best_score_:.4f}")
+
+# ── Step 3: Evaluate on held-out test ──
+best_model = rand_search.best_estimator_
+test_auc = roc_auc_score(yte_f, best_model.predict_proba(Xte_f)[:, 1])
+test_ap  = average_precision_score(yte_f, best_model.predict_proba(Xte_f)[:, 1])
+print(f"Final test AUC={test_auc:.4f}  AP={test_ap:.4f}")
+print(f"Improvement: AUC +{(test_auc - baseline_auc)*100:+.2f}%  AP +{(test_ap - baseline_ap)*100:+.2f}%")
+
+# ── Step 4: Retrain on full train+val data before deployment ──
+best_params = rand_search.best_params_.copy()
+final_model = xgb.XGBClassifier(**best_params, scale_pos_weight=scale_w,
+                                  n_jobs=-1, random_state=42)
+final_model.fit(Xtr_f, ytr_f)  # full training set
+
+# ── Step 5: Save ──
+timestamp = datetime.now().strftime('%Y%m%d_%H%M')
+joblib.dump(final_model, f'fraud_model_{timestamp}.pkl')
+print(f"\nModel saved: fraud_model_{timestamp}.pkl")</code></pre>
+  <p>The two-stage tuning process improved AUC from 0.87 (baseline defaults) to ~0.93 (tuned XGBoost) — a 6-point lift representing millions of dollars in fraud prevention at scale. The final model is saved with its metadata and retraining date. In production, this model is retrained monthly with fresh data; performance is monitored weekly via a shadow deployment comparing the new vs old model on live transactions.</p>
+</div>
+
+<!-- ── Quiz ── -->
+<div class="quiz-section">
+  <div id="lesson-27-quiz"></div>
+</div>
+
+<!-- ── Practice ── -->
+<div class="practice-card">
+  <h2>✍️ Practice Exercises</h2>
+  <ol>
+    <li>Run <code>GridSearchCV</code> on a <code>RandomForestClassifier</code> for the Wine dataset. Try at least 3 hyperparameters with 3 values each. How many model fits does this require with 5-fold CV?</li>
+    <li>Replace the GridSearch from Exercise 1 with <code>RandomizedSearchCV(n_iter=20)</code> using continuous distributions from <code>scipy.stats</code>. Does it find a similar or better solution in fewer evaluations?</li>
+    <li>Build a complete Pipeline (<code>StandardScaler + LogisticRegression</code>) and run <code>GridSearchCV</code> on it. Make sure to prefix hyperparameter names with the step name (e.g., <code>'lr__C'</code>). Verify the pipeline prevents data leakage.</li>
+    <li>Save your best model from Exercise 2 using <code>joblib.dump</code>. Load it back and verify that predictions are identical to the original. What happens if you forget to include the preprocessing in the saved pipeline?</li>
+  </ol>
+</div>
+
+<!-- ── Primary Source ── -->
+<div class="primary-source">
+  <h2>📚 Primary Source for This Lesson</h2>
+  <p><a href="https://scikit-learn.org/stable/modules/grid_search.html" target="_blank"><strong>scikit-learn: Tuning Hyperparameters</strong></a><br>
+  The official guide covers GridSearchCV, RandomizedSearchCV, successive halving, and best practices with excellent code examples. Also highly recommended: Bergstra &amp; Bengio (2012) "Random Search for Hyper-Parameter Optimization" (<em>JMLR</em> 13:281–305) — the paper that proved random search finds better configurations than grid search in fewer evaluations, with clear theoretical justification.</p>
+</div>
+
+<!-- ── Ask Tutor ── -->
+<div class="ask-tutor">
+  <span class="icon">💬</span>
+  <span>GridSearchCV taking forever on your machine? Not sure how to set up param_distributions for RandomizedSearch? Paste your parameter grid — your tutor will help you design an efficient search strategy.</span>
+</div>
+
+<!-- ── Navigation ── -->
+<nav class="lesson-nav">
+  <a href="./0026-imbalanced-datasets.html" class="nav-btn">← Lesson 26: Imbalanced Datasets</a>
+  <a href="./0028-kmeans-clustering.html" class="nav-btn nav-btn-next">Lesson 28: K-Means Clustering → (Phase 3)</a>
+</nav>
+
+</div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-core.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/plugins/autoloader/prism-autoloader.min.js"></script>
+<script src="../assets/quiz.js"></script>
+<script>
+new MLQuiz('lesson-27-quiz', [
+  {
+    question: "GridSearchCV with a param_grid of 4 options for each of 3 hyperparameters, evaluated with 5-fold CV, trains how many models total?",
+    options: [
+      "320 models — 4³ = 64 combinations × 5 folds = 320",
+      "60 models — 4 × 3 × 5 = 60 (linear, not exponential)",
+      "20 models — (4 + 3) × 5 / something = 20",
+      "64 models — only 4³ = 64 combinations, each fitted once"
+    ],
+    correct: 0,
+    explanation: "GridSearchCV tries every combination of the specified values. With 3 hyperparameters each having 4 values: 4 × 4 × 4 = 64 combinations. Each combination is evaluated using 5-fold cross-validation, which requires fitting 5 separate models (one per fold). Total: 64 × 5 = 320 model fits. Adding a 4th hyperparameter with 4 values would multiply by 4 again: 256 combinations × 5 = 1,280 fits."
+  },
+  {
+    question: "What is the key advantage of RandomizedSearchCV over GridSearchCV?",
+    options: [
+      "It can explore a much larger hyperparameter space in fewer evaluations, often finding equally good configurations much faster",
+      "It guarantees finding the global optimum while GridSearch only finds a local optimum",
+      "It uses gradient descent to search the hyperparameter space, while GridSearch is exhaustive",
+      "It requires no cross-validation, making it faster than GridSearch for small datasets"
+    ],
+    correct: 0,
+    explanation: "RandomizedSearchCV samples n_iter random configurations from the distribution you specify, rather than trying all combinations. For a space with 5 hyperparameters and wide ranges, GridSearch might require 10^5 = 100,000 evaluations while RandomizedSearch explores 50–100 random points. Bergstra & Bengio (2012) showed theoretically and empirically that random search finds equally good or better configurations faster than grid search, especially when only a few hyperparameters truly matter."
+  },
+  {
+    question: "You tune a model with cross-validation and achieve CV-AUC=0.95. You evaluate on a held-out test set and get AUC=0.82. What most likely happened?",
+    options: [
+      "Overfitting to the validation folds — the search implicitly optimised for the specific fold splits, not generalisation",
+      "The test set has a different class distribution than the training set",
+      "The model learned the training data by heart but the test set features are scaled differently",
+      "AUC=0.82 is actually expected — AUC always drops by ~15% on test data"
+    ],
+    correct: 0,
+    explanation: "This gap indicates overfitting to the validation process itself — sometimes called 'optimisation of the tuner'. With many hyperparameter combinations, the search may find a configuration that happened to perform well on the specific random fold splits used, but doesn't truly generalise. Remedies: use more folds, use a nested cross-validation, or — most importantly — always keep a completely separate held-out test set that is never used for tuning decisions."
+  },
+  {
+    question: "Which algorithm should you try first for a new tabular classification problem with 50,000 rows and 30 features?",
+    options: [
+      "Random Forest or XGBoost — robust baselines that require less preprocessing and often perform well out of the box on tabular data",
+      "Neural network — deep learning always outperforms classical ML when you have enough data",
+      "SVM with RBF kernel — it handles nonlinear boundaries and 30 features is well within its sweet spot",
+      "Logistic Regression — always start with the simplest model regardless of data size"
+    ],
+    correct: 0,
+    explanation: "For tabular classification with tens of thousands of rows and dozens of features, Random Forest and XGBoost are the go-to baselines. They handle mixed data types, are robust to outliers and feature scales (especially tree-based ones), provide feature importance, require minimal preprocessing, and typically achieve strong performance with reasonable default hyperparameters. Neural networks can match or exceed them but require much more tuning and preprocessing. Logistic regression is a good minimal baseline but often underfits nonlinear tabular problems."
+  },
+  {
+    question: "When using GridSearchCV with a Pipeline, why does it prevent data leakage?",
+    options: [
+      "The Pipeline fits preprocessing (e.g., scaling, imputation) only on the training fold data in each CV split, keeping test fold information out of the fit",
+      "Pipelines use cryptographic isolation to ensure the test folds are never accessible during training",
+      "GridSearchCV automatically detects and removes any preprocessing steps that could cause leakage",
+      "Pipeline prevents leakage by caching intermediate results and only refitting when hyperparameters change"
+    ],
+    correct: 0,
+    explanation: "In k-fold cross-validation, each fold acts as a temporary test set. If you fit a StandardScaler on all data and then cross-validate, the scaler has 'seen' the test fold's statistics (mean, std) during fitting — information leakage. When you put the scaler inside a Pipeline and then cross-validate the Pipeline, scikit-learn fits the scaler on only the training k-1 folds in each split, keeping the test fold unseen. This makes the cross-validation estimate unbiased."
+  }
+]);
+</script>
+
+</body>
+</html>

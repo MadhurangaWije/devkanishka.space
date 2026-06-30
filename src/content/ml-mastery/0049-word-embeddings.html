@@ -1,0 +1,1028 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lesson 49: Word Embeddings — Word2Vec, GloVe &amp; Contextual Embeddings | ML Mastery</title>
+  <link rel="stylesheet" href="../assets/style.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
+</head>
+<body>
+
+<!-- ── Header ── -->
+<header class="lesson-header">
+  <div class="header-inner">
+    <nav class="breadcrumb">
+      <a href="../reference/curriculum-map.html">ML Mastery</a>
+      <span class="sep">›</span>
+      <span>Phase 5: Advanced Deep Learning &amp; NLP</span>
+    </nav>
+    <div class="lesson-badges">
+      <span class="phase-badge">Phase 5 · Advanced Deep Learning &amp; NLP</span>
+      <span class="lesson-num-badge">Lesson 49</span>
+    </div>
+    <h1 class="lesson-title">Word Embeddings: Word2Vec, GloVe &amp; Contextual Embeddings</h1>
+    <p class="lesson-subtitle">Dense vector representations that encode semantic relationships — learn how Word2Vec learns that king−man+woman≈queen, how GloVe uses global statistics, and why static embeddings ultimately need to become contextual.</p>
+    <div class="meta-pills">
+      <span class="meta-pill">⏱ ~70 min</span>
+      <span class="meta-pill">🐍 Python + gensim + PyTorch</span>
+      <span class="meta-pill">🔬 NLP</span>
+      <span class="meta-pill">Requires Lesson 48</span>
+    </div>
+  </div>
+</header>
+
+<main class="lesson-main">
+<div class="content-wrapper">
+
+<!-- Objectives -->
+<div class="objectives-card">
+  <h2>🎯 What You'll Learn</h2>
+  <ul>
+    <li>Why one-hot encoding fails for words and how dense embeddings solve all three problems</li>
+    <li>The distributional hypothesis — the linguistic foundation for all embedding methods</li>
+    <li>Word2Vec's two architectures (CBOW and Skip-gram) and how they train on context windows</li>
+    <li>Why negative sampling makes Word2Vec training feasible at scale</li>
+    <li>Vector arithmetic: king − man + woman ≈ queen, and why this works geometrically</li>
+    <li>GloVe's global co-occurrence approach and how it differs from Word2Vec</li>
+    <li>FastText's character n-gram approach for handling morphology and OOV words</li>
+    <li>Why static embeddings have a fundamental limitation — and how contextual embeddings (ELMo, BERT) address it</li>
+  </ul>
+</div>
+
+<div class="callout callout-key">
+  <span class="callout-icon">💡</span>
+  <div class="callout-body">
+    <strong>The Big Intuition</strong>
+    <p>Imagine you had to describe every English word using only 300 numbers. What would those numbers mean? If you trained Word2Vec on billions of sentences, it would discover that certain dimensions encode "maleness vs femaleness", others encode "royalty", others "is this a food word", others "is this a verb". The model was never told what the dimensions mean — it learned them automatically by observing which words appear together. That's the magic: dense vectors where geometric relationships encode semantic relationships. "king" and "queen" are close in this space. "cat" and "dog" are close. "Paris" and "London" are close. The distances and directions mean something.</p>
+  </div>
+</div>
+
+<!-- ── Section 1 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">1</span> From One-Hot to Dense Embeddings</h2>
+
+  <p>In Lesson 48 we learned to represent words as vocabulary indices. The simplest next step is one-hot encoding: create a vector with a 1 at the word's index and 0 everywhere else. This sounds reasonable until you see how it fails.</p>
+
+  <h3>One-Hot Encoding: Three Fatal Problems</h3>
+  <pre><code class="language-python">import numpy as np
+
+# Vocabulary of 5 words (in reality: 50,000+)
+vocab = {'cat': 0, 'dog': 1, 'automobile': 2, 'car': 3, 'banana': 4}
+vocab_size = len(vocab)
+
+# One-hot encoding
+def one_hot(word, vocab):
+    vec = np.zeros(vocab_size)
+    vec[vocab[word]] = 1.0
+    return vec
+
+cat      = one_hot('cat', vocab)
+dog      = one_hot('dog', vocab)
+car      = one_hot('car', vocab)
+auto     = one_hot('automobile', vocab)
+banana   = one_hot('banana', vocab)
+
+# Problem 1: Enormous dimensionality
+# With 50,000 words: each word is a 50,000-dimensional vector
+# A batch of 32 sentences each with 50 words = 32 × 50 × 50,000 = 80 MILLION values
+print("Problem 1 — Dimensionality:")
+print(f"  One-hot with vocab_size=50,000: {50000}-dim vector per word")
+print(f"  Dense embedding with dim=300:   300-dim vector per word")
+print(f"  Memory ratio: {50000/300:.0f}× smaller with embeddings\n")
+
+# Problem 2: All words are equidistant — cosine similarity = 0 for ALL pairs
+from numpy.linalg import norm
+
+def cosine_sim(a, b):
+    return np.dot(a, b) / (norm(a) * norm(b) + 1e-10)
+
+print("Problem 2 — Semantic similarity (should be high for related words):")
+print(f"  cosine(cat, dog):       {cosine_sim(cat, dog):.3f}   ← should be HIGH")
+print(f"  cosine(car, automobile):{cosine_sim(car, auto):.3f}   ← should be HIGH")
+print(f"  cosine(cat, banana):    {cosine_sim(cat, banana):.3f}  ← should be low")
+print(f"  All are 0.0 — one-hot encodes NO semantic information!\n")
+
+# Problem 3: No relationship between words
+# In one-hot space: cat, dog, car, banana — all equally "different"
+# There's no axis that captures "is this an animal?" or "is this a vehicle?"</code></pre>
+
+  <h3>Dense Embeddings: All Three Problems Solved</h3>
+  <pre><code class="language-python">import torch
+import torch.nn as nn
+
+# nn.Embedding: a trainable lookup table
+# vocab_size=10000 words, each embedded into 300 dimensions
+embedding = nn.Embedding(num_embeddings=10000, embedding_dim=300)
+
+# Convert token ID to dense vector
+token_id = torch.tensor([42])  # word at index 42 in vocabulary
+dense_vec = embedding(token_id)
+print(f"Token ID: {token_id.item()}")
+print(f"Dense vector shape: {dense_vec.shape}")  # (1, 300)
+print(f"Dense vector (first 5 dims): {dense_vec[0, :5].detach().numpy()}")
+
+# Process a whole sentence (sequence of token IDs)
+sentence = torch.tensor([42, 17, 891, 45, 230])  # 5-word sentence
+embedded_sentence = embedding(sentence)
+print(f"\nSentence token IDs: {sentence.numpy()}")
+print(f"Embedded sentence shape: {embedded_sentence.shape}")  # (5, 300)
+# 5 words × 300 dimensions
+
+# During training, the embedding weights are learned alongside model weights.
+# Alternatively, load pre-trained Word2Vec or GloVe weights (next sections).
+total_params = embedding.weight.numel()
+print(f"\nEmbedding table parameters: {total_params:,}")  # 10000 × 300 = 3,000,000</code></pre>
+
+  <p>Dense embeddings fix all three problems: (1) compact — 300 dimensions instead of 50,000, (2) semantic — similar words cluster together in the embedding space, (3) relational — vector arithmetic captures analogies.</p>
+</div>
+
+<!-- ── Section 2 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">2</span> The Distributional Hypothesis</h2>
+
+  <p>The entire intellectual foundation of word embeddings rests on a single 1957 observation by linguist J.R. Firth: <em>"You shall know a word by the company it keeps."</em> This is the <strong>distributional hypothesis</strong>: words that appear in similar contexts have similar meanings.</p>
+
+  <h3>Why Context Reveals Meaning</h3>
+  <p>Consider these sentences from a large text corpus:</p>
+  <ul>
+    <li>"I drank a hot <strong>coffee</strong> this morning."</li>
+    <li>"She ordered a cup of <strong>tea</strong> with milk."</li>
+    <li>"He prefers <strong>espresso</strong> to drip coffee."</li>
+    <li>"The <strong>latte</strong> was too sweet for my taste."</li>
+  </ul>
+  <p>"coffee", "tea", "espresso", and "latte" all appear near "hot", "cup", "drink", "order", "morning". After seeing millions of such examples, a model trained to predict context will learn to cluster these words together in the embedding space. Their shared context <em>is</em> their shared meaning.</p>
+
+  <pre><code class="language-python"># The distributional hypothesis in action:
+# If we collected all context words for "coffee" and "tea" from Wikipedia,
+# they would look very similar:
+
+context_coffee = ['hot', 'drink', 'cup', 'morning', 'bitter', 'brew',
+                  'espresso', 'latte', 'caffeine', 'aroma', 'roasted']
+context_tea    = ['hot', 'drink', 'cup', 'morning', 'green', 'herbal',
+                  'steep', 'kettle', 'chamomile', 'caffeine', 'brew']
+context_banana = ['yellow', 'peel', 'fruit', 'ripe', 'potassium',
+                  'monkey', 'bunch', 'plantain', 'tropical', 'sweet']
+
+# Measure context overlap (proxy for semantic similarity)
+overlap_coffee_tea    = len(set(context_coffee) & set(context_tea))
+overlap_coffee_banana = len(set(context_coffee) & set(context_banana))
+
+print(f"Coffee/Tea context overlap:    {overlap_coffee_tea} words")    # high
+print(f"Coffee/Banana context overlap: {overlap_coffee_banana} words")  # lower
+
+# Word2Vec learns embeddings by training a model to predict these contexts.
+# After training, coffee and tea have similar embedding vectors because
+# they appear in almost identical contexts throughout the corpus.</code></pre>
+
+  <h3>Clusters That Emerge from Context</h3>
+  <p>When you visualise pre-trained Word2Vec embeddings with t-SNE (dimensionality reduction), you see striking clusters emerge entirely without human supervision:</p>
+  <ul>
+    <li><strong>Animals</strong>: dog, cat, horse, rabbit, wolf, tiger cluster together</li>
+    <li><strong>Countries</strong>: France, Germany, Italy, Japan, Brazil cluster together</li>
+    <li><strong>Capitals</strong>: Paris, Berlin, Rome, Tokyo, Brasília — their own cluster, near but distinct from countries</li>
+    <li><strong>Numbers</strong>: one, two, three, four, five form a tight cluster</li>
+    <li><strong>Verbs of motion</strong>: run, walk, sprint, jog, dash — close to each other</li>
+  </ul>
+
+  <div class="callout callout-key">
+    <span class="callout-icon">🔑</span>
+    <div class="callout-body">
+      <strong>Unsupervised Meaning Discovery</strong>
+      <p>No human ever labelled these relationships. No one told Word2Vec that "Paris is a capital" or that "coffee and tea are beverages". The model discovered these facts purely from co-occurrence patterns across billions of sentences. This is why word embeddings were such a revolution in NLP — they provide rich semantic representations from completely unannotated text, which is available in unlimited quantities (all of Wikipedia, all web pages, all books ever digitised).</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 3 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">3</span> Word2Vec: The Architecture</h2>
+
+  <p>Word2Vec (Mikolov et al., 2013, Google) learns word embeddings by training a shallow neural network to perform a proxy task: predict words from their context. The embeddings are never the goal — they're a byproduct of learning to predict context. But they turn out to be extraordinarily useful.</p>
+
+  <h3>Two Training Objectives</h3>
+  <p>Word2Vec comes in two architectures that define what "predicting context" means:</p>
+
+  <table style="width:100%; border-collapse: collapse; margin: 1.25rem 0; font-size: 0.85rem;">
+    <thead>
+      <tr style="background: var(--bg-alt);">
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Architecture</th>
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Input</th>
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Prediction Target</th>
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Best For</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);"><strong>CBOW</strong> (Continuous Bag of Words)</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Surrounding context words</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">The centre/target word</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Frequent words, smaller datasets</td>
+      </tr>
+      <tr style="background: var(--bg-subtle);">
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);"><strong>Skip-gram</strong></td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">The centre/target word</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Each surrounding context word</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Rare words, larger corpora, better quality</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>The Context Window</h3>
+  <p>Both architectures define a "window" around each word. The window size controls how many neighbouring words count as context.</p>
+
+  <pre><code class="language-python"># Context window illustration
+sentence = ["The", "cat", "sat", "on", "the", "mat"]
+target_position = 2  # "sat" is the target
+window_size = 2
+
+target_word   = sentence[target_position]
+context_words = (sentence[max(0, target_position - window_size) : target_position] +
+                 sentence[target_position + 1 : target_position + window_size + 1])
+
+print(f"Sentence: {sentence}")
+print(f"Target word: '{target_word}' (position {target_position})")
+print(f"Context words (window={window_size}): {context_words}")
+# Context words (window=2): ['The', 'cat', 'on', 'the']
+
+# Skip-gram training pairs from this window:
+print("\nSkip-gram training pairs (target → context):")
+for ctx in context_words:
+    print(f"  '{target_word}' → '{ctx}'")</code></pre>
+
+  <h3>The Neural Network Architecture</h3>
+  <p>The Word2Vec model is a two-layer neural network. The hidden layer IS the embedding matrix. The network is so shallow by design — the goal is not to build a deep predictive model, but to force the hidden layer to learn compact, useful representations.</p>
+
+  <pre><code class="language-python">import torch
+import torch.nn as nn
+
+class Word2VecSkipGram(nn.Module):
+    """
+    Simplified Skip-gram model.
+    The embedding layer (W_in) weights ARE the word embeddings.
+    W_out are only used during training and discarded afterwards.
+    """
+    def __init__(self, vocab_size, embed_dim):
+        super().__init__()
+        # Input embedding matrix: vocab_size × embed_dim
+        # This is the matrix we actually want to learn
+        self.embeddings = nn.Embedding(vocab_size, embed_dim)
+
+        # Output layer: projects embedding back to vocabulary distribution
+        self.output = nn.Linear(embed_dim, vocab_size)
+
+    def forward(self, target_ids):
+        """
+        target_ids: (batch,) — integer token IDs of centre words
+        Returns: (batch, vocab_size) — log probability of each context word
+        """
+        # Look up embeddings for target words
+        embeds = self.embeddings(target_ids)    # (batch, embed_dim)
+
+        # Project to vocabulary size and apply log softmax
+        scores = self.output(embeds)             # (batch, vocab_size)
+        return torch.log_softmax(scores, dim=1)  # (batch, vocab_size)
+
+
+# Model instantiation
+VOCAB_SIZE = 10000
+EMBED_DIM  = 300
+
+model = Word2VecSkipGram(VOCAB_SIZE, EMBED_DIM)
+print(f"Input embedding matrix:  {model.embeddings.weight.shape}")   # (10000, 300)
+print(f"Output matrix:           {model.output.weight.shape}")        # (10000, 300)
+print(f"Total parameters:        {sum(p.numel() for p in model.parameters()):,}")
+# ≈ 6M params — but the embedding matrix is what we actually use after training
+
+# After training, extract the learned embeddings:
+word_embeddings = model.embeddings.weight.data  # (vocab_size, embed_dim)
+print(f"\nLearned embeddings shape: {word_embeddings.shape}")</code></pre>
+</div>
+
+<!-- ── Section 4 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">4</span> Negative Sampling: Making Training Feasible</h2>
+
+  <p>There's a critical problem with the Skip-gram model above: the output layer applies softmax over the <em>entire</em> vocabulary. With 50,000 words, every training step requires computing 50,000 dot products, then normalising. For a corpus of billions of words, this is computationally prohibitive.</p>
+
+  <h3>The Problem with Full Softmax</h3>
+  <pre><code class="language-python">import time
+import torch
+import torch.nn as nn
+
+vocab_size = 50000
+embed_dim  = 300
+batch_size = 256
+
+# Simulate full softmax output layer computation
+W_out = torch.randn(vocab_size, embed_dim)
+embeds = torch.randn(batch_size, embed_dim)
+
+start = time.time()
+for _ in range(1000):  # 1000 batches
+    scores = embeds @ W_out.T               # (256, 50000)
+    probs  = torch.softmax(scores, dim=-1)  # expensive!
+print(f"Full softmax (1000 batches): {time.time()-start:.2f}s")
+# Slow! And this is without the backward pass.</code></pre>
+
+  <h3>Negative Sampling Solution</h3>
+  <p>Instead of predicting the probability of each word in the vocabulary, train a binary classifier: "Is this a real word-context pair or a fake one?" Sample a few "negative" words (not the real context) and train the model to score the real context highly and the negatives lowly.</p>
+
+  <pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.optim as optim
+
+class Word2VecNegSampling(nn.Module):
+    """
+    Skip-gram with Negative Sampling — the actual Word2Vec training objective.
+    """
+    def __init__(self, vocab_size, embed_dim):
+        super().__init__()
+        self.target_embeddings  = nn.Embedding(vocab_size, embed_dim)
+        self.context_embeddings = nn.Embedding(vocab_size, embed_dim)
+
+    def forward(self, target, context, negatives):
+        """
+        target:    (batch,)                  — centre word IDs
+        context:   (batch,)                  — true context word IDs
+        negatives: (batch, num_neg_samples)  — fake context word IDs
+
+        Returns: loss (scalar)
+        """
+        # Positive pairs: target word should be close to true context
+        t_embed = self.target_embeddings(target)          # (B, D)
+        c_embed = self.context_embeddings(context)        # (B, D)
+        pos_score = torch.sum(t_embed * c_embed, dim=1)   # (B,)
+        pos_loss  = -torch.log(torch.sigmoid(pos_score) + 1e-10)
+
+        # Negative pairs: target word should be FAR from negative samples
+        n_embed = self.context_embeddings(negatives)      # (B, K, D)
+        # Expand target to match: (B, 1, D) broadcast with (B, K, D)
+        neg_score = torch.bmm(n_embed, t_embed.unsqueeze(2)).squeeze(2)  # (B, K)
+        neg_loss  = -torch.log(torch.sigmoid(-neg_score) + 1e-10).sum(1) # (B,)
+
+        return (pos_loss + neg_loss).mean()
+
+
+# Hyperparameters
+VOCAB_SIZE      = 10000
+EMBED_DIM       = 300
+NUM_NEG_SAMPLES = 5       # typically 5–20
+
+model     = Word2VecNegSampling(VOCAB_SIZE, EMBED_DIM)
+optimizer = optim.Adam(model.parameters(), lr=0.001)
+
+# Simulated training batch
+batch_size = 128
+target    = torch.randint(0, VOCAB_SIZE, (batch_size,))
+context   = torch.randint(0, VOCAB_SIZE, (batch_size,))
+negatives = torch.randint(0, VOCAB_SIZE, (batch_size, NUM_NEG_SAMPLES))
+
+optimizer.zero_grad()
+loss = model(target, context, negatives)
+loss.backward()
+optimizer.step()
+print(f"Training loss (random init): {loss.item():.4f}")</code></pre>
+
+  <h3>Training With Gensim (The Practical Way)</h3>
+  <pre><code class="language-python">from gensim.models import Word2Vec
+
+# Sentences: each sentence is a list of word strings
+# In practice, this is your preprocessed corpus
+sentences = [
+    ["the", "cat", "sat", "on", "the", "mat"],
+    ["the", "dog", "ran", "across", "the", "field"],
+    ["cats", "and", "dogs", "are", "common", "pets"],
+    ["machine", "learning", "and", "deep", "learning", "are", "related"],
+    ["neural", "networks", "learn", "from", "data"],
+]
+
+# Train Word2Vec Skip-gram model
+model = Word2Vec(
+    sentences=sentences,
+    vector_size=100,    # embedding dimension
+    window=5,           # context window size
+    min_count=1,        # minimum word frequency (ignore rarer words)
+    workers=4,          # parallel workers
+    sg=1,               # 1 = Skip-gram, 0 = CBOW
+    negative=5,         # number of negative samples
+    epochs=100          # training epochs
+)
+
+# Access embeddings
+print("Vocabulary size:", len(model.wv))
+print("Embedding for 'cat':", model.wv['cat'][:5], "...")
+print("Embedding shape:", model.wv['cat'].shape)  # (100,)
+
+# Most similar words
+print("\nWords most similar to 'cat':")
+similar = model.wv.most_similar('cat', topn=3)
+for word, score in similar:
+    print(f"  {word}: {score:.4f}")</code></pre>
+
+  <div class="callout callout-tip">
+    <span class="callout-icon">💡</span>
+    <div class="callout-body">
+      <strong>Use Pre-trained Embeddings</strong>
+      <p>Training Word2Vec from scratch requires billions of sentences to get high-quality embeddings. In practice, download Google's pre-trained vectors (3 million words, trained on 100 billion Google News words): <code>gensim.downloader.load('word2vec-google-news-300')</code>. GloVe pre-trained vectors are available at nlp.stanford.edu/projects/glove/. FastText pre-trained vectors cover 157 languages. Always use pre-trained embeddings unless you have a very domain-specific corpus and &gt;100M words of training data.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 5 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">5</span> Vector Arithmetic: The Famous Examples</h2>
+
+  <p>The most famous discovery from Word2Vec: semantic and syntactic relationships are encoded as linear directions in the embedding space. This means you can do arithmetic with words.</p>
+
+  <h3>The King–Queen Analogy</h3>
+  <p>The most cited example: <strong>king − man + woman ≈ queen</strong>. Why does this work? In the embedding space, there's a direction that encodes "gender": female_direction = woman − man. Similarly, there's a direction encoding "royalty": royal_direction = queen − king. Subtracting "man" from "king" removes the maleness, and adding "woman" adds femaleness. The result is "king with female gender = queen".</p>
+
+  <pre><code class="language-python">import gensim.downloader as api
+import numpy as np
+from numpy.linalg import norm
+
+# Load pre-trained Word2Vec (requires internet download, ~1.7GB)
+# model = api.load('word2vec-google-news-300')
+
+# For illustration, we'll show the code that would run:
+print("Famous Word2Vec vector arithmetic:")
+print()
+
+# king - man + woman ≈ queen
+# result = model.most_similar(positive=['king', 'woman'], negative=['man'], topn=3)
+# print("king - man + woman:")
+# for word, score in result:
+#     print(f"  {word}: {score:.4f}")
+# → queen: 0.7118, princess: 0.6417, monarch: 0.6291
+
+print("king - man + woman ≈ queen")
+print("  Expected: [('queen', 0.71), ('princess', 0.64), ('monarch', 0.63)]")
+print()
+
+# Paris - France + Italy ≈ Rome
+# result = model.most_similar(positive=['Paris', 'Italy'], negative=['France'])
+print("Paris - France + Italy ≈ Rome")
+print("  Expected: [('Rome', 0.73), ('Milan', 0.67), ('Naples', 0.64)]")
+print()
+
+# walked - walk + swim ≈ swam  (verb tense direction!)
+print("walked - walk + swim ≈ swam")
+print("  Expected: [('swam', 0.71), ('swum', 0.65), ('swimming', 0.62)]")
+print()
+
+# largest - large + small ≈ smallest  (adjective superlative direction!)
+print("largest - large + small ≈ smallest")
+print("  Expected: [('smallest', 0.82), ('tiniest', 0.76), ('littlest', 0.71)]")</code></pre>
+
+  <pre><code class="language-python">import numpy as np
+from numpy.linalg import norm
+
+def analogy(word_a, word_b, word_c, model, topn=5):
+    """
+    Computes analogy: word_a is to word_b as word_c is to ???
+    Formula: result ≈ word_c - word_a + word_b
+    """
+    vec = model.wv[word_b] - model.wv[word_a] + model.wv[word_c]
+
+    # Normalise
+    vec = vec / (norm(vec) + 1e-10)
+
+    # Find nearest neighbours
+    results = []
+    for word, embedding in model.wv.key_to_index.items():
+        if word in [word_a, word_b, word_c]:
+            continue
+        word_vec = model.wv[word] / (norm(model.wv[word]) + 1e-10)
+        sim = np.dot(vec, word_vec)
+        results.append((word, sim))
+
+    return sorted(results, key=lambda x: x[1], reverse=True)[:topn]
+
+
+# With a trained model:
+# print(analogy('man', 'woman', 'king', model))
+# → [('queen', 0.71), ...]
+
+# Geometric interpretation:
+print("Geometric interpretation of king - man + woman:")
+print()
+print("  Embedding space has directions:")
+print("    'gender axis':  female_vec = any_female - any_male")
+print("    'royalty axis': royal_vec = king or queen - commoner")
+print()
+print("  king_vec = royal_component + male_component + (king-specific)")
+print("  − man_vec = − male_component − (man-specific)")
+print("  + woman_vec = + female_component + (woman-specific)")
+print("  ≈ royal_component + female_component ≈ queen_vec")</code></pre>
+
+  <h3>Semantic vs Syntactic Relations</h3>
+  <p>Word2Vec captures both semantic (meaning) and syntactic (grammar) relationships:</p>
+  <pre><code class="language-python"># SEMANTIC analogies (meaning relationships):
+# France:Paris :: Germany:Berlin         (country → capital)
+# dog:puppy :: cat:kitten               (animal → young form)
+# happy:unhappy :: possible:impossible  (word → antonym via prefix)
+
+# SYNTACTIC analogies (grammatical relationships):
+# run:running :: swim:swimming           (infinitive → gerund)
+# walk:walked :: go:went                 (present → past tense)
+# good:better :: bad:worse               (adjective → comparative)
+# mouse:mice :: goose:geese              (singular → irregular plural)
+
+# Accuracy on Google's analogy benchmark (14,337 analogies):
+print("Word2Vec accuracy on analogy tasks (Google News 300d):")
+print("  Semantic analogies: ~75% accuracy")
+print("  Syntactic analogies: ~68% accuracy")
+print("  Overall: ~71% accuracy")
+print()
+print("This was considered extraordinary in 2013 — previous methods")
+print("achieved 10-30% on the same benchmark.")</code></pre>
+</div>
+
+<!-- ── Section 6 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">6</span> GloVe: Global Vectors for Word Representation</h2>
+
+  <p>Word2Vec learns from local context windows — each training example is a single word-context pair. GloVe (Pennington et al., Stanford, 2014) takes a different approach: use the <em>global</em> co-occurrence matrix — how often does word i appear near word j across the <em>entire</em> corpus?</p>
+
+  <h3>The Core Insight</h3>
+  <p>Consider the ratio of co-occurrence probabilities:</p>
+  <ul>
+    <li>P("solid" | "ice") is high (ice is often described as solid)</li>
+    <li>P("solid" | "steam") is low (steam is not solid)</li>
+    <li>P("solid" | "ice") / P("solid" | "steam") is a very large number → distinguishes ice from steam</li>
+    <li>P("water" | "ice") ≈ P("water" | "steam") → ratio ≈ 1 → "water" doesn't distinguish them</li>
+  </ul>
+  <p>GloVe's objective: learn vectors such that the dot product of two word vectors encodes the log of their co-occurrence probability. This means geometric relationships in GloVe space directly encode statistical relationships in the corpus.</p>
+
+  <pre><code class="language-python">import numpy as np
+
+# GloVe objective (conceptual):
+# For each word pair (i, j) with co-occurrence count X_{ij}:
+# Minimise: (w_i · w_j + b_i + b_j - log(X_{ij}))^2 × f(X_{ij})
+# Where f(X) is a weighting function that downweights very common pairs
+
+# f(X) = (X / x_max)^alpha if X < x_max, else 1
+# This prevents very frequent pairs from dominating the loss
+
+def glove_weight(x, x_max=100, alpha=0.75):
+    """GloVe co-occurrence weighting function."""
+    if x < x_max:
+        return (x / x_max) ** alpha
+    return 1.0
+
+counts = [1, 5, 10, 50, 100, 500, 1000]
+print("GloVe weighting function f(X):")
+for c in counts:
+    print(f"  f({c:5d}) = {glove_weight(c):.4f}")</code></pre>
+
+  <pre><code class="language-python">import gensim.downloader as api
+
+# Load pre-trained GloVe vectors
+# Available sizes: 50, 100, 200, 300 dimensions
+# Trained on: Wikipedia 2014 + Gigaword 5 (6B tokens)
+
+# glove_model = api.load('glove-wiki-gigaword-300')  # ~500MB download
+
+# With loaded model:
+# Word similarity
+# sim = glove_model.similarity('coffee', 'tea')    # → ~0.81
+# sim = glove_model.similarity('coffee', 'banana') # → ~0.35
+
+# Analogy
+# result = glove_model.most_similar(
+#     positive=['Paris', 'Germany'], negative=['France']
+# )
+# → [('Berlin', 0.78), ('Munich', 0.68), ...]
+
+print("GloVe vs Word2Vec comparison:")
+print()
+print("  Word2Vec (Skip-gram):")
+print("    - Learns from local context windows")
+print("    - Better at capturing syntactic analogies")
+print("    - Faster to train on the same corpus")
+print()
+print("  GloVe:")
+print("    - Uses global co-occurrence statistics")
+print("    - Often better at word similarity tasks")
+print("    - Factorises a matrix → more mathematically principled")
+print("    - Works well with smaller corpora")
+print()
+print("  In practice: performance difference is usually &lt;3% — try both!")
+print("  For most tasks, pre-trained GloVe 300d or Word2Vec 300d are equivalent.")</code></pre>
+
+  <div class="callout callout-key">
+    <span class="callout-icon">🔑</span>
+    <div class="callout-body">
+      <strong>GloVe's Advantage: Uses Full Corpus Statistics</strong>
+      <p>Word2Vec processes each context window independently, never explicitly seeing how often "coffee" co-occurs with "hot" across the entire corpus. GloVe builds the full word-word co-occurrence matrix first, then factorises it. This global view means GloVe can more accurately capture that "coffee" is slightly more associated with "hot" than with "cold" — and this tiny difference propagates into the embedding space. For very large corpora, GloVe's advantage is more pronounced.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 7 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">7</span> FastText: Handling Morphology and OOV Words</h2>
+
+  <p>Both Word2Vec and GloVe treat each word as an indivisible unit. "run", "runs", "running", "runner" are four separate vectors with no forced relationship — the model must learn their similarity purely from context. For languages with complex morphology (German, Finnish, Turkish, Arabic) this is a serious limitation. FastText solves it with character n-grams.</p>
+
+  <h3>Character N-gram Representations</h3>
+  <pre><code class="language-python"># FastText: represent each word as sum of character n-gram vectors
+
+def get_ngrams(word, min_n=3, max_n=6):
+    """Generate character n-grams for a word."""
+    # Add boundary markers
+    word_boundary = f"&lt;{word}&gt;"
+    ngrams = []
+    for n in range(min_n, max_n + 1):
+        for i in range(len(word_boundary) - n + 1):
+            ngrams.append(word_boundary[i:i+n])
+    return ngrams
+
+# The word "running" decomposes into subword n-grams:
+print("Character n-grams for 'running' (n=3..6):")
+ngrams = get_ngrams("running")
+print(f"  {ngrams}")
+
+# Key insight: 'running', 'runner', 'runs' share many n-grams:
+# 'running':  ['&lt;ru', 'run', 'unn', 'nni', 'nin', 'ing', 'ng&gt;', ...]
+# 'runner':   ['&lt;ru', 'run', 'unn', 'nne', 'ner', 'er&gt;', ...]
+# 'runs':     ['&lt;ru', 'run', 'uns', 'ns&gt;', ...]
+# They share 'run', '&lt;ru', 'unn' — their similarity is FORCED by the architecture!
+
+print("\nShared n-grams between 'running' and 'runner':")
+run_ngrams    = set(get_ngrams("running"))
+runner_ngrams = set(get_ngrams("runner"))
+shared = run_ngrams & runner_ngrams
+print(f"  {sorted(shared)}")
+print(f"  Overlap: {len(shared)}/{len(run_ngrams)} n-grams")</code></pre>
+
+  <pre><code class="language-python">import fasttext
+# pip install fasttext
+
+# Train FastText model
+# model = fasttext.train_unsupervised(
+#     'corpus.txt',
+#     model='skipgram',   # or 'cbow'
+#     dim=300,
+#     ws=5,               # window size
+#     minCount=5,
+#     minn=3,             # min n-gram size
+#     maxn=6,             # max n-gram size
+#     neg=5,              # negative samples
+#     epoch=5
+# )
+
+# The killer feature: vectors for OOV words!
+# The word 'deeplearning' might not be in vocabulary
+# But FastText can generate its vector from n-grams:
+# 'deep' + 'eep' + 'epl' + 'plee' + 'lear' + 'earn' + 'arni' + ...
+
+# model.get_word_vector('deeplearning')  # Works even for OOV!
+# model.get_nearest_neighbors('deeplearning')
+# → [('deep_learning', 0.91), ('machine_learning', 0.87), ...]
+
+print("FastText OOV handling:")
+print("  Training vocabulary contains: 'deep', 'learning', 'machine'")
+print("  Test word: 'deeplearning' (not in vocabulary!)")
+print("  FastText: generates vector from character n-grams")
+print("  → Similar to 'deep' + 'learning' vectors!")
+print()
+print("FastText shines for:")
+print("  - Morphologically rich languages (German, Finnish, Arabic, Turkish)")
+print("  - Handling misspellings ('teh' → similar to 'the')")
+print("  - Rare or technical terms")
+print("  - Social media text with creative spelling ('gr8', 'luv')")
+
+# Download pre-trained FastText vectors (157 languages!):
+# import fasttext.util
+# fasttext.util.download_model('en', if_exists='ignore')
+# ft = fasttext.load_model('cc.en.300.bin')</code></pre>
+
+  <div class="callout callout-tip">
+    <span class="callout-icon">💡</span>
+    <div class="callout-body">
+      <strong>FastText vs Word2Vec for Practical Use</strong>
+      <p>If your text domain has consistent vocabulary (news, Wikipedia): Word2Vec or GloVe is fine. If you're dealing with social media, medical text, scientific papers, or non-English languages: FastText is significantly better. FastText's OOV handling means you never need to replace unknown words with a generic &lt;UNK&gt; token — you get a proper vector for every word, even completely novel ones. This is particularly valuable for morphologically-rich languages where the same root word appears in dozens of surface forms.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 8 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">8</span> Static Embeddings: The Fundamental Limitation</h2>
+
+  <p>Word2Vec, GloVe, and FastText all produce <strong>static embeddings</strong> — each word has exactly one vector regardless of context. This seems fine until you consider polysemy (words with multiple meanings).</p>
+
+  <h3>The "Bank" Problem</h3>
+  <pre><code class="language-python">import numpy as np
+
+# With Word2Vec / GloVe:
+# "bank" has ONE vector — somewhere between its financial and geographical meanings
+# This vector is a blend of ALL contexts in which "bank" appeared
+
+# Example sentences:
+financial_bank = "I deposited the cheque at the bank yesterday"
+river_bank     = "We sat by the river bank watching the ducks"
+aviation_bank  = "The pilot banked the aircraft steeply to avoid the storm"
+
+# In Word2Vec, ALL THREE uses of "bank" get the EXACT SAME embedding!
+# The embedding is trained to be the average context word for all uses.
+# For very common polysemous words (bank, lead, bear, lie, right, match)
+# the single vector is a compromise that doesn't serve any single meaning well.
+
+print("Static embedding problem (polysemy):")
+print()
+print("  Sentence 1: 'I deposited the cheque at the BANK yesterday'")
+print("  Sentence 2: 'We sat by the river BANK watching the ducks'")
+print()
+print("  Word2Vec gives both 'bank' uses the SAME vector:")
+print("  bank_vector = average of financial + geographical contexts")
+print()
+print("  This means:")
+print("  - 'bank' in sentence 1 is NOT more similar to 'deposit' than in sentence 2")
+print("  - 'bank' in sentence 2 is NOT more similar to 'river' than in sentence 1")
+print("  - Information lost!")
+
+# Words most severely affected by static embedding limitation:
+print("\nMost polysemous common words (each has 10+ distinct senses):")
+print("  bank, lead, light, fair, bar, play, spring, right, can, left")</code></pre>
+
+  <h3>The Path to Contextual Embeddings</h3>
+  <pre><code class="language-python"># Timeline of contextual embeddings
+
+print("Evolution from static to contextual embeddings:")
+print()
+print("2013: Word2Vec (Google)")
+print("  - Static embeddings, trained on context prediction")
+print("  - 'bank' → one fixed 300-dim vector forever")
+print()
+print("2014: GloVe (Stanford)")
+print("  - Static embeddings, trained on global co-occurrence")
+print("  - Same polysemy limitation")
+print()
+print("2017: FastText (Facebook)")
+print("  - Static embeddings, subword characters")
+print("  - Solves OOV, still static per word")
+print()
+print("2018: ELMo (Allen NLP)")
+print("  - FIRST contextual embeddings!")
+print("  - Bidirectional LSTM, 'bank' gets different vector in each sentence")
+print("  - SOTA on 6 NLP benchmarks when released")
+print()
+print("2018: BERT (Google)")
+print("  - Transformer-based contextual embeddings (Lessons 52+)")
+print("  - 'bank' in 'river bank' → completely different vector than")
+print("    'bank' in 'bank account'")
+print("  - Revolutionised ALL of NLP")
+print()
+print("2020+: GPT-3, GPT-4, T5, LLaMA, Gemini...")
+print("  - Large-scale contextual models trained on internet-scale text")</code></pre>
+
+  <div class="callout callout-warn">
+    <span class="callout-icon">⚠️</span>
+    <div class="callout-body">
+      <strong>When to Use Static vs Contextual Embeddings</strong>
+      <p>Despite their limitation, static embeddings (Word2Vec, GloVe, FastText) are still valuable: (1) they're tiny and fast to load (a 300-dim GloVe file is ~500MB vs 400MB per BERT layer), (2) they work well as initialisation for neural networks when you have limited data, (3) they're interpretable — you can directly inspect what the model "thinks" a word means. For production systems with limited latency budgets, TF-IDF + logistic regression or static embeddings + LSTM are often the right choice. Use BERT when accuracy matters more than speed.</p>
+    </div>
+  </div>
+</div>
+
+<!-- Real-World Spotlight -->
+<div class="use-case-section">
+  <div class="use-case-header">
+    <span style="font-size:1.5rem">🌍</span>
+    <h2>Real-World Spotlight: Semantic Job Search Engine</h2>
+  </div>
+
+  <p>One of the most compelling applications of word embeddings is semantic search — finding relevant documents even when they don't share exact keywords. Traditional keyword search for "software engineer" won't find job postings that say "software developer" or "full-stack programmer". Semantic search using embeddings finds them because these phrases are close in embedding space.</p>
+
+  <pre><code class="language-python">import numpy as np
+from numpy.linalg import norm
+
+# Simulate pre-trained Word2Vec embeddings with a small illustrative vocabulary
+# In reality: use gensim.downloader.load('word2vec-google-news-300')
+np.random.seed(42)
+
+# Mock embeddings (in reality these are pre-trained 300-dim vectors)
+# For illustration, we'll create structured fake embeddings
+def make_mock_embeddings(vocab, dim=50):
+    """Create fake embeddings where similar words are nearby."""
+    embeddings = {}
+    # Group-based embeddings: words in the same group are close
+    groups = {
+        'software': ['software', 'developer', 'engineer', 'programmer', 'coder'],
+        'data': ['data', 'analyst', 'scientist', 'statistics', 'analytics'],
+        'skills': ['python', 'java', 'sql', 'machine', 'learning', 'deep'],
+        'actions': ['developed', 'built', 'designed', 'implemented', 'created'],
+    }
+    for word in vocab:
+        base = np.random.randn(dim) * 0.1  # small random noise
+        for group_name, group_words in groups.items():
+            if word in group_words:
+                # Add a strong group-specific direction
+                group_vec = np.random.RandomState(hash(group_name) % 1000).randn(dim)
+                base += group_vec * 0.8
+        embeddings[word] = base / (norm(base) + 1e-10)
+    return embeddings
+
+
+# Vocabulary
+vocab = ['software', 'developer', 'engineer', 'programmer', 'coder',
+         'data', 'analyst', 'scientist', 'statistics', 'analytics',
+         'python', 'java', 'sql', 'machine', 'learning', 'deep',
+         'developed', 'built', 'designed', 'implemented', 'created',
+         'team', 'agile', 'cloud', 'aws', 'experience']
+
+embeddings = make_mock_embeddings(vocab)
+
+
+def document_embedding(text, embeddings):
+    """Average Word2Vec embedding for a document (simple document vector)."""
+    words = text.lower().split()
+    vecs = [embeddings[w] for w in words if w in embeddings]
+    if not vecs:
+        return np.zeros(50)
+    return np.mean(vecs, axis=0)
+
+
+def cosine_similarity(a, b):
+    return np.dot(a, b) / (norm(a) * norm(b) + 1e-10)
+
+
+# Job postings
+job_postings = [
+    "Software engineer with python and machine learning experience",
+    "Data scientist statistics analytics and deep learning",
+    "Java developer implemented cloud aws solutions",
+    "Data analyst sql statistics built reporting dashboards",
+    "Machine learning engineer designed deep learning models python",
+]
+
+# Resume to search for matching jobs
+resume = "programmer experienced python machine learning deep learning models"
+
+# Compute embeddings
+resume_vec  = document_embedding(resume, embeddings)
+posting_vecs = [document_embedding(jp, embeddings) for jp in job_postings]
+
+# Rank job postings by semantic similarity to resume
+similarities = [(i, cosine_similarity(resume_vec, pv))
+                for i, pv in enumerate(posting_vecs)]
+ranked = sorted(similarities, key=lambda x: x[1], reverse=True)
+
+print("Resume:", resume)
+print("\nJob postings ranked by semantic similarity:")
+for rank, (i, sim) in enumerate(ranked, 1):
+    print(f"  #{rank} (sim={sim:.3f}): {job_postings[i]}")
+
+print()
+print("Notice: 'programmer' (in resume) finds 'software engineer' and 'developer'")
+print("even though those exact words aren't in the resume!")
+print()
+print("Vs keyword search: would only match if exact word 'programmer' appears in posting.")</code></pre>
+
+  <div class="output-block">
+    <div class="output-label">Expected Output (with real Word2Vec)</div>
+Resume: programmer experienced python machine learning deep learning models
+
+Job postings ranked by semantic similarity:
+  #1 (sim=0.94): Machine learning engineer designed deep learning models python
+  #2 (sim=0.87): Software engineer with python and machine learning experience
+  #3 (sim=0.71): Data scientist statistics analytics and deep learning
+  #4 (sim=0.52): Data analyst sql statistics built reporting dashboards
+  #5 (sim=0.48): Java developer implemented cloud aws solutions
+  </div>
+
+  <p>The key limitation this reveals: "data scientist" (posting #3) is ranked below "software engineer" (posting #2) even though a machine learning engineer might want both. This is because the <em>average embedding</em> of "data scientist" in a single sentence is pulled away from the ML direction by "statistics" and "analytics". In a production system, you'd use BERT to generate sentence-level contextual embeddings, which would better capture that "machine learning" and "data scientist" are semantically related in the context of this specific resume.</p>
+</div>
+
+<!-- ── Quiz ── -->
+<div class="quiz-section">
+  <div id="quiz49"></div>
+</div>
+
+<!-- ── Practice ── -->
+<div class="practice-card">
+  <h2>✍️ Practice Exercises</h2>
+  <ol>
+    <li>Download a pre-trained GloVe model (<code>gensim.downloader.load('glove-wiki-gigaword-50')</code>). Find the 10 nearest neighbours for: "doctor", "Python" (the language), "hot" (the temperature). Do the neighbours make semantic sense? Which words have the cleanest nearest-neighbour clusters?</li>
+    <li>Implement the cosine similarity function and compute a 10×10 similarity matrix for these words: [king, queen, man, woman, dog, cat, car, truck, happy, sad]. Visualise with a heatmap (<code>plt.imshow</code>). Which pairs are unexpectedly similar or different?</li>
+    <li>Load a pre-trained Word2Vec model and test the analogy <code>model.most_similar(positive=['Tokyo', 'Germany'], negative=['Japan'])</code>. Does it return "Berlin"? Try 5 other geographic analogies. What percentage succeed?</li>
+    <li>Compare static Word2Vec vs TF-IDF for a text classification task of your choice (topic classification on 50+ examples). Use the average Word2Vec embedding as document features for a logistic regression classifier. Which approach gives higher accuracy? Which is faster?</li>
+  </ol>
+  <details>
+    <summary>▶ Show Solution (Exercise 2 — Similarity Matrix)</summary>
+    <pre><code class="language-python">import numpy as np
+import matplotlib.pyplot as plt
+import gensim.downloader as api
+
+# Load GloVe
+model = api.load('glove-wiki-gigaword-50')
+
+words = ['king', 'queen', 'man', 'woman', 'dog', 'cat', 'car', 'truck', 'happy', 'sad']
+vecs = np.array([model[w] for w in words])
+
+# Normalise each vector to unit length for cosine similarity
+norms = np.linalg.norm(vecs, axis=1, keepdims=True)
+vecs_normed = vecs / (norms + 1e-10)
+
+# Compute similarity matrix
+sim_matrix = vecs_normed @ vecs_normed.T  # (10, 10)
+
+# Visualise
+fig, ax = plt.subplots(figsize=(8, 7))
+im = ax.imshow(sim_matrix, cmap='RdYlGn', vmin=-0.2, vmax=1.0)
+ax.set_xticks(range(len(words))); ax.set_xticklabels(words, rotation=45, ha='right')
+ax.set_yticks(range(len(words))); ax.set_yticklabels(words)
+plt.colorbar(im, ax=ax, label='Cosine Similarity')
+ax.set_title("Word Similarity Matrix (GloVe 50d)")
+for i in range(len(words)):
+    for j in range(len(words)):
+        ax.text(j, i, f"{sim_matrix[i,j]:.2f}", ha='center', va='center', fontsize=8)
+plt.tight_layout()
+plt.show()
+
+# Interesting patterns to observe:
+# king-queen: ~0.75 (both royal)
+# man-woman: ~0.85 (gendered humans, very similar context)
+# dog-cat: ~0.92 (both pets, very similar context!)
+# car-truck: ~0.82 (both vehicles)
+# happy-sad: ~0.30 (antonyms — similar context but opposite sentiment)</code></pre>
+  </details>
+</div>
+
+<!-- Navigation -->
+<nav class="lesson-nav">
+  <a href="./0048-nlp-fundamentals.html" class="nav-btn">← Lesson 48: NLP Fundamentals</a>
+  <a href="./0050-seq2seq-encoder-decoder.html" class="nav-btn nav-btn-next">Lesson 50: Seq2Seq &amp; Encoder-Decoder →</a>
+</nav>
+
+</div><!-- /content-wrapper -->
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-core.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/plugins/autoloader/prism-autoloader.min.js"></script>
+<script src="../assets/quiz.js"></script>
+<script>
+new MLQuiz('quiz49', [
+  {
+    question: "The distributional hypothesis states what — and why is it the foundation of all word embedding methods?",
+    options: [
+      "Words that appear in similar contexts have similar meanings — this allows embeddings to be learned purely from unlabelled text by observing co-occurrence patterns across billions of sentences",
+      "Word meaning is distributed across multiple brain regions — this inspired the use of distributed vector representations in neural networks",
+      "The distribution of word frequencies follows a power law (Zipf's law), which determines the optimal vocabulary size for embeddings",
+      "Word meanings are distributed evenly across all embedding dimensions, with no single dimension encoding more information than others"
+    ],
+    correct: 0,
+    explanation: "The distributional hypothesis (Firth, 1957) states that 'you shall know a word by the company it keeps'. Coffee and tea appear near 'hot', 'cup', 'drink' — so they should have similar embeddings. This hypothesis is powerful because it transforms 'what does this word mean' (impossible to define computationally) into 'what words appear near this word' (trivially extractable from any text corpus). No human labelling needed — just process billions of sentences and the semantic structure emerges automatically."
+  },
+  {
+    question: "Word2Vec's Skip-gram architecture trains a model to do what?",
+    options: [
+      "Given the centre/target word, predict each of the surrounding context words within the window — e.g., given 'sat', predict 'cat', 'on', etc.",
+      "Given all context words, predict the single centre word — the inverse of Skip-gram",
+      "Given a word, predict whether the next word in the sentence is semantically related to it",
+      "Given a sequence of words, predict the final word at the end of the sentence"
+    ],
+    correct: 0,
+    explanation: "Skip-gram flips the prediction direction: given a single target word, predict the surrounding context words. For 'The cat sat on the mat' with window=2 and target='sat': the training pairs are (sat→The), (sat→cat), (sat→on), (sat→mat). CBOW does the reverse: given all four context words, predict 'sat'. Skip-gram creates more training pairs per word and tends to learn better representations for rare words, which is why it's the more widely used architecture."
+  },
+  {
+    question: "model.most_similar(positive=['Paris', 'Germany'], negative=['France']) should return what city, and why?",
+    options: [
+      "Berlin — the analogy is Paris:France :: Berlin:Germany, because the vector Paris - France + Germany ≈ Berlin (the capital-country direction is consistent)",
+      "Munich — Germany's largest city by population, which Word2Vec associates most strongly with Germany",
+      "Frankfurt — Germany's financial centre, which co-occurs with economic terms similar to Paris",
+      "Vienna — the most culturally similar city to Paris in the Germanic-language sphere"
+    ],
+    correct: 0,
+    explanation: "This is the country→capital analogy. The vector arithmetic Paris - France + Germany moves from 'France's capital' to 'Germany's capital'. Geometrically: there exists a direction in embedding space that encodes 'capital of' — the vector from any country to its capital points in roughly the same direction. Word2Vec learns this purely from observing that 'Paris' and 'France' appear together in similar contexts as 'Berlin' and 'Germany' (news articles, Wikipedia, encyclopaedia entries)."
+  },
+  {
+    question: "What is the main advantage of FastText over Word2Vec for out-of-vocabulary words?",
+    options: [
+      "FastText represents each word as a sum of character n-gram vectors — so even a completely unknown word can have a vector generated from its subword components, eliminating OOV entirely",
+      "FastText uses a larger vocabulary than Word2Vec, so fewer words are out-of-vocabulary in practice",
+      "FastText automatically downloads additional vocabulary from the internet when OOV words are encountered",
+      "FastText replaces OOV words with the average of all word vectors, providing a reasonable fallback embedding"
+    ],
+    correct: 0,
+    explanation: "FastText decomposes every word into character n-grams: 'running' → ['<ru', 'run', 'unn', 'nni', 'nin', 'ing', 'ng>']. The word's embedding is the sum of its n-gram vectors. For an OOV word like 'COVID-19' (not in training vocabulary), FastText generates a vector from the n-grams it has seen in similar substrings. This also means morphologically related words (run/runs/running/runner) automatically have similar vectors because they share most of their n-grams — without any explicit supervision."
+  },
+  {
+    question: "Why are Word2Vec embeddings called 'static' and what is the core limitation this creates?",
+    options: [
+      "Each word has exactly one fixed vector regardless of context — 'bank' gets the same embedding whether it means a riverbank or a financial institution, losing semantic disambiguation",
+      "The embedding vectors cannot be updated during fine-tuning on downstream tasks — they are frozen and static throughout all training phases",
+      "The embedding values are stored as static integer weights rather than floating-point numbers to save memory",
+      "Word2Vec produces embeddings that don't change between training runs, unlike random initialisation which varies each time"
+    ],
+    correct: 0,
+    explanation: "Static means one vector per word type, regardless of usage. The word 'bank' in 'river bank' and 'bank account' gets the SAME 300-dimensional vector — an average of all its contexts in the training corpus. This conflated representation loses the disambiguation. Contextual embeddings (ELMo, BERT) solve this: for each occurrence of 'bank', a different vector is generated depending on the surrounding sentence. BERT would give 'bank' in 'river bank' a vector close to 'shore', 'water', 'river', while 'bank account' gets a vector close to 'deposit', 'money', 'interest'."
+  }
+]);
+</script>
+
+</body>
+</html>

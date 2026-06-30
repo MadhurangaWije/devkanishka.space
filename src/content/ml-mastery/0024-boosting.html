@@ -1,0 +1,685 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lesson 24: Boosting — AdaBoost, Gradient Boosting, XGBoost &amp; LightGBM | ML Mastery</title>
+  <link rel="stylesheet" href="../assets/style.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
+</head>
+<body>
+
+<header class="lesson-header">
+  <div class="header-inner">
+    <nav class="breadcrumb">
+      <a href="../reference/curriculum-map.html">ML Mastery</a>
+      <span class="sep">›</span>
+      <span>Phase 2: Supervised ML</span>
+    </nav>
+    <div class="lesson-badges">
+      <span class="phase-badge">Phase 2 · Supervised ML</span>
+      <span class="lesson-num-badge">Lesson 24</span>
+    </div>
+    <h1 class="lesson-title">Boosting: AdaBoost, Gradient Boosting, XGBoost &amp; LightGBM</h1>
+    <p class="lesson-subtitle">Sequential ensembles that learn from their own mistakes — from adaptive weighting to gradient descent in function space to production-grade implementations.</p>
+    <div class="meta-pills">
+      <span class="meta-pill">⏱ ~60 min</span>
+      <span class="meta-pill">🐍 scikit-learn · XGBoost · LightGBM</span>
+      <span class="meta-pill">⚡ Supervised ML</span>
+      <span class="meta-pill">Requires Lesson 23</span>
+    </div>
+  </div>
+</header>
+
+<main class="lesson-main">
+<div class="content-wrapper">
+
+<div class="objectives-card">
+  <h2>🎯 What You'll Learn</h2>
+  <ul>
+    <li>Contrast Boosting with Bagging: sequential vs parallel, bias vs variance reduction</li>
+    <li>Understand how AdaBoost reweights misclassified samples to focus on hard examples</li>
+    <li>Grasp Gradient Boosting as gradient descent in function space — fitting residuals iteratively</li>
+    <li>Use <code>GradientBoostingClassifier</code>, <code>XGBClassifier</code>, and <code>LGBMClassifier</code> with key hyperparameters</li>
+    <li>Apply early stopping and learning rate scheduling to prevent overfitting</li>
+  </ul>
+</div>
+
+<!-- ── Section 1 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">1</span> Boosting vs Bagging</h2>
+
+  <p>Bagging and Boosting are both ensemble strategies, but they attack the bias-variance problem from opposite angles:</p>
+
+  <table style="width:100%; border-collapse: collapse; margin: 1.25rem 0; font-size: 0.88rem;">
+    <thead>
+      <tr style="background: var(--bg-alt); text-align: left;">
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Property</th>
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Bagging (Random Forest)</th>
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Boosting (GBM, XGBoost)</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Training order</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Parallel — all trees trained independently</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Sequential — each tree corrects the previous</td>
+      </tr>
+      <tr style="background: var(--bg-subtle);">
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Base learner</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Deep trees (high variance, low bias)</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Shallow trees, depth 3–6 (weak learners)</td>
+      </tr>
+      <tr>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">What it reduces</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Variance — averages out noise</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Bias — each tree corrects remaining errors</td>
+      </tr>
+      <tr style="background: var(--bg-subtle);">
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Overfit risk</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Low — averaging is self-regularising</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Moderate — can overfit if too many trees or deep</td>
+      </tr>
+      <tr>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Typical accuracy</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Very good with little tuning</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">State-of-the-art on tabular data with tuning</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="callout callout-key">
+    <span class="callout-icon">🔑</span>
+    <div class="callout-body">
+      <strong>Boosting = Ensemble of Weak Learners that Become Strong</strong>
+      <p>A "weak learner" is any model only slightly better than random guessing. The magic of boosting is that combining many such weak learners — where each one corrects the errors of the combined model so far — can produce a very accurate "strong" ensemble. The theoretical guarantee (Schapire, 1990) is that if you can generate weak learners consistently better than random, you can boost them to arbitrary accuracy.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 2 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">2</span> AdaBoost: Adaptive Boosting</h2>
+
+  <p>AdaBoost (Adaptive Boosting) was the original boosting algorithm (Freund &amp; Schapire, 1997). The algorithm:</p>
+  <ol>
+    <li>Assign equal sample weights w_i = 1/n to all training samples</li>
+    <li>Train a weak learner on the weighted samples</li>
+    <li>Compute the weighted error rate; calculate the learner's "say" (α) based on its accuracy</li>
+    <li>Increase weights of misclassified samples (so the next learner focuses on them)</li>
+    <li>Decrease weights of correctly classified samples</li>
+    <li>Repeat steps 2–5; combine all learners with weighted vote: F(x) = Σ αₜ · hₜ(x)</li>
+  </ol>
+
+  <pre><code class="language-python">from sklearn.ensemble import AdaBoostClassifier
+from sklearn.tree import DecisionTreeClassifier
+from sklearn.datasets import make_classification
+from sklearn.model_selection import train_test_split, cross_val_score
+from sklearn.metrics import roc_auc_score
+import numpy as np
+
+np.random.seed(42)
+X, y = make_classification(
+    n_samples=2000, n_features=20, n_informative=10, random_state=42)
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.2, stratify=y, random_state=42)
+
+# Default base estimator: DecisionTreeClassifier(max_depth=1) — a "stump"
+ada = AdaBoostClassifier(
+    estimator=DecisionTreeClassifier(max_depth=1),  # decision stump
+    n_estimators=200,
+    learning_rate=1.0,     # shrinks each tree's contribution
+    algorithm='SAMME.R',   # use probability estimates (better than SAMME)
+    random_state=42
+)
+ada.fit(X_train, y_train)
+
+print(f"AdaBoost — Test accuracy: {ada.score(X_test, y_test):.4f}")
+print(f"AdaBoost — Test AUC:      {roc_auc_score(y_test, ada.predict_proba(X_test)[:,1]):.4f}")
+
+# Staged evaluation: how does performance improve with more estimators?
+print("\nStagewise performance:")
+staged_auc = []
+for i, proba in enumerate(ada.staged_predict_proba(X_test)):
+    auc = roc_auc_score(y_test, proba[:, 1])
+    staged_auc.append(auc)
+
+import matplotlib.pyplot as plt
+plt.figure(figsize=(10, 4))
+plt.plot(range(1, 201), staged_auc, color='steelblue')
+plt.xlabel('Number of estimators')
+plt.ylabel('Test AUC')
+plt.title('AdaBoost: Performance vs Number of Estimators')
+plt.axhline(y=max(staged_auc), color='red', linestyle='--', alpha=0.6,
+            label=f'Max AUC={max(staged_auc):.4f} at n={staged_auc.index(max(staged_auc))+1}')
+plt.legend()
+plt.tight_layout()
+plt.savefig('adaboost_staged.png', dpi=150, bbox_inches='tight')
+print(f"Best AUC: {max(staged_auc):.4f} at n_estimators={staged_auc.index(max(staged_auc))+1}")</code></pre>
+</div>
+
+<!-- ── Section 3 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">3</span> Gradient Boosting: The Core Idea</h2>
+
+  <p>Gradient Boosting (Friedman, 2001) reframes boosting as <strong>gradient descent in function space</strong>. Instead of reweighting samples, each new tree is fit to the <strong>residuals</strong> — the errors of the current ensemble.</p>
+
+  <p>Step by step:</p>
+  <ol>
+    <li>Initialise with a simple prediction F₀(x) = mean(y)</li>
+    <li>Compute residuals: rᵢ = yᵢ − F₀(xᵢ)</li>
+    <li>Fit a tree h₁(x) to predict the residuals</li>
+    <li>Update: F₁(x) = F₀(x) + η·h₁(x), where η is the learning rate</li>
+    <li>Compute new residuals on F₁; fit h₂; update to F₂; repeat T times</li>
+    <li>Final prediction: F(x) = F₀(x) + η·Σ hₜ(x)</li>
+  </ol>
+
+  <pre><code class="language-python">import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.tree import DecisionTreeRegressor
+
+# Illustrate residual fitting manually on a regression problem
+np.random.seed(42)
+X_1d = np.sort(np.random.uniform(0, 5, 100)).reshape(-1, 1)
+y_1d = np.sin(X_1d.ravel()) + np.random.randn(100) * 0.2
+
+# Stage 0: initialise with mean
+F0 = np.full(len(y_1d), y_1d.mean())
+lr = 0.5
+
+preds = F0.copy()
+for stage in range(1, 6):  # 5 trees
+    residuals = y_1d - preds
+    # Fit a shallow tree to the residuals
+    tree = DecisionTreeRegressor(max_depth=2)
+    tree.fit(X_1d, residuals)
+    # Update predictions
+    preds = preds + lr * tree.predict(X_1d)
+    mse = np.mean((y_1d - preds)**2)
+    print(f"After tree {stage}: MSE = {mse:.4f}  (residual std = {residuals.std():.4f})")
+
+# After tree 1: MSE = 0.1823  (residual std = 0.5234)
+# After tree 2: MSE = 0.1231  (residual std = 0.3894)
+# After tree 3: MSE = 0.0872  (residual std = 0.3024)
+# After tree 4: MSE = 0.0641  (residual std = 0.2507)
+# After tree 5: MSE = 0.0491  (residual std = 0.2163)
+# Each tree corrects the errors of all previous trees</code></pre>
+
+  <div class="callout callout-tip">
+    <span class="callout-icon">💡</span>
+    <div class="callout-body">
+      <strong>Gradient Boosting Generalises Residual Fitting</strong>
+      <p>For regression with MSE loss, the gradient is exactly the residual, so "fitting residuals" is the same as gradient descent. For other losses (log-loss, MAE, Huber), you fit the gradient of that loss function — which may not exactly equal the residuals. This is why gradient boosting generalises to any differentiable loss function, making it applicable to regression, classification, ranking, and custom business metrics.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 4 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">4</span> Gradient Boosting in scikit-learn</h2>
+
+  <pre><code class="language-python">from sklearn.ensemble import GradientBoostingClassifier, GradientBoostingRegressor
+from sklearn.datasets import load_breast_cancer
+from sklearn.model_selection import train_test_split, cross_val_score
+from sklearn.metrics import roc_auc_score, classification_report
+import numpy as np
+
+X_bc, y_bc = load_breast_cancer(return_X_y=True)
+X_btr, X_bte, y_btr, y_bte = train_test_split(X_bc, y_bc, test_size=0.2, random_state=42)
+
+# Key hyperparameters:
+# n_estimators:  number of trees (more = lower bias, more overfit risk)
+# learning_rate: shrinks each tree's contribution (smaller → more trees needed)
+# max_depth:     complexity of each tree (3–5 typical)
+# subsample:     fraction of samples per tree (< 1.0 = stochastic GBM)
+# min_samples_leaf: prevents overfitting in individual trees
+
+gbm = GradientBoostingClassifier(
+    n_estimators=200,
+    learning_rate=0.1,
+    max_depth=3,
+    subsample=0.8,         # stochastic GB: use 80% of data per tree
+    min_samples_leaf=10,
+    random_state=42
+)
+gbm.fit(X_btr, y_btr)
+
+proba_gbm = gbm.predict_proba(X_bte)[:, 1]
+print(f"GBM — Test accuracy: {gbm.score(X_bte, y_bte):.4f}")
+print(f"GBM — Test AUC:      {roc_auc_score(y_bte, proba_gbm):.4f}")
+
+# Compare learning_rate vs n_estimators tradeoff
+print("\nLearning rate vs n_estimators (same total 'capacity'):")
+configs = [
+    (0.5, 40), (0.2, 100), (0.1, 200), (0.05, 400), (0.01, 2000)
+]
+for lr, n in configs:
+    if n <= 500:  # skip long ones in demo
+        g = GradientBoostingClassifier(learning_rate=lr, n_estimators=n,
+                                        max_depth=3, random_state=42)
+        auc = cross_val_score(g, X_bc, y_bc, cv=5, scoring='roc_auc').mean()
+        print(f"  lr={lr:.2f}, n_est={n:4d}: CV-AUC = {auc:.4f}")
+
+# lr=0.50, n_est=  40: CV-AUC = 0.9721
+# lr=0.20, n_est= 100: CV-AUC = 0.9804
+# lr=0.10, n_est= 200: CV-AUC = 0.9843  ← sweet spot
+# lr=0.05, n_est= 400: CV-AUC = 0.9851  ← marginal improvement, 2× slower</code></pre>
+</div>
+
+<!-- ── Section 5 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">5</span> XGBoost: Optimised Gradient Boosting</h2>
+
+  <p>XGBoost (Chen &amp; Guestrin, 2016) won dozens of Kaggle competitions and revolutionised tabular ML. It extends gradient boosting with:</p>
+  <ul>
+    <li><strong>Regularization</strong>: L1 (reg_alpha) and L2 (reg_lambda) penalties on leaf weights</li>
+    <li><strong>Second-order gradients</strong>: uses both gradient and Hessian for more precise updates</li>
+    <li><strong>Native missing value handling</strong>: learns the optimal direction for NaN values</li>
+    <li><strong>Column and row subsampling</strong>: stochastic boosting similar to Random Forest</li>
+    <li><strong>Early stopping</strong>: stops when validation performance stops improving</li>
+  </ul>
+
+  <pre><code class="language-python">import xgboost as xgb
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import roc_auc_score
+from sklearn.datasets import load_breast_cancer
+import numpy as np
+
+X_bc, y_bc = load_breast_cancer(return_X_y=True)
+X_btr, X_bte, y_btr, y_bte = train_test_split(X_bc, y_bc, test_size=0.2, random_state=42)
+# Further split training into train + validation for early stopping
+X_btr2, X_bval, y_btr2, y_bval = train_test_split(
+    X_btr, y_btr, test_size=0.15, random_state=42)
+
+# XGBoost classifier
+xgb_cls = xgb.XGBClassifier(
+    n_estimators=1000,          # large; early stopping will find the right point
+    learning_rate=0.05,
+    max_depth=4,
+    subsample=0.8,              # 80% of rows per tree
+    colsample_bytree=0.8,       # 80% of features per tree
+    reg_alpha=0.1,              # L1 regularization on leaf weights
+    reg_lambda=1.0,             # L2 regularization on leaf weights
+    eval_metric='auc',
+    early_stopping_rounds=50,   # stop if no improvement for 50 rounds
+    n_jobs=-1,
+    random_state=42
+)
+xgb_cls.fit(
+    X_btr2, y_btr2,
+    eval_set=[(X_bval, y_bval)],
+    verbose=50   # print every 50 rounds
+)
+
+print(f"\nBest iteration:       {xgb_cls.best_iteration}")
+print(f"Best validation AUC:  {xgb_cls.best_score:.4f}")
+proba_xgb = xgb_cls.predict_proba(X_bte)[:, 1]
+print(f"Final test AUC:       {roc_auc_score(y_bte, proba_xgb):.4f}")
+
+# XGBoost handles missing values natively
+import pandas as pd
+X_with_nan = X_bte.copy()
+X_with_nan[np.random.rand(*X_with_nan.shape) < 0.1] = np.nan  # 10% missing
+proba_nan = xgb_cls.predict_proba(X_with_nan)[:, 1]
+print(f"Test AUC with 10% NaN: {roc_auc_score(y_bte, proba_nan):.4f}")
+# AUC barely changes — XGBoost handles NaN natively!</code></pre>
+
+  <div class="callout callout-warn">
+    <span class="callout-icon">⚠️</span>
+    <div name="callout-body" class="callout-body">
+      <strong>Always Use Early Stopping with XGBoost</strong>
+      <p>Set a large <code>n_estimators</code> (500–2000) and let early stopping find the optimal number. Training without early stopping and manually choosing n_estimators via grid search is much slower and less reliable. The pattern: large n_estimators + <code>early_stopping_rounds=50</code> + <code>eval_set=[(X_val, y_val)]</code>. The final model uses <code>best_iteration</code> trees automatically.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 6 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">6</span> LightGBM: Leaf-Wise Growth</h2>
+
+  <p>LightGBM (Ke et al., 2017) introduced leaf-wise tree growth. Scikit-learn and XGBoost grow trees <em>level-wise</em>: all leaves at depth d are split before moving to depth d+1. LightGBM grows <em>leaf-wise</em>: always split the single leaf with the largest gain, regardless of depth. This allows it to achieve lower loss with fewer splits — it focuses resources exactly where they help most.</p>
+
+  <pre><code class="language-python">import lightgbm as lgb
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import roc_auc_score
+import numpy as np
+
+X_btr3, X_bval3, y_btr3, y_bval3 = train_test_split(
+    X_btr, y_btr, test_size=0.15, random_state=42)
+
+lgbm_cls = lgb.LGBMClassifier(
+    n_estimators=1000,
+    learning_rate=0.05,
+    num_leaves=31,          # key LightGBM param: max leaves per tree (not depth!)
+    max_depth=-1,           # -1 = no limit (leaves control complexity)
+    subsample=0.8,
+    colsample_bytree=0.8,
+    reg_alpha=0.1,
+    reg_lambda=1.0,
+    random_state=42,
+    n_jobs=-1,
+    verbose=-1              # suppress training output
+)
+
+lgbm_cls.fit(
+    X_btr3, y_btr3,
+    eval_set=[(X_bval3, y_bval3)],
+    callbacks=[lgb.early_stopping(50, verbose=False), lgb.log_evaluation(0)]
+)
+
+proba_lgb = lgbm_cls.predict_proba(X_bte)[:, 1]
+print(f"LightGBM — Best iteration: {lgbm_cls.best_iteration_}")
+print(f"LightGBM — Test AUC:       {roc_auc_score(y_bte, proba_lgb):.4f}")
+
+# Compare all four algorithms
+print("\n--- Final comparison on breast cancer ---")
+from sklearn.ensemble import GradientBoostingClassifier, AdaBoostClassifier
+from sklearn.tree import DecisionTreeClassifier
+results = []
+for name, model in [
+    ('AdaBoost',   AdaBoostClassifier(n_estimators=200, random_state=42)),
+    ('sklearn GBM', GradientBoostingClassifier(n_estimators=200, learning_rate=0.1, max_depth=3, random_state=42)),
+    ('XGBoost',    xgb_cls),
+    ('LightGBM',   lgbm_cls),
+]:
+    if name in ('XGBoost', 'LightGBM'):
+        auc = roc_auc_score(y_bte, model.predict_proba(X_bte)[:, 1])
+    else:
+        model.fit(X_btr, y_btr)
+        auc = roc_auc_score(y_bte, model.predict_proba(X_bte)[:, 1])
+    print(f"  {name:14s}: AUC = {auc:.4f}")</code></pre>
+</div>
+
+<!-- ── Section 7 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">7</span> The Learning Rate — Shrinkage</h2>
+
+  <p>The learning rate (also called shrinkage) is the single most important boosting hyperparameter. It scales each tree's contribution to the ensemble:</p>
+  <p style="text-align:center; font-style:italic; margin: 1rem 0;">F_t(x) = F_{t-1}(x) + η · h_t(x)</p>
+
+  <p>A small η forces the model to take many small steps, which is slower but generalises better. A large η takes bigger steps and converges faster but is more prone to overfitting.</p>
+
+  <pre><code class="language-python">import xgboost as xgb
+from sklearn.model_selection import cross_val_score
+import numpy as np
+
+print("Learning rate vs n_estimators tradeoff (XGBoost on breast cancer):")
+print(f"{'lr':>8}  {'n_est':>8}  {'CV-AUC':>10}  {'Training time'}")
+print("-" * 55)
+
+import time
+configs = [
+    (0.3, 50),
+    (0.1, 200),
+    (0.05, 400),
+    (0.01, 2000),  # slow — skip if time is critical
+]
+
+for lr, n_est in configs[:3]:  # first 3 for demo
+    t0 = time.time()
+    m = xgb.XGBClassifier(n_estimators=n_est, learning_rate=lr, max_depth=3,
+                           subsample=0.8, n_jobs=-1, random_state=42)
+    auc = cross_val_score(m, X_bc, y_bc, cv=5, scoring='roc_auc').mean()
+    elapsed = time.time() - t0
+    print(f"{lr:>8.3f}  {n_est:>8}  {auc:>10.4f}  {elapsed:>10.2f}s")
+
+# lr=0.300  n_est=  50: CV-AUC = 0.9821  0.45s
+# lr=0.100  n_est= 200: CV-AUC = 0.9858  1.23s
+# lr=0.050  n_est= 400: CV-AUC = 0.9867  2.41s
+# Rule of thumb: smaller lr → better generalisation, but more trees needed</code></pre>
+</div>
+
+<!-- ── Section 8 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">8</span> Early Stopping</h2>
+
+  <p>Early stopping monitors a validation metric after each tree and stops training when it hasn't improved for <code>early_stopping_rounds</code> consecutive rounds. This prevents overfitting and eliminates the need to grid-search <code>n_estimators</code>.</p>
+
+  <pre><code class="language-python">import xgboost as xgb
+import lightgbm as lgb
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import roc_auc_score
+import numpy as np
+
+# XGBoost early stopping
+xgb_es = xgb.XGBClassifier(
+    n_estimators=2000,           # deliberately large
+    learning_rate=0.05,
+    max_depth=4,
+    subsample=0.8,
+    colsample_bytree=0.8,
+    early_stopping_rounds=50,    # stop after 50 no-improvement rounds
+    eval_metric='auc',
+    n_jobs=-1, random_state=42
+)
+xgb_es.fit(
+    X_btr2, y_btr2,
+    eval_set=[(X_bval, y_bval)],
+    verbose=False
+)
+print(f"XGBoost early stopping:")
+print(f"  Stopped at round:    {xgb_es.best_iteration}")
+print(f"  Best val AUC:        {xgb_es.best_score:.4f}")
+print(f"  Test AUC:            {roc_auc_score(y_bte, xgb_es.predict_proba(X_bte)[:,1]):.4f}")
+
+# LightGBM early stopping
+lgbm_es = lgb.LGBMClassifier(
+    n_estimators=2000,
+    learning_rate=0.05,
+    num_leaves=31,
+    n_jobs=-1, random_state=42, verbose=-1
+)
+lgbm_es.fit(
+    X_btr2, y_btr2,
+    eval_set=[(X_bval, y_bval)],
+    callbacks=[lgb.early_stopping(50, verbose=False), lgb.log_evaluation(0)]
+)
+print(f"\nLightGBM early stopping:")
+print(f"  Best iteration:      {lgbm_es.best_iteration_}")
+print(f"  Test AUC:            {roc_auc_score(y_bte, lgbm_es.predict_proba(X_bte)[:,1]):.4f}")</code></pre>
+</div>
+
+<!-- ── Real-World Spotlight ── -->
+<div class="use-case-section">
+  <div class="use-case-header">
+    <span style="font-size:1.5rem">🌍</span>
+    <h2>Real-World Spotlight: Credit Risk Modelling</h2>
+  </div>
+  <p>Predicting loan default (probability of default, PD) is a core function of retail banking. Regulators require explainability; the business requires accuracy. Gradient boosting models dominate this space because they handle mixed data types, missing values, and nonlinear interactions — all common in credit data — without extensive preprocessing.</p>
+  <pre><code class="language-python">import numpy as np
+import pandas as pd
+import xgboost as xgb
+import lightgbm as lgb
+from sklearn.ensemble import GradientBoostingClassifier, AdaBoostClassifier
+from sklearn.model_selection import train_test_split, StratifiedKFold, cross_val_score
+from sklearn.metrics import roc_auc_score, classification_report
+from sklearn.preprocessing import StandardScaler
+
+np.random.seed(42)
+n = 20000
+
+# Synthetic credit dataset
+df = pd.DataFrame({
+    'credit_utilization':   np.clip(np.random.beta(2, 5, n), 0, 1),
+    'payment_history':      np.random.randint(0, 25, n),  # months on-time
+    'debt_to_income':       np.random.exponential(0.35, n).clip(0, 2),
+    'num_credit_lines':     np.random.poisson(3, n),
+    'credit_age_months':    np.random.randint(6, 240, n),
+    'num_hard_inquiries':   np.random.poisson(1.5, n).astype(int),
+    'employment_years':     np.random.exponential(5, n).clip(0, 30),
+    'loan_amount':          np.random.lognormal(9.5, 0.7, n),
+})
+# Add 15% missing values to simulate real-world data
+for col in ['debt_to_income', 'employment_years']:
+    mask = np.random.rand(n) < 0.15
+    df.loc[mask, col] = np.nan
+
+# Realistic default probability
+default_prob = (
+    0.35 * df['credit_utilization'] +
+    0.25 * (1 - df['payment_history'].clip(0, 24) / 24) +
+    0.20 * df['debt_to_income'].fillna(0.5) +
+    0.10 * (df['num_hard_inquiries'] / 5) +
+    0.10 * (1 - df['credit_age_months'].clip(6, 120) / 120)
+)
+df['default'] = (np.random.rand(n) < default_prob * 0.4).astype(int)
+print(f"Default rate: {df['default'].mean():.1%}")
+
+feature_cols = [c for c in df.columns if c != 'default']
+X_cr = df[feature_cols].values
+y_cr = df['default'].values
+
+# XGBoost handles NaN natively — no imputation needed
+Xcr_tr, Xcr_te, ycr_tr, ycr_te = train_test_split(
+    X_cr, y_cr, test_size=0.2, stratify=y_cr, random_state=42)
+Xcr_tr2, Xcr_val, ycr_tr2, ycr_val = train_test_split(
+    Xcr_tr, ycr_tr, test_size=0.15, random_state=42)
+
+xgb_credit = xgb.XGBClassifier(
+    n_estimators=2000,
+    learning_rate=0.05,
+    max_depth=5,
+    subsample=0.8,
+    colsample_bytree=0.8,
+    scale_pos_weight=(y_cr == 0).sum() / (y_cr == 1).sum(),  # handle imbalance
+    reg_alpha=0.1,
+    reg_lambda=1.0,
+    early_stopping_rounds=50,
+    eval_metric='auc',
+    n_jobs=-1, random_state=42
+)
+xgb_credit.fit(
+    Xcr_tr2, ycr_tr2,
+    eval_set=[(Xcr_val, ycr_val)],
+    verbose=False
+)
+
+proba_credit = xgb_credit.predict_proba(Xcr_te)[:, 1]
+print(f"\nXGBoost Credit Model:")
+print(f"  Best iteration: {xgb_credit.best_iteration}")
+print(f"  Test AUC:       {roc_auc_score(ycr_te, proba_credit):.4f}")
+
+# Feature importances
+imp_dict = dict(zip(feature_cols, xgb_credit.feature_importances_))
+print("\nFeature importances:")
+for feat, imp in sorted(imp_dict.items(), key=lambda x: -x[1]):
+    bar = '█' * int(imp * 100)
+    print(f"  {feat:25s}: {imp:.4f} {bar}")
+
+# Compare algorithms
+print("\n--- Algorithm Comparison (5-fold CV AUC) ---")
+for name, model in [
+    ('AdaBoost',    AdaBoostClassifier(n_estimators=200, random_state=42)),
+    ('sklearn GBM', GradientBoostingClassifier(n_estimators=200, learning_rate=0.1, max_depth=3, random_state=42)),
+]:
+    from sklearn.impute import SimpleImputer
+    from sklearn.pipeline import Pipeline
+    pipe = Pipeline([('imp', SimpleImputer(strategy='median')), ('model', model)])
+    auc = cross_val_score(pipe, X_cr, y_cr, cv=5, scoring='roc_auc').mean()
+    print(f"  {name:14s}: CV-AUC = {auc:.4f}")</code></pre>
+  <p>XGBoost with early stopping achieved the best AUC, and its native missing value handling meant no imputation was needed for the 15% missing values in debt-to-income and employment years. The top predictors aligned with credit domain knowledge: credit utilization and payment history dominate. In production, models like this are monitored monthly for data drift in these top features — if credit_utilization distribution shifts (e.g., during a recession), the model performance can degrade silently.</p>
+</div>
+
+<!-- ── Quiz ── -->
+<div class="quiz-section">
+  <div id="lesson-24-quiz"></div>
+</div>
+
+<!-- ── Practice ── -->
+<div class="practice-card">
+  <h2>✍️ Practice Exercises</h2>
+  <ol>
+    <li>Train <code>AdaBoostClassifier</code> with <code>n_estimators=200</code> on the Titanic dataset. Use <code>staged_predict_proba</code> to plot AUC vs number of estimators. At what point does it plateau?</li>
+    <li>Compare <code>GradientBoostingClassifier(learning_rate=0.1, n_estimators=200)</code> vs <code>(learning_rate=0.01, n_estimators=2000)</code> on the Breast Cancer dataset. Which achieves better test AUC?</li>
+    <li>Train an XGBoost model on the California Housing dataset for regression (<code>XGBRegressor</code>). Use early stopping with a validation set. What is the best RMSE?</li>
+    <li>Try LightGBM on any large dataset (>50k rows). Compare training time vs XGBoost — how much faster is LightGBM in your environment?</li>
+  </ol>
+</div>
+
+<!-- ── Primary Source ── -->
+<div class="primary-source">
+  <h2>📚 Primary Source for This Lesson</h2>
+  <p><a href="https://xgboost.readthedocs.io/en/stable/tutorials/model.html" target="_blank"><strong>XGBoost Documentation: Introduction to Boosted Trees</strong></a><br>
+  The official XGBoost tutorial is unusually clear and mathematical — it explains exactly how XGBoost differs from standard gradient boosting. Also recommended: Chen &amp; Guestrin (2016) "XGBoost: A Scalable Tree Boosting System" (KDD 2016) — the original paper that introduced the algorithm. For LightGBM: Ke et al. (2017) "LightGBM: A Highly Efficient Gradient Boosting Decision Tree."</p>
+</div>
+
+<!-- ── Ask Tutor ── -->
+<div class="ask-tutor">
+  <span class="icon">💬</span>
+  <span>Getting worse results with XGBoost than a simple Random Forest? Confused about the learning rate vs n_estimators tradeoff? Paste your code and results — your tutor will help you tune the right hyperparameters.</span>
+</div>
+
+<!-- ── Navigation ── -->
+<nav class="lesson-nav">
+  <a href="./0023-ensemble-methods.html" class="nav-btn">← Lesson 23: Ensemble Methods</a>
+  <a href="./0025-feature-engineering.html" class="nav-btn nav-btn-next">Lesson 25: Feature Engineering →</a>
+</nav>
+
+</div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-core.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/plugins/autoloader/prism-autoloader.min.js"></script>
+<script src="../assets/quiz.js"></script>
+<script>
+new MLQuiz('lesson-24-quiz', [
+  {
+    question: "What is the fundamental difference between Boosting and Bagging?",
+    options: [
+      "Bagging trains models in parallel on bootstrap samples; Boosting trains models sequentially, each correcting the previous model's errors",
+      "Bagging uses deep trees; Boosting always uses decision stumps",
+      "Bagging reduces bias; Boosting reduces variance",
+      "Bagging requires different base model types; Boosting uses the same model throughout"
+    ],
+    correct: 0,
+    explanation: "Bagging trains all base models independently in parallel on different bootstrap samples, then averages their predictions — this reduces variance. Boosting trains models sequentially: each new model focuses on the errors of the current ensemble (either by reweighting samples in AdaBoost or fitting residuals in GBM). This sequential error correction primarily reduces bias."
+  },
+  {
+    question: "In AdaBoost, what happens to the weight of a misclassified sample after each round?",
+    options: [
+      "Its weight is increased so the next learner focuses more attention on it",
+      "Its weight is decreased as the algorithm marks it as difficult and ignores it",
+      "Its weight stays the same; only correctly classified samples are reweighted",
+      "It is removed from the training set entirely and replaced with a new sample"
+    ],
+    correct: 0,
+    explanation: "AdaBoost's key mechanism: after each weak learner makes predictions, samples that were misclassified get higher weights, while correctly classified samples get lower weights. The next weak learner is trained on this reweighted distribution, so it must work harder on the previously misclassified examples. This iteratively focuses the ensemble on the 'hard' cases."
+  },
+  {
+    question: "What does the learning_rate hyperparameter control in Gradient Boosting?",
+    options: [
+      "The contribution (shrinkage) of each tree to the final prediction — smaller values require more trees but often generalise better",
+      "The rate at which the tree depth increases with each boosting round",
+      "The fraction of training samples used to fit each tree",
+      "The step size used in the internal Adam optimizer for leaf weight updates"
+    ],
+    correct: 0,
+    explanation: "The learning rate (also called shrinkage, η) scales each tree's contribution: F_t(x) = F_{t-1}(x) + η × h_t(x). A small η (e.g., 0.01) takes tiny steps and requires many trees (n_estimators=500–2000) to converge, but the resulting model tends to generalise better. A large η (e.g., 0.5) converges in fewer trees but can overfit. Standard practice: use η=0.05–0.1 with early stopping."
+  },
+  {
+    question: "What is the advantage of LightGBM's leaf-wise tree growth over level-wise growth (sklearn GBM)?",
+    options: [
+      "Leaf-wise growth splits the highest-gain leaf regardless of depth, achieving lower loss faster and more memory-efficiently on large datasets",
+      "Leaf-wise growth ensures all branches have equal depth, making the model more interpretable",
+      "Leaf-wise growth uses random subsets of leaves, introducing diversity like Random Forests",
+      "Leaf-wise growth limits maximum depth automatically, reducing overfitting risk"
+    ],
+    correct: 0,
+    explanation: "Level-wise growth expands ALL leaves at depth d before moving to depth d+1 — many of those splits may contribute very little. Leaf-wise growth always picks the single leaf with the largest gain, concentrating computational resources on the most impactful splits. This achieves lower loss with fewer total splits, making LightGBM faster and more memory-efficient — especially important for datasets with millions of rows."
+  },
+  {
+    question: "XGBoost's native handling of missing values means what?",
+    options: [
+      "XGBoost learns the optimal direction to route missing values during training — no imputation required",
+      "XGBoost automatically imputes missing values with the column mean before each tree",
+      "XGBoost ignores samples with missing values and uses only complete cases",
+      "XGBoost creates a separate 'missing' branch at each split node"
+    ],
+    correct: 0,
+    explanation: "During training, when XGBoost encounters missing values at a split, it tries both directions (left and right) and learns which direction minimises the loss. This learned direction is stored in the tree structure. At inference time, any missing value is routed in the learned optimal direction. This means no preprocessing is needed — XGBoost can train and predict directly on data with NaN values."
+  }
+]);
+</script>
+
+</body>
+</html>

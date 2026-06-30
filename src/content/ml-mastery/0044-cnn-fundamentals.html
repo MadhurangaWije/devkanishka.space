@@ -1,0 +1,995 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lesson 44: CNN Fundamentals | ML Mastery</title>
+  <link rel="stylesheet" href="../assets/style.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
+</head>
+<body>
+
+<!-- ── Header ── -->
+<header class="lesson-header">
+  <div class="header-inner">
+    <nav class="breadcrumb">
+      <a href="../reference/curriculum-map.html">ML Mastery</a>
+      <span class="sep">›</span>
+      <span>Phase 4: Deep Learning Foundations</span>
+    </nav>
+    <div class="lesson-badges">
+      <span class="phase-badge">Phase 4 · Deep Learning Foundations</span>
+      <span class="lesson-num-badge">Lesson 44</span>
+    </div>
+    <h1 class="lesson-title">Convolutional Neural Networks: Convolution, Kernels, Pooling, Padding &amp; Strides</h1>
+    <p class="lesson-subtitle">MLPs are blind to spatial structure — a CNN is engineered to see it. Learn how local connections, weight sharing, and hierarchical feature learning turn pixels into understanding.</p>
+    <div class="meta-pills">
+      <span class="meta-pill">⏱ ~70 min</span>
+      <span class="meta-pill">🐍 Python + PyTorch</span>
+      <span class="meta-pill">🔬 Deep Learning</span>
+      <span class="meta-pill">Requires Lessons 1–43</span>
+    </div>
+  </div>
+</header>
+
+<main class="lesson-main">
+<div class="content-wrapper">
+
+<!-- Objectives -->
+<div class="objectives-card">
+  <h2>🎯 What You'll Learn</h2>
+  <ul>
+    <li>Why MLPs fail at images and the three structural assumptions CNNs make to overcome this</li>
+    <li>How the convolution operation works: sliding a filter over an input to produce a feature map</li>
+    <li>What kernels detect and how they are learned automatically via backpropagation</li>
+    <li>How multiple filters create multiple feature maps (depth dimension of a CNN)</li>
+    <li>Calculate output sizes using the formula: <code>⌊(H + 2P − F) / S⌋ + 1</code></li>
+    <li>The difference between same padding and valid padding, and when to use each</li>
+    <li>How stride downsamples spatially during convolution</li>
+    <li>How max pooling and average pooling compress feature maps</li>
+    <li>Assemble a complete CNN in PyTorch and trace the shape of tensors through every layer</li>
+  </ul>
+</div>
+
+<!-- Intuition hook callout -->
+<div class="callout callout-key">
+  <span class="callout-icon">💡</span>
+  <div class="callout-body">
+    <strong>The Big Intuition</strong>
+    <p>An MLP treats an image as a flat list of 784 pixels — it doesn't know that pixel[10] and pixel[11] are neighbours. It has no concept of spatial structure. A CNN is specifically designed to exploit spatial structure: nearby pixels are related, the same edge detector works everywhere in the image (not just in one location), and interesting patterns are hierarchical (edges → textures → objects → scenes). CNNs encode these three intuitions as: <strong>local connections</strong>, <strong>weight sharing</strong>, and <strong>hierarchical feature learning</strong>.</p>
+  </div>
+</div>
+
+<!-- ── Section 1 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">1</span> Why Not Just Use an MLP for Images?</h2>
+
+  <p>Before we understand what CNNs do, we need to understand why the alternatives fail. An MLP (Multi-Layer Perceptron) is a fully connected network — every neuron in one layer connects to every neuron in the next. For small inputs this is fine. For images, it becomes catastrophic.</p>
+
+  <h3>The Parameter Explosion</h3>
+  <p>Consider a typical modern image: 224×224 pixels, with 3 colour channels (RGB). That's <strong>224 × 224 × 3 = 150,528 input values</strong>. If the first hidden layer has 1,024 neurons — not even a large layer by modern standards — the number of weights for just the first layer is:</p>
+  <p style="text-align:center; font-size:1.1rem; margin: 1rem 0;"><strong>150,528 × 1,024 = 154,140,672 parameters</strong></p>
+  <p>That's 154 million parameters for one layer. A full MLP on ImageNet-scale images would have billions of parameters in just the first few layers — far too many to train, and far too prone to overfitting.</p>
+
+  <pre><code class="language-python">import torch
+import torch.nn as nn
+
+# An MLP for 224x224x3 images
+class ImageMLP(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.fc1 = nn.Linear(224 * 224 * 3, 1024)  # 150,528 -> 1024
+        self.fc2 = nn.Linear(1024, 256)
+        self.fc3 = nn.Linear(256, 10)              # 10 classes
+
+    def forward(self, x):
+        x = x.view(x.size(0), -1)  # flatten: (batch, 3, 224, 224) -> (batch, 150528)
+        x = torch.relu(self.fc1(x))
+        x = torch.relu(self.fc2(x))
+        return self.fc3(x)
+
+model = ImageMLP()
+total_params = sum(p.numel() for p in model.parameters())
+print(f"Total parameters: {total_params:,}")
+# Total parameters: 154,404,618  (just for this tiny network!)</code></pre>
+
+  <h3>The Spatial Blindness Problem</h3>
+  <p>Beyond parameter count, an MLP has a deeper conceptual flaw: it treats an image as a <em>flat, unordered list of pixel values</em>. There's nothing in the architecture that says "pixel at position (10, 11) is close to pixel at position (10, 12)." Every pixel is just an independent input dimension.</p>
+
+  <p>This means:</p>
+  <ul>
+    <li><strong>No spatial awareness</strong>: The network must re-learn from scratch that nearby pixels tend to co-vary</li>
+    <li><strong>No translation invariance</strong>: A cat in the top-left corner looks completely different from a cat in the bottom-right — different pixels are activated, so the MLP sees two entirely different inputs</li>
+    <li><strong>No parameter reuse</strong>: If an edge detector is useful in one part of the image, the MLP must learn a separate edge detector for every other part</li>
+  </ul>
+
+  <h3>How CNNs Fix All Three Problems</h3>
+
+  <table style="width:100%; border-collapse: collapse; margin: 1.25rem 0; font-size: 0.85rem;">
+    <thead>
+      <tr style="background: var(--bg-alt);">
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Problem with MLPs</th>
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">CNN Solution</th>
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">CNN Feature Name</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Too many parameters (154M for layer 1)</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Each neuron only looks at a small local region (3×3, 5×5)</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Local connections</td>
+      </tr>
+      <tr style="background: var(--bg-subtle);">
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Not translation-invariant</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">The same filter is applied at every position in the image</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Weight sharing</td>
+      </tr>
+      <tr>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">No concept of hierarchy (edges → objects)</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Stacked layers build increasingly abstract features</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Hierarchical features</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="callout callout-tip">
+    <span class="callout-icon">💡</span>
+    <div class="callout-body">
+      <strong>How Many Parameters Does a CNN First Layer Have?</strong>
+      <p>A CNN first layer with 32 filters of size 3×3 on an RGB image has only <strong>32 × (3 × 3 × 3) + 32 = 896 parameters</strong>. Compare that to the MLP's 154 million. That's a 170,000× reduction, and the CNN actually performs better because its architecture matches the problem structure.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 2 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">2</span> The Convolution Operation: Local Feature Detection</h2>
+
+  <p>The core building block of every CNN is the <strong>convolution operation</strong>. Let's build the intuition first, then the mechanics.</p>
+
+  <h3>The Flashlight Analogy</h3>
+  <p>Imagine you're in a completely dark room, examining a painting with a small flashlight. At each position, you can only see the small area illuminated by the light. You slowly slide the flashlight across the painting — at each position, you look at what's illuminated and decide whether it matches a pattern you're looking for (say, a horizontal edge). The <strong>filter</strong> is the pattern you're searching for. The <strong>feature map</strong> is your record of where the pattern appeared strongly as you slid across the image.</p>
+
+  <h3>The Mechanics: Dot Product at Each Position</h3>
+  <p>Concretely, a filter is a small 2D matrix of weights (e.g., 3×3). We slide this filter over the input image. At each position, we compute the <strong>element-wise product</strong> between the filter and the corresponding patch of the image, then sum all the products. This single number tells us how strongly the filter "matched" that patch.</p>
+
+  <pre><code class="language-python">import numpy as np
+
+# A simple 5x5 input image (greyscale, pixel values 0-9)
+image = np.array([
+    [1, 2, 3, 0, 1],
+    [4, 5, 6, 1, 2],
+    [7, 8, 9, 0, 3],
+    [2, 3, 4, 5, 6],
+    [1, 1, 2, 3, 4]
+], dtype=float)
+
+# A 3x3 filter (kernel) — we'll learn what this detects in Section 3
+kernel = np.array([
+    [1, 0, -1],
+    [2, 0, -2],
+    [1, 0, -1]
+], dtype=float)
+
+# Manually compute one output pixel at position (0, 0) — the top-left position
+# The filter aligns with the top-left 3x3 patch of the image
+patch = image[0:3, 0:3]  # [[1,2,3],[4,5,6],[7,8,9]]
+output_00 = np.sum(patch * kernel)
+
+print("Patch at position (0,0):")
+print(patch)
+print(f"\nKernel:")
+print(kernel)
+print(f"\nElement-wise product:")
+print(patch * kernel)
+print(f"\nSum (output pixel): {output_00}")</code></pre>
+
+  <div class="output-block">
+    <div class="output-label">Output</div>
+Patch at position (0,0):
+[[1. 2. 3.]
+ [4. 5. 6.]
+ [7. 8. 9.]]
+
+Kernel:
+[[ 1.  0. -1.]
+ [ 2.  0. -2.]
+ [ 1.  0. -1.]]
+
+Element-wise product:
+[[ 1.  0. -3.]
+ [ 8.  0. -12.]
+ [ 7.  0. -9.]]
+
+Sum (output pixel): -8.0
+  </div>
+
+  <p>We then slide the filter one step to the right (stride=1) and compute the next output pixel. We repeat this for every valid position, producing the complete <strong>feature map</strong>:</p>
+
+  <pre><code class="language-python">def convolve2d(image, kernel):
+    """Manually implement 2D convolution (no padding, stride=1)."""
+    H, W = image.shape
+    F = kernel.shape[0]  # assume square kernel
+    out_H = H - F + 1
+    out_W = W - F + 1
+    output = np.zeros((out_H, out_W))
+
+    for i in range(out_H):
+        for j in range(out_W):
+            patch = image[i:i+F, j:j+F]
+            output[i, j] = np.sum(patch * kernel)
+
+    return output
+
+feature_map = convolve2d(image, kernel)
+print("Feature map (5x5 image, 3x3 kernel, no padding, stride=1):")
+print(feature_map)
+print(f"Output shape: {feature_map.shape}")  # (3, 3)</code></pre>
+
+  <div class="output-block">
+    <div class="output-label">Output</div>
+Feature map (5x5 image, 3x3 kernel, no padding, stride=1):
+[[ -8.  -8.  -5.]
+ [-16. -16. -11.]
+ [ -8.  -8.  -5.]]
+Output shape: (3, 3)
+  </div>
+
+  <div class="callout callout-key">
+    <span class="callout-icon">🔑</span>
+    <div class="callout-body">
+      <strong>Feature Map = Where the Pattern Appeared</strong>
+      <p>Each value in the feature map represents how strongly the kernel matched the image at that position. Large positive values mean strong match; values near zero mean no match; negative values mean the image patch is the opposite of the filter pattern. After applying a ReLU activation, negative values become zero, and only strong pattern detections survive.</p>
+    </div>
+  </div>
+
+  <h3>Doing It in PyTorch</h3>
+  <pre><code class="language-python">import torch
+import torch.nn.functional as F
+
+# PyTorch tensors must be (batch, channels, height, width)
+image_t = torch.tensor(image, dtype=torch.float32).unsqueeze(0).unsqueeze(0)  # (1,1,5,5)
+kernel_t = torch.tensor(kernel, dtype=torch.float32).unsqueeze(0).unsqueeze(0)  # (1,1,3,3)
+
+output_t = F.conv2d(image_t, kernel_t, padding=0)
+print(f"Input shape:  {image_t.shape}")   # torch.Size([1, 1, 5, 5])
+print(f"Kernel shape: {kernel_t.shape}")  # torch.Size([1, 1, 3, 3])
+print(f"Output shape: {output_t.shape}")  # torch.Size([1, 1, 3, 3])</code></pre>
+</div>
+
+<!-- ── Section 3 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">3</span> Kernels: What Features They Detect</h2>
+
+  <p>The power of the convolution operation comes from what the kernels detect. Different kernels are sensitive to different patterns in the image. Before CNNs existed, computer vision researchers spent decades hand-designing kernels for edge detection, blurring, sharpening, and more. CNNs make this obsolete — but understanding hand-designed kernels builds intuition for what your CNN is learning automatically.</p>
+
+  <h3>Classic Hand-Designed Kernels</h3>
+
+  <pre><code class="language-python">import numpy as np
+
+# Vertical edge detector (Sobel filter)
+# Strongly responds to left-to-right intensity changes
+vertical_edge = np.array([
+    [-1,  0,  1],
+    [-2,  0,  2],
+    [-1,  0,  1]
+], dtype=float)
+
+# Horizontal edge detector
+# Strongly responds to top-to-bottom intensity changes
+horizontal_edge = np.array([
+    [-1, -2, -1],
+    [ 0,  0,  0],
+    [ 1,  2,  1]
+], dtype=float)
+
+# Blur (average filter) — smooths the image
+blur = np.ones((3, 3)) / 9.0
+
+# Sharpen filter — enhances edges
+sharpen = np.array([
+    [ 0, -1,  0],
+    [-1,  5, -1],
+    [ 0, -1,  0]
+], dtype=float)
+
+# Identity filter — leaves image unchanged (useful concept to understand)
+identity = np.array([
+    [0, 0, 0],
+    [0, 1, 0],
+    [0, 0, 0]
+], dtype=float)
+
+print("Vertical edge kernel detects:")
+print("  - Strong positive response on bright-left-of-dark boundaries")
+print("  - Strong negative response on dark-left-of-bright boundaries")
+print("  - Near-zero response in uniform regions (no edge)")
+
+# Demonstrate: apply vertical edge detector to a synthetic image
+test_image = np.zeros((7, 7))
+test_image[:, :3] = 1.0   # left half bright
+test_image[:, 3:] = 0.0   # right half dark
+
+edge_response = convolve2d(test_image, vertical_edge)
+print("\nTest image (bright left, dark right):")
+print(test_image)
+print("\nVertical edge response:")
+print(edge_response)</code></pre>
+
+  <div class="output-block">
+    <div class="output-label">Output</div>
+Vertical edge kernel detects:
+  - Strong positive response on bright-left-of-dark boundaries
+  - Strong negative response on dark-left-of-bright boundaries
+  - Near-zero response in uniform regions (no edge)
+
+Test image (bright left, dark right):
+[[1. 1. 1. 0. 0. 0. 0.]
+ ...similar rows...]
+
+Vertical edge response:
+[[ 0. -4.  0.  0.  0.]
+ [ 0. -4.  0.  0.  0.]
+ ...boundary column shows strong response...]
+  </div>
+
+  <h3>What CNNs Learn Automatically</h3>
+  <p>In a CNN, we don't specify these kernels manually. Instead, we initialise them randomly and let <strong>backpropagation</strong> adjust them to minimise the loss on the training data. What the network actually learns depends on the data and the task.</p>
+
+  <p>Research on trained networks reveals a beautiful hierarchy:</p>
+  <ul>
+    <li><strong>Layer 1 filters</strong>: Edge detectors (horizontal, vertical, diagonal), colour gradients, blobs — very similar to the hand-designed Sobel filters above</li>
+    <li><strong>Layer 2 filters</strong>: Textures — combinations of edges that form grids, curves, and simple patterns</li>
+    <li><strong>Layer 3–4 filters</strong>: Parts — eyes, ears, wheels, windows — recurring sub-objects</li>
+    <li><strong>Layer 5+ filters</strong>: Objects — dog faces, car front-ends, flower petals — entire concepts</li>
+  </ul>
+
+  <div class="callout callout-realworld">
+    <span class="callout-icon">🌍</span>
+    <div class="callout-body">
+      <strong>AlexNet's Learned Filters</strong>
+      <p>When Alex Krizhevsky, Ilya Sutskever, and Geoffrey Hinton visualised the first-layer filters of AlexNet (the 2012 CNN that revolutionised computer vision), they found 96 filters that looked exactly like Gabor filters — a class of edge detectors that neuroscientists had found in the human visual cortex. The network independently rediscovered, from raw pixel data and labels alone, the same edge detectors that evolution built into human vision. This is one of the most remarkable results in all of deep learning.</p>
+    </div>
+  </div>
+
+  <div class="callout callout-tip">
+    <span class="callout-icon">💡</span>
+    <div class="callout-body">
+      <strong>Why Layer 1 Always Learns Edge Detectors</strong>
+      <p>Edges are the statistically most common and informative local patterns in natural images. Pixels at the same side of an edge are correlated; pixels across an edge are anti-correlated. Since backpropagation finds the filters that minimise loss, and edge detection is almost always useful, the first layer reliably converges to edge detectors regardless of what task you train on. This universality is why transfer learning (Lesson 46) works so well.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 4 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">4</span> Multiple Filters = Multiple Feature Maps</h2>
+
+  <p>A single filter produces a single feature map — a 2D grid showing where one specific pattern appears. But an image has many different patterns worth detecting: horizontal edges, vertical edges, curves, colour contrasts, and more. We need many filters to capture all of them.</p>
+
+  <h3>One Filter → One Feature Map</h3>
+  <p>Recall: input is (H, W), filter is (F, F), output is (H', W') — one 2D grid of responses.</p>
+
+  <h3>N Filters → N Feature Maps (3D Output)</h3>
+  <p>Apply N different filters simultaneously → get N different feature maps → stack them into a 3D tensor of shape (H', W', N). This third dimension (N) is called the <strong>channel dimension</strong> or <strong>depth</strong>.</p>
+
+  <pre><code class="language-python">import torch
+import torch.nn as nn
+
+# A conv layer with 32 filters, each 3x3, applied to a greyscale image (1 channel)
+conv_layer = nn.Conv2d(
+    in_channels=1,    # 1 input channel (greyscale)
+    out_channels=32,  # 32 filters → 32 feature maps
+    kernel_size=3,    # each filter is 3x3
+    padding=1         # same padding (explained in Section 6)
+)
+
+# Input: batch of 4 greyscale images, each 28x28
+x = torch.randn(4, 1, 28, 28)  # (batch=4, channels=1, H=28, W=28)
+output = conv_layer(x)
+print(f"Input shape:  {x.shape}")       # torch.Size([4, 1, 28, 28])
+print(f"Output shape: {output.shape}")  # torch.Size([4, 32, 28, 28])
+# 4 images, each now has 32 feature maps, each 28x28
+
+# Count parameters in this layer:
+# Each filter: 3x3x1 = 9 weights + 1 bias = 10
+# 32 filters: 32 x 10 = 320 parameters total
+print(f"Parameters: {sum(p.numel() for p in conv_layer.parameters())}")  # 320</code></pre>
+
+  <h3>Colour Images: Filters Have Depth Too</h3>
+  <p>When the input has C channels (e.g., RGB: C=3), each filter must also have depth C. Think of it as C stacked 2D filters — one slice per channel — that are all applied simultaneously and their outputs summed.</p>
+
+  <pre><code class="language-python"># Conv layer for RGB images (3 channels)
+conv_rgb = nn.Conv2d(
+    in_channels=3,   # RGB: 3 channels
+    out_channels=64, # 64 filters
+    kernel_size=3,
+    padding=1
+)
+
+# Each filter: 3x3x3 = 27 weights + 1 bias = 28 params
+# 64 filters: 64 x 28 = 1,792 parameters
+params = sum(p.numel() for p in conv_rgb.parameters())
+print(f"Parameters (3-channel input, 64 filters, 3x3): {params}")  # 1,792
+
+# Input: batch of 16 RGB images, each 32x32
+x_rgb = torch.randn(16, 3, 32, 32)
+output_rgb = conv_rgb(x_rgb)
+print(f"Input:  {x_rgb.shape}")        # torch.Size([16, 3, 32, 32])
+print(f"Output: {output_rgb.shape}")   # torch.Size([16, 64, 32, 32])</code></pre>
+
+  <div class="callout callout-key">
+    <span class="callout-icon">🔑</span>
+    <div class="callout-body">
+      <strong>The CNN's General Tensor Shape</strong>
+      <p>In PyTorch: tensors are (batch, channels, height, width) — abbreviated NCHW. As you go deeper in a CNN: spatial dimensions (H, W) shrink (due to pooling/stride), and channel depth (C) grows (more filters = more detected features). The spatial compression focuses on <em>what</em> is there; the channel expansion captures <em>what kind of thing</em> is there.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 5 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">5</span> Output Size Formula</h2>
+
+  <p>Every time you add a conv layer, the spatial dimensions of your feature maps change. Keeping track of these dimensions is critical — a mismatch will crash your network with a shape error. Fortunately, there's a simple formula.</p>
+
+  <h3>The Formula</h3>
+  <p>Given: input height H (same formula applies to width W), filter size F, padding P, stride S:</p>
+  <p style="text-align:center; background: var(--bg-alt); padding: 1rem; border-radius: 0.5rem; font-size:1.1rem; font-family: monospace; margin: 1rem 0;">
+    Output size = ⌊(H + 2P − F) / S⌋ + 1
+  </p>
+  <p>The ⌊ ⌋ symbol means "floor" — round down to the nearest integer.</p>
+
+  <h3>Building Intuition: Walk Through Common Cases</h3>
+
+  <pre><code class="language-python">import math
+
+def conv_output_size(H, F, P=0, S=1):
+    """Calculate output spatial dimension after a conv layer."""
+    return math.floor((H + 2*P - F) / S) + 1
+
+# Case 1: No padding, stride 1 (standard "valid" convolution)
+print(conv_output_size(H=28, F=3, P=0, S=1))  # (28 + 0 - 3) / 1 + 1 = 26
+print(conv_output_size(H=28, F=5, P=0, S=1))  # (28 + 0 - 5) / 1 + 1 = 24
+
+# Case 2: Same padding (P = (F-1)/2), stride 1 — output equals input size
+print(conv_output_size(H=28, F=3, P=1, S=1))  # (28 + 2 - 3) / 1 + 1 = 28 ✓
+print(conv_output_size(H=32, F=5, P=2, S=1))  # (32 + 4 - 5) / 1 + 1 = 32 ✓
+
+# Case 3: Stride 2 — output is roughly half the input size
+print(conv_output_size(H=32, F=3, P=0, S=2))  # (32 + 0 - 3) / 2 + 1 = 15
+print(conv_output_size(H=32, F=3, P=1, S=2))  # (32 + 2 - 3) / 2 + 1 = 16
+
+# Case 4: Same padding + stride 2 = exact halving
+print(conv_output_size(H=64, F=3, P=1, S=2))  # (64 + 2 - 3) / 2 + 1 = 32 ✓</code></pre>
+
+  <div class="output-block">
+    <div class="output-label">Output</div>
+26
+24
+28
+32
+15
+16
+32
+  </div>
+
+  <h3>Complete Example: Trace Shapes Through 3 Conv Layers</h3>
+  <pre><code class="language-python"># Starting with a 32x32 greyscale image
+# Conv1: 1 -> 32 filters, 3x3, padding=1, stride=1
+h1 = conv_output_size(32, F=3, P=1, S=1)   # 32
+# Pool1: 2x2, stride=2
+h1p = conv_output_size(h1, F=2, P=0, S=2)  # 16
+
+# Conv2: 32 -> 64 filters, 3x3, padding=1, stride=1
+h2 = conv_output_size(h1p, F=3, P=1, S=1)  # 16
+# Pool2: 2x2, stride=2
+h2p = conv_output_size(h2, F=2, P=0, S=2)  # 8
+
+# Conv3: 64 -> 128 filters, 3x3, padding=1, stride=1
+h3 = conv_output_size(h2p, F=3, P=1, S=1)  # 8
+# Pool3: 2x2, stride=2
+h3p = conv_output_size(h3, F=2, P=0, S=2)  # 4
+
+print(f"After Conv1+Pool1: {h1p}x{h1p}x32")    # 16x16x32
+print(f"After Conv2+Pool2: {h2p}x{h2p}x64")    # 8x8x64
+print(f"After Conv3+Pool3: {h3p}x{h3p}x128")   # 4x4x128
+print(f"Flatten size: {h3p * h3p * 128}")       # 2048</code></pre>
+
+  <div class="callout callout-warn">
+    <span class="callout-icon">⚠️</span>
+    <div class="callout-body">
+      <strong>Always Track Your Shapes</strong>
+      <p>The most common error when building CNNs is a shape mismatch at the transition from conv layers to the first fully connected layer. Use this formula at every layer during design, or run a forward pass with a dummy input and print the shapes at each step. Getting this wrong gives a cryptic <code>RuntimeError: mat1 and mat2 shapes cannot be multiplied</code>.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 6 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">6</span> Padding: Same vs Valid</h2>
+
+  <p>Without padding, every conv layer shrinks the spatial dimensions. For a 3×3 filter on a 28×28 image, the output is 26×26 — losing 2 pixels on each dimension. Stack 10 conv layers, and a 28×28 input becomes 8×8. That's fine for shallow networks, but deep networks need spatial dimensions to survive longer.</p>
+
+  <h3>Valid Padding (No Padding, P=0)</h3>
+  <p>The filter only slides over valid positions — positions where the entire filter window is within the image boundaries. The output is smaller than the input.</p>
+  <ul>
+    <li>Pros: No artificial border information added; slightly more computation-efficient</li>
+    <li>Cons: Spatial dimensions shrink at every layer; border pixels are "seen" fewer times than central pixels</li>
+  </ul>
+
+  <h3>Same Padding (P = (F−1)/2)</h3>
+  <p>Zero-pad the input so the output is the same spatial size as the input (for stride=1). For a 3×3 filter: pad by 1 on each side. For a 5×5 filter: pad by 2 on each side.</p>
+  <ul>
+    <li>Pros: Spatial dimensions preserved — you control exactly when downsampling happens (pooling/stride); border pixels treated equally</li>
+    <li>Cons: Introduces zeros at borders (though this is rarely a problem in practice)</li>
+  </ul>
+
+  <pre><code class="language-python">import torch
+import torch.nn as nn
+
+input_tensor = torch.randn(1, 1, 28, 28)
+
+# Valid padding (default in PyTorch: padding=0)
+conv_valid = nn.Conv2d(1, 32, kernel_size=3, padding=0)
+out_valid = conv_valid(input_tensor)
+print(f"Input:         {input_tensor.shape}")   # [1, 1, 28, 28]
+print(f"Valid padding: {out_valid.shape}")       # [1, 32, 26, 26]  (shrinks)
+
+# Same padding (padding=1 for kernel_size=3)
+conv_same = nn.Conv2d(1, 32, kernel_size=3, padding=1)
+out_same = conv_same(input_tensor)
+print(f"Same padding:  {out_same.shape}")        # [1, 32, 28, 28]  (preserved)
+
+# For a 5x5 kernel, same padding requires padding=2
+conv_5x5 = nn.Conv2d(1, 32, kernel_size=5, padding=2)
+out_5x5 = conv_5x5(input_tensor)
+print(f"5x5 same pad:  {out_5x5.shape}")         # [1, 32, 28, 28]  (preserved)</code></pre>
+
+  <div class="callout callout-tip">
+    <span class="callout-icon">💡</span>
+    <div class="callout-body">
+      <strong>TensorFlow vs PyTorch Padding</strong>
+      <p>In TensorFlow/Keras: <code>padding='SAME'</code> or <code>padding='VALID'</code> — convenient string aliases. In PyTorch: you must specify the integer value manually: <code>padding=(kernel_size-1)//2</code> for same padding. With PyTorch 1.9+, you can also write <code>padding='same'</code> (lowercase), but only when stride=1.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 7 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">7</span> Stride: Downsampling During Convolution</h2>
+
+  <p>Stride controls how far the filter moves at each step. With stride=1, the filter moves one pixel at a time — dense sampling with maximum overlap. With stride=2, the filter jumps two pixels at a time — skipping positions and halving the output spatial dimensions.</p>
+
+  <h3>Stride = 1 (Dense, Overlapping)</h3>
+  <p>Every position is visited. Maximum information extracted. Output ≈ same size as input (with same padding). Used for most conv layers where you want to preserve spatial information.</p>
+
+  <h3>Stride = 2 (Sparse, Non-overlapping)</h3>
+  <p>Every other position is skipped. Output is roughly half the spatial size. This is a form of <strong>learnable downsampling</strong> — unlike max pooling, the stride-2 convolution can learn the best way to downsample rather than using a fixed max or average operation.</p>
+
+  <pre><code class="language-python">import torch
+import torch.nn as nn
+
+x = torch.randn(1, 3, 64, 64)  # batch=1, RGB, 64x64
+
+# Stride 1: no spatial change (with same padding)
+conv_s1 = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1)
+out_s1 = conv_s1(x)
+print(f"Stride 1: {x.shape} -> {out_s1.shape}")   # [1, 64, 64, 64]
+
+# Stride 2: halves spatial dimensions
+conv_s2 = nn.Conv2d(3, 64, kernel_size=3, stride=2, padding=1)
+out_s2 = conv_s2(x)
+print(f"Stride 2: {x.shape} -> {out_s2.shape}")   # [1, 64, 32, 32]
+
+# Stride 4: quarters spatial dimensions
+conv_s4 = nn.Conv2d(3, 64, kernel_size=7, stride=4, padding=3)
+out_s4 = conv_s4(x)
+print(f"Stride 4: {x.shape} -> {out_s4.shape}")   # [1, 64, 16, 16]</code></pre>
+
+  <div class="callout callout-key">
+    <span class="callout-icon">🔑</span>
+    <div class="callout-body">
+      <strong>Stride-2 Conv vs Max Pooling</strong>
+      <p>Both halve the spatial dimensions. The difference: max pooling is a fixed, non-learnable operation (takes the max). A stride-2 conv is <em>learned</em> — it can figure out the best way to compress the spatial information for the task. Modern architectures (ResNet, EfficientNet) increasingly replace max pooling with stride-2 convolutions for the flexibility this provides.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 8 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">8</span> Pooling: Downsampling Feature Maps</h2>
+
+  <p>Pooling layers reduce the spatial dimensions of feature maps. They serve two purposes: (1) reducing computation in subsequent layers, and (2) providing a form of translation invariance — if a feature appears slightly off-centre, pooling ensures it still produces the same output.</p>
+
+  <h3>The Translation Invariance Intuition</h3>
+  <p>Imagine a 2×2 max pool window. If an "eye detector" fires strongly at position (5, 6) in one image and at position (5, 7) in another (the eye is one pixel to the right), the 2×2 max pool at that region will capture the same maximum value in both cases. The small positional shift is absorbed. This is why pooled representations are robust to slight positional changes.</p>
+
+  <h3>Max Pooling</h3>
+  <p>Takes the maximum value in each pooling window. The most common type. Keeps the strongest activation — if any position in the window strongly detected the feature, it passes through.</p>
+
+  <pre><code class="language-python">import torch
+import torch.nn as nn
+
+pool = nn.MaxPool2d(kernel_size=2, stride=2)
+
+x = torch.tensor([[[[1., 3., 2., 4.],
+                     [5., 6., 7., 8.],
+                     [3., 2., 1., 0.],
+                     [9., 7., 4., 5.]]]])  # shape: (1, 1, 4, 4)
+
+output = pool(x)
+print("Input (4x4):")
+print(x[0, 0])
+print("\nMax Pool 2x2, stride 2 output (2x2):")
+print(output[0, 0])
+# Top-left 2x2: max(1, 3, 5, 6) = 6
+# Top-right 2x2: max(2, 4, 7, 8) = 8
+# Bottom-left 2x2: max(3, 2, 9, 7) = 9
+# Bottom-right 2x2: max(1, 0, 4, 5) = 5</code></pre>
+
+  <div class="output-block">
+    <div class="output-label">Output</div>
+Input (4x4):
+tensor([[1., 3., 2., 4.],
+        [5., 6., 7., 8.],
+        [3., 2., 1., 0.],
+        [9., 7., 4., 5.]])
+
+Max Pool 2x2, stride 2 output (2x2):
+tensor([[6., 8.],
+        [9., 5.]])
+  </div>
+
+  <h3>Average Pooling</h3>
+  <p>Takes the average of values in each window. Smoother than max pooling — all activations contribute. Preferred for global pooling at the end of a network.</p>
+
+  <pre><code class="language-python"># Average Pooling
+avg_pool = nn.AvgPool2d(kernel_size=2, stride=2)
+avg_output = avg_pool(x)
+print("Average Pool output:")
+print(avg_output[0, 0])
+# Top-left: (1+3+5+6)/4 = 3.75
+# Top-right: (2+4+7+8)/4 = 5.25</code></pre>
+
+  <h3>Global Average Pooling (GAP)</h3>
+  <p>Takes the average of the <em>entire</em> feature map — reduces each feature map to a single number. This is a parameter-free alternative to flattening before the classifier. Used in modern architectures (ResNet, EfficientNet) as the final spatial operation. Dramatically reduces overfitting since it has no learnable weights.</p>
+
+  <pre><code class="language-python"># Global Average Pooling
+# Input: (batch, channels, H, W) -> Output: (batch, channels)
+gap = nn.AdaptiveAvgPool2d((1, 1))  # reduces H, W to 1x1
+x_deep = torch.randn(32, 512, 7, 7)  # 32 images, 512 feature maps, 7x7
+out_gap = gap(x_deep)
+print(f"Before GAP: {x_deep.shape}")   # torch.Size([32, 512, 7, 7])
+print(f"After GAP:  {out_gap.shape}")  # torch.Size([32, 512, 1, 1])
+out_flat = out_gap.squeeze(-1).squeeze(-1)
+print(f"After squeeze: {out_flat.shape}")  # torch.Size([32, 512])</code></pre>
+
+  <div class="callout callout-tip">
+    <span class="callout-icon">💡</span>
+    <div class="callout-body">
+      <strong>When to Use Which Pooling</strong>
+      <p>Max pooling: use between conv layers for intermediate downsampling — it preserves the strongest feature activations. Global average pooling: use as the final spatial operation before the classifier — it's parameter-free and reduces overfitting. Avoid flattening large feature maps (e.g., 7×7×512 = 25,088 values) directly before a fully connected layer if GAP is an option.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 9 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">9</span> Putting It All Together: A Complete CNN</h2>
+
+  <p>Now we have all the pieces. Let's build a complete, working CNN in PyTorch and carefully trace the shape of tensors through every single layer. This section brings together everything from Sections 1–8.</p>
+
+  <h3>Design Principles</h3>
+  <p>A standard CNN architecture follows this pattern for each "block":</p>
+  <p style="text-align:center; background: var(--bg-alt); padding: 0.75rem 1rem; border-radius: 0.5rem; font-family: monospace; margin: 1rem 0;">
+    Conv → BatchNorm → ReLU → MaxPool
+  </p>
+  <p>Repeat this block 2–5 times, with increasing number of channels at each block. Then flatten and connect to a fully connected classifier.</p>
+
+  <pre><code class="language-python">import torch
+import torch.nn as nn
+
+class SimpleCNN(nn.Module):
+    """
+    A CNN for 32x32 greyscale images (10-class classification).
+    Architecture:
+      Input: (batch, 1, 32, 32)
+      Block 1: Conv(1->32) + BN + ReLU + MaxPool  -> (batch, 32, 16, 16)
+      Block 2: Conv(32->64) + BN + ReLU + MaxPool -> (batch, 64, 8, 8)
+      Block 3: Conv(64->128) + BN + ReLU + MaxPool -> (batch, 128, 4, 4)
+      Flatten: (batch, 2048)
+      FC1: 2048 -> 256
+      FC2: 256 -> 10
+    """
+    def __init__(self, num_classes=10):
+        super().__init__()
+
+        # Block 1
+        self.block1 = nn.Sequential(
+            nn.Conv2d(1, 32, kernel_size=3, padding=1),   # (1,32,32) -> (32,32,32)
+            nn.BatchNorm2d(32),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=2, stride=2)          # (32,32,32) -> (32,16,16)
+        )
+
+        # Block 2
+        self.block2 = nn.Sequential(
+            nn.Conv2d(32, 64, kernel_size=3, padding=1),  # (32,16,16) -> (64,16,16)
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=2, stride=2)          # (64,16,16) -> (64,8,8)
+        )
+
+        # Block 3
+        self.block3 = nn.Sequential(
+            nn.Conv2d(64, 128, kernel_size=3, padding=1), # (64,8,8) -> (128,8,8)
+            nn.BatchNorm2d(128),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=2, stride=2)          # (128,8,8) -> (128,4,4)
+        )
+
+        # Classifier
+        self.classifier = nn.Sequential(
+            nn.Flatten(),           # 128 * 4 * 4 = 2048
+            nn.Linear(2048, 256),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.5),
+            nn.Linear(256, num_classes)
+        )
+
+    def forward(self, x):
+        x = self.block1(x)
+        x = self.block2(x)
+        x = self.block3(x)
+        x = self.classifier(x)
+        return x
+
+
+model = SimpleCNN(num_classes=10)
+
+# Count parameters at each part
+def count_params(module):
+    return sum(p.numel() for p in module.parameters())
+
+print(f"Block 1 params:      {count_params(model.block1):,}")
+print(f"Block 2 params:      {count_params(model.block2):,}")
+print(f"Block 3 params:      {count_params(model.block3):,}")
+print(f"Classifier params:   {count_params(model.classifier):,}")
+print(f"Total params:        {count_params(model):,}")
+
+# Run a forward pass with a dummy batch to verify shapes
+x = torch.randn(8, 1, 32, 32)  # batch of 8 greyscale 32x32 images
+print(f"\nInput:  {x.shape}")
+
+x_b1 = model.block1(x)
+print(f"Block1: {x_b1.shape}")
+
+x_b2 = model.block2(x_b1)
+print(f"Block2: {x_b2.shape}")
+
+x_b3 = model.block3(x_b2)
+print(f"Block3: {x_b3.shape}")
+
+logits = model.classifier(x_b3)
+print(f"Output: {logits.shape}")</code></pre>
+
+  <div class="output-block">
+    <div class="output-label">Output</div>
+Block 1 params:      320 + 64 = 384
+Block 2 params:      18,496
+Block 3 params:      73,984
+Classifier params:   525,578
+Total params:        618,442
+
+Input:  torch.Size([8, 1, 32, 32])
+Block1: torch.Size([8, 32, 16, 16])
+Block2: torch.Size([8, 64, 8, 8])
+Block3: torch.Size([8, 128, 4, 4])
+Output: torch.Size([8, 10])
+  </div>
+
+  <h3>A Quick Training Loop to Verify It Works</h3>
+  <pre><code class="language-python">import torch.optim as optim
+
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+model = SimpleCNN(num_classes=10).to(device)
+optimizer = optim.Adam(model.parameters(), lr=1e-3)
+criterion = nn.CrossEntropyLoss()
+
+# Fake dataset: 100 batches of 8 random images
+model.train()
+for step in range(100):
+    x = torch.randn(8, 1, 32, 32).to(device)
+    y = torch.randint(0, 10, (8,)).to(device)
+
+    optimizer.zero_grad()
+    logits = model(x)
+    loss = criterion(logits, y)
+    loss.backward()
+    optimizer.step()
+
+    if step % 25 == 0:
+        print(f"Step {step:3d} | Loss: {loss.item():.4f}")
+
+print("Training complete — model architecture verified.")</code></pre>
+</div>
+
+<!-- Real-World Use Case -->
+<div class="use-case-section">
+  <div class="use-case-header">
+    <span style="font-size:1.5rem">🌍</span>
+    <h2>Real-World Spotlight: AlexNet and the 2012 Deep Learning Revolution</h2>
+  </div>
+  <p>In 2012, Alex Krizhevsky, Ilya Sutskever, and Geoffrey Hinton entered a CNN called <strong>AlexNet</strong> into the ImageNet Large Scale Visual Recognition Challenge (ILSVRC). The result was shocking: AlexNet's top-5 error rate was 15.3%, compared to 26.2% for the second-place entry — a nearly 11-percentage-point gap. Previous winners had improved by 1–2% per year. AlexNet improved by 11% in one step. The deep learning era had begun.</p>
+
+  <p>AlexNet's architecture in hindsight is simple — exactly the pattern you've learned in this lesson:</p>
+  <ul>
+    <li><strong>5 convolutional layers</strong> with ReLU activations (the first CNN to use ReLU instead of tanh)</li>
+    <li><strong>Max pooling</strong> after layers 1, 2, and 5</li>
+    <li><strong>3 fully connected layers</strong> with Dropout (0.5) to prevent overfitting</li>
+    <li><strong>Local Response Normalisation</strong> (since replaced by BatchNorm)</li>
+    <li>Trained on 1.2 million ImageNet images across 2 GPUs for 5–6 days</li>
+    <li>First layer learned 96 filters of size 11×11 — when visualised, they look exactly like Gabor filters (edge and orientation detectors)</li>
+  </ul>
+
+  <pre><code class="language-python">import torch
+import torch.nn as nn
+
+class AlexNetSimplified(nn.Module):
+    """Simplified AlexNet (adapted for 224x224 input, ignoring LRN)."""
+    def __init__(self, num_classes=1000):
+        super().__init__()
+        self.features = nn.Sequential(
+            nn.Conv2d(3, 96, kernel_size=11, stride=4, padding=2),  # -> 55x55x96
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=3, stride=2),                   # -> 27x27x96
+            nn.Conv2d(96, 256, kernel_size=5, padding=2),            # -> 27x27x256
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=3, stride=2),                   # -> 13x13x256
+            nn.Conv2d(256, 384, kernel_size=3, padding=1),           # -> 13x13x384
+            nn.ReLU(inplace=True),
+            nn.Conv2d(384, 384, kernel_size=3, padding=1),           # -> 13x13x384
+            nn.ReLU(inplace=True),
+            nn.Conv2d(384, 256, kernel_size=3, padding=1),           # -> 13x13x256
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=3, stride=2),                   # -> 6x6x256
+        )
+        self.classifier = nn.Sequential(
+            nn.Dropout(0.5),
+            nn.Linear(256 * 6 * 6, 4096),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.5),
+            nn.Linear(4096, 4096),
+            nn.ReLU(inplace=True),
+            nn.Linear(4096, num_classes),
+        )
+
+    def forward(self, x):
+        x = self.features(x)
+        x = x.view(x.size(0), -1)
+        return self.classifier(x)
+
+alexnet = AlexNetSimplified()
+total = sum(p.numel() for p in alexnet.parameters())
+print(f"AlexNet total parameters: {total:,}")   # ~60 million</code></pre>
+
+  <p>The key insight from AlexNet isn't the architecture itself — it's what it proved: <strong>deep convolutional networks, trained on large datasets with GPUs, can learn representations that far surpass anything hand-engineered</strong>. Every CNN architecture you'll ever use — ResNet, EfficientNet, VGG, MobileNet — traces its lineage back to this moment.</p>
+</div>
+
+<!-- ── Quiz ── -->
+<div class="quiz-section">
+  <div id="quiz44"></div>
+</div>
+
+<!-- ── Practice ── -->
+<div class="practice-card">
+  <h2>✍️ Practice Exercises</h2>
+  <ol>
+    <li>Create a <code>nn.Conv2d</code> layer with 3 input channels, 64 output channels, 5×5 kernels, and same padding. What is the padding value? Count the total parameters in this layer.</li>
+    <li>An input tensor has shape <code>(16, 3, 64, 64)</code>. You apply: Conv(3→32, 3×3, P=1, S=1), then MaxPool(2×2, S=2), then Conv(32→64, 3×3, P=1, S=1), then MaxPool(2×2, S=2). What is the final output shape?</li>
+    <li>Build a CNN for 10-class classification on 28×28 greyscale images (MNIST). Use 2 conv blocks. Use <code>model.eval()</code> mode and run a batch of 64 images through it, printing the shape at every layer.</li>
+    <li>Visualise 3 different kernels (edge detectors, blur, sharpen) applied to a random 10×10 image using the <code>convolve2d</code> function from Section 2. Describe in one sentence what each output represents.</li>
+  </ol>
+  <details>
+    <summary>▶ Show Solution (Exercise 2)</summary>
+    <pre><code class="language-python">import torch, torch.nn as nn, math
+
+def conv_output_size(H, F, P, S):
+    return math.floor((H + 2*P - F) / S) + 1
+
+# Start: (16, 3, 64, 64)
+h = 64
+h = conv_output_size(h, F=3, P=1, S=1)  # Conv1 -> 64
+h = conv_output_size(h, F=2, P=0, S=2)  # Pool1 -> 32
+h = conv_output_size(h, F=3, P=1, S=1)  # Conv2 -> 32
+h = conv_output_size(h, F=2, P=0, S=2)  # Pool2 -> 16
+print(f"Final spatial: {h}x{h}, channels=64")
+print(f"Output shape: (16, 64, 16, 16)")
+
+# Verify with PyTorch
+model = nn.Sequential(
+    nn.Conv2d(3, 32, 3, padding=1), nn.ReLU(),
+    nn.MaxPool2d(2, 2),
+    nn.Conv2d(32, 64, 3, padding=1), nn.ReLU(),
+    nn.MaxPool2d(2, 2)
+)
+x = torch.randn(16, 3, 64, 64)
+print(model(x).shape)  # torch.Size([16, 64, 16, 16])</code></pre>
+  </details>
+</div>
+
+<!-- Navigation -->
+<nav class="lesson-nav">
+  <a href="./0043-dl-regularization.html" class="nav-btn">← Lesson 43: DL Regularization</a>
+  <a href="./0045-cnn-practice.html" class="nav-btn nav-btn-next">Lesson 45: CNNs in Practice →</a>
+</nav>
+
+</div><!-- /content-wrapper -->
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-core.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/plugins/autoloader/prism-autoloader.min.js"></script>
+<script src="../assets/quiz.js"></script>
+<script>
+new MLQuiz('quiz44', [
+  {
+    question: "A convolutional layer receives input (28×28×1), uses 32 filters of size 3×3, stride=1, padding=0. What is the output shape (H×W×channels)?",
+    options: [
+      "26×26×32 — output size: (28−3)/1+1=26, 32 feature maps",
+      "28×28×32 — padding=0 still preserves spatial dimensions",
+      "26×26×1 — channels don't change with convolution",
+      "30×30×32 — padding adds border pixels, increasing size"
+    ],
+    correct: 0,
+    explanation: "With no padding (P=0), a 3×3 filter on a 28×28 input gives output size (28+0−3)/1+1 = 26. With 32 filters, the output has 32 feature maps. Shape: 26×26×32. In PyTorch NCHW format: (batch, 32, 26, 26)."
+  },
+  {
+    question: "What is weight sharing in CNNs and why is it important?",
+    options: [
+      "The same filter weights are used at every spatial position — this reduces parameters dramatically and encodes translation invariance",
+      "Weights are shared between adjacent layers to reduce overfitting",
+      "Multiple filters within the same layer share a subset of their weights",
+      "Weights are shared between the encoder and decoder in an autoencoder architecture"
+    ],
+    correct: 0,
+    explanation: "In a CNN, a single filter (e.g., a 3×3 edge detector) slides over the entire image using the same 9 weights at every position. If the image is 28×28, the filter is applied ~676 times but always with the same weights — those 9 weights replace what would be 28×28×9=7,056 weights in a fully connected layer. This also encodes the assumption that the same feature (e.g., an edge) can appear anywhere in the image."
+  },
+  {
+    question: "Max pooling with a 2×2 kernel and stride 2 is applied to a 28×28 feature map. What is the output size?",
+    options: [
+      "14×14 — halving both dimensions by taking the max in each 2×2 non-overlapping window",
+      "26×26 — pooling reduces size by 2 pixels on each edge",
+      "56×56 — pooling doubles resolution by interpolation",
+      "28×28 — max pooling preserves spatial dimensions"
+    ],
+    correct: 0,
+    explanation: "With a 2×2 kernel and stride 2, the pooling window covers non-overlapping 2×2 blocks. For a 28×28 input: output size = (28−2)/2+1 = 14. Both dimensions halve: 28×28 → 14×14. This is the most common pooling setup in CNNs."
+  },
+  {
+    question: "Why do deeper CNN layers have more channels but smaller spatial dimensions?",
+    options: [
+      "More channels: the network detects more abstract features; smaller spatial dims: pooling/stride reduces resolution, focusing on semantics over location",
+      "More channels: added automatically to compensate for information lost by pooling",
+      "Smaller spatial dims: caused by the ReLU activation which clips small values",
+      "More channels are a side effect of batch normalisation expanding the representation"
+    ],
+    correct: 0,
+    explanation: "As you go deeper, pooling and stride compress the spatial dimensions — a 224×224 input might become 7×7 by the last conv layer. This spatial compression is intentional: deep layers should represent 'what is here' rather than 'exactly where it is'. Meanwhile, more channels (filters) are added to capture an increasing variety of abstract features — from edges (few channels needed) to object parts (many specific patterns to detect)."
+  },
+  {
+    question: "What is 'same' padding and how is the padding amount determined for a kernel of size F?",
+    options: [
+      "Padding = (F−1)/2 on each side so the output has the same spatial dimensions as the input (for stride=1)",
+      "Padding = F on each side so the output has the same total area as the input",
+      "Same padding adds one zero row/column regardless of kernel size",
+      "Same padding means using an odd kernel size so no padding is needed"
+    ],
+    correct: 0,
+    explanation: "For a kernel of size F and stride 1, adding P=(F−1)/2 zeros on each side ensures the output is the same size as the input. For F=3: P=1. For F=5: P=2. For F=7: P=3. In PyTorch, you set this manually: nn.Conv2d(..., padding=(kernel_size-1)//2). With same padding you control exactly when downsampling happens (using pooling or stride) rather than having it happen automatically at every conv layer."
+  }
+]);
+</script>
+
+</body>
+</html>

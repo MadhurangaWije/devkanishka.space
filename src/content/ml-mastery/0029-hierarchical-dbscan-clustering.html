@@ -1,0 +1,777 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lesson 29: Hierarchical &amp; DBSCAN Clustering | ML Mastery</title>
+  <link rel="stylesheet" href="../assets/style.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
+</head>
+<body>
+
+<header class="lesson-header">
+  <div class="header-inner">
+    <nav class="breadcrumb">
+      <a href="../reference/curriculum-map.html">ML Mastery</a>
+      <span class="sep">›</span>
+      <span>Phase 3: Unsupervised Learning</span>
+    </nav>
+    <div class="lesson-badges">
+      <span class="phase-badge">Phase 3 · Unsupervised Learning</span>
+      <span class="lesson-num-badge">Lesson 29</span>
+    </div>
+    <h1 class="lesson-title">Hierarchical &amp; DBSCAN Clustering</h1>
+    <p class="lesson-subtitle">Beyond K-Means — how tree-based hierarchical clustering reveals nested structure, and how DBSCAN finds clusters of any shape while automatically labelling outliers as noise.</p>
+    <div class="meta-pills">
+      <span class="meta-pill">⏱ ~60 min</span>
+      <span class="meta-pill">🐍 scikit-learn + SciPy</span>
+      <span class="meta-pill">🔵 Unsupervised Learning</span>
+      <span class="meta-pill">Requires Lesson 28</span>
+    </div>
+  </div>
+</header>
+
+<main class="lesson-main">
+<div class="content-wrapper">
+
+<div class="objectives-card">
+  <h2>🎯 What You'll Learn</h2>
+  <ul>
+    <li>Build a dendrogram with agglomerative clustering and understand how to read it to choose the number of clusters</li>
+    <li>Understand the four linkage criteria (single, complete, average, Ward) and when each is appropriate</li>
+    <li>Implement hierarchical clustering with both scikit-learn and SciPy</li>
+    <li>Master DBSCAN's core/border/noise point model and the two parameters <code>eps</code> and <code>min_samples</code></li>
+    <li>Compare K-Means, hierarchical clustering, and DBSCAN on non-convex datasets to choose the right algorithm for each problem</li>
+  </ul>
+</div>
+
+<!-- ── Section 1 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">1</span> Hierarchical Clustering: The Idea</h2>
+
+  <p>K-Means partitions data into exactly K flat clusters. Hierarchical clustering builds a <strong>tree of clusters</strong> — called a <em>dendrogram</em> — that captures the nested structure of data at multiple scales. This is powerful: you don't commit to a specific K upfront. Instead, you build the full tree and cut it at the level that makes sense for your problem.</p>
+
+  <p>There are two philosophies:</p>
+  <ul>
+    <li><strong>Agglomerative (bottom-up)</strong>: Start with every single data point as its own cluster (n clusters). At each step, merge the two closest clusters. Repeat until everything is one big cluster. This is by far the most common approach.</li>
+    <li><strong>Divisive (top-down)</strong>: Start with all points in one cluster and recursively split it. Computationally expensive and rarely used in practice.</li>
+  </ul>
+
+  <p>The agglomerative approach runs in O(n² log n) time — much slower than K-Means O(nKt) for large datasets. But for small-to-medium datasets (n &lt; 10,000), it provides rich information about cluster structure that K-Means cannot.</p>
+
+  <pre><code class="language-python">import numpy as np
+from sklearn.datasets import make_blobs
+
+# Dataset for illustration
+X, _ = make_blobs(n_samples=15, centers=3, cluster_std=0.5, random_state=42)
+print(f"Dataset: {X.shape[0]} points in 2D")
+
+# Agglomerative clustering with sklearn — directly gives labels
+from sklearn.cluster import AgglomerativeClustering
+
+agg = AgglomerativeClustering(n_clusters=3, linkage='ward')
+labels = agg.fit_predict(X)
+print(f"Cluster labels: {labels}")
+print(f"Cluster sizes:  {np.bincount(labels)}")
+
+# Unlike K-Means, there is no .predict() method — agglomerative
+# clustering must be refit to include new points</code></pre>
+
+  <div class="callout callout-key">
+    <span class="callout-icon">🔑</span>
+    <div class="callout-body">
+      <strong>Why Hierarchical? Nested Structure Exists Everywhere</strong>
+      <p>In biology, species form families → orders → classes → phyla. In retail, products cluster into SKUs → categories → departments. In text analysis, words cluster into topics → themes → domains. K-Means flattens this hierarchy into a single level. Agglomerative clustering captures the full multilevel structure and lets you decide at which level to "cut."</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 2 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">2</span> Linkage Criteria: How to Measure Distance Between Clusters</h2>
+
+  <p>At each step of agglomerative clustering, we need to merge the "closest" pair of clusters. But how do you define the distance between two <em>groups</em> of points? The choice of <strong>linkage criterion</strong> dramatically affects the resulting dendrogram.</p>
+
+  <table style="width:100%; border-collapse: collapse; margin: 1.25rem 0; font-size: 0.88rem;">
+    <thead>
+      <tr style="background: var(--bg-alt); text-align: left;">
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Linkage</th>
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Distance definition</th>
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Tends to produce</th>
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Use when</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);"><strong>Single</strong></td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Min distance between any two points (one from each cluster)</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Long chain-like clusters; susceptible to "chaining"</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Non-ellipsoidal, connected clusters</td>
+      </tr>
+      <tr style="background: var(--bg-subtle);">
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);"><strong>Complete</strong></td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Max distance between any two points (furthest pair)</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Compact, roughly equal-sized clusters</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">When cluster diameter should be minimised</td>
+      </tr>
+      <tr>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);"><strong>Average</strong></td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Mean of all pairwise distances between clusters</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Compromise between single and complete</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">General purpose, moderate noise tolerance</td>
+      </tr>
+      <tr style="background: var(--bg-subtle);">
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);"><strong>Ward ⭐</strong></td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Increase in total within-cluster variance after merge</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Compact, well-separated, similar-sized clusters</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Default choice — best overall performance</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <pre><code class="language-python">import numpy as np
+from sklearn.cluster import AgglomerativeClustering
+from sklearn.datasets import make_blobs
+from sklearn.metrics import silhouette_score
+
+X, y_true = make_blobs(n_samples=300, centers=4, cluster_std=0.9, random_state=42)
+
+print(f"{'Linkage':>10}  {'Silhouette':>12}  {'Description':>30}")
+print("-" * 60)
+for linkage in ['ward', 'average', 'complete', 'single']:
+    agg = AgglomerativeClustering(n_clusters=4, linkage=linkage)
+    labels = agg.fit_predict(X)
+    sil = silhouette_score(X, labels)
+    desc = {
+        'ward':     'Minimises within-cluster variance',
+        'average':  'Average pairwise distances',
+        'complete': 'Maximises inter-cluster diameter',
+        'single':   'Minimum distance (chaining risk)',
+    }
+    print(f"{linkage:>10}  {sil:>12.4f}  {desc[linkage]:>30}")
+
+# Ward typically achieves the best silhouette on well-structured data</code></pre>
+</div>
+
+<!-- ── Section 3 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">3</span> Reading the Dendrogram</h2>
+
+  <p>The dendrogram is a binary tree diagram that shows the full merge history. Each leaf is a data point (or small cluster). Moving up the tree, leaves merge into clusters. The <strong>height of a merge</strong> represents the distance (or variance increase, for Ward) at which the two sub-clusters were joined — higher merges mean less similar clusters being combined.</p>
+
+  <p>To decide on K clusters from the dendrogram: draw a horizontal line across it. The number of vertical lines the horizontal cut crosses equals the number of clusters. A natural choice is to cut where the vertical "gaps" (distances between merge heights) are largest — long vertical lines before the cut indicate that you're merging quite dissimilar clusters, suggesting the data has a natural break there.</p>
+
+  <pre><code class="language-python">import numpy as np
+import matplotlib.pyplot as plt
+from scipy.cluster.hierarchy import dendrogram, linkage, fcluster
+from sklearn.datasets import make_blobs
+from sklearn.preprocessing import StandardScaler
+
+# Generate data with 4 natural clusters
+X, y_true = make_blobs(n_samples=80, centers=4, cluster_std=0.7, random_state=42)
+X_scaled = StandardScaler().fit_transform(X)
+
+# ── Build the linkage matrix (SciPy format) ──
+# linkage() returns an (n-1) x 4 matrix:
+# [cluster_a, cluster_b, distance, n_merged_points]
+Z = linkage(X_scaled, method='ward')
+
+print(f"Linkage matrix shape: {Z.shape}")    # (79, 4) for 80 points
+print(f"First few merges (closest pairs):")
+for i in range(5):
+    print(f"  Merge {i+1}: clusters {int(Z[i,0])} + {int(Z[i,1])} "
+          f"at distance {Z[i,2]:.4f} → {int(Z[i,3])} points")
+
+# ── Plot the dendrogram ──
+plt.figure(figsize=(14, 6))
+dendrogram(
+    Z,
+    leaf_rotation=90,
+    leaf_font_size=8,
+    color_threshold=Z[-4, 2],   # colour groups at 4-cluster level
+    above_threshold_color='gray'
+)
+plt.axhline(y=Z[-4, 2] * 1.01, color='red', linestyle='--',
+            alpha=0.7, label='Cut for K=4')
+plt.xlabel('Sample Index')
+plt.ylabel('Ward Distance (variance increase)')
+plt.title('Dendrogram — Agglomerative Clustering (Ward Linkage)')
+plt.legend()
+plt.tight_layout()
+plt.savefig('dendrogram.png', dpi=150)
+
+# ── Extract cluster labels at a specific cut ──
+# Option 1: specify number of clusters directly
+labels_k4 = fcluster(Z, t=4, criterion='maxclust')  # K=4
+
+# Option 2: cut at a distance threshold
+labels_dist = fcluster(Z, t=Z[-4, 2] * 1.01, criterion='distance')
+
+print(f"\nK=4 labels (fcluster): {np.bincount(labels_k4 - 1)}")  # fcluster is 1-indexed
+print(f"Same via distance cut: {np.bincount(labels_dist - 1)}")
+
+# ── Finding the largest "gap" (elbow in dendrogram heights) ──
+merge_distances = Z[:, 2]
+gaps = np.diff(merge_distances)
+# The largest gap suggests where to cut
+cut_idx = np.argmax(gaps[-10:])   # look at last 10 merges (top of tree)
+print(f"\nLargest gap in top-10 merges suggests K = {10 - cut_idx}")</code></pre>
+
+  <div class="callout callout-tip">
+    <span class="callout-icon">💡</span>
+    <div class="callout-body">
+      <strong>SciPy vs scikit-learn for Hierarchical Clustering</strong>
+      <p>Use <strong>SciPy</strong> (<code>linkage</code> + <code>dendrogram</code>) when you want to visualise the dendrogram and interactively explore cut heights. Use <strong>scikit-learn</strong> (<code>AgglomerativeClustering</code>) when you want cluster labels to plug into a Pipeline or combine with other sklearn tools. They use the same underlying algorithms and produce identical cluster assignments for the same parameters.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 4 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">4</span> Full Hierarchical Clustering Implementation</h2>
+
+  <pre><code class="language-python">import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.cluster import AgglomerativeClustering
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import silhouette_score
+from scipy.cluster.hierarchy import dendrogram, linkage
+from sklearn.datasets import load_iris
+
+# Use Iris dataset — known to have 3 species (natural clusters)
+iris_data = __import__('sklearn.datasets', fromlist=['load_iris']).load_iris()
+X_iris = iris_data.data
+y_iris = iris_data.target
+feature_names = iris_data.feature_names
+
+# Scale
+scaler = StandardScaler()
+X_iris_sc = scaler.fit_transform(X_iris)
+
+# ── 1. Plot the dendrogram to choose K ──
+Z_iris = linkage(X_iris_sc, method='ward')
+
+plt.figure(figsize=(16, 6))
+dendrogram(Z_iris, leaf_rotation=90, leaf_font_size=6,
+           color_threshold=Z_iris[-3, 2])
+plt.axhline(y=Z_iris[-3, 2] * 1.01, color='red', linestyle='--', label='K=3 cut')
+plt.title('Iris Dendrogram (Ward Linkage) — Cut Suggests K=3')
+plt.ylabel('Ward Distance')
+plt.legend()
+plt.tight_layout()
+plt.savefig('iris_dendrogram.png', dpi=150)
+
+# ── 2. Fit with sklearn for labels + evaluation ──
+agg_iris = AgglomerativeClustering(n_clusters=3, linkage='ward')
+labels_iris = agg_iris.fit_predict(X_iris_sc)
+
+print("=== Hierarchical Clustering on Iris ===")
+print(f"Cluster sizes: {np.bincount(labels_iris)}")
+print(f"Silhouette score: {silhouette_score(X_iris_sc, labels_iris):.4f}")
+
+# Compare to true labels (note: cluster numbers may not match species numbers)
+from sklearn.metrics import adjusted_rand_score, normalized_mutual_info_score
+print(f"Adjusted Rand Index: {adjusted_rand_score(y_iris, labels_iris):.4f}")
+print(f"NMI:                 {normalized_mutual_info_score(y_iris, labels_iris):.4f}")
+
+# ── 3. Try different n_clusters ──
+print("\nSilhouette score by K:")
+for k in range(2, 8):
+    agg_k = AgglomerativeClustering(n_clusters=k, linkage='ward')
+    lbl = agg_k.fit_predict(X_iris_sc)
+    print(f"  K={k}: {silhouette_score(X_iris_sc, lbl):.4f}")
+
+# ── 4. Connectivity constraints (optional) ──
+# You can add a connectivity matrix to enforce that only
+# spatially adjacent points merge — useful for image segmentation
+from sklearn.neighbors import kneighbors_graph
+connectivity = kneighbors_graph(X_iris_sc, n_neighbors=10, include_self=False)
+agg_conn = AgglomerativeClustering(n_clusters=3, linkage='ward', connectivity=connectivity)
+labels_conn = agg_conn.fit_predict(X_iris_sc)
+print(f"\nWith connectivity constraint: Silhouette = {silhouette_score(X_iris_sc, labels_conn):.4f}")</code></pre>
+</div>
+
+<!-- ── Section 5 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">5</span> DBSCAN: Density-Based Clustering</h2>
+
+  <p>DBSCAN (Density-Based Spatial Clustering of Applications with Noise) takes a completely different approach to clustering. Instead of minimising distances to centroids or building merge trees, DBSCAN defines clusters as <strong>dense regions of points separated by sparse regions</strong>.</p>
+
+  <p>DBSCAN classifies every point into one of three types:</p>
+  <ul>
+    <li><strong>Core point</strong>: A point that has at least <code>min_samples</code> points (including itself) within radius <code>eps</code>. Core points are the "dense" backbone of a cluster.</li>
+    <li><strong>Border point</strong>: A point that is within <code>eps</code> of a core point but does not itself have enough neighbours to be a core point. Border points belong to a cluster but cannot extend it.</li>
+    <li><strong>Noise point (outlier)</strong>: A point that is not within <code>eps</code> of any core point. These receive the special label <strong>-1</strong> — they belong to no cluster.</li>
+  </ul>
+
+  <p>A cluster is defined as the set of all points reachable from a core point through other core points. Two core points are in the same cluster if you can "hop" between them through a chain of core points that are within <code>eps</code> of each other.</p>
+
+  <pre><code class="language-python">import numpy as np
+from sklearn.cluster import DBSCAN
+from sklearn.datasets import make_moons
+from sklearn.preprocessing import StandardScaler
+
+# K-Means fails on crescent shapes — DBSCAN handles them naturally
+X_moons, y_true = make_moons(n_samples=300, noise=0.05, random_state=42)
+X_moons_sc = StandardScaler().fit_transform(X_moons)
+
+# Fit DBSCAN
+db = DBSCAN(eps=0.3, min_samples=5)
+db_labels = db.fit_predict(X_moons_sc)
+
+# Analyse results
+n_clusters = len(set(db_labels)) - (1 if -1 in db_labels else 0)
+n_noise = (db_labels == -1).sum()
+n_core = len(db.core_sample_indices_)
+
+print(f"Number of clusters found: {n_clusters}")
+print(f"Number of noise points:   {n_noise}")
+print(f"Number of core points:    {n_core}")
+print(f"Cluster sizes: {[(db_labels == k).sum() for k in range(n_clusters)]}")
+
+# Core, border, and noise point identification
+core_mask    = np.zeros(len(X_moons_sc), dtype=bool)
+core_mask[db.core_sample_indices_] = True
+border_mask  = (~core_mask) & (db_labels != -1)
+noise_mask   = db_labels == -1
+
+print(f"\nCore points:   {core_mask.sum()}")
+print(f"Border points: {border_mask.sum()}")
+print(f"Noise points:  {noise_mask.sum()}")</code></pre>
+
+  <div class="callout callout-key">
+    <span class="callout-icon">🔑</span>
+    <div class="callout-body">
+      <strong>DBSCAN Discovers K Automatically</strong>
+      <p>Unlike K-Means or hierarchical clustering, DBSCAN does not require you to specify the number of clusters. The number of clusters emerges naturally from the density structure of the data and the chosen <code>eps</code>/<code>min_samples</code> parameters. This is a significant practical advantage when the true K is unknown — which is almost always.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 6 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">6</span> DBSCAN Parameters: eps and min_samples</h2>
+
+  <p>DBSCAN has exactly two parameters, and both critically affect results:</p>
+
+  <p><strong>eps</strong> (epsilon): The radius of the neighbourhood around each point. Too small → almost everything is noise. Too large → all points merge into one cluster. A practical method: compute the k-nearest-neighbour distance for each point (k = min_samples - 1), sort and plot these distances, and look for an "elbow" — that elbow value is a good candidate for eps.</p>
+
+  <p><strong>min_samples</strong>: The minimum number of points required in an eps-neighbourhood for a point to be a core point. Larger values → fewer, more robust clusters with stricter density requirements; smaller values → more clusters, more sensitive to local density variations. Rule of thumb: <code>min_samples ≥ 2 × n_features</code>.</p>
+
+  <pre><code class="language-python">import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.cluster import DBSCAN
+from sklearn.neighbors import NearestNeighbors
+from sklearn.preprocessing import StandardScaler
+from sklearn.datasets import make_blobs
+
+X, _ = make_blobs(n_samples=300, centers=4, cluster_std=0.8, random_state=42)
+X_sc = StandardScaler().fit_transform(X)
+
+# ── k-NN distance plot to choose eps ──
+# Using k = min_samples - 1 = 4 (for min_samples=5)
+k = 4
+nbrs = NearestNeighbors(n_neighbors=k).fit(X_sc)
+distances, _ = nbrs.kneighbors(X_sc)
+kth_distances = np.sort(distances[:, -1])  # distance to k-th nearest neighbor
+
+plt.figure(figsize=(8, 5))
+plt.plot(kth_distances, linewidth=2)
+plt.xlabel('Points (sorted by k-NN distance)')
+plt.ylabel(f'{k}-NN Distance')
+plt.title('k-NN Distance Plot — Choose eps at the Elbow')
+plt.grid(alpha=0.3)
+plt.tight_layout()
+plt.savefig('knn_distance_plot.png', dpi=150)
+# The "elbow" in this plot ≈ 0.5 suggests eps=0.5
+
+# ── Grid search over eps and min_samples ──
+from sklearn.metrics import silhouette_score
+
+print(f"{'eps':>6}  {'min_samples':>12}  {'K':>5}  {'Noise':>6}  {'Silhouette':>12}")
+print("-" * 50)
+for eps in [0.3, 0.5, 0.7, 1.0]:
+    for min_samp in [3, 5, 10]:
+        db = DBSCAN(eps=eps, min_samples=min_samp)
+        labels = db.fit_predict(X_sc)
+        n_clusters = len(set(labels)) - (1 if -1 in labels else 0)
+        n_noise    = (labels == -1).sum()
+        if n_clusters > 1:
+            sil = silhouette_score(X_sc, labels)
+        else:
+            sil = float('nan')
+        print(f"{eps:>6.1f}  {min_samp:>12}  {n_clusters:>5}  {n_noise:>6}  {sil:>12.4f}")
+
+# ── Best configuration ──
+db_best = DBSCAN(eps=0.5, min_samples=5)
+labels_best = db_best.fit_predict(X_sc)
+n_clusters_best = len(set(labels_best)) - (1 if -1 in labels_best else 0)
+print(f"\nBest config (eps=0.5, min_samples=5): {n_clusters_best} clusters, "
+      f"{(labels_best==-1).sum()} noise points")</code></pre>
+
+  <div class="callout callout-warn">
+    <span class="callout-icon">⚠️</span>
+    <div class="callout-body">
+      <strong>DBSCAN Struggles With Varying Density</strong>
+      <p>A single <code>eps</code> cannot simultaneously handle a dense cluster (where you need small eps to separate points within the cluster from noise) and a sparse cluster (where you need large eps to connect distant cluster members). For datasets with clusters of very different densities, use HDBSCAN (Hierarchical DBSCAN), available in <code>hdbscan</code> library or <code>sklearn.cluster.HDBSCAN</code> (sklearn ≥ 1.3). HDBSCAN automatically adapts eps to local density.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 7 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">7</span> DBSCAN Advantages and When to Use It</h2>
+
+  <p>DBSCAN has several unique strengths that make it irreplaceable in certain scenarios:</p>
+
+  <ul>
+    <li><strong>Arbitrary cluster shapes</strong>: Discovers crescents, rings, spirals, filaments — any shape defined by density, not geometry.</li>
+    <li><strong>Automatic outlier detection</strong>: Noise points (label = -1) are not forced into any cluster. This is simultaneously anomaly detection.</li>
+    <li><strong>No K required</strong>: The number of clusters is determined by the data's density structure, not a user parameter.</li>
+    <li><strong>Robust to noise</strong>: Noise points don't affect cluster formation — they're explicitly labelled out.</li>
+  </ul>
+
+  <pre><code class="language-python">import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.cluster import DBSCAN
+from sklearn.datasets import make_moons, make_circles
+from sklearn.preprocessing import StandardScaler
+
+fig, axes = plt.subplots(2, 3, figsize=(15, 9))
+
+datasets = [
+    ('Moons',   make_moons(n_samples=300, noise=0.06, random_state=42)[0],   (0.25, 5)),
+    ('Circles', make_circles(n_samples=300, noise=0.05, factor=0.5, random_state=42)[0], (0.25, 5)),
+    ('Blobs with noise',
+     np.vstack([
+         np.random.default_rng(42).normal([0, 0], 0.5, (100, 2)),
+         np.random.default_rng(43).normal([4, 0], 0.5, (100, 2)),
+         np.random.default_rng(44).normal([2, 4], 0.5, (100, 2)),
+         np.random.default_rng(45).uniform(-3, 7, (20, 2)),  # noise
+     ]),
+     (0.5, 5)
+    ),
+]
+
+cluster_colors = ['#e41a1c', '#377eb8', '#4daf4a', '#984ea3', '#ff7f00']
+
+for col, (name, X_raw, (eps, minsamp)) in enumerate(datasets):
+    X_sc = StandardScaler().fit_transform(X_raw)
+    db = DBSCAN(eps=eps, min_samples=minsamp)
+    labels = db.fit_predict(X_sc)
+
+    n_clusters = len(set(labels)) - (1 if -1 in labels else 0)
+    noise_mask  = labels == -1
+
+    for k in range(n_clusters):
+        mask = labels == k
+        axes[0, col].scatter(X_sc[mask, 0], X_sc[mask, 1],
+                             c=cluster_colors[k % len(cluster_colors)],
+                             alpha=0.7, s=20, label=f'Cluster {k}')
+    if noise_mask.any():
+        axes[0, col].scatter(X_sc[noise_mask, 0], X_sc[noise_mask, 1],
+                             c='black', alpha=0.4, s=15, marker='x', label='Noise')
+    axes[0, col].set_title(f'DBSCAN on {name}\n({n_clusters} clusters, {noise_mask.sum()} noise)')
+    axes[0, col].legend(fontsize=7)
+
+    # Mark core vs border points
+    core_mask = np.zeros(len(X_sc), dtype=bool)
+    core_mask[db.core_sample_indices_] = True
+    border_mask = (~core_mask) & (labels != -1)
+
+    colors_type = np.where(core_mask, 'steelblue', np.where(border_mask, 'orange', 'red'))
+    axes[1, col].scatter(X_sc[:, 0], X_sc[:, 1], c=colors_type, alpha=0.6, s=15)
+    axes[1, col].set_title(f'Point Types\nBlue=Core, Orange=Border, Red=Noise')
+
+plt.suptitle("DBSCAN: Arbitrary Shapes, Automatic Outlier Detection", fontsize=13)
+plt.tight_layout()
+plt.savefig('dbscan_results.png', dpi=150)</code></pre>
+</div>
+
+<!-- ── Section 8 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">8</span> Comparing All Three Algorithms</h2>
+
+  <p>Now that you know all three major clustering algorithms, here is a comprehensive comparison to guide your algorithm selection:</p>
+
+  <table style="width:100%; border-collapse: collapse; margin: 1.25rem 0; font-size: 0.85rem;">
+    <thead>
+      <tr style="background: var(--bg-alt); text-align: left;">
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Property</th>
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">K-Means</th>
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Hierarchical (Ward)</th>
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">DBSCAN</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Requires K?</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">✅ Yes</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">⚠️ After dendrogram</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">❌ No</td>
+      </tr>
+      <tr style="background: var(--bg-subtle);">
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Cluster shape</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Spherical/convex only</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Convex (Ward) or arbitrary (single)</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Arbitrary shape</td>
+      </tr>
+      <tr>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Handles outliers?</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">❌ Absorbed into clusters</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">❌ Absorbed</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">✅ Labelled as noise (-1)</td>
+      </tr>
+      <tr style="background: var(--bg-subtle);">
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Scalability</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">✅ O(nKt) — very fast</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">❌ O(n² log n) — slow</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">⚠️ O(n log n) with index</td>
+      </tr>
+      <tr>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Predict new points?</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">✅ Yes (.predict)</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">❌ Must refit</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">⚠️ Approximate only</td>
+      </tr>
+      <tr style="background: var(--bg-subtle);">
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Hierarchical structure</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">❌ No</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">✅ Full dendrogram</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">❌ No</td>
+      </tr>
+      <tr>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Sensitive to scale?</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">✅ Yes — must scale</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">✅ Yes — must scale</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">✅ Yes — must scale</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <pre><code class="language-python">import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.cluster import KMeans, AgglomerativeClustering, DBSCAN
+from sklearn.datasets import make_moons
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import adjusted_rand_score
+
+# Non-convex dataset where K-Means fails
+X_m, y_m = make_moons(n_samples=300, noise=0.05, random_state=42)
+X_m_sc = StandardScaler().fit_transform(X_m)
+
+algorithms = [
+    ('K-Means (K=2)',       KMeans(n_clusters=2, n_init=10, random_state=42)),
+    ('Hierarchical (K=2)',  AgglomerativeClustering(n_clusters=2, linkage='ward')),
+    ('DBSCAN',              DBSCAN(eps=0.25, min_samples=5)),
+]
+
+fig, axes = plt.subplots(1, 3, figsize=(15, 4))
+colors = ['#e41a1c', '#377eb8', '#999999']
+
+for ax, (name, algo) in zip(axes, algorithms):
+    labels = algo.fit_predict(X_m_sc)
+    ari = adjusted_rand_score(y_m, np.where(labels == -1, 2, labels))
+    unique = sorted(set(labels))
+    for k in unique:
+        mask = labels == k
+        col = colors[min(k, 2)] if k >= 0 else '#999999'
+        label_str = f'Cluster {k}' if k >= 0 else 'Noise'
+        ax.scatter(X_m_sc[mask, 0], X_m_sc[mask, 1], c=col, alpha=0.7, s=15, label=label_str)
+    ax.set_title(f'{name}\nARI = {ari:.3f}')
+    ax.legend(fontsize=8)
+
+plt.suptitle('Comparing Clustering Algorithms on Crescent Data', fontsize=12)
+plt.tight_layout()
+plt.savefig('algorithm_comparison.png', dpi=150)
+# ARI: K-Means ≈ 0.49 (poor), Hierarchical ≈ 0.49 (poor), DBSCAN ≈ 1.0 (perfect)</code></pre>
+</div>
+
+<!-- ── Real-World Spotlight ── -->
+<div class="use-case-section">
+  <div class="use-case-header">
+    <span style="font-size:1.5rem">🌍</span>
+    <h2>Real-World Spotlight: Geospatial Crime Hotspot Analysis with DBSCAN</h2>
+  </div>
+  <p>Urban planners and law enforcement agencies use DBSCAN on GPS coordinates of reported crimes to identify <strong>crime hotspots</strong> — dense spatial clusters — while distinguishing them from isolated incidents (noise). Standard K-Means would force every incident into a cluster; DBSCAN correctly identifies isolated events as noise.</p>
+  <pre><code class="language-python">import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.cluster import DBSCAN
+from sklearn.preprocessing import StandardScaler
+
+np.random.seed(42)
+
+# Simulate crime incidents across a city (lat/lon coordinates)
+# Three genuine hotspots + scattered noise
+hotspot_1 = np.random.normal([40.712, -74.006], [0.008, 0.012], (150, 2))  # Manhattan
+hotspot_2 = np.random.normal([40.678, -73.944], [0.006, 0.008], (120, 2))  # Brooklyn
+hotspot_3 = np.random.normal([40.730, -73.990], [0.005, 0.007], (80, 2))   # Village
+isolated   = np.random.uniform([40.65, -74.05], [40.77, -73.92], (50, 2))  # scattered
+
+crimes = np.vstack([hotspot_1, hotspot_2, hotspot_3, isolated])
+print(f"Total crime incidents: {len(crimes)}")
+
+# DBSCAN with geographic parameters
+# eps ≈ 0.01 degrees ≈ ~1 km; min_samples=10 (need dense area to be a hotspot)
+db = DBSCAN(eps=0.015, min_samples=10)
+labels = db.fit_predict(crimes)
+
+n_hotspots = len(set(labels)) - (1 if -1 in labels else 0)
+n_noise     = (labels == -1).sum()
+
+print(f"\nCrime hotspots found:  {n_hotspots}")
+print(f"Isolated incidents:    {n_noise} ({n_noise/len(crimes):.1%} of total)")
+
+for h in range(n_hotspots):
+    mask = labels == h
+    lat_c = crimes[mask, 0].mean()
+    lon_c = crimes[mask, 1].mean()
+    print(f"\nHotspot {h+1}: {mask.sum()} incidents, "
+          f"centre ({lat_c:.4f}N, {lon_c:.4f}W)")
+
+# Visualise
+fig, ax = plt.subplots(figsize=(10, 8))
+cluster_colors = ['#e41a1c', '#377eb8', '#4daf4a', '#984ea3']
+for h in range(n_hotspots):
+    mask = labels == h
+    ax.scatter(crimes[mask, 1], crimes[mask, 0],
+               c=cluster_colors[h % len(cluster_colors)],
+               s=30, alpha=0.7, label=f'Hotspot {h+1} (n={mask.sum()})')
+noise_mask = labels == -1
+ax.scatter(crimes[noise_mask, 1], crimes[noise_mask, 0],
+           c='gray', s=15, alpha=0.4, marker='x', label=f'Isolated ({n_noise})')
+ax.set_xlabel('Longitude')
+ax.set_ylabel('Latitude')
+ax.set_title('Crime Hotspot Analysis — DBSCAN on GPS Coordinates')
+ax.legend()
+plt.tight_layout()
+plt.savefig('crime_hotspots.png', dpi=150)
+
+# Hierarchical clustering on customer purchase sequences
+print("\n--- Bonus: Hierarchical Clustering on Customer Purchase Patterns ---")
+from sklearn.cluster import AgglomerativeClustering
+from sklearn.metrics import silhouette_score
+
+np.random.seed(0)
+# 200 customers × 10 product categories (purchase frequency)
+n_customers, n_categories = 200, 10
+customer_purchases = np.abs(np.random.randn(n_customers, n_categories))
+
+# Three archetypes: essentials buyers, electronics buyers, fashion buyers
+customer_purchases[:70,  :3]  *= 4    # essentials (categories 0-2)
+customer_purchases[70:140, 3:7] *= 4  # electronics (categories 3-6)
+customer_purchases[140:,  7:]  *= 4   # fashion (categories 7-9)
+
+scaler = StandardScaler()
+X_cust = scaler.fit_transform(customer_purchases)
+
+agg = AgglomerativeClustering(n_clusters=3, linkage='ward')
+cust_labels = agg.fit_predict(X_cust)
+print(f"Customer segments found: {np.bincount(cust_labels)}")
+print(f"Silhouette score: {silhouette_score(X_cust, cust_labels):.4f}")</code></pre>
+  <p>The DBSCAN approach found three genuine hotspots and correctly identified isolated incidents as noise — something K-Means cannot do without manual post-processing. Law enforcement can prioritise patrols around the hotspot centres while treating isolated incidents as one-off occurrences rather than evidence of an emerging cluster. The hierarchical clustering bonus shows how dendrogram-based analysis naturally reveals three distinct customer purchase archetypes without requiring prior knowledge of K.</p>
+</div>
+
+<!-- ── Quiz ── -->
+<div class="quiz-section">
+  <div id="lesson-29-quiz"></div>
+</div>
+
+<!-- ── Practice ── -->
+<div class="practice-card">
+  <h2>✍️ Practice Exercises</h2>
+  <ol>
+    <li>Load the Wine dataset (<code>from sklearn.datasets import load_wine</code>). Run agglomerative clustering with all four linkage methods. Plot the Ward dendrogram and choose K by visual inspection. Compare ARI scores across linkage methods.</li>
+    <li>Apply DBSCAN to the <code>make_circles</code> dataset. Use the k-NN distance plot to choose an appropriate <code>eps</code>. How does DBSCAN compare to K-Means on this dataset?</li>
+    <li>Implement a parameter search for DBSCAN: vary <code>eps</code> from 0.1 to 2.0 and <code>min_samples</code> from 2 to 15. For each pair that produces at least 2 clusters, record the silhouette score. Plot a heatmap of silhouette scores.</li>
+    <li>Generate a dataset with three clusters of very different densities (use <code>make_blobs</code> with different <code>cluster_std</code> values per centre). Show that DBSCAN struggles. Then research HDBSCAN in sklearn (≥1.3) and compare.</li>
+  </ol>
+</div>
+
+<!-- ── Primary Source ── -->
+<div class="primary-source">
+  <h2>📚 Primary Source for This Lesson</h2>
+  <p><a href="https://scikit-learn.org/stable/modules/clustering.html" target="_blank"><strong>scikit-learn: Clustering Overview</strong></a> — covers agglomerative clustering, DBSCAN, and all other sklearn clustering algorithms with visual comparisons.<br>
+  Original DBSCAN paper: Ester et al. (1996) "A density-based algorithm for discovering clusters in large spatial databases with noise" (KDD-96). For hierarchical clustering theory, see Hastie, Tibshirani &amp; Friedman, Chapter 14.3.</p>
+</div>
+
+<!-- ── Ask Tutor ── -->
+<div class="ask-tutor">
+  <span class="icon">💬</span>
+  <span>DBSCAN finding only one giant cluster? Dendrogram not showing a clear cut? Confused about Ward linkage vs average linkage? Paste your dataset description and parameter values — your AI tutor can diagnose what's happening and suggest better configurations.</span>
+</div>
+
+<!-- ── Navigation ── -->
+<nav class="lesson-nav">
+  <a href="./0028-kmeans-clustering.html" class="nav-btn">← Lesson 28: K-Means Clustering</a>
+  <a href="./0030-pca.html" class="nav-btn nav-btn-next">Lesson 30: Principal Component Analysis →</a>
+</nav>
+
+</div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-core.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/plugins/autoloader/prism-autoloader.min.js"></script>
+<script src="../assets/quiz.js"></script>
+<script>
+new MLQuiz('lesson-29-quiz', [
+  {
+    question: "What does DBSCAN label a point as if it has fewer than min_samples neighbors within eps but is within eps of a core point?",
+    options: [
+      "A border point — it belongs to the cluster but cannot expand it",
+      "A noise point (label = -1) — it is too sparse to be part of any cluster",
+      "A core point — being within eps of a core point automatically grants core status",
+      "An ambiguous point — DBSCAN randomly assigns it to one of the adjacent clusters"
+    ],
+    correct: 0,
+    explanation: "A border point is within eps of at least one core point (so it belongs to that core's cluster) but does not itself have enough points in its eps-neighbourhood to be classified as core. Border points ride along with the cluster formed by their nearest core point but cannot extend the cluster's reach. Only noise points receive label -1."
+  },
+  {
+    question: "In a dendrogram, how do you determine the number of clusters?",
+    options: [
+      "Cut the dendrogram at a chosen height — the number of vertical lines crossed by the horizontal cut equals the number of clusters",
+      "Count the number of leaf nodes at the bottom of the dendrogram",
+      "Choose the height where the total linkage distance first drops below a threshold",
+      "The number of branches at the root node of the dendrogram"
+    ],
+    correct: 0,
+    explanation: "To read K from a dendrogram: draw a horizontal line across the tree at a chosen height. Count how many vertical line segments (subtrees) that horizontal line passes through — that count is the number of clusters at that cut. A good cut height is where there are long vertical gaps before the next merge, meaning the algorithm is being forced to merge dissimilar clusters."
+  },
+  {
+    question: "Which clustering algorithm is most appropriate for finding clusters of irregular shapes like crescents or rings?",
+    options: [
+      "DBSCAN — it discovers clusters based on density, not shape assumptions",
+      "K-Means — it uses Euclidean distance which is shape-agnostic",
+      "Agglomerative clustering with Ward linkage — Ward minimises variance which works for any shape",
+      "Agglomerative clustering with complete linkage — the maximum distance criterion handles concavities"
+    ],
+    correct: 0,
+    explanation: "DBSCAN is specifically designed for this scenario. It defines clusters as connected dense regions, not as balls around centroids. Two points are in the same cluster if you can walk from one to the other through a chain of core points that are within eps of each other — this naturally follows the shape of the dense region regardless of geometry. K-Means and Ward hierarchical clustering both fundamentally assume convex/spherical cluster shapes."
+  },
+  {
+    question: "Ward linkage merges clusters based on what criterion?",
+    options: [
+      "Minimising the total within-cluster variance after merging — equivalent to minimising the WCSS increase",
+      "Minimising the maximum distance between any point in one cluster and any point in the other",
+      "Minimising the average pairwise distance between all pairs of points across the two clusters",
+      "Maximising the distance between the two cluster centroids to ensure separation"
+    ],
+    correct: 0,
+    explanation: "Ward linkage: at each step, merge the two clusters whose merger causes the smallest increase in total within-cluster variance (sum of squared distances from each point to its cluster mean). This is equivalent to minimising the increase in WCSS, making Ward linkage the hierarchical analog of K-Means. It tends to produce compact, similarly-sized clusters and generally gives the best results for globular data."
+  },
+  {
+    question: "DBSCAN assigns some points a label of -1. What does this mean?",
+    options: [
+      "These are noise points — they are not within eps of any core point and belong to no cluster",
+      "These points are on the border between two clusters and are ambiguously assigned",
+      "These points failed the convergence check and need to be re-assigned",
+      "These are the first cluster found; DBSCAN uses 0-indexed labelling starting from -1"
+    ],
+    correct: 0,
+    explanation: "In DBSCAN, label -1 specifically means 'noise' or 'outlier.' A noise point has fewer than min_samples points in its eps-neighbourhood AND is not within eps of any core point. It is effectively an isolated point or one in a sparse region that doesn't belong to any dense cluster. This automatic identification of outliers is one of DBSCAN's most valuable features — K-Means forces every point into a cluster, hiding outliers."
+  }
+]);
+</script>
+
+</body>
+</html>

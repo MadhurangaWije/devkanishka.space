@@ -1,0 +1,752 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lesson 33: Recommendation Systems &amp; Collaborative Filtering | ML Mastery</title>
+  <link rel="stylesheet" href="../assets/style.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
+</head>
+<body>
+
+<header class="lesson-header">
+  <div class="header-inner">
+    <nav class="breadcrumb">
+      <a href="../reference/curriculum-map.html">ML Mastery</a>
+      <span class="sep">›</span>
+      <span>Phase 3: Unsupervised Learning</span>
+    </nav>
+    <div class="lesson-badges">
+      <span class="phase-badge">Phase 3 · Unsupervised Learning</span>
+      <span class="lesson-num-badge">Lesson 33</span>
+    </div>
+    <h1 class="lesson-title">Recommendation Systems &amp; Collaborative Filtering</h1>
+    <p class="lesson-subtitle">How Netflix knows what you want to watch, Amazon knows what you want to buy, and Spotify knows what song comes next — from cosine similarity to matrix factorization.</p>
+    <div class="meta-pills">
+      <span class="meta-pill">⏱ ~60 min</span>
+      <span class="meta-pill">🐍 scikit-learn · scipy · pandas</span>
+      <span class="meta-pill">🎬 Unsupervised Learning</span>
+      <span class="meta-pill">Requires Lesson 32</span>
+    </div>
+  </div>
+</header>
+
+<main class="lesson-main">
+<div class="content-wrapper">
+
+<div class="objectives-card">
+  <h2>🎯 What You'll Learn</h2>
+  <ul>
+    <li>Contrast content-based filtering and collaborative filtering — when to use each and how they complement each other</li>
+    <li>Build user-based and item-based collaborative filtering using cosine similarity from scratch</li>
+    <li>Implement matrix factorization with SVD and NMF to discover latent user and item features</li>
+    <li>Understand explicit vs implicit feedback and the cold start problem in production systems</li>
+    <li>Evaluate recommenders with RMSE on held-out ratings and build a working movie recommender</li>
+  </ul>
+</div>
+
+<!-- ── Section 1 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">1</span> Why Recommendations Matter</h2>
+
+  <p>Recommendation systems are among the highest-value machine learning applications in existence. Netflix reports that over <strong>80% of content streamed by users is discovered through its recommendation engine</strong>, not through direct browsing. Amazon attributes approximately <strong>35% of total revenue to its recommendation system</strong>. Spotify's Discover Weekly playlist, which uses collaborative filtering and NLP, attracted over 40 million users in its first year and is now the most-used personalized playlist in music streaming history.</p>
+
+  <p>At the core of every modern recommender is a simple intuition: people who agreed about a lot of things in the past will probably agree about new things in the future. This is called the <em>collaborative filtering hypothesis</em>. Combined with content-based approaches that analyse item attributes, these techniques power a trillion-dollar industry.</p>
+
+  <h3>The Three Paradigms</h3>
+  <p>There are three main approaches to building recommenders, each with distinct trade-offs:</p>
+
+  <table style="width:100%; border-collapse: collapse; margin: 1.25rem 0; font-size: 0.87rem;">
+    <thead>
+      <tr style="background: var(--bg-alt); text-align: left;">
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Approach</th>
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Requires</th>
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Key Strength</th>
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Key Weakness</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);"><strong>Content-Based</strong></td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Item features (genre, keywords, metadata)</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Works for new items; no other users needed</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Only recommends similar to what user already liked (no discovery)</td>
+      </tr>
+      <tr style="background: var(--bg-subtle);">
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);"><strong>Collaborative Filtering</strong></td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">User–item interaction history</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Discovers surprising items; no item features needed</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Cold start problem for new users/items; needs interaction data</td>
+      </tr>
+      <tr>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);"><strong>Hybrid</strong></td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Both features and interaction history</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Best of both worlds; handles cold start better</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">More complex; more data required</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="callout callout-warn">
+    <span class="callout-icon">⚠️</span>
+    <div class="callout-body">
+      <strong>The Filter Bubble</strong>
+      <p>Recommendation systems that only optimise for relevance create "filter bubbles" — users only see content similar to what they have already consumed. This can lead to radicalisation in news recommendation, reduced diversity of cultural exposure, and echo chambers in social media. Production recommender systems often deliberately introduce diversity, serendipity, and novelty into their rankings beyond pure relevance scores. Understanding the societal impact of recommendation systems is as important as the technical implementation.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 2 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">2</span> Content-Based Filtering</h2>
+
+  <p>Content-based filtering recommends items similar to what a user has liked, based on item features. For movies: genre, director, cast, keywords. For articles: TF-IDF of words. For products: category, brand, price range. The user is represented as a profile of feature preferences, and items are recommended if they match that profile.</p>
+
+  <pre><code class="language-python">import numpy as np
+import pandas as pd
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
+
+# Simple movie content-based recommender using plot descriptions
+movies = pd.DataFrame({
+    'title': [
+        'The Dark Knight', 'Batman Begins', 'Inception', 'Interstellar',
+        'The Prestige', 'Memento', 'Iron Man', 'The Avengers',
+        'Captain America', 'Thor', 'Toy Story', 'Finding Nemo',
+    ],
+    'description': [
+        'batman joker crime gotham superhero dark vigilante',
+        'batman origins gotham crime vigilante superhero',
+        'dreams heist thriller mind subconscious layers crime',
+        'space time dimension wormhole astronaut future science',
+        'magicians illusion rivalry obsession mystery trick',
+        'memory amnesia mystery crime backwards nonlinear',
+        'superhero billionaire iron suit technology avengers',
+        'superhero team avengers marvel thor hulk captain',
+        'superhero soldier serum world war avengers history',
+        'superhero god asgard hammer avengers marvel',
+        'toys adventure friendship animated children comedy',
+        'fish ocean adventure animated children friendship',
+    ]
+})
+
+# TF-IDF vectorize the descriptions
+tfidf = TfidfVectorizer(stop_words='english')
+tfidf_matrix = tfidf.fit_transform(movies['description'])
+
+# Cosine similarity between all pairs of movies
+cosine_sim = cosine_similarity(tfidf_matrix, tfidf_matrix)
+print(f"Similarity matrix shape: {cosine_sim.shape}")
+
+def get_content_recommendations(title, top_n=5):
+    """Return top N most similar movies based on description."""
+    idx = movies[movies['title'] == title].index[0]
+    sim_scores = list(enumerate(cosine_sim[idx]))
+    sim_scores = sorted(sim_scores, key=lambda x: x[1], reverse=True)
+    sim_scores = sim_scores[1:top_n+1]  # exclude the movie itself
+    movie_indices = [s[0] for s in sim_scores]
+    return pd.DataFrame({
+        'Title': movies['title'].iloc[movie_indices].values,
+        'Similarity': [round(s[1], 4) for s in sim_scores]
+    })
+
+# Test the recommender
+print("\nMovies similar to 'The Dark Knight':")
+print(get_content_recommendations('The Dark Knight'))
+# Expects: Batman Begins, Iron Man, The Avengers, Captain America, Thor
+
+print("\nMovies similar to 'Inception':")
+print(get_content_recommendations('Inception'))
+# Expects: Interstellar, The Prestige, Memento, ...</code></pre>
+
+  <div class="callout callout-tip">
+    <span class="callout-icon">💡</span>
+    <div class="callout-body">
+      <strong>Building a User Profile for Content-Based Filtering</strong>
+      <p>To personalise content-based recommendations, build a user profile vector by averaging the TF-IDF vectors of all items the user has rated positively. Then compute cosine similarity between this profile vector and all item vectors to find the best matches. Items already rated are excluded from the output. This approach is completely self-contained and works well even with just a handful of user ratings — making it ideal for the cold-start case when a new user provides a few initial preferences.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 3 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">3</span> Collaborative Filtering: The Intuition</h2>
+
+  <p>Collaborative filtering makes recommendations based on the preferences of similar users, without needing any item features whatsoever. The name comes from the idea of "collaborating" — using the collective wisdom of many users to help each individual one. This is why Netflix can recommend a documentary you would never have searched for: users with a similar taste profile to yours have watched and rated it highly.</p>
+
+  <p>There are two variants of collaborative filtering:</p>
+
+  <ul>
+    <li><strong>User-based CF</strong>: "People like you liked these items." Find users whose past ratings are similar to yours; recommend what they liked that you haven't seen. Problem: users change over time and there are millions of them — this doesn't scale.</li>
+    <li><strong>Item-based CF</strong>: "If you liked item A, you might like item B because they are rated similarly by many users." Find items whose rating patterns across all users are similar to items you liked. Amazon pioneered this. More stable and scalable than user-based CF because item similarity is more static over time.</li>
+  </ul>
+
+  <p>Both variants rely on the same core building block: a <strong>user-item rating matrix</strong>, where rows are users, columns are items, and cells contain the rating a user gave an item (or are empty/zero if no interaction occurred).</p>
+
+  <div class="callout callout-key">
+    <span class="callout-icon">🔑</span>
+    <div class="callout-body">
+      <strong>Sparsity Is the Core Challenge</strong>
+      <p>Even a medium-sized system with 1 million users and 100,000 items has a user-item matrix with 100 billion cells. If the average user rates 200 items, that's only 200 million non-zero entries — a sparsity of 99.8%. All collaborative filtering algorithms must handle this extreme sparsity gracefully. This is why sparse matrix formats (<code>scipy.sparse</code>), approximate nearest neighbour algorithms, and matrix factorization techniques exist and dominate production systems.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 4 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">4</span> User-Based Collaborative Filtering</h2>
+
+  <p>User-based CF works by finding the K most similar users to the target user, then aggregating their ratings for items the target user hasn't yet rated, weighted by similarity.</p>
+
+  <pre><code class="language-python">import numpy as np
+import pandas as pd
+from sklearn.metrics.pairwise import cosine_similarity
+
+# Small movie rating matrix (rows=users, columns=movies, 0=not rated)
+# Movies: Inception, Batman, Avengers, Toy Story, Finding Nemo, Interstellar
+ratings = pd.DataFrame({
+    'Inception':    [5, 4, 0, 0, 2, 5, 0, 3],
+    'Batman':       [4, 5, 0, 1, 0, 4, 3, 0],
+    'Avengers':     [3, 4, 5, 0, 0, 3, 5, 2],
+    'Toy Story':    [0, 0, 4, 5, 5, 0, 3, 0],
+    'Finding Nemo': [0, 0, 5, 5, 4, 0, 2, 0],
+    'Interstellar': [5, 3, 0, 0, 1, 5, 0, 4],
+}, index=[f'User_{i+1}' for i in range(8)])
+
+print("Rating matrix:")
+print(ratings)
+print(f"\nMatrix sparsity: {(ratings == 0).sum().sum()} zeros out of {ratings.size} cells")
+
+# Compute user-user cosine similarity
+# Note: cosine_similarity treats 0 as "no rating", not "rated 0"
+# For a production system, use mean-centered ratings to remove user bias
+user_sim = cosine_similarity(ratings)
+user_sim_df = pd.DataFrame(user_sim, index=ratings.index, columns=ratings.index)
+
+def user_based_recommend(user_id, ratings_df, sim_matrix, top_k_users=3, top_n=3):
+    """Recommend top N unrated items for user_id using K most similar users."""
+    # Get similarities to all other users
+    user_sims = sim_matrix[user_id].drop(user_id).sort_values(ascending=False)
+    top_users = user_sims.head(top_k_users)
+
+    # Weighted average rating for unrated items
+    unrated_items = ratings_df.columns[ratings_df.loc[user_id] == 0]
+    scores = {}
+    for item in unrated_items:
+        numerator = 0
+        denominator = 0
+        for similar_user, sim in top_users.items():
+            rating = ratings_df.loc[similar_user, item]
+            if rating > 0:  # only include users who rated this item
+                numerator += sim * rating
+                denominator += sim
+        if denominator > 0:
+            scores[item] = numerator / denominator
+
+    if not scores:
+        return pd.Series(dtype=float)
+    return pd.Series(scores).sort_values(ascending=False).head(top_n)
+
+print(f"\nTop 3 users similar to User_1:")
+print(user_sim_df['User_1'].drop('User_1').sort_values(ascending=False).head(3).round(3))
+
+print(f"\nRecommendations for User_1:")
+recs = user_based_recommend('User_1', ratings, user_sim_df)
+print(recs.round(3))</code></pre>
+</div>
+
+<!-- ── Section 5 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">5</span> Item-Based Collaborative Filtering</h2>
+
+  <p>Item-based CF computes similarity between items based on how users rated them. Once you have item similarities, you can recommend items similar to what a target user already liked. Amazon's "Customers who bought X also bought Y" feature is a classic example — it's based on item co-purchase patterns, which is item-based CF applied to implicit feedback.</p>
+
+  <pre><code class="language-python">import numpy as np
+import pandas as pd
+from sklearn.metrics.pairwise import cosine_similarity
+
+# Use the same rating matrix as above
+ratings = pd.DataFrame({
+    'Inception':    [5, 4, 0, 0, 2, 5, 0, 3],
+    'Batman':       [4, 5, 0, 1, 0, 4, 3, 0],
+    'Avengers':     [3, 4, 5, 0, 0, 3, 5, 2],
+    'Toy Story':    [0, 0, 4, 5, 5, 0, 3, 0],
+    'Finding Nemo': [0, 0, 5, 5, 4, 0, 2, 0],
+    'Interstellar': [5, 3, 0, 0, 1, 5, 0, 4],
+}, index=[f'User_{i+1}' for i in range(8)])
+
+# Item-item cosine similarity: transpose the matrix so items are rows
+item_sim = cosine_similarity(ratings.T)
+item_sim_df = pd.DataFrame(item_sim, index=ratings.columns, columns=ratings.columns)
+
+print("Item similarity matrix (cosine):")
+print(item_sim_df.round(3))
+
+def item_based_recommend(user_id, ratings_df, item_sim_df, top_n=3):
+    """Recommend items most similar to what user_id has already rated highly."""
+    user_ratings = ratings_df.loc[user_id]
+    liked_items = user_ratings[user_ratings >= 4].index.tolist()
+    unrated_items = user_ratings[user_ratings == 0].index.tolist()
+
+    scores = {}
+    for unrated in unrated_items:
+        score = 0
+        for liked in liked_items:
+            score += item_sim_df.loc[liked, unrated]
+        scores[unrated] = score / max(len(liked_items), 1)
+
+    return pd.Series(scores).sort_values(ascending=False).head(top_n)
+
+print("\nItem-based recommendations for User_1 (liked Inception ★5, Batman ★4, Interstellar ★5):")
+recs = item_based_recommend('User_1', ratings, item_sim_df)
+print(recs.round(3))
+# Expects: Avengers, then animated films (less similar to sci-fi/action)
+
+print("\nWhat movies are most similar to 'Inception'?")
+print(item_sim_df['Inception'].sort_values(ascending=False).drop('Inception').round(3))</code></pre>
+
+  <div class="callout callout-key">
+    <span class="callout-icon">🔑</span>
+    <div class="callout-body">
+      <strong>Why Item-Based CF Is Preferred in Production</strong>
+      <p>Item-based CF has two critical advantages over user-based CF for production systems. First, item similarity is <strong>more stable over time</strong> — an action movie stays similar to other action movies for years. User preferences, on the other hand, can shift dramatically month to month. Second, item similarity can be <strong>pre-computed offline</strong> — you compute all pairwise item similarities once and cache them. At serving time, you only need to look up similarities for items the user has recently interacted with. This reduces real-time inference to a simple lookup rather than computing nearest neighbours on the fly.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 6 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">6</span> Matrix Factorization: SVD &amp; NMF</h2>
+
+  <p>Neighbourhood-based CF (Sections 4–5) has a fundamental limitation: it uses the observed ratings directly and doesn't generalise to items with few ratings. <strong>Matrix factorization</strong> takes a different approach: decompose the rating matrix into two low-rank matrices that capture latent (hidden) factors — abstract features like "preference for action movies," "preference for critically acclaimed films," or "preference for directors with a distinctive style."</p>
+
+  <h3>Singular Value Decomposition (SVD)</h3>
+  <p>SVD decomposes the rating matrix R (users × items) into three matrices: R ≈ U × Σ × Vᵀ, where U encodes user–latent factor associations, V encodes item–latent factor associations, and Σ holds the importance of each latent factor. Using only the top k singular values captures the dominant patterns while ignoring noise.</p>
+
+  <pre><code class="language-python">import numpy as np
+import pandas as pd
+from scipy.sparse.linalg import svds
+from sklearn.metrics import mean_squared_error
+
+np.random.seed(42)
+
+# Simulate a 50-user × 30-item rating matrix (1-5 stars, 0=unrated)
+n_users, n_items = 50, 30
+R = np.random.randint(1, 6, size=(n_users, n_items)).astype(float)
+# Introduce sparsity: ~70% unrated
+mask = np.random.rand(n_users, n_items) < 0.70
+R[mask] = 0
+
+print(f"Rating matrix: {R.shape}")
+print(f"Sparsity: {(R == 0).sum() / R.size:.1%}")
+
+# For SVD: mean-center the ratings to handle user bias
+R_mean_centered = R.copy()
+user_means = np.true_divide(R.sum(axis=1), (R != 0).sum(axis=1))
+for i in range(n_users):
+    R_mean_centered[i, R[i] != 0] -= user_means[i]
+
+# Truncated SVD with k latent factors
+k = 10  # number of latent factors (hyper-parameter)
+U, sigma, Vt = svds(R_mean_centered, k=k)
+sigma_diag = np.diag(sigma)
+
+# Reconstruct the full matrix (fills in unrated items)
+R_predicted = np.dot(np.dot(U, sigma_diag), Vt)
+# Add back user means to get interpretable rating predictions
+for i in range(n_users):
+    R_predicted[i] += user_means[i]
+R_predicted = np.clip(R_predicted, 1, 5)  # clamp to valid rating range
+
+print(f"\nLatent factor matrix shapes:")
+print(f"  U (users × k):    {U.shape}")
+print(f"  Σ (k × k):        {sigma_diag.shape}")
+print(f"  Vt (k × items):   {Vt.shape}")
+
+# Evaluate only on observed ratings
+observed_mask = R > 0
+rmse = np.sqrt(mean_squared_error(R[observed_mask], R_predicted[observed_mask]))
+print(f"\nRMSE on observed ratings: {rmse:.4f}")
+
+def svd_recommend(user_id, R_original, R_pred, top_n=5):
+    """Recommend top N unrated items for user_id based on SVD predictions."""
+    unrated = np.where(R_original[user_id] == 0)[0]
+    predicted_ratings = R_pred[user_id, unrated]
+    top_indices = np.argsort(predicted_ratings)[::-1][:top_n]
+    return [(f"Item_{unrated[i]}", round(predicted_ratings[i], 2))
+            for i in top_indices]
+
+print(f"\nSVD recommendations for User 0:")
+for item, pred_rating in svd_recommend(0, R, R_predicted):
+    print(f"  {item}: predicted rating = {pred_rating}")</code></pre>
+
+  <h3>Non-Negative Matrix Factorization (NMF)</h3>
+  <p>NMF constrains all factors to be non-negative, which produces parts-based decompositions that are more interpretable. For recommendation, NMF is particularly well-suited to <strong>implicit feedback</strong> (click counts, view counts, purchase counts) where the data is inherently non-negative.</p>
+
+  <pre><code class="language-python">import numpy as np
+from sklearn.decomposition import NMF
+from sklearn.preprocessing import MinMaxScaler
+
+np.random.seed(42)
+
+# Simulate implicit feedback (play counts, not ratings)
+n_users, n_items = 100, 50
+play_counts = np.random.poisson(lam=3, size=(n_users, n_items)).astype(float)
+# Many zeros — most users haven't played most songs
+play_counts[np.random.rand(n_users, n_items) < 0.8] = 0
+
+print(f"Play count matrix: {play_counts.shape}")
+print(f"Sparsity: {(play_counts == 0).mean():.1%}")
+
+# NMF: decompose play_counts ≈ W × H
+# W (users × k): how much each user represents each latent "genre"
+# H (k × items): how much each item represents each latent "genre"
+n_components = 15  # number of latent factors / genres
+nmf = NMF(
+    n_components=n_components,
+    init='nndsvda',   # non-negative double SVD initialisation (recommended)
+    max_iter=500,
+    random_state=42
+)
+W = nmf.fit_transform(play_counts)   # User factors: (n_users, k)
+H = nmf.components_                  # Item factors: (k, n_items)
+R_nmf = W @ H                        # Reconstructed matrix
+
+print(f"\nNMF reconstruction error: {nmf.reconstruction_err_:.4f}")
+print(f"W (user factors) shape: {W.shape}")
+print(f"H (item factors) shape: {H.shape}")
+
+# Find items most associated with latent factor 0 (a "genre")
+factor_0_items = np.argsort(H[0])[::-1][:5]
+print(f"\nTop 5 items for latent factor 0 (genre 0):")
+for item_idx in factor_0_items:
+    print(f"  Item_{item_idx}: factor weight = {H[0, item_idx]:.3f}")</code></pre>
+</div>
+
+<!-- ── Section 7 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">7</span> Explicit vs Implicit Feedback</h2>
+
+  <p>Feedback signals come in two fundamentally different types, each with different collection costs, noise levels, and modelling requirements:</p>
+
+  <ul>
+    <li><strong>Explicit feedback</strong>: the user deliberately tells you their preference. Star ratings (Netflix's 1–5 stars), thumbs up/down (YouTube), written reviews, wishlisting. High signal quality — a 5-star rating genuinely means the user loved it. Low volume — most users rate very few items.</li>
+    <li><strong>Implicit feedback</strong>: observed behavioural signals that suggest preference without the user explicitly stating it. Play counts, watch time, clicks, purchases, search history, mouse hover time, add-to-cart. High volume — every user interaction generates signal. Low precision — a click doesn't mean the user liked the item. Absence of a click is ambiguous — the user might not have seen the item, not just disliked it.</li>
+  </ul>
+
+  <pre><code class="language-python">import numpy as np
+import pandas as pd
+
+# Demonstrate the noise problem with implicit feedback
+np.random.seed(42)
+
+print("=== The implicit feedback ambiguity problem ===\n")
+
+# Scenario: User A clicked on 10 items
+items_clicked = ['Item_A', 'Item_B', 'Item_C', 'Item_D', 'Item_E',
+                 'Item_F', 'Item_G', 'Item_H', 'Item_I', 'Item_J']
+watch_time_pct = [0.95, 0.12, 0.87, 0.03, 0.71, 0.44, 0.08, 0.92, 0.15, 0.61]
+
+df = pd.DataFrame({'item': items_clicked, 'completion_rate': watch_time_pct})
+df['inferred_preference'] = df['completion_rate'].apply(
+    lambda x: 'loved' if x > 0.8 else ('neutral' if x > 0.3 else 'disliked/abandoned')
+)
+
+print("Click data vs inferred preference from watch time:")
+print(df.to_string(index=False))
+print("\nInsight: clicks alone (binary) would treat all items equally.")
+print("Watch-time completion rate is a much richer signal — but still imperfect.")
+print("(User may have left the browser open, or abandoned due to buffering, etc.)")
+
+# Confidence-weighted implicit feedback (Hu et al., 2008)
+# Treat play count as confidence: c_ui = 1 + alpha * r_ui
+# Higher play count = more confident the user likes this item
+alpha = 40
+play_counts = np.array([0, 3, 0, 15, 1, 0, 8, 0, 0, 2])
+binary_preference = (play_counts > 0).astype(float)
+confidence = 1 + alpha * play_counts
+
+print("\n=== Confidence-weighted matrix factorization (ALS-style) ===")
+for item, pref, count, conf in zip(range(10), binary_preference, play_counts, confidence):
+    status = "→ high confidence" if conf > 100 else ("→ some signal" if count > 0 else "→ unobserved")
+    print(f"  Item {item}: count={count:3d}, pref={pref:.0f}, confidence={conf:5.0f}  {status}")</code></pre>
+
+  <div class="callout callout-tip">
+    <span class="callout-icon">💡</span>
+    <div class="callout-body">
+      <strong>Confidence-Weighted ALS for Implicit Feedback</strong>
+      <p>The foundational paper for implicit feedback is Hu, Koren &amp; Volinsky (2008) "Collaborative Filtering for Implicit Feedback Datasets." Their key innovation: treat implicit feedback as a <em>confidence</em> rather than a rating. An item played 20 times has high confidence; an item played once has low confidence. The ALS (Alternating Least Squares) algorithm minimises a confidence-weighted reconstruction error. This paper underpins Spotify's and Netflix's core algorithms and is highly recommended reading.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 8 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">8</span> The Cold Start Problem</h2>
+
+  <p>The cold start problem occurs when a collaborative filtering system cannot generate useful recommendations because it lacks sufficient interaction history. It manifests in three forms:</p>
+
+  <ul>
+    <li><strong>New user cold start</strong>: a user who just signed up has no ratings history, so CF cannot find similar users or match item preferences. Solution: ask for initial preferences during onboarding ("What genres do you like?"), use content-based filtering initially, fall back to popularity-based recommendations.</li>
+    <li><strong>New item cold start</strong>: a newly added movie, product, or song has no ratings from any user, so item-based CF can't compute meaningful similarity. Solution: use item content features (genre, description, metadata) to bootstrap recommendations before interaction data accumulates.</li>
+    <li><strong>New system cold start</strong>: when a recommendation system is first deployed, there is no historical data at all. Solution: import external data, use content-based filtering exclusively, or run a pilot with a subset of users.</li>
+  </ul>
+
+  <pre><code class="language-python">import numpy as np
+import pandas as pd
+
+# Illustrate a cold-start fallback strategy
+np.random.seed(42)
+
+print("=== Cold Start Strategy ===\n")
+
+# New user signs up — collect initial preferences
+def handle_new_user(onboarding_preferences):
+    """
+    Simplified cold-start handler:
+    1. Collect explicit genre preferences
+    2. Fall back to popularity in those genres
+    3. Switch to CF once >=10 ratings are collected
+    """
+    genre_preferences = onboarding_preferences.get('genres', [])
+    print(f"New user's stated genre preferences: {genre_preferences}")
+
+    # Popularity-based fallback within preferred genres
+    item_catalog = pd.DataFrame({
+        'title': ['Inception', 'Batman', 'Avengers', 'Toy Story',
+                  'Finding Nemo', 'Interstellar', 'The Matrix', 'Shrek'],
+        'genre': ['Sci-Fi', 'Action', 'Action', 'Animation',
+                  'Animation', 'Sci-Fi', 'Sci-Fi', 'Animation'],
+        'avg_rating': [4.8, 4.7, 4.5, 4.9, 4.8, 4.6, 4.7, 4.6],
+        'num_ratings': [50000, 48000, 62000, 71000, 68000, 45000, 55000, 59000]
+    })
+
+    filtered = item_catalog[item_catalog['genre'].isin(genre_preferences)]
+    recommendations = filtered.sort_values('num_ratings', ascending=False).head(5)
+    print(f"\nCold-start recommendations (popularity-based in preferred genres):")
+    print(recommendations[['title', 'genre', 'avg_rating', 'num_ratings']].to_string(index=False))
+    print("\nOnce this user rates 10+ items, switch to collaborative filtering.")
+
+handle_new_user({'genres': ['Sci-Fi', 'Action']})
+
+# Explore-exploit for handling new items (epsilon-greedy)
+def recommend_with_exploration(user_history, item_catalog_all, epsilon=0.1):
+    """
+    Epsilon-greedy: exploit known similarities (1-epsilon fraction)
+    and explore new/unrated items (epsilon fraction) to solve new item cold start.
+    """
+    if np.random.rand() < epsilon:
+        strategy = "EXPLORE: recommend new/unrated item"
+        new_items = [i for i in item_catalog_all if i not in user_history]
+        chosen = np.random.choice(new_items)
+    else:
+        strategy = "EXPLOIT: recommend based on collaborative filtering"
+        chosen = "best CF recommendation"
+    return chosen, strategy
+
+print("\n=== Explore-Exploit for New Item Cold Start ===")
+user_hist = ['Inception', 'Batman', 'Avengers']
+for _ in range(5):
+    rec, strat = recommend_with_exploration(
+        user_hist, ['Inception', 'Batman', 'Avengers', 'Toy Story', 'NewFilm2024'])
+    print(f"  Recommendation: {rec:20s}  ({strat})")</code></pre>
+</div>
+
+<!-- ── Real-World Spotlight ── -->
+<div class="use-case-section">
+  <div class="use-case-header">
+    <span style="font-size:1.5rem">🌍</span>
+    <h2>Real-World Spotlight: Movie Recommender with MovieLens</h2>
+  </div>
+  <p>The MovieLens dataset (GroupLens Research) is the standard benchmark for recommendation systems. The 100K version contains 100,000 ratings from 943 users on 1,682 movies, collected 1997–1998. We'll build a complete item-based CF recommender and evaluate it with matrix factorization.</p>
+  <pre><code class="language-python">import numpy as np
+import pandas as pd
+from sklearn.metrics.pairwise import cosine_similarity
+from sklearn.decomposition import NMF
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import mean_squared_error
+import scipy.sparse as sp
+
+np.random.seed(42)
+
+# Simulate MovieLens 100K statistics
+# (Load with: pd.read_csv('ratings.csv') after downloading from grouplens.org)
+print("Simulating MovieLens-style dataset...")
+n_users, n_items = 943, 200  # reduced for demo
+
+# Generate rating matrix with realistic sparsity
+R_dense = np.random.choice([0, 1, 2, 3, 4, 5], size=(n_users, n_items),
+                             p=[0.80, 0.02, 0.04, 0.06, 0.05, 0.03])
+print(f"Rating matrix: {R_dense.shape}")
+print(f"Total ratings: {(R_dense > 0).sum():,}")
+print(f"Sparsity: {(R_dense == 0).mean():.1%}")
+
+movie_titles = [f"Movie_{i:03d}" for i in range(n_items)]
+
+# Item-based CF: compute item-item cosine similarity
+item_sim_matrix = cosine_similarity(R_dense.T)  # items as rows
+print(f"\nItem similarity matrix: {item_sim_matrix.shape}")
+
+def get_movie_recommendations(movie_idx, sim_matrix, titles, top_n=10):
+    """Given a movie index, return top N most similar movies."""
+    similarities = sim_matrix[movie_idx]
+    # Exclude the movie itself
+    similar_indices = np.argsort(similarities)[::-1][1:top_n+1]
+    results = [(titles[i], round(similarities[i], 4)) for i in similar_indices]
+    return results
+
+print(f"\nMovies most similar to {movie_titles[0]}:")
+for title, sim in get_movie_recommendations(0, item_sim_matrix, movie_titles, top_n=5):
+    print(f"  {title}: similarity = {sim:.4f}")
+
+# NMF decomposition for latent genre discovery
+print("\n=== NMF: Discovering Latent Genres ===")
+R_for_nmf = R_dense.astype(float)  # NMF needs non-negative values
+
+nmf = NMF(n_components=10, init='nndsvda', random_state=42, max_iter=500)
+W = nmf.fit_transform(R_for_nmf)  # (users, 10)
+H = nmf.components_               # (10, items)
+
+print(f"User latent factor matrix: {W.shape}")
+print(f"Item latent factor matrix: {H.shape}")
+print(f"NMF reconstruction error: {nmf.reconstruction_err_:.2f}")
+
+# Evaluate with train/test split on held-out ratings
+observed_users, observed_items = np.where(R_dense > 0)
+n_observed = len(observed_users)
+split_idx = int(0.8 * n_observed)
+perm = np.random.permutation(n_observed)
+train_idx, test_idx = perm[:split_idx], perm[split_idx:]
+
+R_train = np.zeros_like(R_dense, dtype=float)
+R_train[observed_users[train_idx], observed_items[train_idx]] = \
+    R_dense[observed_users[train_idx], observed_items[train_idx]]
+
+nmf_eval = NMF(n_components=10, init='nndsvda', random_state=42, max_iter=500)
+W_train = nmf_eval.fit_transform(R_train)
+R_pred_full = W_train @ nmf_eval.components_
+
+# Compute RMSE on test ratings only
+test_true = R_dense[observed_users[test_idx], observed_items[test_idx]]
+test_pred = R_pred_full[observed_users[test_idx], observed_items[test_idx]]
+test_pred_clipped = np.clip(test_pred, 0, 5)
+rmse = np.sqrt(mean_squared_error(test_true, test_pred_clipped))
+print(f"\nNMF Test RMSE (on held-out ratings): {rmse:.4f}")
+print("(Lower is better; RMSE around 0.9-1.0 is typical for 10 factors on MovieLens)")
+
+# Show top recommendations for a target user
+user_id = 5
+already_rated = np.where(R_dense[user_id] > 0)[0]
+predicted_ratings = R_pred_full[user_id].copy()
+predicted_ratings[already_rated] = -1  # exclude already rated
+
+top_recs = np.argsort(predicted_ratings)[::-1][:5]
+print(f"\nNMF Recommendations for User {user_id}:")
+for item_idx in top_recs:
+    print(f"  {movie_titles[item_idx]}: predicted = {predicted_ratings[item_idx]:.2f}")</code></pre>
+  <p>In a production system, this architecture scales to millions of users and items using sparse matrix formats, approximate nearest neighbour search, and distributed computation. The MovieLens benchmark shows that NMF with 50 latent factors typically achieves RMSE around 0.90 — competitive with neighbourhood methods and much more scalable. The latent factors discovered by NMF often correspond to interpretable genres: a factor with high weights on action movies, another on romantic comedies, another on critically acclaimed art films.</p>
+</div>
+
+<!-- ── Quiz ── -->
+<div class="quiz-section">
+  <div id="lesson-33-quiz"></div>
+</div>
+
+<!-- ── Practice ── -->
+<div class="practice-card">
+  <h2>✍️ Practice Exercises</h2>
+  <ol>
+    <li>Download the MovieLens 100K dataset from <a href="https://grouplens.org/datasets/movielens/100k/" target="_blank">grouplens.org</a>. Load the ratings file, build the user-item matrix, and implement item-based CF. Given a movie title (e.g., "Star Wars"), return the top 10 most similar movies by cosine similarity on rating vectors.</li>
+    <li>Using the same MovieLens dataset, train an NMF model with <code>n_components=20</code>. For each of the 20 latent factors, find the top 5 movies with the highest weight in that factor. Do the factors correspond to recognisable genres?</li>
+    <li>Implement a train/test split evaluation: hold out 20% of observed ratings as a test set. Train user-based CF (K=10 neighbours) and NMF (k=20 factors) on the training set. Compute RMSE on the held-out test ratings. Which method achieves better RMSE?</li>
+    <li>Simulate the cold start problem: pick 5 users who have rated fewer than 5 movies. Show how popularity-based fallback recommendations differ from CF-based recommendations for users with more ratings. Discuss when each approach is appropriate.</li>
+  </ol>
+</div>
+
+<!-- ── Primary Source ── -->
+<div class="primary-source">
+  <h2>📚 Primary Source for This Lesson</h2>
+  <p><a href="https://dl.acm.org/doi/10.1145/2827872" target="_blank"><strong>Koren, Bell &amp; Volinsky (2009) "Matrix Factorization Techniques for Recommender Systems"</strong></a><br>
+  Published in IEEE Computer, this paper by the Netflix Prize winners is the single most important reference for modern recommender systems. It explains SVD, implicit feedback, and temporal dynamics with exceptional clarity. Freely available as a PDF — read Sections 1–4. Also recommended: the GroupLens MovieLens dataset paper and Hu, Koren &amp; Volinsky (2008) "Collaborative Filtering for Implicit Feedback Datasets."</p>
+</div>
+
+<!-- ── Ask Tutor ── -->
+<div class="ask-tutor">
+  <span class="icon">💬</span>
+  <span>Getting poor RMSE from your matrix factorization? Struggling with sparse matrix operations? Share the shape of your rating matrix and the sparsity level — your tutor will help diagnose whether you need more latent factors, different initialisation, or a different approach altogether.</span>
+</div>
+
+<!-- ── Navigation ── -->
+<nav class="lesson-nav">
+  <a href="./0032-anomaly-detection.html" class="nav-btn">← Lesson 32: Anomaly Detection</a>
+  <a href="./0034-time-series-analysis.html" class="nav-btn nav-btn-next">Lesson 34: Time Series Analysis →</a>
+</nav>
+
+</div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-core.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/plugins/autoloader/prism-autoloader.min.js"></script>
+<script src="../assets/quiz.js"></script>
+<script>
+new MLQuiz('lesson-33-quiz', [
+  {
+    question: "What is the key difference between content-based filtering and collaborative filtering?",
+    options: [
+      "Content-based uses item features to find similar items; collaborative filtering uses user–item interactions to find similar users or items — without needing item features",
+      "Content-based requires ratings from multiple users; collaborative filtering only uses a single user's history",
+      "Content-based is used for text data only; collaborative filtering is used for numeric ratings only",
+      "Content-based requires deep learning; collaborative filtering only uses cosine similarity"
+    ],
+    correct: 0,
+    explanation: "Content-based filtering analyses item attributes (genre, keywords, description) to find items similar to what a user already liked — no other users are needed, but rich item metadata is required. Collaborative filtering analyses the pattern of user–item interactions ('people like you liked this') without needing any item features — this allows it to discover surprising, serendipitous recommendations."
+  },
+  {
+    question: "Why is item-based CF generally more stable and scalable in production than user-based CF?",
+    options: [
+      "Item similarity is more stable over time — an action movie stays similar to other action movies; user preferences change frequently and there are far more users than items",
+      "Item-based CF requires fewer distance computations because cosine similarity is O(1) for items",
+      "User-based CF requires explicit ratings while item-based CF works with implicit feedback only",
+      "Item-based CF can only be used for movies; user-based CF is domain-agnostic"
+    ],
+    correct: 0,
+    explanation: "Two key advantages: (1) Stability — an action movie released in 2000 still has similar cosine similarity to other action movies in 2024. User preferences can change weekly. (2) Scale — most systems have far more users than items. Pre-computing item-item similarities (a one-time offline job) is far cheaper than computing user-user similarities for millions of users in real time."
+  },
+  {
+    question: "What is the cold start problem in recommendation systems?",
+    options: [
+      "The inability to generate personalised recommendations for new users or items that have no interaction history in the system",
+      "The system slows down dramatically when the rating matrix becomes very sparse",
+      "Matrix factorization converges to a poor local minimum when initialised with zeros",
+      "The recommender fails when users rate items at a very low temperature (below average)"
+    ],
+    correct: 0,
+    explanation: "Cold start occurs in three forms: (1) New user — no history, so CF can't find similar users; (2) New item — no ratings, so item similarity can't be computed; (3) New system — no data at all. Solutions include: collecting explicit preferences during onboarding, using content-based filtering for new items until interaction data accumulates, and popularity-based fallback recommendations."
+  },
+  {
+    question: "In matrix factorization (SVD/NMF), what do the latent factors represent?",
+    options: [
+      "Hidden features that explain the observed rating patterns — e.g., genre preferences, quality sensitivity, mainstream vs indie tastes — without being explicitly defined",
+      "The eigenvectors of the user-item covariance matrix, which correspond to specific known genres",
+      "The missing values in the rating matrix that were imputed by the algorithm before training",
+      "The hyperparameters controlling the number of recommendation candidates generated"
+    ],
+    correct: 0,
+    explanation: "Latent factors are abstract, automatically discovered dimensions that explain why users rate items the way they do. A factorization with 10 components might discover factors corresponding to action intensity, artistic merit, comedic tone, etc. — but these labels are assigned by interpretation, not by the algorithm. The power is that the model finds the most statistically useful abstractions from the rating patterns alone, without any predefined categories."
+  },
+  {
+    question: "Implicit feedback signals like clicks and views are generally noisier than explicit star ratings. Why?",
+    options: [
+      "A click doesn't mean the user liked the item — they may have clicked out of curiosity, found it disappointing, or simply forgotten to unclick; absence of a click is also ambiguous",
+      "Implicit signals are collected less frequently than explicit ratings and therefore have smaller sample sizes",
+      "Implicit signals can only be measured in binary (clicked / not clicked) whereas ratings have a 1–5 scale",
+      "Implicit signals require neural networks to process, introducing model approximation error"
+    ],
+    correct: 0,
+    explanation: "The fundamental ambiguity of implicit feedback: a user who clicks on an item for 3 seconds and never returns almost certainly disliked it — but the signal says 'clicked' just like a user who watched the whole movie. Similarly, a user who didn't click might simply not have seen the item, not necessarily disliked it. Confidence-weighted approaches (Hu et al. 2008) handle this by weighting items clicked many times (high confidence of preference) more heavily than single-click events."
+  }
+]);
+</script>
+
+</body>
+</html>
