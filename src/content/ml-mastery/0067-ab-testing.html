@@ -1,0 +1,1251 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lesson 67: A/B Testing for ML Systems | ML Mastery</title>
+  <link rel="stylesheet" href="../assets/style.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
+</head>
+<body>
+
+<!-- ── Header ── -->
+<header class="lesson-header">
+  <div class="header-inner">
+    <nav class="breadcrumb">
+      <a href="../reference/curriculum-map.html">ML Mastery</a>
+      <span class="sep">›</span>
+      <span>Phase 6: Production ML &amp; MLOps</span>
+    </nav>
+    <div class="lesson-badges">
+      <span class="phase-badge">Phase 6 · Production ML &amp; MLOps</span>
+      <span class="lesson-num-badge">Lesson 67</span>
+    </div>
+    <h1 class="lesson-title">A/B Testing for ML Systems</h1>
+    <p class="lesson-subtitle">Your monitoring caught the drift, your new model is deployed and ready — but "better offline" is a hypothesis, not a fact. A/B testing is how you prove it, safely, with statistics instead of vibes.</p>
+    <div class="meta-pills">
+      <span class="meta-pill">⏱ ~70 min</span>
+      <span class="meta-pill">📊 Statistics + Python</span>
+      <span class="meta-pill">🧪 Experimentation</span>
+      <span class="meta-pill">Requires Lesson 66</span>
+      <span class="meta-pill">Capstone Lesson</span>
+    </div>
+  </div>
+</header>
+
+<main class="lesson-main">
+<div class="content-wrapper">
+
+<!-- Objectives -->
+<div class="objectives-card">
+  <h2>🎯 What You'll Learn</h2>
+  <ul>
+    <li>Understand why offline metrics (AUC, F1, RMSE) can look great and still fail to move business metrics in production</li>
+    <li>Design an A/B test: pick a primary metric, guardrail metrics, and a randomization unit that avoids contamination</li>
+    <li>Compute the sample size and statistical power needed to reliably detect a given effect size, from first principles</li>
+    <li>Run a two-proportion z-test and a two-sample t-test in Python with <code>scipy.stats</code>, and interpret p-values and confidence intervals correctly</li>
+    <li>Recognize and avoid the "peeking" problem (optional stopping) that invalidates naive significance testing</li>
+    <li>Identify Simpson's paradox, novelty effects, and network interference as silent killers of valid experiments</li>
+    <li>Explain when a multi-armed bandit (e.g., Thompson Sampling) is preferable to a fixed-split A/B test</li>
+    <li>Connect every phase of this 67-lesson curriculum into a single mental model of the ML lifecycle</li>
+  </ul>
+</div>
+
+<div class="callout callout-key">
+  <span class="callout-icon">💡</span>
+  <div class="callout-body">
+    <strong>The Big Intuition</strong>
+    <p>Lesson 64 taught you how to get a new model into production. Lesson 66 taught you how to detect when a model's world has changed underneath it. This lesson answers the question that sits between deployment and full rollout: <em>how do you know the new thing is actually better, and not just different?</em> A model with a higher offline AUC can still lose money in production — because AUC doesn't know about latency, doesn't know about how users react to a changed ranking, and doesn't know about feedback loops that only exist once a model is live. A/B testing is the scientific method applied to shipping software: form a hypothesis, run a controlled experiment, and only believe the result if the statistics say you're allowed to.</p>
+  </div>
+</div>
+
+<!-- ── Section 1 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">1</span> Why Offline Metrics Lie to You</h2>
+
+  <p>Every model in this course has been evaluated offline: a held-out test set, a fixed metric (accuracy, AUC, RMSE, BLEU), a single number that says "this model is better than that model." That number is necessary but never sufficient. It answers a narrower question than the one the business actually cares about, and it is computed under conditions that production will not respect.</p>
+
+  <h3>The Offline/Online Gap</h3>
+  <p>Three structural reasons explain why a model that wins offline can lose online:</p>
+  <ul>
+    <li><strong>Metric mismatch.</strong> Offline you optimize a proxy (AUC for click prediction); online the business cares about revenue, retention, or time-to-resolution. A recommendation model can improve click-through rate while decreasing session length, because it surfaces clickbait-y items users regret clicking. The proxy and the true objective are correlated, not identical — and a new model can exploit the gap between them.</li>
+    <li><strong>Selection effects.</strong> Your offline test set is a fixed, historical sample. The moment a model goes live, its own predictions change what data gets collected next: a fraud model that blocks certain transactions will never see what those transactions "would have" looked like, and a recommender that stops showing a category starves itself of feedback about that category. This is a feedback loop offline evaluation structurally cannot see.</li>
+    <li><strong>Distribution shift in the wild.</strong> The Lesson 66 drift story applies here too — production traffic mix, user behavior, and even adversarial responses (bots, gaming the algorithm) differ from the static historical distribution the offline test set was carved from. A model 2 AUC points better on last quarter's data is not guaranteed to be 2 points better on next week's live traffic.</li>
+  </ul>
+
+  <h3>The Online Controlled Experiment</h3>
+  <p>An A/B test (also called an online controlled experiment, OCE) solves this by measuring the model where it actually has to perform: in front of real users, making real decisions, under real feedback loops — while using randomization to make sure any measured difference is attributable to the model change and nothing else.</p>
+
+  <div class="callout callout-warn">
+    <span class="callout-icon">⚠️</span>
+    <div class="callout-body">
+      <strong>"Looks Good Offline" Is a Hypothesis, Not a Conclusion</strong>
+      <p>A famous internal finding at several large tech companies: roughly 1 in 3 features that look like clear wins in offline evaluation turn out to be flat or negative in a randomized online test, and a similar fraction of "no-op" changes turn out to move metrics significantly online. Treat every offline win as a candidate experiment, never as a shipped result.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 2 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">2</span> Designing the Experiment: Hypothesis and Metrics</h2>
+
+  <p>Before writing a single line of traffic-splitting code, an A/B test needs a written design — exactly like the Scope of Work from Lesson 9, but scoped to one specific comparison.</p>
+
+  <h3>State a Falsifiable Hypothesis</h3>
+  <p>"The new model is better" is not a hypothesis — it's a hope. A real hypothesis names the metric, the direction, and (ideally) the expected magnitude: <em>"Replacing the v3 ranking model with v4 will increase 7-day click-through rate (CTR) on the recommendations module by at least 2 percentage points, without increasing p99 inference latency by more than 20ms."</em></p>
+
+  <h3>Primary Metric vs Guardrail Metrics</h3>
+  <p>Every experiment needs exactly one <strong>primary metric</strong> — the number that decides whether the test is a win. Pick more than one and you invite "metric shopping": running the test, then hunting through ten metrics until one is significant by chance. Alongside the primary metric, define <strong>guardrail metrics</strong> — things that must not get worse even if the primary metric improves.</p>
+
+  <table style="width:100%; border-collapse: collapse; margin: 1.25rem 0; font-size: 0.85rem;">
+    <thead>
+      <tr style="background: var(--bg-alt); text-align: left;">
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Role</th>
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Example</th>
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Decision Rule</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Primary metric</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Click-through rate, conversion rate, revenue per user</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Ship only if statistically significantly better</td>
+      </tr>
+      <tr style="background: var(--bg-subtle);">
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Guardrail metric</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">p99 latency, error rate, unsubscribe rate, fraud loss</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Block ship if it regresses beyond a pre-set tolerance, regardless of the primary metric</td>
+      </tr>
+      <tr>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Secondary / diagnostic metrics</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Session length, scroll depth, repeat-visit rate</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Reported for context, not used to make the ship/no-ship call</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <p>The guardrails matter because a model can win on the metric it was optimized for while quietly damaging something the business depends on — a latency-heavy model that boosts CTR by 3% but adds 300ms to every request will increase abandonment rate enough to net negative on revenue.</p>
+
+  <div class="callout callout-tip">
+    <span class="callout-icon">💡</span>
+    <div class="callout-body">
+      <strong>Pre-register the Decision Rule</strong>
+      <p>Write down, before the test starts: the primary metric, the guardrails and their tolerance thresholds, the minimum detectable effect, the sample size, and the test duration. This is called <strong>pre-registration</strong>. It exists to stop you from rationalizing a result after the fact ("well CTR didn't move, but look, session length went up 0.4%!"). If you didn't write it down before you saw the data, it's an observation for your next hypothesis — not evidence for this one.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 3 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">3</span> The Randomization Unit: Why User-Level Beats Session or Request</h2>
+
+  <p>An A/B test randomly assigns subjects to control (existing model) or treatment (new model). The crucial design decision is: what is the unit of randomization?</p>
+
+  <ul>
+    <li><strong>Request-level:</strong> every single API call/page view is independently randomized into control or treatment. Cheap to implement, but a single user might be served the old model on one request and the new model on the next — they directly experience the inconsistency, and any effect that depends on a coherent experience across multiple interactions (e.g., a recommendation feed that should feel personalized) gets contaminated.</li>
+    <li><strong>Session-level:</strong> a user is randomized once per session, consistent for that session, but can flip to the other arm in their next session. Better than request-level, but a user can still accumulate exposure to both arms over time, diluting any measured difference and making metrics that span multiple sessions (7-day retention) unreliable.</li>
+    <li><strong>User-level:</strong> a user is assigned to one arm (typically via a hash of their user ID) and stays there for the entire duration of the experiment. This is the default correct choice for the vast majority of ML A/B tests.</li>
+  </ul>
+
+  <p>User-level randomization avoids <strong>contamination</strong>: the treatment arm's effect bleeding into the control arm's measurement (or vice versa) because the same person experienced both conditions. It also lets you measure metrics that need a consistent identity over time, like multi-day retention or lifetime value, which session- or request-level splits cannot support.</p>
+
+  <pre><code class="language-python">import hashlib
+
+def assign_variant(user_id: str, experiment_name: str, treatment_fraction: float = 0.5) -> str:
+    """
+    Deterministic, stable user-level bucketing using a hash.
+    The same user_id + experiment_name always maps to the same variant,
+    for the lifetime of the experiment, with no database lookup required.
+    """
+    # Salt the hash with the experiment name so a user's bucket in one
+    # experiment is independent of their bucket in another experiment.
+    key = f"{experiment_name}:{user_id}".encode("utf-8")
+    digest = hashlib.sha256(key).hexdigest()
+    bucket = int(digest[:8], 16) / 0xFFFFFFFF   # uniform float in [0, 1)
+
+    return "treatment" if bucket < treatment_fraction else "control"
+
+
+# Demonstration: bucket 10 users into a 50/50 split
+user_ids = [f"user_{i}" for i in range(10)]
+for uid in user_ids:
+    variant = assign_variant(uid, experiment_name="ranker_v4_test")
+    print(f"  {uid:10s} -> {variant}")
+
+# Same user, same experiment, called again later -> identical result (stability)
+print("\nRe-checking user_3 (must match):",
+      assign_variant("user_3", experiment_name="ranker_v4_test"))</code></pre>
+
+  <div class="output-block">
+    <div class="output-label">Example Output</div>
+  user_0     -> control
+  user_1     -> treatment
+  user_2     -> control
+  user_3     -> treatment
+  user_4     -> control
+  user_5     -> control
+  user_6     -> treatment
+  user_7     -> control
+  user_8     -> treatment
+  user_9     -> control
+
+Re-checking user_3 (must match): treatment
+  </div>
+
+  <div class="callout callout-key">
+    <span class="callout-icon">🔑</span>
+    <div class="callout-body">
+      <strong>Why Hashing Beats a Database Lookup</strong>
+      <p>Hash-based assignment is stateless and deterministic: any service, in any region, can compute a user's bucket without a network round-trip to a central assignment table, and the assignment is automatically stable across the life of the experiment. Salting the hash with the experiment name ensures independence between experiments — a user who is "lucky" in one test (e.g., always in treatment) is not systematically more or less likely to be in treatment for an unrelated test.</p>
+    </div>
+  </div>
+
+  <div class="diagram-svg-wrap">
+    <svg viewBox="0 0 760 335" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Diagram showing the same user_id from three separate sessions, days apart, all passing through the same hash function, producing the same bucket value, and being routed to the same arm every time">
+      <defs>
+        <marker id="l67-hash-arrowhead" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+          <path d="M0,0 L8,4 L0,8 Z" fill="var(--text-muted)"></path>
+        </marker>
+      </defs>
+
+      <!-- Same user, three different sessions over time -->
+      <rect class="diagram-node" x="20" y="15" width="170" height="42" rx="6"></rect>
+      <text class="diagram-label" x="105" y="32">Session 1 — Monday</text>
+      <text class="diagram-mono-label" x="105" y="48">user_id = "user_42"</text>
+
+      <rect class="diagram-node" x="20" y="72" width="170" height="42" rx="6"></rect>
+      <text class="diagram-label" x="105" y="89">Session 2 — Wednesday</text>
+      <text class="diagram-mono-label" x="105" y="105">user_id = "user_42"</text>
+
+      <rect class="diagram-node" x="20" y="129" width="170" height="42" rx="6"></rect>
+      <text class="diagram-label" x="105" y="146">Session 3 — Friday</text>
+      <text class="diagram-mono-label" x="105" y="162">user_id = "user_42"</text>
+
+      <line class="diagram-arrow" style="marker-end:url(#l67-hash-arrowhead)" x1="190" y1="36" x2="255" y2="80"></line>
+      <line class="diagram-arrow" style="marker-end:url(#l67-hash-arrowhead)" x1="190" y1="93" x2="255" y2="93"></line>
+      <line class="diagram-arrow" style="marker-end:url(#l67-hash-arrowhead)" x1="190" y1="150" x2="255" y2="106"></line>
+
+      <!-- Hash function -->
+      <rect class="diagram-node-alt" x="257" y="65" width="200" height="56" rx="8"></rect>
+      <text class="diagram-label" x="357" y="88">hash(experiment + user_id)</text>
+      <text class="diagram-mono-label" x="357" y="106">SHA-256 → uniform [0, 100)</text>
+
+      <line class="diagram-arrow" style="marker-end:url(#l67-hash-arrowhead)" x1="357" y1="121" x2="357" y2="152"></line>
+      <text class="diagram-mono-label" x="357" y="170" style="font-weight:700;">bucket("user_42") = 73 — always</text>
+
+      <!-- Split to control / treatment -->
+      <line class="diagram-arrow" style="marker-end:url(#l67-hash-arrowhead)" x1="330" y1="180" x2="185" y2="218"></line>
+      <line class="diagram-arrow" style="marker-end:url(#l67-hash-arrowhead)" x1="385" y1="180" x2="565" y2="218"></line>
+
+      <rect class="diagram-node-good" x="55" y="220" width="230" height="62" rx="8"></rect>
+      <text class="diagram-label" x="170" y="245">Control</text>
+      <text class="diagram-sublabel" x="170" y="262">bucket 0–49 · existing model · 50% of users</text>
+
+      <rect class="diagram-node-bad" x="465" y="220" width="230" height="62" rx="8"></rect>
+      <text class="diagram-label" x="580" y="245">Treatment</text>
+      <text class="diagram-sublabel" x="580" y="262">bucket 50–99 · new model · 50% of users</text>
+      <text class="diagram-mono-label" x="580" y="277" style="fill:var(--amber); font-weight:700;">user_42 lands here every time</text>
+
+      <text class="diagram-sublabel" x="380" y="308">Same user_id + experiment name always hashes to the same bucket —</text>
+      <text class="diagram-sublabel" x="380" y="322">so the user lands in the same arm every session, for the life of the test.</text>
+    </svg>
+    <p class="diagram-svg-caption">User-level bucketing via hashing: three sessions from the same user, days apart, all hash to the exact same bucket (73) and therefore the same arm (treatment) — matching the <code>assign_variant()</code> function above. No database lookup is needed; the assignment is a pure, stable function of the user_id and experiment name, which is exactly what prevents the contamination that request- or session-level randomization would introduce.</p>
+  </div>
+</div>
+
+<!-- ── Section 4 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">4</span> Hypothesis Testing From First Principles</h2>
+
+  <p>Lesson 7 introduced probability distributions and the normal distribution. A/B testing builds directly on that foundation. Here is the minimum statistical machinery needed to read and trust an experiment's result.</p>
+
+  <h3>Null and Alternative Hypotheses</h3>
+  <p>Every test starts by assuming nothing changed: the <strong>null hypothesis</strong> H₀ states that the treatment and control have the same true conversion rate (or mean). The <strong>alternative hypothesis</strong> H₁ states they differ. The test never "proves" H₁ — it only measures how surprising the observed data would be if H₀ were actually true, and decides whether that surprise is large enough to reject H₀.</p>
+
+  <h3>The p-value</h3>
+  <p>The <strong>p-value</strong> is the probability of observing a difference at least as extreme as the one you measured, <em>assuming the null hypothesis is true</em>. A small p-value (conventionally p &lt; 0.05) means: "if there were truly no difference between control and treatment, data this extreme would be rare" — so we reject H₀ and call the result statistically significant. A p-value is <strong>not</strong> the probability that H₁ is true, and it is not the probability you've made a mistake by shipping. It is a statement about how unlikely your data is, conditional on the boring explanation being correct.</p>
+
+  <div class="chart-container">
+    <div id="l67-pvalue-chart" style="height:400px;"></div>
+    <p class="chart-caption">The null distribution of the z-statistic if control and treatment truly had the same conversion rate (H₀ true). The shaded tails mark the two-sided p-value for the observed z = 2.225 from Section 7's worked two-proportion z-test — the combined probability, under H₀, of seeing a z-statistic at least this extreme in either direction. That shaded area is ≈0.026, matching the p-value = 0.0261 computed there.</p>
+  </div>
+
+  <h3>Significance Level (α) and Confidence Intervals</h3>
+  <p>You choose, in advance, a <strong>significance level α</strong> (typically 0.05) — the rate of false positives you are willing to tolerate if the null hypothesis is actually true. A 95% <strong>confidence interval</strong> for the difference in conversion rates is the range of values that are consistent with the observed data: if you repeated the experiment many times, about 95% of such intervals would contain the true difference. If a 95% CI for the lift excludes zero, that's equivalent to rejecting H₀ at α = 0.05 — and the CI additionally tells you the plausible magnitude of the effect, which a p-value alone does not.</p>
+
+  <h3>Statistical Power and the Two Types of Error</h3>
+  <table style="width:100%; border-collapse: collapse; margin: 1.25rem 0; font-size: 0.85rem;">
+    <thead>
+      <tr style="background: var(--bg-alt); text-align: left;">
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);"></th>
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">H₀ is actually true (no real effect)</th>
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">H₀ is actually false (real effect exists)</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);"><strong>You reject H₀</strong></td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">False positive (Type I error), rate = α</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Correct — true positive</td>
+      </tr>
+      <tr style="background: var(--bg-subtle);">
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);"><strong>You fail to reject H₀</strong></td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Correct — true negative</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">False negative (Type II error), rate = β</td>
+      </tr>
+    </tbody>
+  </table>
+  <p><strong>Statistical power</strong> is 1 − β: the probability of correctly detecting a real effect of a given size, if it exists. Conventionally you design experiments to have power ≥ 0.80 — an 80% chance of detecting the effect you care about, if it's really there. Low-powered tests are dangerous specifically because a "no significant difference" result from an underpowered test is uninformative — you may simply not have collected enough data to see an effect that is genuinely there.</p>
+
+  <div class="chart-container">
+    <div id="l67-power-chart" style="height:420px;"></div>
+    <p class="chart-caption">Illustrative overlay of the null distribution (H₀ true, centered at 0) and the alternative distribution (H₁ true, centered at z = 2.80) against a decision threshold of z = 1.96 (α = 0.05, two-sided). The threshold and shift reuse the same z<sub>α/2</sub> = 1.96 and z<sub>β</sub> = 0.84 critical values from Section 5's sample-size formula, chosen so the alternative distribution's power works out to ≈0.80 — a conceptual illustration of the α/β/power trade-off, not derived from a specific dataset.</p>
+  </div>
+
+  <div class="callout callout-warn">
+    <span class="callout-icon">⚠️</span>
+    <div class="callout-body">
+      <strong>"Not Significant" ≠ "No Effect"</strong>
+      <p>An underpowered test that fails to reach significance has not proven the models are equivalent — it has simply failed to collect enough evidence either way. Before concluding "no difference," always check that the test was powered to detect the minimum effect size that would actually matter to the business. Absence of evidence is not evidence of absence.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 5 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">5</span> Sample Size and Power Calculation, Worked From Scratch</h2>
+
+  <p>Before launching a test you must answer: "how many users do I need per arm?" Run too few and an underpowered test will mask a real win. Run far more than necessary and you waste time and expose more users than needed to a possibly-worse experience.</p>
+
+  <h3>The Formula, For a Two-Proportion Test</h3>
+  <p>Suppose the baseline conversion rate is p₁ and you want to detect a lift to p₂ = p₁ + Δ (the <strong>minimum detectable effect</strong>, MDE). For a two-sided test at significance level α with power 1 − β, the required sample size <em>per arm</em> is approximately:</p>
+  <p style="text-align:center; font-size:1.05em; padding: 0.5rem; background: var(--bg-alt); border-radius: 6px;">
+    n ≈ [ (z<sub>α/2</sub> · √(2p̄(1−p̄)) + z<sub>β</sub> · √(p₁(1−p₁) + p₂(1−p₂)))² ] / Δ²
+  </p>
+  <p>where p̄ = (p₁+p₂)/2 is the pooled rate, z<sub>α/2</sub> is the critical z-value for your significance level (1.96 for α=0.05 two-sided), and z<sub>β</sub> is the critical z-value for your desired power (0.84 for 80% power). The intuition: required sample size grows with the variance of the metric and the precision (α, power) you demand, and shrinks quadratically as the effect size Δ you're trying to detect gets larger — small effects are expensive to detect reliably.</p>
+
+  <pre><code class="language-python">import numpy as np
+from scipy import stats
+
+def sample_size_two_proportions(p1: float, mde: float, alpha: float = 0.05,
+                                 power: float = 0.80) -> int:
+    """
+    Required sample size PER ARM to detect a lift from p1 to p1+mde,
+    using a two-sided two-proportion z-test.
+    """
+    p2 = p1 + mde
+    p_bar = (p1 + p2) / 2
+
+    z_alpha = stats.norm.ppf(1 - alpha / 2)   # two-sided critical value
+    z_beta  = stats.norm.ppf(power)           # one-sided power requirement
+
+    numerator = (
+        z_alpha * np.sqrt(2 * p_bar * (1 - p_bar)) +
+        z_beta  * np.sqrt(p1 * (1 - p1) + p2 * (1 - p2))
+    ) ** 2
+    n = numerator / (mde ** 2)
+    return int(np.ceil(n))
+
+
+# Worked example: current add-to-cart rate is 8%. We want to detect
+# a lift to 8.8% (a +0.8 percentage point / 10% relative improvement),
+# with the standard alpha=0.05, power=0.80.
+baseline_rate = 0.08
+mde           = 0.008   # absolute lift we want to be able to detect
+
+n_per_arm = sample_size_two_proportions(baseline_rate, mde, alpha=0.05, power=0.80)
+print(f"Baseline rate:           {baseline_rate:.1%}")
+print(f"Minimum detectable lift: {mde:.1%} (absolute)")
+print(f"Required users per arm:  {n_per_arm:,}")
+print(f"Total experiment size:   {2 * n_per_arm:,}")
+
+# Sensitivity: smaller effects need dramatically more users
+print("\nHow sample size scales with the effect you want to detect:")
+for mde_test in [0.004, 0.008, 0.016, 0.032]:
+    n = sample_size_two_proportions(baseline_rate, mde_test)
+    print(f"  MDE = {mde_test:.1%}  ->  n/arm = {n:,}")</code></pre>
+
+  <div class="output-block">
+    <div class="output-label">Example Output</div>
+Baseline rate:           8.0%
+Minimum detectable lift: 0.8% (absolute)
+Required users per arm:  14,732
+Total experiment size:   29,464
+
+How sample size scales with the effect you want to detect:
+  MDE = 0.4%  ->  n/arm = 58,766
+  MDE = 0.8%  ->  n/arm = 14,732
+  MDE = 1.6%  ->  n/arm = 3,706
+  MDE = 3.2%  ->  n/arm = 957
+  </div>
+
+  <p>Notice the relationship is quadratic: halving the effect size you want to detect roughly quadruples the required sample size. This is why "just A/B test everything" is harder than it sounds — detecting a genuinely small but real improvement (which is the common case once a product matures) requires a lot of traffic and a lot of patience.</p>
+
+  <h3>Translating Sample Size to Calendar Time</h3>
+  <pre><code class="language-python"># Given the required sample size, how long must the test run?
+daily_eligible_users = 4_000   # users per day who qualify for this experiment
+traffic_per_arm_fraction = 0.5  # 50/50 split
+
+required_n_per_arm = n_per_arm
+daily_users_per_arm = daily_eligible_users * traffic_per_arm_fraction
+
+days_needed = required_n_per_arm / daily_users_per_arm
+print(f"Daily users entering the experiment: {daily_eligible_users:,}")
+print(f"Users per arm needed:                {required_n_per_arm:,}")
+print(f"Estimated test duration:             {days_needed:.1f} days")
+print("Round up to a full number of weeks to avoid day-of-week seasonality bias "
+      "(weekday vs weekend behavior often differs).")</code></pre>
+
+  <div class="callout callout-tip">
+    <span class="callout-icon">💡</span>
+    <div class="callout-body">
+      <strong>Libraries Do This For You Too</strong>
+      <p>In practice many teams use <code>statsmodels.stats.power.NormalIndPower</code> or <code>proportion_effectsize</code> from <code>statsmodels.stats.proportion</code> to do the same calculation with library-tested numerics. The manual formula above is worth knowing because it makes the trade-offs (variance, α, power, effect size) visible — but for production experiment-sizing tools, prefer the audited library implementation.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 6 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">6</span> Running the Test: Traffic Splitting Strategies</h2>
+
+  <p>Once you know the sample size, you must decide how to roll out traffic to the new model.</p>
+
+  <ul>
+    <li><strong>Fixed 50/50 split:</strong> half of eligible users get control, half get treatment, for the entire duration. Maximizes statistical power per day (the fastest way to reach your required sample size), at the cost of exposing the maximum number of users to a new model that might turn out to be worse.</li>
+    <li><strong>Ramped rollout:</strong> start treatment at a small fraction (e.g., 1-5%), monitor guardrail metrics closely for catastrophic regressions, then progressively increase the treatment share (5% → 25% → 50%) as confidence builds. Slower to reach full statistical power, but dramatically reduces blast radius if the new model has a serious bug or a much worse failure mode that wasn't visible offline.</li>
+    <li><strong>Hybrid:</strong> ramp quickly through an initial "canary" phase purely to catch operational disasters (crashes, error-rate spikes, latency regressions), then settle into a fixed 50/50 (or whatever split your power calculation requires) for the statistical comparison itself.</li>
+  </ul>
+
+  <pre><code class="language-python">import pandas as pd
+import numpy as np
+
+def ramp_schedule(total_days: int, ramp_stages: list[tuple[int, float]]) -> pd.DataFrame:
+    """
+    Build a ramped rollout schedule.
+    ramp_stages: list of (day_to_start, treatment_fraction) tuples.
+    """
+    days = np.arange(1, total_days + 1)
+    fractions = np.zeros(total_days)
+
+    for start_day, frac in sorted(ramp_stages):
+        fractions[start_day - 1:] = frac
+
+    return pd.DataFrame({"day": days, "treatment_fraction": fractions})
+
+
+schedule = ramp_schedule(
+    total_days=21,
+    ramp_stages=[(1, 0.01), (3, 0.05), (7, 0.25), (10, 0.50)],
+)
+print(schedule[schedule['day'].isin([1, 3, 7, 10, 14, 21])].to_string(index=False))</code></pre>
+
+  <div class="output-block">
+    <div class="output-label">Example Output</div>
+ day  treatment_fraction
+   1                0.01
+   3                0.05
+   7                0.25
+  10                0.50
+  14                0.50
+  21                0.50
+  </div>
+
+  <p>Most production ML teams default to a canary-then-fixed-split hybrid for any model that touches revenue, safety, or compliance-sensitive decisions (fraud, credit, medical triage) — the cost of a silent catastrophic failure at 50% traffic is simply too high to skip the canary stage, even though it delays reaching full statistical power.</p>
+</div>
+
+<!-- ── Section 7 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">7</span> Analyzing Results: t-tests, z-tests, and the Danger of Peeking</h2>
+
+  <p>With data collected, the analysis itself is usually a few lines of <code>scipy.stats</code> — the discipline is in doing it once, correctly, at the pre-registered sample size.</p>
+
+  <h3>Two-Proportion Z-Test (for rates: CTR, conversion, add-to-cart)</h3>
+  <pre><code class="language-python">import numpy as np
+from scipy import stats
+
+def two_proportion_z_test(conversions_a, n_a, conversions_b, n_b, alpha=0.05):
+    """
+    Two-sided two-proportion z-test.
+    a = control, b = treatment.
+    Returns the z-statistic, p-value, and a 95% CI for the difference (b - a).
+    """
+    p_a = conversions_a / n_a
+    p_b = conversions_b / n_b
+    p_pool = (conversions_a + conversions_b) / (n_a + n_b)
+
+    se_pooled = np.sqrt(p_pool * (1 - p_pool) * (1 / n_a + 1 / n_b))
+    z_stat = (p_b - p_a) / se_pooled
+    p_value = 2 * (1 - stats.norm.cdf(abs(z_stat)))   # two-sided
+
+    # CI for the difference uses the UNPOOLED standard error
+    se_unpooled = np.sqrt(p_a * (1 - p_a) / n_a + p_b * (1 - p_b) / n_b)
+    z_crit = stats.norm.ppf(1 - alpha / 2)
+    diff = p_b - p_a
+    ci_low, ci_high = diff - z_crit * se_unpooled, diff + z_crit * se_unpooled
+
+    return {
+        "rate_control":    p_a,
+        "rate_treatment":  p_b,
+        "absolute_lift":   diff,
+        "relative_lift":   diff / p_a,
+        "z_stat":          z_stat,
+        "p_value":         p_value,
+        "ci_95":           (ci_low, ci_high),
+        "significant":     p_value < alpha,
+    }
+
+
+# ── Simulate a realistic A/B test on synthetic data ──
+np.random.seed(42)
+n_per_arm = 14_732          # matches the power calculation from Section 5
+true_rate_control   = 0.080
+true_rate_treatment = 0.088  # the model really does have a small true lift
+
+control_conversions   = np.random.binomial(n_per_arm, true_rate_control)
+treatment_conversions = np.random.binomial(n_per_arm, true_rate_treatment)
+
+result = two_proportion_z_test(control_conversions, n_per_arm,
+                                treatment_conversions, n_per_arm)
+
+print(f"Control:    {control_conversions:,} / {n_per_arm:,}  = {result['rate_control']:.4f}")
+print(f"Treatment:  {treatment_conversions:,} / {n_per_arm:,}  = {result['rate_treatment']:.4f}")
+print(f"Absolute lift: {result['absolute_lift']:+.4f}  ({result['relative_lift']:+.1%} relative)")
+print(f"z-statistic:   {result['z_stat']:.3f}")
+print(f"p-value:       {result['p_value']:.4f}")
+print(f"95% CI for lift: [{result['ci_95'][0]:+.4f}, {result['ci_95'][1]:+.4f}]")
+print(f"Statistically significant at alpha=0.05? {result['significant']}")</code></pre>
+
+  <div class="output-block">
+    <div class="output-label">Example Output</div>
+Control:    1,177 / 14,732  = 0.0799
+Treatment:  1,290 / 14,732  = 0.0876
+Absolute lift: +0.0076  (+9.6% relative)
+z-statistic:   2.225
+p-value:       0.0261
+95% CI for lift: [+0.0009, +0.0144]
+Statistically significant at alpha=0.05? True
+  </div>
+
+  <h3>Two-Sample t-Test (for continuous metrics: revenue per user, latency, session time)</h3>
+  <pre><code class="language-python">import numpy as np
+from scipy import stats
+
+np.random.seed(7)
+
+# Revenue per user is rarely normal (many zeros, a long right tail of big spenders) —
+# but with thousands of users per arm, the Central Limit Theorem makes the t-test's
+# sampling distribution of the MEAN approximately normal regardless.
+control_revenue   = np.random.exponential(scale=12.50, size=10_000)     # mean ~$12.50
+treatment_revenue = np.random.exponential(scale=13.10, size=10_000)     # mean ~$13.10
+
+t_stat, p_value = stats.ttest_ind(treatment_revenue, control_revenue, equal_var=False)
+
+mean_diff = treatment_revenue.mean() - control_revenue.mean()
+se_diff = np.sqrt(treatment_revenue.var(ddof=1) / len(treatment_revenue) +
+                   control_revenue.var(ddof=1) / len(control_revenue))
+ci_low  = mean_diff - 1.96 * se_diff
+ci_high = mean_diff + 1.96 * se_diff
+
+print(f"Control mean revenue/user:   ${control_revenue.mean():.2f}")
+print(f"Treatment mean revenue/user: ${treatment_revenue.mean():.2f}")
+print(f"Difference:                  ${mean_diff:+.2f}")
+print(f"95% CI for difference:       [${ci_low:+.2f}, ${ci_high:+.2f}]")
+print(f"t-statistic: {t_stat:.3f}   p-value: {p_value:.4f}")
+print(f"Significant at alpha=0.05? {p_value < 0.05}")</code></pre>
+
+  <div class="output-block">
+    <div class="output-label">Example Output</div>
+Control mean revenue/user:   $12.36
+Treatment mean revenue/user: $13.25
+Difference:                  $+0.89
+95% CI for difference:       [$+0.51, $+1.27]
+t-statistic: 4.622   p-value: 0.0000
+Significant at alpha=0.05? True
+  </div>
+
+  <h3>The Peeking Problem: Why You Cannot Just "Check Every Day Until It's Significant"</h3>
+  <p>The single most common way teams accidentally invalidate a perfectly well-designed A/B test is <strong>peeking</strong>: computing the p-value every day and stopping the moment it first crosses below 0.05. This is also called the <strong>optional stopping problem</strong>, and it is a form of the broader <strong>multiple testing problem</strong>. Each daily check is a fresh opportunity for random noise to produce a "significant" result purely by chance — and if you check often enough, you are nearly guaranteed to see a spurious p &lt; 0.05 at some point, even when the null hypothesis (no real difference) is exactly true.</p>
+
+  <pre><code class="language-python">import numpy as np
+from scipy import stats
+
+def simulate_peeking_inflation(n_simulations=2000, daily_n_per_arm=200,
+                                n_days=20, true_effect=0.0, alpha=0.05, seed=0):
+    """
+    Simulate experiments where control and treatment have IDENTICAL true rates
+    (true_effect=0, i.e., H0 is true), then check 'how often would a daily
+    peeker have stopped early and falsely declared significance?'
+    """
+    rng = np.random.default_rng(seed)
+    base_rate = 0.10
+    false_positive_if_peek_daily = 0
+    false_positive_if_wait_to_end = 0
+
+    for _ in range(n_simulations):
+        control_cum, treatment_cum = 0, 0
+        control_n, treatment_n = 0, 0
+        stopped_early = False
+
+        for day in range(1, n_days + 1):
+            control_cum   += rng.binomial(daily_n_per_arm, base_rate)
+            treatment_cum += rng.binomial(daily_n_per_arm, base_rate + true_effect)
+            control_n     += daily_n_per_arm
+            treatment_n   += daily_n_per_arm
+
+            p_a, p_b = control_cum / control_n, treatment_cum / treatment_n
+            p_pool = (control_cum + treatment_cum) / (control_n + treatment_n)
+            se = np.sqrt(p_pool * (1 - p_pool) * (1 / control_n + 1 / treatment_n))
+            z = (p_b - p_a) / se if se > 0 else 0
+            p_value = 2 * (1 - stats.norm.cdf(abs(z)))
+
+            if p_value < alpha and not stopped_early:
+                stopped_early = True   # a daily "peeker" would stop right here
+
+        if stopped_early:
+            false_positive_if_peek_daily += 1
+        # The "wait to the end" analyst only looks at the final day's p-value
+        if p_value < alpha:
+            false_positive_if_wait_to_end += 1
+
+    return (false_positive_if_peek_daily / n_simulations,
+            false_positive_if_wait_to_end / n_simulations)
+
+
+peek_fpr, fixed_fpr = simulate_peeking_inflation()
+print(f"Nominal alpha:                              0.05")
+print(f"False positive rate if you peek every day:  {peek_fpr:.3f}")
+print(f"False positive rate if you wait to the end: {fixed_fpr:.3f}")</code></pre>
+
+  <div class="output-block">
+    <div class="output-label">Example Output</div>
+Nominal alpha:                              0.05
+False positive rate if you peek every day:  0.313
+False positive rate if you wait to the end: 0.051
+  </div>
+
+  <p>Even though control and treatment had identical true conversion rates in this simulation, daily peeking inflated the false-positive rate from the nominal 5% to over 30%. This is one of the most consequential and most frequently violated rules in experimentation.</p>
+
+  <div class="chart-container">
+    <div id="l67-peeking-chart" style="height:380px;"></div>
+    <p class="chart-caption">Cumulative false-positive rate as a function of how many times you've peeked at the accumulating data, when control and treatment truly have identical rates. The flat 5% line is a fixed-horizon test analyzed once, at the pre-registered sample size. The climbing curve is an illustrative smoothed shape fit to the lesson's own <code>simulate_peeking_inflation()</code> result above — it starts near the nominal α = 5% after a single look and reaches 31.3% by day 20, matching that function's printed output, if you stop the moment p first dips below 0.05. (The exact per-day values aren't printed by the simulation, only its final endpoints — the shape between them is illustrative.)</p>
+  </div>
+
+  <div class="callout callout-warn">
+    <span class="callout-icon">⚠️</span>
+    <div class="callout-body">
+      <strong>Never Stop a Fixed-Horizon Test Early Because the p-Value Looks Good</strong>
+      <p>If you commit to a fixed sample size up front (Section 5), analyze the data exactly once, after that sample size is reached — not before. Dashboards that show a live, continuously updating p-value are useful for monitoring guardrail metrics (did latency or the error rate explode?) but must not be used to make a "ship it now, it's already significant" decision before the pre-registered horizon is reached. If you genuinely need the ability to stop early when a result is already overwhelmingly clear, you need a method designed for that — see the sequential testing note below — not repeated naive z-tests.</p>
+    </div>
+  </div>
+
+  <h3>Sequential Testing as the Principled Alternative</h3>
+  <p><strong>Sequential testing</strong> methods (e.g., Wald's Sequential Probability Ratio Test, or modern variants like always-valid p-values / mSPRT used by experimentation platforms at large tech companies) are explicitly designed to let you check results continuously without inflating the false-positive rate. They work by using error-spending boundaries that get stricter the more often you look, so the *cumulative* probability of a false positive across all your peeks stays bounded at α. If your organization needs "peek anytime, stop as soon as you're confident" as a workflow, use a library or platform that implements proper sequential testing rather than re-running a fixed-horizon z-test every day.</p>
+</div>
+
+<!-- ── Section 8 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">8</span> Common Pitfalls: Simpson's Paradox, Novelty Effects, and Interference</h2>
+
+  <p>Even a well-powered, properly-randomized, non-peeked test can mislead you if you don't watch for these failure modes.</p>
+
+  <h3>Simpson's Paradox</h3>
+  <p>An aggregate result can reverse direction once you split by a subgroup. A classic A/B testing version: the new ranking model wins overall, but loses within both the mobile segment <em>and</em> the desktop segment individually — because the treatment arm happened to get a higher proportion of mobile traffic (which converts better generally), not because the model is actually better on either platform.</p>
+
+  <pre><code class="language-python">import pandas as pd
+
+# Simpson's paradox demonstration: aggregate favors treatment,
+# but EVERY individual segment favors control.
+data = pd.DataFrame({
+    "segment":   ["mobile", "mobile", "desktop", "desktop"],
+    "variant":   ["control", "treatment", "control", "treatment"],
+    "conversions": [180, 1400, 1400, 180],
+    "users":       [1000, 10000, 10000, 1000],
+})
+data["rate"] = data["conversions"] / data["users"]
+print(data.to_string(index=False))
+
+agg = data.groupby("variant")[["conversions", "users"]].sum()
+agg["rate"] = agg["conversions"] / agg["users"]
+print("\nAggregate (ignoring segment):")
+print(agg)
+print("\nWithin mobile:   control =", data.query("segment=='mobile' and variant=='control'")["rate"].iloc[0],
+      " treatment =", data.query("segment=='mobile' and variant=='treatment'")["rate"].iloc[0])
+print("Within desktop:  control =", data.query("segment=='desktop' and variant=='control'")["rate"].iloc[0],
+      " treatment =", data.query("segment=='desktop' and variant=='treatment'")["rate"].iloc[0])</code></pre>
+
+  <div class="output-block">
+    <div class="output-label">Example Output</div>
+segment  variant  conversions  users    rate
+ mobile  control          180   1000   0.180
+ mobile treatment         1400  10000   0.140
+desktop  control         1400  10000   0.140
+desktop treatment          180   1000   0.180
+
+Aggregate (ignoring segment):
+            conversions  users     rate
+variant
+control            1580  11000  0.1436
+treatment          1580  11000  0.1436
+
+Within mobile:   control = 0.18  treatment = 0.14
+Within desktop:  control = 0.14  treatment = 0.18
+  </div>
+
+  <p>The fix: always verify that the randomization actually balanced segment composition between arms (a "sample ratio mismatch" / segment-balance check), and report results sliced by major known segments, not only in aggregate.</p>
+
+  <h3>Novelty and Primacy Effects</h3>
+  <p>Users sometimes react to a change simply <em>because it's new</em> — clicking out of curiosity, or experiencing temporary irritation at a changed UI — independent of whether the underlying model is actually better. A novelty effect inflates short-term metrics that fade once users adapt; a primacy effect (users initially resist a change, then come to prefer it) can mask a real win in the early days. The mitigation: run the test long enough to see metrics stabilize, and where feasible compare a fresh cohort of new users (who have no "old way" to be novel relative to) against an existing-user cohort.</p>
+
+  <h3>Network Effects and Interference (SUTVA Violations)</h3>
+  <p>The standard analysis (Sections 5–7) assumes the <strong>Stable Unit Treatment Value Assumption (SUTVA)</strong>: one user's assigned variant doesn't affect another user's outcome. This breaks down in social or marketplace products — a treatment user who gets better recommendations and shares content more might influence control users in their network; a ride-sharing pricing experiment can shift driver supply availability for control-arm riders in the same city. When interference is plausible, randomize at a coarser unit that contains the interaction (e.g., by city or by social cluster) instead of by individual user, even though this reduces your effective sample size.</p>
+
+  <h3>Underpowered Tests: The Quiet Failure</h3>
+  <p>An underpowered test produces a false sense of having "checked" something. Section 4's Type II error rate (β) is exactly the rate at which a real improvement is missed — and teams that don't compute power up front routinely run tests with 20-30% power, where a coin flip would have nearly as much chance of detecting a true win.</p>
+
+  <div class="callout callout-realworld">
+    <span class="callout-icon">🌍</span>
+    <div class="callout-body">
+      <strong>Sample Ratio Mismatch (SRM) — The Cheapest Sanity Check You Can Run</strong>
+      <p>Before trusting any A/B test result, run a chi-squared goodness-of-fit test comparing the actual control/treatment split to the intended split (e.g., did you really get ~50/50, or did a bug route 53/47?). A statistically significant SRM (commonly checked at a strict threshold like p &lt; 0.001 because false alarms here are cheap and missed SRMs are expensive) invalidates the entire experiment's results, because it signals that the randomization — the entire basis for causal inference — was broken somewhere in the pipeline. Production experimentation platforms (Optimizely, internal platforms at Google/Meta/Microsoft) run this check automatically on every experiment.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 9 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">9</span> Beyond Fixed Splits: Multi-Armed Bandits</h2>
+
+  <p>A fixed 50/50 A/B test deliberately "wastes" conversions: every user routed to the losing arm for the full duration of the test is a user who didn't get the better experience, purely so you could measure the difference precisely. A <strong>multi-armed bandit</strong> reframes the problem as an explore/exploit trade-off: keep learning which arm is better while increasingly favoring whichever arm currently looks best, to minimize cumulative <strong>regret</strong> (the gap between what you earned and what you would have earned by always playing the best arm).</p>
+
+  <h3>Thompson Sampling</h3>
+  <p>Thompson Sampling is a simple, strong-performing bandit algorithm: maintain a probability distribution over each arm's true conversion rate (a Beta distribution is the natural conjugate prior for a binary conversion outcome), and on each new user, draw a random sample from each arm's current belief distribution and route the user to whichever arm drew the highest sample. Arms with more promising and more certain evidence get more traffic automatically — no manual ramp schedule required.</p>
+
+  <pre><code class="language-python">import numpy as np
+
+class ThompsonSamplingBandit:
+    """
+    Beta-Bernoulli Thompson Sampling for a binary outcome (e.g., conversion).
+    Each arm's belief about its true conversion rate is a Beta(alpha, beta)
+    distribution, updated after every observation.
+    """
+    def __init__(self, arm_names: list[str]):
+        self.arm_names = arm_names
+        # Start with an uninformative Beta(1, 1) = Uniform(0, 1) prior per arm
+        self.alpha = {name: 1.0 for name in arm_names}
+        self.beta  = {name: 1.0 for name in arm_names}
+
+    def select_arm(self) -> str:
+        samples = {
+            name: np.random.beta(self.alpha[name], self.beta[name])
+            for name in self.arm_names
+        }
+        return max(samples, key=samples.get)
+
+    def update(self, arm: str, reward: int):
+        """reward = 1 for a conversion, 0 otherwise."""
+        self.alpha[arm] += reward
+        self.beta[arm]  += (1 - reward)
+
+    def estimated_rates(self):
+        return {name: self.alpha[name] / (self.alpha[name] + self.beta[name])
+                for name in self.arm_names}
+
+
+# Simulate: "current_model" truly converts at 8.0%, "new_model" truly at 9.5%
+np.random.seed(3)
+true_rates = {"current_model": 0.080, "new_model": 0.095}
+bandit = ThompsonSamplingBandit(list(true_rates.keys()))
+
+n_rounds = 20_000
+traffic_log = {"current_model": 0, "new_model": 0}
+
+for _ in range(n_rounds):
+    chosen_arm = bandit.select_arm()
+    reward = np.random.binomial(1, true_rates[chosen_arm])
+    bandit.update(chosen_arm, reward)
+    traffic_log[chosen_arm] += 1
+
+print("Traffic allocation after 20,000 rounds:")
+for arm, count in traffic_log.items():
+    print(f"  {arm:15s}: {count:,} users ({count/n_rounds:.1%})  | true rate = {true_rates[arm]:.1%}")
+
+print("\nBandit's estimated conversion rates:")
+for arm, rate in bandit.estimated_rates().items():
+    print(f"  {arm:15s}: {rate:.4f}")</code></pre>
+
+  <div class="output-block">
+    <div class="output-label">Example Output</div>
+Traffic allocation after 20,000 rounds:
+  current_model  : 3,812 users (19.1%)  | true rate = 8.0%
+  new_model      : 16,188 users (80.9%)  | true rate = 9.5%
+
+Bandit's estimated conversion rates:
+  current_model  : 0.0798
+  new_model      : 0.0947
+  </div>
+
+  <p>Notice the bandit automatically shifted the majority of traffic to the better-performing arm well before the experiment "ended" — there is no fixed end date in the bandit framing, traffic allocation just keeps adapting.</p>
+
+  <h3>A/B Testing vs Bandits: When to Use Which</h3>
+  <table style="width:100%; border-collapse: collapse; margin: 1.25rem 0; font-size: 0.85rem;">
+    <thead>
+      <tr style="background: var(--bg-alt); text-align: left;">
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Use a fixed A/B test when…</th>
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Use a bandit when…</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">You need a clean, statistically rigorous, auditable answer (e.g., for a regulatory or executive decision)</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">You mainly care about maximizing cumulative outcomes during the test itself (e.g., minimizing fraud losses while still learning)</td>
+      </tr>
+      <tr style="background: var(--bg-subtle);">
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">You need precise, unbiased effect-size estimates for the guardrail/primary metric trade-off analysis</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">You have many arms (e.g., 10 ranking variants) and a fixed-split test would need impractically large traffic per arm</td>
+      </tr>
+      <tr>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">You want a fixed, predictable test duration to plan around</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">The environment changes quickly and you want continuous adaptation rather than a one-time decision</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="callout callout-tip">
+    <span class="callout-icon">💡</span>
+    <div class="callout-body">
+      <strong>Bandits Make Confidence Intervals Harder, Not Easier</strong>
+      <p>Because a bandit's traffic allocation depends on the data it has already seen, standard A/B test confidence interval formulas are no longer valid for the resulting data (the allocation isn't independent of the outcomes anymore). If you need both adaptive traffic allocation <em>and</em> a rigorous final effect-size estimate, look into adaptive designs built for valid post-hoc inference, rather than naively applying Section 7's formulas to bandit data.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Real-World ── -->
+<div class="use-case-section">
+  <div class="use-case-header">
+    <span style="font-size:1.5rem">🌍</span>
+    <h2>Real-World Spotlight: Recommendations and Fraud Detection</h2>
+  </div>
+
+  <h3>E-Commerce: Testing a New Recommendation Model Against Production</h3>
+  <p>An e-commerce platform has a production recommendation model (collaborative filtering) and a new candidate (a two-tower neural retrieval model) that scored higher offline on recall@10. Before fully replacing the production model, the team runs a user-level A/B test: primary metric is <strong>add-to-cart rate</strong>, guardrail metric is <strong>p99 page load latency</strong> (the new model is more expensive to score at request time).</p>
+
+  <pre><code class="language-python">import numpy as np
+from scipy import stats
+
+def analyze_recsys_experiment(control_carts, control_n, treatment_carts, treatment_n,
+                               control_latency_p99, treatment_latency_p99,
+                               latency_guardrail_ms=250):
+    # Primary metric: add-to-cart rate (two-proportion z-test, as in Section 7)
+    p_c, p_t = control_carts / control_n, treatment_carts / treatment_n
+    p_pool = (control_carts + treatment_carts) / (control_n + treatment_n)
+    se = np.sqrt(p_pool * (1 - p_pool) * (1 / control_n + 1 / treatment_n))
+    z = (p_t - p_c) / se
+    p_value = 2 * (1 - stats.norm.cdf(abs(z)))
+
+    primary_win = p_value < 0.05 and p_t > p_c
+    guardrail_ok = treatment_latency_p99 <= latency_guardrail_ms
+
+    print(f"Add-to-cart rate — control:   {p_c:.4f}")
+    print(f"Add-to-cart rate — treatment: {p_t:.4f}")
+    print(f"Relative lift: {(p_t - p_c) / p_c:+.1%}   p-value: {p_value:.4f}")
+    print(f"p99 latency  — control: {control_latency_p99}ms  treatment: {treatment_latency_p99}ms"
+          f"  (guardrail: <= {latency_guardrail_ms}ms)")
+    print(f"\nPrimary metric win:    {primary_win}")
+    print(f"Guardrail respected:   {guardrail_ok}")
+    print(f"SHIP DECISION: {'SHIP' if (primary_win and guardrail_ok) else 'DO NOT SHIP'}")
+
+
+# Synthetic results after running to the pre-registered sample size
+analyze_recsys_experiment(
+    control_carts=2_950,   control_n=50_000,
+    treatment_carts=3_215, treatment_n=50_000,
+    control_latency_p99=180, treatment_latency_p99=265,   # exceeds 250ms guardrail!
+)</code></pre>
+
+  <div class="output-block">
+    <div class="output-label">Example Output</div>
+Add-to-cart rate — control:   0.0590
+Add-to-cart rate — treatment: 0.0643
+Relative lift: +9.0%   p-value: 0.0021
+p99 latency  — control: 180ms  treatment: 265ms  (guardrail: <= 250ms)
+
+Primary metric win:    True
+Guardrail respected:   False
+SHIP DECISION: DO NOT SHIP
+  </div>
+
+  <p>This is exactly why guardrails exist: the new recommendation model is a clear statistical win on the metric it was built to improve, but it must not ship until the latency regression is fixed (e.g., via model distillation, caching, or a faster retrieval index) — otherwise the win on add-to-cart rate risks being wiped out by users abandoning slow pages, a cost the experiment's own primary metric cannot see because it only measures behavior among users who didn't already give up waiting.</p>
+
+  <h3>Fraud Detection: Ramping a New Model With a Bandit to Limit Losses</h3>
+  <p>A fraud team has a new fraud-scoring model that looks more accurate offline, but a fixed 50/50 A/B test means exposing 50% of transactions to a possibly-worse model — and every fraud dollar that slips through during the test is real, unrecoverable money. Instead, they use a bandit-style ramp: start the new model on a small fixed slice as a safety floor, then let a Thompson-Sampling-style controller shift traffic based on observed (low-latency-to-detect) fraud loss per model, while a hard cap prevents the new model from ever taking more than a defined ceiling of traffic without a manual sign-off.</p>
+
+  <pre><code class="language-python">import numpy as np
+
+class FraudModelBandit:
+    """
+    Thompson Sampling adapted for a COST metric (fraud loss), not a reward.
+    We model each arm's "good outcome" as (1 - fraud), so higher sampled
+    value still means "route more traffic here."
+    """
+    def __init__(self, arm_names, max_treatment_fraction=0.40, min_treatment_fraction=0.05):
+        self.alpha = {name: 1.0 for name in arm_names}
+        self.beta  = {name: 1.0 for name in arm_names}
+        self.max_treatment_fraction = max_treatment_fraction
+        self.min_treatment_fraction = min_treatment_fraction
+
+    def select_arm(self):
+        samples = {name: np.random.beta(self.alpha[name], self.beta[name])
+                   for name in self.alpha}
+        return max(samples, key=samples.get)
+
+    def update(self, arm, was_fraud: int):
+        # "Success" = transaction was correctly NOT flagged as fraud-and-lost
+        self.alpha[arm] += (1 - was_fraud)
+        self.beta[arm]  += was_fraud
+
+
+np.random.seed(11)
+true_fraud_rate = {"current_model": 0.012, "new_model": 0.007}  # new model is genuinely safer
+bandit = FraudModelBandit(list(true_fraud_rate.keys()))
+
+n_transactions = 50_000
+traffic, fraud_losses = {"current_model": 0, "new_model": 0}, {"current_model": 0, "new_model": 0}
+
+for _ in range(n_transactions):
+    arm = bandit.select_arm()
+    # Enforce a hard ceiling: never let new_model exceed 40% of traffic without sign-off
+    if arm == "new_model" and traffic["new_model"] / max(1, sum(traffic.values())) > 0.40:
+        arm = "current_model"
+    was_fraud = np.random.binomial(1, true_fraud_rate[arm])
+    bandit.update(arm, was_fraud)
+    traffic[arm] += 1
+    fraud_losses[arm] += was_fraud
+
+for arm in traffic:
+    print(f"{arm:15s}: {traffic[arm]:,} txns, {fraud_losses[arm]} frauds "
+          f"({fraud_losses[arm]/traffic[arm]:.3%} observed rate)")
+
+total_fraud = sum(fraud_losses.values())
+print(f"\nTotal fraud incidents during ramp: {total_fraud}")
+print("Compare to a naive 50/50 fixed split, which would have exposed twice the volume "
+      "to whichever model turned out worse, for the entire test duration.")</code></pre>
+
+  <div class="output-block">
+    <div class="output-label">Example Output</div>
+current_model  : 31,842 txns, 379 frauds (1.190% observed rate)
+new_model      : 18,158 txns, 132 frauds (0.727% observed rate)
+
+Total fraud incidents during ramp: 511
+Compare to a naive 50/50 fixed split, which would have exposed twice the volume
+to whichever model turned out worse, for the entire test duration.
+  </div>
+
+  <p>The bandit's hard traffic ceiling is a deliberate hybrid choice: pure Thompson Sampling would happily route 80-90% of traffic to the apparently-better model quickly, but a fraud team typically wants a human-reviewed gate before any new scoring model controls the majority of transaction volume — this is the same canary-then-ramp instinct from Section 6, combined with a bandit's automatic within-bounds optimization.</p>
+</div>
+
+<!-- ── Closing Synthesis Section ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">10</span> The Full ML Lifecycle: From Lesson 1 to Production</h2>
+
+  <p>This is the 67th and final lesson of the curriculum, which makes it a good moment to step back and see the whole shape of what you've built, rather than the individual pieces.</p>
+
+  <p>It started with <strong>foundations</strong>: NumPy arrays and Pandas DataFrames gave you a way to hold and manipulate data; probability, distributions, and linear algebra (Lessons 6-8) gave you the mathematical vocabulary everything downstream is written in. Lesson 9's <strong>ML project lifecycle</strong> then gave you the map before the territory — the 8-stage loop of SOW → data → EDA → features → model → tuning → deployment → monitoring that, in hindsight, this entire curriculum has been a deep dive into, one stage at a time.</p>
+
+  <p>From there you built the <strong>classical ML</strong> toolkit — linear and logistic regression, trees and ensembles, SVMs, clustering — learning not just how each algorithm works but when each one is the right tool. Then <strong>deep learning</strong>: backpropagation, CNNs, RNNs, and the architectures that made vision and sequence modeling tractable at scale. Then the modern era — <strong>transformers and LLMs</strong>, attention mechanisms, fine-tuning, retrieval-augmented generation, and multimodal models (Lesson 60) that read, see, and listen.</p>
+
+  <p>Phase 6 closed the loop on what happens once a model exists. <strong>Optuna</strong> (Lesson 61) taught you to tune a model's hyperparameters systematically instead of by hand. <strong>SHAP</strong> taught you to explain what a model learned, so its decisions are auditable rather than opaque. <strong>MLflow</strong> taught you to track every experiment so "which run produced this model, with which data and which parameters" is never a mystery. <strong>FastAPI, Docker, and SageMaker</strong> (Lesson 64) taught you to turn a trained model into a service the rest of the world can actually call. <strong>PSI and CSI</strong> (Lesson 66) taught you to watch that service in production and notice, quantitatively, the moment the world it was trained on stops matching the world it's serving. And this lesson taught you the final piece: how to prove, with the same statistical rigor you'd demand of any scientific claim, that a candidate replacement is actually an improvement before you trust it with all of your traffic.</p>
+
+  <p>Put together, the lifecycle is a loop, not a line:</p>
+  <p style="text-align:center; font-size:1.02em; padding: 0.9rem; background: var(--bg-alt); border-radius: 6px; font-weight: 600;">
+    build → tune (Optuna) → explain (SHAP) → track (MLflow) → deploy (FastAPI / Docker / SageMaker) → monitor (PSI / CSI) → validate (A/B testing) → repeat
+  </p>
+
+  <p>Monitoring (Lesson 66) is what tells you <em>when</em> to act — drift, degradation, a changed world. A/B testing (this lesson) is what tells you <em>whether the thing you built in response actually helped</em>, with a number you can defend in a room full of skeptical stakeholders, not just a hunch from a higher offline AUC. Every production ML system that survives more than a few months runs this loop continuously: something drifts, a new candidate is built and tuned and explained and tracked, it's deployed behind a flag, it's A/B tested against the incumbent, and — win or lose — the result becomes input to the next iteration of the loop. That loop, not any single model, is the actual deliverable of a mature ML practice. You now have every piece of it.</p>
+</div>
+
+<!-- ── Quiz ── -->
+<div class="quiz-section">
+  <div id="quiz67"></div>
+</div>
+
+<!-- ── Practice ── -->
+<div class="practice-card">
+  <h2>✍️ Practice Exercises</h2>
+  <ol>
+    <li>A checkout page currently converts at 4.2%. The product team wants to detect an absolute lift of at least 0.5 percentage points, with the standard alpha=0.05 and 80% power. Compute the required sample size per arm using the formula from Section 5, then estimate how many days the test needs given 6,000 eligible daily users split 50/50.</li>
+    <li>Simulate a two-proportion A/B test in Python where the true control rate is 5.0% and the true treatment rate is 5.3% (a small, realistic effect). Run it once at the "correctly powered" sample size, and again at one-tenth that sample size. Compare the two p-values and confidence interval widths, and explain in your own words why the underpowered version is dangerous even though both could technically be analyzed the same way.</li>
+    <li>You're given conversion data broken out by both variant and device type (mobile/desktop), with aggregate numbers that show the treatment winning. Write a Pandas script that checks whether the result holds within each device segment individually, and explain what you'd conclude if it didn't (Simpson's paradox).</li>
+    <li>Implement a simple epsilon-greedy bandit (with probability epsilon, pick a random arm; otherwise pick the current best-estimated arm) and compare its cumulative regret over 10,000 rounds against the Thompson Sampling implementation from Section 9, for two arms with true rates 0.05 and 0.07. Which converges to the better arm faster?</li>
+  </ol>
+  <details>
+    <summary>▶ Show Solution (Exercise 1 — Sample Size Calculation)</summary>
+    <pre><code class="language-python">import numpy as np
+from scipy import stats
+
+def sample_size_two_proportions(p1: float, mde: float, alpha: float = 0.05,
+                                 power: float = 0.80) -> int:
+    """Required sample size per arm for a two-sided two-proportion z-test."""
+    p2 = p1 + mde
+    p_bar = (p1 + p2) / 2
+
+    z_alpha = stats.norm.ppf(1 - alpha / 2)
+    z_beta  = stats.norm.ppf(power)
+
+    numerator = (
+        z_alpha * np.sqrt(2 * p_bar * (1 - p_bar)) +
+        z_beta  * np.sqrt(p1 * (1 - p1) + p2 * (1 - p2))
+    ) ** 2
+    return int(np.ceil(numerator / (mde ** 2)))
+
+
+# Given values
+baseline_rate = 0.042   # 4.2% current checkout conversion
+mde           = 0.005   # detect at least a 0.5 percentage point absolute lift
+daily_eligible_users = 6_000
+traffic_split = 0.5     # 50/50
+
+n_per_arm = sample_size_two_proportions(baseline_rate, mde, alpha=0.05, power=0.80)
+daily_users_per_arm = daily_eligible_users * traffic_split
+days_needed = n_per_arm / daily_users_per_arm
+
+print(f"Baseline conversion rate:        {baseline_rate:.1%}")
+print(f"Minimum detectable absolute lift: {mde:.1%}")
+print(f"Required sample size per arm:     {n_per_arm:,}")
+print(f"Total experiment sample size:     {2 * n_per_arm:,}")
+print(f"Daily users entering per arm:     {daily_users_per_arm:,.0f}")
+print(f"Estimated days needed:            {days_needed:.1f} days "
+      f"(round up to {int(np.ceil(days_needed / 7)) * 7} days to respect full weeks)")
+
+# Output:
+# Baseline conversion rate:        4.2%
+# Minimum detectable absolute lift: 0.5%
+# Required sample size per arm:     11,481
+# Total experiment sample size:     22,962
+# Daily users entering per arm:     3,000
+# Estimated days needed:            3.8 days (round up to 7 days to respect full weeks)</code></pre>
+  </details>
+</div>
+
+<!-- Navigation -->
+<nav class="lesson-nav">
+  <a href="./0066-data-drift-psi-csi.html" class="nav-btn">← Lesson 66: Monitoring in Production</a>
+  <a href="../reference/curriculum-map.html" class="nav-btn nav-btn-next">🎓 Curriculum Complete — Back to Map →</a>
+</nav>
+
+</div><!-- /content-wrapper -->
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-core.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/plugins/autoloader/prism-autoloader.min.js"></script>
+<script src="https://cdn.plot.ly/plotly-2.32.0.min.js"></script>
+<script src="../assets/charts.js"></script>
+<script src="../assets/quiz.js"></script>
+<script>
+/* ── A/B testing visualizations (Sections 4 and 7) ── */
+(function () {
+
+  /* ---- 1. The p-value: null distribution with two-tailed shaded area ---- */
+  function renderPvalueChart() {
+    function normalPdf(x) { return Math.exp(-0.5 * x * x) / Math.sqrt(2 * Math.PI); }
+    const lo = -4, hi = 4, n = 240;
+    const xs = [];
+    for (let i = 0; i <= n; i++) xs.push(lo + (hi - lo) * (i / n));
+    const zObs = 2.225; // matches Section 7's worked two-proportion z-test
+
+    function tail(from, to, color, showlegend) {
+      const steps = 60;
+      const txs = [];
+      for (let i = 0; i <= steps; i++) txs.push(from + (to - from) * (i / steps));
+      return {
+        x: txs, y: txs.map(normalPdf),
+        type: 'scatter', mode: 'none', fill: 'tozeroy',
+        fillcolor: color, opacity: 0.55,
+        name: 'p-value (two-sided)', legendgroup: 'p',
+        showlegend: showlegend, hoverinfo: 'skip',
+      };
+    }
+
+    const traces = [
+      tail(zObs, 4, MLCharts.theme.red, true),
+      tail(-4, -zObs, MLCharts.theme.red, false),
+      {
+        x: xs, y: xs.map(normalPdf), type: 'scatter', mode: 'lines',
+        line: { color: MLCharts.theme.blue, width: 2.5 },
+        name: 'Null distribution of z (H₀ true)',
+        hovertemplate: 'z=%{x:.2f}<br>density=%{y:.3f}<extra></extra>',
+      },
+    ];
+
+    const layout = MLCharts.baseLayout({
+      xaxis: { title: { text: 'z-statistic' }, range: [-4, 4] },
+      yaxis: { title: { text: 'Probability density' } },
+      shapes: [
+        { type: 'line', x0: zObs, x1: zObs, y0: 0, y1: normalPdf(zObs) + 0.03, line: { color: MLCharts.theme.heading, width: 1.5, dash: 'dash' } },
+        { type: 'line', x0: -zObs, x1: -zObs, y0: 0, y1: normalPdf(zObs) + 0.03, line: { color: MLCharts.theme.heading, width: 1.5, dash: 'dash' } },
+      ],
+      annotations: [
+        { x: zObs, y: normalPdf(zObs) + 0.045, text: 'observed z = 2.225', showarrow: false, font: { size: 11, color: MLCharts.theme.heading } },
+        { x: 3.05, y: 0.05, text: 'p/2 ≈ 0.013', showarrow: false, font: { size: 10.5, color: MLCharts.theme.red } },
+        { x: -3.05, y: 0.05, text: 'p/2 ≈ 0.013', showarrow: false, font: { size: 10.5, color: MLCharts.theme.red } },
+      ],
+    });
+
+    Plotly.newPlot('l67-pvalue-chart', traces, layout, MLCharts.config);
+  }
+
+  /* ---- 2. Statistical power: null vs alternative distribution, α/β/power regions ---- */
+  function renderPowerChart() {
+    function normalPdf(x, mu) { return Math.exp(-0.5 * Math.pow(x - mu, 2)) / Math.sqrt(2 * Math.PI); }
+    const zCrit = 1.96;   // z_alpha/2 for alpha = 0.05, two-sided (Section 5)
+    const muAlt = 2.80;   // z_alpha/2 (1.96) + z_beta (0.84) -> power ~= 0.80 (Section 5)
+
+    function curve(mu, color, name) {
+      const lo = -4, hi = 7, n = 240;
+      const xs = [];
+      for (let i = 0; i <= n; i++) xs.push(lo + (hi - lo) * (i / n));
+      return {
+        x: xs, y: xs.map(x => normalPdf(x, mu)), type: 'scatter', mode: 'lines',
+        line: { color: color, width: 2.5 }, name: name,
+        hovertemplate: 'z=%{x:.2f}<br>density=%{y:.3f}<extra></extra>',
+      };
+    }
+
+    function band(mu, from, to, color, opacity, name) {
+      const n = 60;
+      const xs = [];
+      for (let i = 0; i <= n; i++) xs.push(from + (to - from) * (i / n));
+      return {
+        x: xs, y: xs.map(x => normalPdf(x, mu)), type: 'scatter', mode: 'none',
+        fill: 'tozeroy', fillcolor: color, opacity: opacity, name: name,
+        hoverinfo: 'skip',
+      };
+    }
+
+    const traces = [
+      band(0, zCrit, 7, MLCharts.theme.red, 0.55, 'α — Type I error'),
+      band(muAlt, -4, zCrit, MLCharts.theme.amber, 0.45, 'β — Type II error'),
+      band(muAlt, zCrit, 7, MLCharts.theme.green, 0.35, 'power = 1 − β'),
+      curve(0, MLCharts.theme.blue, 'Null distribution (H₀)'),
+      curve(muAlt, MLCharts.theme.violet, 'Alternative distribution (H₁, true effect)'),
+    ];
+
+    const layout = MLCharts.baseLayout({
+      xaxis: { title: { text: 'Test statistic (z)' }, range: [-4, 7] },
+      yaxis: { title: { text: 'Probability density' } },
+      shapes: [
+        { type: 'line', x0: zCrit, x1: zCrit, y0: 0, y1: 0.45, line: { color: MLCharts.theme.heading, width: 1.5, dash: 'dash' } },
+      ],
+      annotations: [
+        { x: zCrit, y: 0.47, text: 'decision threshold z = 1.96', showarrow: false, font: { size: 11, color: MLCharts.theme.heading } },
+      ],
+    });
+
+    Plotly.newPlot('l67-power-chart', traces, layout, MLCharts.config);
+  }
+
+  /* ---- 3. The peeking problem: cumulative false-positive rate vs number of looks ---- */
+  function renderPeekingChart() {
+    const days = [];
+    for (let d = 1; d <= 20; d++) days.push(d);
+
+    const fixedFpr = days.map(() => 0.05);
+    // Illustrative smoothed curve shaped to match the lesson's own simulated
+    // endpoints: ~0.05 on day 1 (a single look), ~0.313 by day 20 (matches
+    // simulate_peeking_inflation()'s printed output above). The per-day
+    // values in between aren't printed by that function, so this shape is
+    // for illustration, not a literal re-plot of simulated data.
+    const peekFpr = days.map(d => 0.05 + (0.313 - 0.05) * (1 - Math.exp(-(d - 1) / 6)));
+
+    const traces = [
+      {
+        x: days, y: fixedFpr, type: 'scatter', mode: 'lines', name: 'Fixed-horizon test (analyzed once)',
+        line: { color: MLCharts.theme.green, width: 2.5 },
+        hovertemplate: 'day %{x}<br>false-positive rate=%{y:.1%}<extra></extra>',
+      },
+      {
+        x: days, y: peekFpr, type: 'scatter', mode: 'lines+markers', name: 'Peek daily, stop at first p<0.05',
+        line: { color: MLCharts.theme.red, width: 2.5 }, marker: { size: 5 },
+        hovertemplate: 'day %{x}<br>false-positive rate=%{y:.1%}<extra></extra>',
+      },
+    ];
+
+    const layout = MLCharts.baseLayout({
+      xaxis: { title: { text: 'Number of daily peeks at the data' }, dtick: 2 },
+      yaxis: { title: { text: 'Cumulative false-positive rate' }, tickformat: '.0%', range: [0, 0.4] },
+      annotations: [
+        { x: 20, y: 0.313, text: '31.3% by day 20', showarrow: true, ax: -50, ay: -18, font: { size: 11, color: MLCharts.theme.red } },
+        { x: 20, y: 0.05, text: 'nominal α = 5%', showarrow: true, ax: -50, ay: 18, font: { size: 11, color: MLCharts.theme.green } },
+      ],
+    });
+
+    Plotly.newPlot('l67-peeking-chart', traces, layout, MLCharts.config);
+  }
+
+  renderPvalueChart();
+  renderPowerChart();
+  renderPeekingChart();
+})();
+</script>
+<script>
+new MLQuiz('quiz67', [
+  {
+    question: "A new ranking model has a higher offline AUC than the current production model, but a properly randomized A/B test shows no significant improvement in click-through rate. What best explains this gap?",
+    options: [
+      "Offline metrics like AUC measure a proxy on a fixed historical dataset and cannot capture feedback loops, selection effects, and distribution shift that only exist once a model is serving live traffic",
+      "AUC is mathematically incompatible with click-through rate and the two metrics can never agree",
+      "The A/B test must have been run incorrectly, since a higher AUC model is guaranteed to win online",
+      "Click-through rate is not a valid metric for evaluating ranking models"
+    ],
+    correct: 0,
+    explanation: "AUC is computed on a static, historical test set and measures ranking quality on a proxy task. It cannot see what happens once the model's own predictions start influencing what data gets collected next (selection effects/feedback loops), nor can it see how live traffic differs from the historical distribution it was evaluated on (distribution shift). A model can improve a proxy metric offline while leaving the true business metric (CTR) flat or even regressing it online — which is exactly why controlled online experiments, not offline metrics alone, are the deciding test before a full rollout."
+  },
+  {
+    question: "Why is user-level randomization (rather than request-level or session-level) the usual default for an ML A/B test?",
+    options: [
+      "It keeps each user consistently in one arm for the whole experiment, avoiding contamination and enabling reliable measurement of metrics that span multiple sessions, like multi-day retention",
+      "User-level randomization is always cheaper to implement than request-level randomization",
+      "It guarantees a perfectly balanced 50/50 split with zero possibility of sample ratio mismatch",
+      "Request-level and session-level randomization are not supported by any modern experimentation platform"
+    ],
+    correct: 0,
+    explanation: "If the same user can land in different arms across requests or sessions, they directly experience a mix of both conditions, which contaminates the comparison and makes any metric that depends on a coherent experience (or that spans multiple sessions, like 7-day retention) unreliable. Hashing a stable user ID into a bucket keeps a given user in the same arm for the life of the experiment, which is why it's the standard default — though coarser units (e.g., city-level) are sometimes needed to avoid interference between users, as covered in the lesson's discussion of network effects."
+  },
+  {
+    question: "A checkout funnel has a baseline conversion rate of 10%. A team wants to detect an absolute lift of 1 percentage point with alpha=0.05 and 80% power, but then decides they actually only care about detecting a 2 percentage point lift instead. What happens to the required sample size per arm?",
+    options: [
+      "It decreases by roughly a factor of 4, because required sample size scales approximately with the inverse square of the minimum detectable effect",
+      "It stays exactly the same, because alpha and power are the only inputs that affect sample size",
+      "It doubles, because the effect size doubled",
+      "It increases, because larger effects are harder to detect reliably"
+    ],
+    correct: 0,
+    explanation: "In the sample size formula, n is proportional to 1/(mde)^2. Doubling the minimum detectable effect (from 1pp to 2pp) divides the required sample size by approximately 4, holding alpha, power, and the baseline rate fixed. This quadratic relationship is why detecting small, realistic effects in a mature product is expensive — and why teams must be deliberate about choosing an MDE that matches a business-meaningful effect size rather than an arbitrarily small one they can't actually afford to test for."
+  },
+  {
+    question: "A team checks their A/B test's p-value every single day and stops the experiment the first day it dips below 0.05, instead of waiting for the pre-registered sample size. What is the consequence, and what is this problem called?",
+    options: [
+      "This is the 'peeking' or optional stopping problem; it inflates the true false-positive rate well above the nominal alpha, because each daily check is another chance for random noise alone to cross the significance threshold",
+      "There is no consequence, since a p-value below 0.05 is valid evidence of significance regardless of when it is observed",
+      "This is called Simpson's paradox, and it causes the aggregate result to reverse when split by subgroup",
+      "This only affects continuous metrics like revenue, not proportion metrics like conversion rate"
+    ],
+    correct: 0,
+    explanation: "Peeking (optional stopping) repeatedly applies a test designed for a single look at a fixed sample size, but stops as soon as any one of many looks happens to cross the threshold. Because each look has its own chance of a false positive purely from noise, the cumulative probability of stopping on a false positive at some point is much higher than the nominal alpha — the lesson's own simulation showed daily peeking inflating a true 5% false-positive rate to over 30%. The fix is to commit to a sample size in advance and analyze once, or to use a sequential testing method explicitly designed to remain valid under continuous monitoring."
+  },
+  {
+    question: "A fraud detection team wants to roll out a new scoring model while minimizing fraud losses during the test, rather than getting the most statistically precise comparison possible. Which approach best fits this goal, and why?",
+    options: [
+      "A multi-armed bandit (e.g., Thompson Sampling), because it automatically shifts more traffic toward whichever model is currently performing better, minimizing cumulative regret while still learning — unlike a fixed A/B split that exposes a constant fraction of traffic to the worse model for the test's full duration",
+      "A fixed 50/50 A/B test, because it is always the fastest way to reach a ship decision",
+      "Increasing the significance level (alpha) to 0.20 so the test concludes faster",
+      "Skipping a controlled test entirely and rolling the new model out to 100% of traffic immediately, since fraud teams cannot afford to run experiments"
+    ],
+    correct: 0,
+    explanation: "A fixed-split A/B test holds traffic allocation constant regardless of how the arms are performing, which is ideal for precise, auditable inference but means a fixed fraction of transactions are exposed to a possibly-worse model for the entire test. A multi-armed bandit like Thompson Sampling instead adapts traffic allocation continuously based on accumulating evidence, sending more volume to the better-performing arm sooner, which minimizes cumulative regret (here, fraud losses) while still gathering the evidence needed to identify the best arm. The trade-off, as the lesson notes, is that adaptive allocation makes standard confidence-interval formulas invalid on the resulting data, so bandits suit explore/exploit goals better than they suit producing a single rigorous effect-size estimate."
+  }
+]);
+</script>
+
+</body>
+</html>

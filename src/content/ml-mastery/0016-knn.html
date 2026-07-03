@@ -60,6 +60,42 @@
 
   <p>This laziness has real consequences: KNN is fast to "train" (just store data), but can be slow to predict when the training set is large. And since it stores all training data, it can also be memory-intensive.</p>
 
+  <div class="diagram-svg-wrap">
+    <svg viewBox="0 0 640 320" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="A query point with its 3 nearest neighbors highlighted among scattered class A and class B points">
+      <!-- distance lines from query to its 3 nearest neighbors -->
+      <line class="diagram-arrow" x1="340" y1="170" x2="300" y2="120" stroke-dasharray="3 3"></line>
+      <line class="diagram-arrow" x1="340" y1="170" x2="380" y2="130" stroke-dasharray="3 3"></line>
+      <line class="diagram-arrow" x1="340" y1="170" x2="310" y2="205" stroke-dasharray="3 3"></line>
+
+      <!-- far-away points, class A (circles) -->
+      <circle class="diagram-node-good" cx="90" cy="60" r="8"><title>Class A</title></circle>
+      <circle class="diagram-node-good" cx="140" cy="110" r="8"><title>Class A</title></circle>
+      <circle class="diagram-node-good" cx="100" cy="160" r="8"><title>Class A</title></circle>
+      <circle class="diagram-node-good" cx="160" cy="250" r="8"><title>Class A</title></circle>
+      <circle class="diagram-node-good" cx="70" cy="230" r="8"><title>Class A</title></circle>
+
+      <!-- far-away points, class B (squares via alt style) -->
+      <rect class="diagram-node-alt" x="500" y="50" width="16" height="16" rx="3"><title>Class B</title></rect>
+      <rect class="diagram-node-alt" x="540" y="120" width="16" height="16" rx="3"><title>Class B</title></rect>
+      <rect class="diagram-node-alt" x="560" y="200" width="16" height="16" rx="3"><title>Class B</title></rect>
+      <rect class="diagram-node-alt" x="480" y="240" width="16" height="16" rx="3"><title>Class B</title></rect>
+
+      <!-- the 3 nearest neighbors (mixed classes near the query) -->
+      <circle class="diagram-node-good" cx="300" cy="120" r="9"><title>Nearest neighbor — Class A</title></circle>
+      <rect class="diagram-node-alt" x="372" y="122" width="18" height="18" rx="3"><title>Nearest neighbor — Class B</title></rect>
+      <circle class="diagram-node-good" cx="310" cy="205" r="9"><title>Nearest neighbor — Class A</title></circle>
+
+      <!-- query point -->
+      <circle class="diagram-node" cx="340" cy="170" r="10"><title>Query point — class unknown</title></circle>
+      <text class="diagram-label" x="340" y="148" text-anchor="middle">? query point</text>
+
+      <text class="diagram-sublabel" x="120" y="290">● Class A</text>
+      <text class="diagram-sublabel" x="500" y="290">■ Class B</text>
+      <text class="diagram-mono-label" x="340" y="245" text-anchor="middle">K = 3 → 2 votes A, 1 vote B → predict A</text>
+    </svg>
+    <p class="diagram-svg-caption">To classify the query point, KNN finds its K=3 closest training points by distance (dashed lines) and takes a majority vote among them — here, 2 of the 3 nearest neighbors are Class A, so the query is predicted Class A, even though it sits closer to the overall cluster of Class B on the right.</p>
+  </div>
+
   <div class="callout callout-key">
     <span class="callout-icon">🔑</span>
     <div class="callout-body">
@@ -164,6 +200,20 @@ knn_cosine    = KNeighborsClassifier(n_neighbors=5, metric='cosine')</code></pre
   </ul>
 
   <p>For binary classification, always choose an <strong>odd K</strong> to prevent ties in majority voting (e.g., 2 votes for class 0, 2 votes for class 1 when K=4). Ties are broken arbitrarily, which is a source of instability.</p>
+
+  <p>The chart below shows this tradeoff directly. It's a small synthetic 2-class, 2-feature dataset (40 points per class, two overlapping blobs — similar in spirit to <code>make_classification</code> from Section 1). The shaded background is the <strong>decision region</strong>: for every point in feature space, it shows which class a KNN classifier with the chosen K would predict, computed by majority vote among that point's K nearest training neighbors (plain Euclidean distance, no scikit-learn involved — just the same logic as the from-scratch <code>SimpleKNN</code> class in the practice section). Drag the slider and watch the boundary behave exactly as the bullets above describe:</p>
+
+  <div class="diagram-controls">
+    <div class="diagram-control-row">
+      <span class="diagram-control-label">K (number of neighbors)</span>
+      <input type="range" id="l16-k-slider" class="diagram-slider" min="1" max="25" step="1" value="1">
+      <span class="diagram-control-value" id="l16-k-value">1</span>
+    </div>
+  </div>
+  <div class="chart-container">
+    <div id="l16-knn-chart" style="height:440px;"></div>
+    <p class="chart-caption" id="l16-knn-caption">K = 1 — the decision boundary is jagged and wraps tightly around individual training points (low bias, high variance — classic overfitting).</p>
+  </div>
 
   <pre><code class="language-python">from sklearn.neighbors import KNeighborsClassifier
 from sklearn.datasets import make_moons
@@ -562,7 +612,124 @@ for movie, score in sorted(recommendations.items(), key=lambda x: -x[1]):
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-core.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/plugins/autoloader/prism-autoloader.min.js"></script>
+<script src="https://cdn.plot.ly/plotly-2.32.0.min.js"></script>
+<script src="../assets/charts.js"></script>
 <script src="../assets/quiz.js"></script>
+<script>
+/* ── Interactive KNN decision-boundary chart (Section 3) ── */
+(function () {
+  // Small synthetic 2-class, 2-feature dataset: two overlapping Gaussian blobs.
+  // Deterministic pseudo-random generator (mulberry32) so the dataset is stable on every load.
+  function mulberry32(seed) {
+    return function () {
+      seed |= 0; seed = (seed + 0x6D2B79F5) | 0;
+      let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+  function gaussian(rng) {
+    // Box-Muller transform
+    const u1 = Math.max(rng(), 1e-9), u2 = rng();
+    return Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
+  }
+
+  const rng = mulberry32(42);
+  const N_PER_CLASS = 40;
+  const trainX = []; // [x, y]
+  const trainY = []; // 0 or 1
+
+  // Class 0 centered near (3, 6), Class 1 centered near (6.5, 3.5) — overlapping blobs
+  for (let i = 0; i < N_PER_CLASS; i++) {
+    trainX.push([3 + gaussian(rng) * 1.4, 6 + gaussian(rng) * 1.4]);
+    trainY.push(0);
+  }
+  for (let i = 0; i < N_PER_CLASS; i++) {
+    trainX.push([6.5 + gaussian(rng) * 1.4, 3.5 + gaussian(rng) * 1.4]);
+    trainY.push(1);
+  }
+
+  const X_MIN = 0, X_MAX = 10, Y_MIN = 0, Y_MAX = 10;
+  const GRID_RES = 40;
+
+  function knnPredict(px, py, k) {
+    // Plain Euclidean-distance K-nearest-neighbor majority vote.
+    const dists = new Array(trainX.length);
+    for (let i = 0; i < trainX.length; i++) {
+      const dx = trainX[i][0] - px, dy = trainX[i][1] - py;
+      dists[i] = { d: dx * dx + dy * dy, label: trainY[i] };
+    }
+    dists.sort((a, b) => a.d - b.d);
+    let votes0 = 0, votes1 = 0;
+    for (let i = 0; i < k; i++) {
+      if (dists[i].label === 0) votes0++; else votes1++;
+    }
+    return votes1 > votes0 ? 1 : 0;
+  }
+
+  function computeGrid(k) {
+    const xs = [], ys = [], z = [];
+    for (let i = 0; i < GRID_RES; i++) xs.push(X_MIN + (X_MAX - X_MIN) * i / (GRID_RES - 1));
+    for (let j = 0; j < GRID_RES; j++) ys.push(Y_MIN + (Y_MAX - Y_MIN) * j / (GRID_RES - 1));
+    for (let j = 0; j < GRID_RES; j++) {
+      const row = [];
+      for (let i = 0; i < GRID_RES; i++) {
+        row.push(knnPredict(xs[i], ys[j], k));
+      }
+      z.push(row);
+    }
+    return { xs, ys, z };
+  }
+
+  function renderKnnChart(k) {
+    k = Math.round(k);
+    const { xs, ys, z } = computeGrid(k);
+
+    const class0X = trainX.filter((_, i) => trainY[i] === 0).map(p => p[0]);
+    const class0Y = trainX.filter((_, i) => trainY[i] === 0).map(p => p[1]);
+    const class1X = trainX.filter((_, i) => trainY[i] === 1).map(p => p[0]);
+    const class1Y = trainX.filter((_, i) => trainY[i] === 1).map(p => p[1]);
+
+    const traces = [
+      {
+        x: xs, y: ys, z: z, type: 'heatmap',
+        colorscale: [[0, MLCharts.theme.bgAlt], [1, MLCharts.theme.amber]],
+        opacity: 0.55, showscale: false, hoverinfo: 'skip', zmin: 0, zmax: 1,
+      },
+      {
+        x: class0X, y: class0Y, type: 'scatter', mode: 'markers',
+        marker: { color: MLCharts.theme.blue, size: 9, line: { color: MLCharts.theme.bgCard, width: 1 } },
+        name: 'Class 0', hovertemplate: 'Class 0<br>x=%{x:.2f}, y=%{y:.2f}<extra></extra>',
+      },
+      {
+        x: class1X, y: class1Y, type: 'scatter', mode: 'markers',
+        marker: { color: MLCharts.theme.amber, size: 9, symbol: 'diamond', line: { color: MLCharts.theme.bgCard, width: 1 } },
+        name: 'Class 1', hovertemplate: 'Class 1<br>x=%{x:.2f}, y=%{y:.2f}<extra></extra>',
+      },
+    ];
+
+    const layout = MLCharts.baseLayout({
+      xaxis: { title: { text: 'Feature 1' }, range: [X_MIN, X_MAX] },
+      yaxis: { title: { text: 'Feature 2' }, range: [Y_MIN, Y_MAX] },
+      margin: { l: 56, r: 24, t: 16, b: 48 },
+    });
+
+    Plotly.react('l16-knn-chart', traces, layout, MLCharts.config);
+
+    const caption = document.getElementById('l16-knn-caption');
+    if (caption) {
+      let msg;
+      if (k === 1) msg = 'K = 1 — the decision boundary is jagged and wraps tightly around individual training points (low bias, high variance — classic overfitting).';
+      else if (k <= 5) msg = `K = ${k} — still fairly jagged, sensitive to local noise, but starting to average over a few neighbors.`;
+      else if (k <= 15) msg = `K = ${k} — a smoother, more reasonable-looking boundary. This is typically the sweet spot range for a dataset this size.`;
+      else msg = `K = ${k} — heavily smoothed and approaching a single straight split between the two classes: rising bias, falling variance, on the road to underfitting.`;
+      caption.textContent = msg;
+    }
+  }
+
+  MLCharts.linkSlider('l16-k-slider', 'l16-k-value', renderKnnChart, v => Math.round(v).toString());
+})();
+</script>
 <script>
 new MLQuiz('quiz1', [
   {

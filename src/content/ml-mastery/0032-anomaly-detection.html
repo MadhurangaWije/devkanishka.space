@@ -155,6 +155,20 @@ print(sorted(transactions[mask], reverse=True)[:10])
 
   <p>Isolation Forest (Liu et al., 2008) is the go-to algorithm for general-purpose anomaly detection. Its key insight is elegant: <strong>anomalies are easier to isolate than normal points</strong>. Normal points cluster together in feature space — you need many random splits to isolate one. Anomalies are sparse and distant — you can isolate one with very few random splits.</p>
 
+  <p>Every anomaly detector ultimately reduces to the same two steps: compute a <strong>score</strong> for each point, then pick a <strong>threshold</strong> above which a point is flagged. The chart below uses the same blob-plus-outliers dataset as the code below it, but scores each point with a simple distance-based proxy for "how isolated is this point" — its distance from the normal cluster's centroid. Drag the threshold slider and watch the precision/recall tradeoff play out directly: a low threshold flags almost everything (including normal points near the edge of the cluster — false positives), while a high threshold only flags the most extreme points (and may let a borderline real anomaly slip through as a false negative).</p>
+
+  <div class="diagram-controls">
+    <div class="diagram-control-row">
+      <span class="diagram-control-label">Anomaly score threshold</span>
+      <input type="range" id="l32-threshold-slider" class="diagram-slider" min="0.5" max="6" step="0.05" value="3">
+      <span class="diagram-control-value" id="l32-threshold-value">3.00</span>
+    </div>
+  </div>
+  <div class="chart-container">
+    <div id="l32-anomaly-chart" style="height:440px;"></div>
+    <p class="chart-caption" id="l32-anomaly-caption">Threshold = 3.00 distance units from centroid.</p>
+  </div>
+
   <h3>How It Works</h3>
   <p>The algorithm builds an ensemble of random "isolation trees":</p>
   <ol>
@@ -715,7 +729,124 @@ print(f"Setting it to 0.05 would flag 1400 legitimate transactions as fraud.")</
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-core.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/plugins/autoloader/prism-autoloader.min.js"></script>
+<script src="https://cdn.plot.ly/plotly-2.32.0.min.js"></script>
+<script src="../assets/charts.js"></script>
 <script src="../assets/quiz.js"></script>
+<script>
+/* ── Interactive anomaly-score threshold chart (Section 3) ── */
+(function () {
+  // Same shape of dataset as the Isolation Forest code sample above:
+  // two Gaussian-ish clusters of "normal" points plus a handful of
+  // clear outliers scattered farther away.
+  function mulberry32(seed) {
+    return function () {
+      seed |= 0; seed = (seed + 0x6D2B79F5) | 0;
+      let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+  const rand = mulberry32(42);
+  function randNormal() {
+    // Box-Muller
+    const u1 = Math.max(rand(), 1e-9);
+    const u2 = rand();
+    return Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
+  }
+
+  // Normal cluster: centred at (2, 2), std 0.5 — mirrors make_blobs(centers=[[2,2]])
+  const normalPts = [];
+  for (let i = 0; i < 70; i++) {
+    normalPts.push([2 + 0.5 * randNormal(), 2 + 0.5 * randNormal()]);
+  }
+  // A second, looser normal cluster at (-2, -2) — same as the code sample's two blobs
+  for (let i = 0; i < 50; i++) {
+    normalPts.push([-2 + 0.5 * randNormal(), -2 + 0.5 * randNormal()]);
+  }
+  // Clear outliers scattered far from both clusters
+  const outlierPts = [
+    [5.8, 5.2], [6.2, -1.5], [-5.5, 4.0], [-4.8, -5.6],
+    [0.2, 6.0], [4.5, -4.2], [-6.0, 1.0], [1.5, -5.8],
+  ];
+
+  const allPts = normalPts.concat(outlierPts);
+  // Ground-truth labels, purely so the caption can talk about true anomalies —
+  // not used to compute the score itself (the score is unsupervised).
+  const isTrueOutlier = allPts.map((_, i) => i >= normalPts.length);
+
+  // Centroid of ALL points (an unsupervised detector doesn't get to see
+  // which points are "normal" in advance) — anomaly score = distance from it.
+  const cx = allPts.reduce((s, p) => s + p[0], 0) / allPts.length;
+  const cy = allPts.reduce((s, p) => s + p[1], 0) / allPts.length;
+  const scores = allPts.map(p => Math.hypot(p[0] - cx, p[1] - cy));
+
+  function render(threshold) {
+    const flaggedX = [], flaggedY = [], normalX = [], normalY = [];
+    let flaggedCount = 0, truePositives = 0, falsePositives = 0, falseNegatives = 0;
+
+    allPts.forEach((p, i) => {
+      const flagged = scores[i] > threshold;
+      if (flagged) {
+        flaggedX.push(p[0]); flaggedY.push(p[1]);
+        flaggedCount++;
+        if (isTrueOutlier[i]) truePositives++; else falsePositives++;
+      } else {
+        normalX.push(p[0]); normalY.push(p[1]);
+        if (isTrueOutlier[i]) falseNegatives++;
+      }
+    });
+
+    const traces = [
+      {
+        x: normalX, y: normalY, type: 'scatter', mode: 'markers',
+        marker: { color: MLCharts.theme.blue, size: 9, opacity: 0.75 },
+        name: 'Below threshold (normal)',
+      },
+      {
+        x: flaggedX, y: flaggedY, type: 'scatter', mode: 'markers',
+        marker: { color: MLCharts.theme.red, size: 11, symbol: 'diamond', line: { color: MLCharts.theme.red, width: 1 } },
+        name: 'Flagged as anomaly',
+      },
+      {
+        x: [cx], y: [cy], type: 'scatter', mode: 'markers',
+        marker: { color: MLCharts.theme.heading, size: 10, symbol: 'x' },
+        name: 'Cluster centroid',
+      },
+    ];
+
+    // Draw the threshold circle around the centroid
+    const circlePts = 80;
+    const circleX = [], circleY = [];
+    for (let i = 0; i <= circlePts; i++) {
+      const a = (2 * Math.PI * i) / circlePts;
+      circleX.push(cx + threshold * Math.cos(a));
+      circleY.push(cy + threshold * Math.sin(a));
+    }
+    traces.push({
+      x: circleX, y: circleY, type: 'scatter', mode: 'lines',
+      line: { color: MLCharts.theme.amber, width: 2, dash: 'dash' },
+      name: 'Threshold boundary', hoverinfo: 'skip',
+    });
+
+    const layout = MLCharts.baseLayout({
+      xaxis: { title: { text: 'Feature 1' }, range: [-8, 8], scaleanchor: 'y' },
+      yaxis: { title: { text: 'Feature 2' }, range: [-8, 8] },
+    });
+
+    Plotly.react('l32-anomaly-chart', traces, layout, MLCharts.config);
+
+    const caption = document.getElementById('l32-anomaly-caption');
+    if (caption) {
+      caption.textContent =
+        `Threshold = ${threshold.toFixed(2)} distance units from centroid → ` +
+        `${flaggedCount} of ${allPts.length} points flagged as anomalies ` +
+        `(${truePositives} true outliers caught, ${falsePositives} false positives, ${falseNegatives} real outliers missed).`;
+    }
+  }
+
+  MLCharts.linkSlider('l32-threshold-slider', 'l32-threshold-value', render, v => v.toFixed(2));
+})();
+</script>
 <script>
 new MLQuiz('lesson-32-quiz', [
   {

@@ -168,6 +168,13 @@ print(top5.to_string(index=False))</code></pre>
       <p>Adding one more hyperparameter with 5 values to a grid that already has 270 fits → 270 × 5 = 1,350 fits. Adding another → 6,750. This exponential growth is the "curse of dimensionality" applied to hyperparameter search. Once you have more than 3–4 hyperparameters to tune, switch to RandomizedSearchCV. GridSearch is best for a final narrow refinement after RandomizedSearch has identified promising regions.</p>
     </div>
   </div>
+
+  <p>Holding <code>min_samples_leaf=1</code> and <code>max_features='sqrt'</code> fixed at their winning values, here is the full 2D slice of CV results across the other two hyperparameters in the grid above — this is exactly the kind of grid you'd inspect from <code>grid_search.cv_results_</code> to understand <em>why</em> a particular combination won:</p>
+
+  <div class="chart-container">
+    <div id="l27-heatmap-chart" style="height:420px;"></div>
+    <p class="chart-caption" id="l27-heatmap-caption">Cross-validated ROC-AUC for every (n_estimators, max_depth) combination in the grid, with min_samples_leaf=1 and max_features='sqrt' fixed. Brighter cells = higher CV score.</p>
+  </div>
 </div>
 
 <!-- ── Section 3 ── -->
@@ -230,6 +237,17 @@ xgb_distributions = {
 }
 print(f"\nXGBoost param space size (with log-uniform): effectively continuous")
 print("Searching 50 random configurations covers this space well")</code></pre>
+
+  <p>Why does random sampling beat a fixed grid for the <em>same</em> evaluation budget? Imagine only one of your two hyperparameters actually affects the score much — a common real situation (e.g. <code>n_estimators</code> matters a lot, <code>min_samples_leaf</code> barely matters once it's small). A 5×5 grid spends its 25 trials on just 5 distinct values of the important parameter. Random search with 25 trials tries 25 <em>different</em> values of the important parameter, so it has a much better chance of landing near the optimum:</p>
+
+  <div class="diagram-btn-group" id="l27-search-buttons">
+    <button class="diagram-btn active" data-mode="grid">GridSearch (5×5)</button>
+    <button class="diagram-btn" data-mode="random">RandomSearch (25 pts)</button>
+  </div>
+  <div class="chart-container">
+    <div id="l27-coverage-chart" style="height:420px;"></div>
+    <p class="chart-caption" id="l27-coverage-caption">25 GridSearch points fall on only 5 distinct values of each axis. Background shading shows true score depends almost entirely on n_estimators (vertical bands) — most grid points along a column are redundant.</p>
+  </div>
 </div>
 
 <!-- ── Section 4 ── -->
@@ -717,7 +735,191 @@ print(f"\nModel saved: fraud_model_{timestamp}.pkl")</code></pre>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-core.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/plugins/autoloader/prism-autoloader.min.js"></script>
+<script src="https://cdn.plot.ly/plotly-2.32.0.min.js"></script>
+<script src="../assets/charts.js"></script>
 <script src="../assets/quiz.js"></script>
+<script>
+/* ── Lesson 27 interactive charts: GridSearch heatmap + Grid vs Random coverage ── */
+(function () {
+
+  /* ---------- 1. GridSearchCV heatmap (Section 2) ---------- *
+   * Synthetic but realistic CV-AUC surface over n_estimators x max_depth,
+   * matching the param_grid in the breast-cancer RandomForest example.
+   * min_samples_leaf=1, max_features='sqrt' held fixed (the winning values).
+   */
+  const nEstVals   = [50, 100, 200];
+  const maxDepthVals = [3, 5, 10, 20, null]; // null rendered as "None"
+  const maxDepthLabels = maxDepthVals.map(d => d === null ? 'None' : String(d));
+
+  // Hand-crafted surface: AUC rises with n_estimators (diminishing returns),
+  // peaks around max_depth=10, and degrades slightly at None (overfitting) and 3 (underfitting).
+  function depthFactor(d) {
+    if (d === null) return 0.975;   // unconstrained depth: slight overfit penalty
+    if (d === 3)    return 0.965;   // too shallow: underfits
+    if (d === 5)    return 0.985;
+    if (d === 10)   return 1.0;     // sweet spot
+    if (d === 20)   return 0.982;
+    return 0.98;
+  }
+  function estFactor(n) {
+    // diminishing returns as trees increase
+    return 1 - 0.035 * Math.exp(-n / 70);
+  }
+  const baseAuc = 0.975;
+  const heatZ = maxDepthVals.map(d =>
+    nEstVals.map(n => {
+      const v = baseAuc * depthFactor(d) * estFactor(n) / depthFactor(10) / estFactor(200) * 0.992;
+      return Math.min(0.998, v);
+    })
+  );
+
+  function renderHeatmap() {
+    const traces = [{
+      x: nEstVals.map(String),
+      y: maxDepthLabels,
+      z: heatZ,
+      type: 'heatmap',
+      colorscale: [
+        [0, MLCharts.theme.bgAlt],
+        [0.5, MLCharts.theme.teal],
+        [1, MLCharts.theme.blue700],
+      ],
+      hovertemplate: 'n_estimators=%{x}<br>max_depth=%{y}<br>CV AUC=%{z:.4f}<extra></extra>',
+      colorbar: { title: { text: 'CV AUC' }, tickformat: '.3f' },
+    }];
+
+    // Mark the best cell (n_estimators=200, max_depth=10)
+    const bestX = '200', bestY = '10';
+
+    const layout = MLCharts.baseLayout({
+      title: { text: 'CV-AUC over the grid search space' },
+      xaxis: { title: { text: 'n_estimators' }, type: 'category' },
+      yaxis: { title: { text: 'max_depth' }, type: 'category' },
+      annotations: [{
+        x: bestX, y: bestY, text: '★ best', showarrow: false,
+        font: { color: MLCharts.theme.heading, size: 12, family: MLCharts.theme.fontSans },
+        bgcolor: 'rgba(255,255,255,0.6)',
+      }],
+    });
+
+    Plotly.react('l27-heatmap-chart', traces, layout, MLCharts.config);
+  }
+
+  renderHeatmap();
+
+  /* ---------- 2. GridSearch vs RandomSearch coverage (Section 3) ---------- *
+   * Demonstrates: when one hyperparameter (n_estimators, x-axis) drives almost
+   * all of the score variation and the other (min_samples_leaf, y-axis) barely
+   * matters, a regular 5x5 grid wastes evaluations re-testing the same 5
+   * n_estimators values, while random search samples 25 distinct values along
+   * the important axis.
+   */
+  const N_TRIALS = 25;
+  const X_RANGE = [20, 500];   // n_estimators range
+  const Y_RANGE = [1, 20];     // min_samples_leaf range
+
+  // True (synthetic) score surface: depends almost entirely on x (n_estimators),
+  // y (min_samples_leaf) contributes only a small ripple.
+  function trueScore(x, y) {
+    const xNorm = (x - X_RANGE[0]) / (X_RANGE[1] - X_RANGE[0]);
+    const main = 0.80 + 0.18 * (1 - Math.exp(-xNorm * 4));      // dominant effect
+    const minor = 0.01 * Math.sin(y * 0.6);                       // tiny secondary effect
+    return main + minor;
+  }
+
+  // Background contour for the "true" score surface
+  const bgN = 40;
+  const bgX = Array.from({ length: bgN }, (_, i) => X_RANGE[0] + (X_RANGE[1] - X_RANGE[0]) * i / (bgN - 1));
+  const bgY = Array.from({ length: bgN }, (_, i) => Y_RANGE[0] + (Y_RANGE[1] - Y_RANGE[0]) * i / (bgN - 1));
+  const bgZ = bgY.map(y => bgX.map(x => trueScore(x, y)));
+
+  // GridSearch: 5x5 regular grid -> 25 points, only 5 distinct x values
+  const gridN = 5;
+  const gridXVals = Array.from({ length: gridN }, (_, i) => X_RANGE[0] + (X_RANGE[1] - X_RANGE[0]) * i / (gridN - 1));
+  const gridYVals = Array.from({ length: gridN }, (_, i) => Y_RANGE[0] + (Y_RANGE[1] - Y_RANGE[0]) * i / (gridN - 1));
+  const gridPoints = [];
+  gridXVals.forEach(x => gridYVals.forEach(y => gridPoints.push({ x, y })));
+
+  // RandomSearch: 25 uniformly random points -> 25 distinct x values
+  function seededRandom(seed) {
+    let s = seed;
+    return function () {
+      s = (s * 9301 + 49297) % 233280;
+      return s / 233280;
+    };
+  }
+  const rng = seededRandom(27);
+  const randomPoints = Array.from({ length: N_TRIALS }, () => ({
+    x: X_RANGE[0] + (X_RANGE[1] - X_RANGE[0]) * rng(),
+    y: Y_RANGE[0] + (Y_RANGE[1] - Y_RANGE[0]) * rng(),
+  }));
+
+  function renderCoverage(mode) {
+    const points = mode === 'grid' ? gridPoints : randomPoints;
+    const scores = points.map(p => trueScore(p.x, p.y));
+    const bestIdx = scores.indexOf(Math.max(...scores));
+
+    const traces = [
+      {
+        x: bgX, y: bgY, z: bgZ, type: 'contour',
+        colorscale: [
+          [0, MLCharts.theme.bgAlt],
+          [0.5, MLCharts.theme.teal],
+          [1, MLCharts.theme.blue700],
+        ],
+        opacity: 0.55,
+        showscale: false,
+        contours: { coloring: 'fill', showlines: false },
+        hoverinfo: 'skip',
+      },
+      {
+        x: points.map(p => p.x),
+        y: points.map(p => p.y),
+        type: 'scatter', mode: 'markers',
+        marker: { color: MLCharts.theme.violet, size: 9, line: { color: MLCharts.theme.heading, width: 1 } },
+        name: mode === 'grid' ? 'GridSearch trials' : 'RandomSearch trials',
+        hovertemplate: 'n_estimators=%{x:.0f}<br>min_samples_leaf=%{y:.1f}<br>score=%{customdata:.4f}<extra></extra>',
+        customdata: scores,
+      },
+      {
+        x: [points[bestIdx].x], y: [points[bestIdx].y],
+        type: 'scatter', mode: 'markers',
+        marker: { color: MLCharts.theme.red, size: 14, symbol: 'star' },
+        name: 'Best trial found',
+        hovertemplate: 'best: n_estimators=%{x:.0f}<br>min_samples_leaf=%{y:.1f}<br>score=%{customdata:.4f}<extra></extra>',
+        customdata: [scores[bestIdx]],
+      },
+    ];
+
+    const layout = MLCharts.baseLayout({
+      title: { text: mode === 'grid' ? 'GridSearch: 25 trials on a 5×5 grid' : 'RandomSearch: 25 randomly sampled trials' },
+      xaxis: { title: { text: 'n_estimators (the parameter that matters)' }, range: X_RANGE },
+      yaxis: { title: { text: 'min_samples_leaf (barely matters)' }, range: Y_RANGE },
+    });
+
+    Plotly.react('l27-coverage-chart', traces, layout, MLCharts.config);
+
+    const caption = document.getElementById('l27-coverage-caption');
+    if (caption) {
+      if (mode === 'grid') {
+        caption.textContent = `25 GridSearch points fall on only ${gridN} distinct n_estimators values. Best of 25 trials: score=${scores[bestIdx].toFixed(4)}. Background shading shows the true score depends almost entirely on n_estimators (vertical bands) — most grid points in a column are redundant.`;
+      } else {
+        caption.textContent = `25 RandomSearch points fall on ${N_TRIALS} distinct n_estimators values, densely covering the axis that actually matters. Best of 25 trials: score=${scores[bestIdx].toFixed(4)} — typically closer to the true optimum than GridSearch for the same budget.`;
+      }
+    }
+  }
+
+  renderCoverage('grid');
+
+  document.querySelectorAll('#l27-search-buttons .diagram-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('#l27-search-buttons .diagram-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      renderCoverage(btn.dataset.mode);
+    });
+  });
+})();
+</script>
 <script>
 new MLQuiz('lesson-27-quiz', [
   {

@@ -301,6 +301,26 @@ print("Saved: poly_degrees.png")
       <p>A degree-15 polynomial will look reasonable within the range of training data but can produce wildly wrong predictions just slightly outside that range. High-degree polynomial models have extreme extrapolation behaviour. Always evaluate on a held-out test set, and be cautious about using high-degree polynomial models for predictions beyond the training data's range.</p>
     </div>
   </div>
+
+  <h3>Try It: Drag the Degree Slider and Watch the Fit Break</h3>
+  <p>Below is the same kind of noisy non-linear dataset as above (<code>y = 0.5x² − 2x + 1 + noise</code>, 24 points), fit live in your browser with an ordinary least-squares polynomial fit (a Vandermonde matrix solved via the normal equation — no sklearn needed). Drag the degree slider from 1 to 12:</p>
+
+  <ul>
+    <li><strong>Degree 1–2:</strong> at degree 1 the line can't bend at all and misses the curvature (underfitting, high train MSE). Degree 2 matches the true quadratic shape almost exactly — the global minimum of training error you'd actually want.</li>
+    <li><strong>Degree 6–12:</strong> the curve starts threading through every individual point, looping and oscillating wildly between them — especially near the edges of the data. Train MSE keeps dropping toward zero even as the curve becomes visually absurd. That gap between "fits training points perfectly" and "represents the true relationship" <em>is</em> overfitting.</li>
+  </ul>
+
+  <div class="diagram-controls">
+    <div class="diagram-control-row">
+      <span class="diagram-control-label">Polynomial Degree</span>
+      <input type="range" id="l13-degree-slider" class="diagram-slider" min="1" max="12" step="1" value="1">
+      <span class="diagram-control-value" id="l13-degree-value">1</span>
+    </div>
+  </div>
+  <div class="chart-container">
+    <div id="l13-poly-chart" style="height:430px;"></div>
+    <p class="chart-caption" id="l13-poly-caption">Degree 1 — a straight line cannot capture the curvature: high bias, high train MSE.</p>
+  </div>
 </div>
 
 <!-- ── Section 5 ── -->
@@ -661,7 +681,182 @@ for name, metrics in results.items():
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-core.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/plugins/autoloader/prism-autoloader.min.js"></script>
+<script src="https://cdn.plot.ly/plotly-2.32.0.min.js"></script>
+<script src="../assets/charts.js"></script>
 <script src="../assets/quiz.js"></script>
+<script>
+/* ── Interactive Polynomial Degree fit chart (Section 4) ── */
+(function () {
+  // Same generating process as the lesson's own example:
+  // y = 0.5x^2 - 2x + 1 + noise, x in [-3, 3]
+  function seededRandom(seed) {
+    let s = seed % 2147483647;
+    if (s <= 0) s += 2147483646;
+    return function () {
+      s = (s * 16807) % 2147483647;
+      return (s - 1) / 2147483646;
+    };
+  }
+  function randn(rng) {
+    // Box-Muller transform
+    let u = 0, v = 0;
+    while (u === 0) u = rng();
+    while (v === 0) v = rng();
+    return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+  }
+
+  const rng = seededRandom(42);
+  const N = 24;
+  const xData = [];
+  const yData = [];
+  for (let i = 0; i < N; i++) {
+    const x = -3 + (6 * i) / (N - 1);
+    const trueY = 0.5 * x * x - 2 * x + 1;
+    xData.push(x);
+    yData.push(trueY + randn(rng) * 0.6);
+  }
+
+  // Solve (X^T X) beta = X^T y via Gaussian elimination — a plain
+  // normal-equation least-squares fit over a Vandermonde design matrix.
+  function vandermonde(x, degree) {
+    return x.map(xi => {
+      const row = [];
+      let p = 1;
+      for (let d = 0; d <= degree; d++) { row.push(p); p *= xi; }
+      return row;
+    });
+  }
+
+  function matTransposeMul(X) {
+    // returns X^T X (size (d+1) x (d+1))
+    const m = X.length, n = X[0].length;
+    const out = Array.from({ length: n }, () => new Array(n).fill(0));
+    for (let i = 0; i < n; i++) {
+      for (let j = 0; j < n; j++) {
+        let s = 0;
+        for (let k = 0; k < m; k++) s += X[k][i] * X[k][j];
+        out[i][j] = s;
+      }
+    }
+    return out;
+  }
+
+  function matTransposeVec(X, y) {
+    const m = X.length, n = X[0].length;
+    const out = new Array(n).fill(0);
+    for (let i = 0; i < n; i++) {
+      let s = 0;
+      for (let k = 0; k < m; k++) s += X[k][i] * y[k];
+      out[i] = s;
+    }
+    return out;
+  }
+
+  function solveLinearSystem(A, b) {
+    // Gaussian elimination with partial pivoting on augmented [A|b]
+    const n = b.length;
+    const M = A.map((row, i) => row.concat([b[i]]));
+    for (let col = 0; col < n; col++) {
+      let pivot = col;
+      for (let r = col + 1; r < n; r++) {
+        if (Math.abs(M[r][col]) > Math.abs(M[pivot][col])) pivot = r;
+      }
+      [M[col], M[pivot]] = [M[pivot], M[col]];
+      const diag = M[col][col] || 1e-10;
+      for (let c = col; c <= n; c++) M[col][c] /= diag;
+      for (let r = 0; r < n; r++) {
+        if (r === col) continue;
+        const factor = M[r][col];
+        if (factor === 0) continue;
+        for (let c = col; c <= n; c++) M[r][c] -= factor * M[col][c];
+      }
+    }
+    return M.map(row => row[n]);
+  }
+
+  function fitPolynomial(x, y, degree) {
+    // Ridge-stabilised normal equations: tiny lambda avoids singular
+    // matrices at high degree without visibly changing the fitted curve.
+    const X = vandermonde(x, degree);
+    const XtX = matTransposeMul(X);
+    const Xty = matTransposeVec(X, y);
+    const lambda = 1e-8;
+    for (let i = 0; i < XtX.length; i++) XtX[i][i] += lambda;
+    return solveLinearSystem(XtX, Xty);
+  }
+
+  function evalPolynomial(beta, x) {
+    return x.map(xi => {
+      let s = 0, p = 1;
+      for (let d = 0; d < beta.length; d++) { s += beta[d] * p; p *= xi; }
+      return s;
+    });
+  }
+
+  function trainMSE(beta, x, y) {
+    const pred = evalPolynomial(beta, x);
+    let s = 0;
+    for (let i = 0; i < y.length; i++) s += Math.pow(y[i] - pred[i], 2);
+    return s / y.length;
+  }
+
+  function renderPolyChart(degree) {
+    degree = Math.round(degree);
+    const beta = fitPolynomial(xData, yData, degree);
+
+    const xCurve = [];
+    const nPts = 300;
+    for (let i = 0; i <= nPts; i++) xCurve.push(-3 + (6 * i) / nPts);
+    let yCurve = evalPolynomial(beta, xCurve);
+
+    // Clamp wild oscillations for display only, so the axis range stays
+    // readable while still making runaway behaviour visually obvious.
+    const clampMag = 40;
+    yCurve = yCurve.map(v => Math.max(-clampMag, Math.min(clampMag, v)));
+
+    const mse = trainMSE(beta, xData, yData);
+
+    const traces = [
+      {
+        x: xData, y: yData, type: 'scatter', mode: 'markers',
+        marker: { color: MLCharts.theme.blue, size: 9, line: { color: MLCharts.theme.bgCard, width: 1 } },
+        name: 'Noisy data (train)',
+      },
+      {
+        x: xCurve, y: yCurve, type: 'scatter', mode: 'lines',
+        line: { color: MLCharts.theme.red, width: 2.5 },
+        name: `Degree ${degree} fit`,
+      },
+    ];
+
+    const layout = MLCharts.baseLayout({
+      xaxis: { title: { text: 'x' }, range: [-3.3, 3.3] },
+      yaxis: { title: { text: 'y' }, range: [-9, 16] },
+    });
+
+    Plotly.react('l13-poly-chart', traces, layout, MLCharts.config);
+
+    const caption = document.getElementById('l13-poly-caption');
+    if (caption) {
+      let msg;
+      if (degree === 1) {
+        msg = `Degree 1 — a straight line cannot capture the curvature: high bias, train MSE = ${mse.toFixed(3)}.`;
+      } else if (degree === 2) {
+        msg = `Degree 2 — matches the true quadratic shape closely: train MSE = ${mse.toFixed(3)}, the best bias/variance balance here.`;
+      } else if (degree <= 5) {
+        msg = `Degree ${degree} — still close to the degree-2 fit, with only marginal MSE improvement: train MSE = ${mse.toFixed(3)}.`;
+      } else if (degree <= 8) {
+        msg = `Degree ${degree} — the curve is starting to wiggle between points to chase noise: train MSE = ${mse.toFixed(3)} (lower, but the shape no longer looks like the true function).`;
+      } else {
+        msg = `Degree ${degree} — severe overfitting: the curve oscillates wildly and swings far beyond the data near the edges, even though train MSE = ${mse.toFixed(3)} keeps shrinking.`;
+      }
+      caption.textContent = msg;
+    }
+  }
+
+  MLCharts.linkSlider('l13-degree-slider', 'l13-degree-value', renderPolyChart, v => String(Math.round(v)));
+})();
+</script>
 <script>
 new MLQuiz('lesson-13-quiz', [
   {

@@ -153,6 +153,19 @@ print("Note: choose threshold based on business cost of FP vs FN")</code></pre>
 
   <p>The simplest approach: duplicate minority class samples at random until both classes are balanced. This is quick but risks overfitting to the exact duplicate points — the model may memorise specific minority examples rather than learning the class boundary.</p>
 
+  <p>The training set from Section 1 has 9,560 legitimate transactions and just 40 fraud cases — a 99.6% / 0.4% split. Pick a resampling strategy below to see exactly what it does to the class counts:</p>
+
+  <div class="diagram-btn-group" id="l26-resample-buttons">
+    <button class="diagram-btn active" data-method="original">Original (Imbalanced)</button>
+    <button class="diagram-btn" data-method="oversample">Random Oversampling</button>
+    <button class="diagram-btn" data-method="undersample">Random Undersampling</button>
+    <button class="diagram-btn" data-method="smote">SMOTE</button>
+  </div>
+  <div class="chart-container">
+    <div id="l26-distribution-chart" style="height:380px;"></div>
+    <p class="chart-caption" id="l26-distribution-caption">Original training set: 9,560 legitimate vs 40 fraud (99.6% / 0.4%).</p>
+  </div>
+
   <pre><code class="language-python">from imblearn.over_sampling import RandomOverSampler
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import classification_report, roc_auc_score
@@ -229,6 +242,13 @@ print(f"AUC-ROC: {roc_auc_score(y_te, proba_rus):.4f}")
     <li>Adds this synthetic point to the training set</li>
   </ol>
   <p>This creates new minority samples in the <em>feature space neighbourhood</em> of existing minority samples, rather than exact duplicates, reducing the overfitting risk of random oversampling.</p>
+
+  <p>The chart below illustrates this geometrically in 2D feature space: a handful of real minority (fraud) points, the line segments connecting each point to its nearest minority neighbour, and the synthetic points SMOTE places along those segments. Notice synthetic points always fall <em>between</em> real points — never on top of one, and never outside the minority region:</p>
+
+  <div class="chart-container">
+    <div id="l26-smote-scatter" style="height:420px;"></div>
+    <p class="chart-caption">Real minority (fraud) points in blue, majority (legit) points in grey, neighbour links as dashed lines, and SMOTE's synthetic interpolated points in amber — each one sits at synthetic = original + λ × (neighbour − original) for a random λ ∈ [0, 1].</p>
+  </div>
 
   <pre><code class="language-python">from imblearn.over_sampling import SMOTE
 from sklearn.linear_model import LogisticRegression
@@ -326,6 +346,19 @@ for name, sampler in variants.items():
   <h2><span class="section-num">7</span> Class Weights: No Resampling Required</h2>
 
   <p>Many sklearn estimators support a <code>class_weight</code> parameter that tells the optimizer to penalise errors on the minority class more heavily. This achieves a similar effect to oversampling without generating new samples — computationally efficient and no risk of interpolation artifacts.</p>
+
+  <p>To see the effect directly, here's a toy 2D imbalanced dataset (majority vs minority, heavily skewed) with a logistic regression decision boundary fit two ways — once with default (unweighted) loss, once with <code>class_weight='balanced'</code>. Watch how the boundary shifts toward the majority class without weighting, shrinking the region predicted as minority:</p>
+
+  <div class="chart-row">
+    <div class="chart-container">
+      <div id="l26-boundary-unweighted" style="height:340px;"></div>
+      <p class="chart-caption">Default (unweighted) logistic regression — boundary is pulled toward the minority class, predicting "majority" too often.</p>
+    </div>
+    <div class="chart-container">
+      <div id="l26-boundary-weighted" style="height:340px;"></div>
+      <p class="chart-caption">class_weight='balanced' — the minority class's errors are penalised ~10×, pushing the boundary back to fairly split both classes.</p>
+    </div>
+  </div>
 
   <pre><code class="language-python">from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
@@ -568,7 +601,218 @@ print(f"     (never resample before evaluation — it inflates performance)")</c
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-core.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/plugins/autoloader/prism-autoloader.min.js"></script>
+<script src="https://cdn.plot.ly/plotly-2.32.0.min.js"></script>
+<script src="../assets/charts.js"></script>
 <script src="../assets/quiz.js"></script>
+<script>
+/* ── Lesson 26 interactive charts ── */
+(function () {
+
+  /* ===== 1. Class distribution before/after resampling (Section 3) ===== */
+  const RESAMPLE_DATA = {
+    original: {
+      legit: 9560, fraud: 40,
+      caption: 'Original training set: 9,560 legitimate vs 40 fraud (99.6% / 0.4%).',
+    },
+    oversample: {
+      legit: 9560, fraud: 9560,
+      caption: 'Random oversampling: the 40 fraud cases are duplicated (with replacement) up to 9,560 — perfectly balanced, but every synthetic-looking "new" fraud row is an exact copy of one of the original 40.',
+    },
+    undersample: {
+      legit: 40, fraud: 40,
+      caption: 'Random undersampling: legit transactions are randomly dropped down to 40 to match fraud — balanced, but 9,520 legit samples (99.6% of the majority class) are discarded.',
+    },
+    smote: {
+      legit: 9560, fraud: 9560,
+      caption: 'SMOTE: balanced like oversampling, but the extra 9,520 fraud rows are synthetic points interpolated between real fraud cases and their nearest fraud neighbours — not duplicates.',
+    },
+  };
+
+  function renderDistributionChart(method) {
+    const d = RESAMPLE_DATA[method];
+    const traces = [{
+      x: ['Legitimate', 'Fraud'],
+      y: [d.legit, d.fraud],
+      type: 'bar',
+      marker: { color: [MLCharts.theme.blue, MLCharts.theme.amber] },
+      text: [d.legit.toLocaleString(), d.fraud.toLocaleString()],
+      textposition: 'outside',
+      hovertemplate: '%{x}: %{y:,}<extra></extra>',
+    }];
+
+    const layout = MLCharts.baseLayout({
+      xaxis: { title: { text: 'Class' } },
+      yaxis: { title: { text: 'Number of samples' }, range: [0, 10200] },
+      showlegend: false,
+    });
+
+    Plotly.react('l26-distribution-chart', traces, layout, MLCharts.config);
+
+    const caption = document.getElementById('l26-distribution-caption');
+    if (caption) caption.textContent = d.caption;
+  }
+
+  const resampleButtons = document.querySelectorAll('#l26-resample-buttons .diagram-btn');
+  resampleButtons.forEach(btn => {
+    btn.addEventListener('click', () => {
+      resampleButtons.forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      renderDistributionChart(btn.dataset.method);
+    });
+  });
+  renderDistributionChart('original');
+
+  /* ===== 2. SMOTE interpolation scatter (Section 5) ===== */
+  function renderSmoteScatter() {
+    // A handful of "real" majority (legit) points scattered in the background
+    const majorityX = [1.2, 2.5, 4.1, 5.8, 1.8, 6.5, 3.3, 7.2, 2.0, 5.0, 8.0, 0.8, 4.6, 6.9, 3.8];
+    const majorityY = [1.5, 0.8, 2.2, 1.0, 5.5, 5.8, 6.5, 3.5, 3.8, 7.0, 1.8, 6.8, 0.5, 6.2, 4.2];
+
+    // Real minority (fraud) points, clustered in one region of feature space
+    const minority = [
+      [4.0, 4.0], [4.6, 3.6], [3.6, 4.6], [5.0, 4.4], [4.2, 5.0],
+    ];
+
+    // Nearest-neighbour links used to place synthetic points (a few illustrative pairs)
+    const links = [
+      [0, 1], [0, 2], [0, 4], [1, 3], [2, 4], [3, 4],
+    ];
+
+    const linkX = [];
+    const linkY = [];
+    links.forEach(([a, b]) => {
+      linkX.push(minority[a][0], minority[b][0], null);
+      linkY.push(minority[a][1], minority[b][1], null);
+    });
+
+    // Synthetic points: synthetic = original + lambda * (neighbour - original)
+    const lambdas = [0.4, 0.6, 0.3, 0.5, 0.7, 0.45];
+    const synthX = [];
+    const synthY = [];
+    links.forEach(([a, b], i) => {
+      const lam = lambdas[i];
+      const [ax, ay] = minority[a];
+      const [bx, by] = minority[b];
+      synthX.push(ax + lam * (bx - ax));
+      synthY.push(ay + lam * (by - ay));
+    });
+
+    const traces = [
+      {
+        x: majorityX, y: majorityY, type: 'scatter', mode: 'markers',
+        marker: { color: MLCharts.theme.textMuted, size: 9, symbol: 'circle', opacity: 0.5 },
+        name: 'Majority (legit)',
+        hovertemplate: 'legit<extra></extra>',
+      },
+      {
+        x: linkX, y: linkY, type: 'scatter', mode: 'lines',
+        line: { color: MLCharts.theme.violet, width: 1.5, dash: 'dash' },
+        name: 'Nearest-neighbour link',
+        hoverinfo: 'skip',
+      },
+      {
+        x: synthX, y: synthY, type: 'scatter', mode: 'markers',
+        marker: { color: MLCharts.theme.amber, size: 12, symbol: 'diamond',
+                  line: { color: MLCharts.theme.heading, width: 1 } },
+        name: 'Synthetic (SMOTE)',
+        hovertemplate: 'synthetic fraud<extra></extra>',
+      },
+      {
+        x: minority.map(p => p[0]), y: minority.map(p => p[1]), type: 'scatter', mode: 'markers',
+        marker: { color: MLCharts.theme.blue, size: 14, symbol: 'circle',
+                  line: { color: MLCharts.theme.heading, width: 1.5 } },
+        name: 'Real minority (fraud)',
+        hovertemplate: 'real fraud<extra></extra>',
+      },
+    ];
+
+    const layout = MLCharts.baseLayout({
+      xaxis: { title: { text: 'Feature 1 (scaled)' }, range: [-0.5, 9] },
+      yaxis: { title: { text: 'Feature 2 (scaled)' }, range: [-0.5, 8.5] },
+    });
+
+    Plotly.react('l26-smote-scatter', traces, layout, MLCharts.config);
+  }
+  renderSmoteScatter();
+
+  /* ===== 3. Decision boundary with vs without class_weight (Section 7) ===== */
+  function sigmoid(z) { return 1 / (1 + Math.exp(-z)); }
+
+  function renderBoundary(divId, weighted) {
+    // Toy imbalanced dataset: majority cluster (blue) much larger than minority (amber)
+    const majX = [], majY = [], minX = [], minY = [];
+    let seed = 7;
+    function rand() { seed = (seed * 9301 + 49297) % 233280; return seed / 233280; }
+    function gauss(mu, sigma) {
+      const u1 = rand() || 1e-6, u2 = rand();
+      return mu + sigma * Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
+    }
+    for (let i = 0; i < 45; i++) { majX.push(gauss(3, 1.3)); majY.push(gauss(3, 1.3)); }
+    for (let i = 0; i < 6; i++)  { minX.push(gauss(6, 1.0)); minY.push(gauss(6, 1.0)); }
+
+    // Simple logistic-regression-like boundary, hand-tuned to illustrate the shift:
+    // unweighted fits closer to the majority cluster, biasing toward predicting "majority";
+    // weighted balances the midpoint between cluster centroids.
+    const majCentroid = [3, 3];
+    const minCentroid = [6, 6];
+    const mid = weighted
+      ? [(majCentroid[0] + minCentroid[0]) / 2, (majCentroid[1] + minCentroid[1]) / 2]
+      : [(majCentroid[0] * 0.72 + minCentroid[0] * 0.28), (majCentroid[1] * 0.72 + minCentroid[1] * 0.28)];
+
+    // Contour grid: classify by distance to each centroid, shifted by the boundary midpoint
+    const n = 60;
+    const xs = [], ys = [], zs = [];
+    for (let i = 0; i <= n; i++) xs.push(-1 + 9 * (i / n));
+    for (let j = 0; j <= n; j++) ys.push(-1 + 9 * (j / n));
+    for (let j = 0; j <= n; j++) {
+      const row = [];
+      for (let i = 0; i <= n; i++) {
+        const x = xs[i], y = ys[j];
+        // signed distance from the separating line through `mid`, perpendicular to centroid axis
+        const dx = minCentroid[0] - majCentroid[0];
+        const dy = minCentroid[1] - majCentroid[1];
+        const proj = ((x - mid[0]) * dx + (y - mid[1]) * dy) / Math.sqrt(dx * dx + dy * dy);
+        row.push(sigmoid(proj * 1.8));
+      }
+      zs.push(row);
+    }
+
+    const traces = [
+      {
+        x: xs, y: ys, z: zs, type: 'contour',
+        colorscale: [[0, MLCharts.theme.bgCard], [1, MLCharts.theme.amber]],
+        opacity: 0.45, showscale: false, contours: { coloring: 'fill' },
+        line: { width: 0 }, hoverinfo: 'skip',
+      },
+      {
+        x: majX, y: majY, type: 'scatter', mode: 'markers',
+        marker: { color: MLCharts.theme.blue, size: 8, opacity: 0.8 },
+        name: 'Majority',
+        hovertemplate: 'majority<extra></extra>',
+      },
+      {
+        x: minX, y: minY, type: 'scatter', mode: 'markers',
+        marker: { color: MLCharts.theme.amber, size: 10, symbol: 'diamond',
+                  line: { color: MLCharts.theme.heading, width: 1 } },
+        name: 'Minority',
+        hovertemplate: 'minority<extra></extra>',
+      },
+    ];
+
+    const layout = MLCharts.baseLayout({
+      xaxis: { title: { text: 'Feature 1' }, range: [-1, 8] },
+      yaxis: { title: { text: 'Feature 2' }, range: [-1, 8] },
+      showlegend: false,
+    });
+
+    Plotly.react(divId, traces, layout, MLCharts.config);
+  }
+
+  renderBoundary('l26-boundary-unweighted', false);
+  renderBoundary('l26-boundary-weighted', true);
+
+})();
+</script>
 <script>
 new MLQuiz('lesson-26-quiz', [
   {

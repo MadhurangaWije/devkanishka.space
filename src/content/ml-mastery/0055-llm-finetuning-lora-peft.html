@@ -234,11 +234,89 @@ Reconstruction with rank-16: error = 0.000000 (near 0 = perfect)
 
   <p>During the forward pass: <strong>h = Wx + (BA)x × (α/r)</strong>, where α is a scaling hyperparameter that controls the magnitude of the LoRA update. Only A and B are updated during training; W is frozen.</p>
 
+  <div class="diagram-svg-wrap">
+    <svg viewBox="0 0 720 340" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="LoRA architecture: a frozen weight matrix W in parallel with a small trainable low-rank adapter path made of matrices A and B">
+      <defs>
+        <marker id="l55-arrowhead" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+          <path d="M0,0 L8,4 L0,8 Z" fill="var(--text-muted)"></path>
+        </marker>
+        <marker id="l55-arrowhead-violet" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+          <path d="M0,0 L8,4 L0,8 Z" fill="var(--violet)"></path>
+        </marker>
+      </defs>
+
+      <!-- Input x -->
+      <circle class="diagram-node" cx="50" cy="170" r="22"></circle>
+      <text class="diagram-label" x="50" y="175">x</text>
+
+      <!-- Split arrows from x to frozen path and LoRA path -->
+      <line class="diagram-arrow" x1="72" y1="160" x2="150" y2="90" marker-end="url(#l55-arrowhead)"></line>
+      <line class="diagram-arrow" x1="72" y1="180" x2="150" y2="250" marker-end="url(#l55-arrowhead-violet)" style="stroke:var(--violet)"></line>
+
+      <!-- Frozen W path (top) -->
+      <rect class="diagram-node" x="150" y="50" width="150" height="80" rx="8"></rect>
+      <text class="diagram-label" x="225" y="82">🔒 W (frozen)</text>
+      <text class="diagram-sublabel" x="225" y="100">d × d pretrained</text>
+      <text class="diagram-sublabel" x="225" y="114">weight matrix</text>
+
+      <!-- Frozen W -> sum -->
+      <line class="diagram-arrow" x1="300" y1="90" x2="470" y2="145" marker-end="url(#l55-arrowhead)"></line>
+
+      <!-- LoRA adapter path (bottom): A then B, small boxes -->
+      <rect class="diagram-node-alt" x="150" y="215" width="70" height="70" rx="8"></rect>
+      <text class="diagram-label" x="185" y="245">A</text>
+      <text class="diagram-sublabel" x="185" y="262">d × r</text>
+      <text class="diagram-sublabel" x="185" y="274">(random init)</text>
+
+      <line class="diagram-arrow" x1="220" y1="250" x2="272" y2="250" marker-end="url(#l55-arrowhead-violet)" style="stroke:var(--violet)"></line>
+
+      <rect class="diagram-node-alt" x="280" y="215" width="70" height="70" rx="8"></rect>
+      <text class="diagram-label" x="315" y="245">B</text>
+      <text class="diagram-sublabel" x="315" y="262">r × d</text>
+      <text class="diagram-sublabel" x="315" y="274">(zero init)</text>
+
+      <!-- scaling label -->
+      <text class="diagram-mono-label" x="400" y="290" fill="var(--violet)">× (α/r)</text>
+
+      <!-- LoRA path -> sum -->
+      <line class="diagram-arrow" x1="350" y1="240" x2="470" y2="170" marker-end="url(#l55-arrowhead-violet)" style="stroke:var(--violet)"></line>
+
+      <!-- Sum node -->
+      <circle class="diagram-node-good" cx="490" cy="158" r="24"></circle>
+      <text class="diagram-label" x="490" y="164" style="font-size:16px;">+</text>
+
+      <!-- Output -->
+      <line class="diagram-arrow" x1="514" y1="158" x2="590" y2="158" marker-end="url(#l55-arrowhead)"></line>
+      <circle class="diagram-node" cx="615" cy="158" r="22"></circle>
+      <text class="diagram-label" x="615" y="163">h</text>
+      <text class="diagram-sublabel" x="615" y="196">h = Wx + BAx·(α/r)</text>
+
+      <!-- Concrete dimension example callout -->
+      <rect x="150" y="305" width="420" height="1" fill="var(--border)"></rect>
+      <text class="diagram-mono-label" x="360" y="330" fill="var(--heading)" style="font-size:12.5px;">Example: d=4096, r=8 → full ΔW = 16,777,216 params vs LoRA (A+B) = 65,536 params (256× fewer)</text>
+    </svg>
+    <p class="diagram-svg-caption">LoRA freezes the original weight matrix W and routes a parallel low-rank path through two small trainable matrices, A (d×r) and B (r×d). Their product BA approximates the weight update ΔW, scaled by α/r, and is added to W's output. Only the violet A/B path is trained — W never changes.</p>
+  </div>
+
   <h3>Initialization: Why B is Zeros</h3>
   <p>A is initialised with random Gaussian values (standard kaiming init). B is initialised to all zeros. At the start of training, ΔW = B×A = 0×A = 0 — the model starts exactly at the pre-trained weights, with no random perturbation. This is crucial: if B were random, the model would start in a degraded state, making early training unstable.</p>
 
   <h3>Parameter Count</h3>
   <p>A matrix has d×r parameters. B matrix has r×k parameters. Total LoRA parameters for one layer: d×r + r×k = r(d+k). Compare to the original d×k. For a typical 768×768 BERT layer with r=8: 8×(768+768) = 12,288 parameters vs 768×768 = 589,824. A 48× reduction per layer.</p>
+
+  <p>Drag the rank slider below to see this tradeoff live. We fix a square weight matrix of size d×d = 4096×4096 (a typical LLM hidden dimension) and vary the LoRA rank r. LoRA's trainable parameter count is <strong>2 × d × r</strong> (matrix A is d×r, matrix B is r×d) — it grows only <em>linearly</em> in r, while full fine-tuning of that matrix always costs the fixed <strong>d × d</strong>. Watch how far r has to climb before the LoRA bar even begins to approach the full fine-tuning bar:</p>
+
+  <div class="diagram-controls">
+    <div class="diagram-control-row">
+      <span class="diagram-control-label">LoRA Rank (r)</span>
+      <input type="range" id="l55-rank-slider" class="diagram-slider" min="1" max="64" step="1" value="8">
+      <span class="diagram-control-value" id="l55-rank-value">8</span>
+    </div>
+  </div>
+  <div class="chart-container">
+    <div id="l55-rank-chart" style="height:380px;"></div>
+    <p class="chart-caption" id="l55-rank-caption">r = 8 — LoRA trains 65,536 parameters vs 16,777,216 for full fine-tuning (0.39%).</p>
+  </div>
 
   <pre><code class="language-python">import torch
 import torch.nn as nn
@@ -921,7 +999,52 @@ Combined (style + knowledge)         ✅ LoRA for style            ✅ RAG for f
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-core.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/plugins/autoloader/prism-autoloader.min.js"></script>
+<script src="https://cdn.plot.ly/plotly-2.32.0.min.js"></script>
+<script src="../assets/charts.js"></script>
 <script src="../assets/quiz.js"></script>
+<script>
+/* ── Interactive LoRA rank vs parameter-count chart (Section 3) ── */
+(function () {
+  const D = 4096; // fixed hidden dimension for the comparison
+
+  function renderRankChart(r) {
+    const loraParams = 2 * D * r;      // A (d×r) + B (r×d)
+    const fullParams  = D * D;         // full fine-tuning of the d×d matrix
+
+    const traces = [
+      {
+        x: ['LoRA adapter (A + B)', 'Full fine-tuning (W)'],
+        y: [loraParams, fullParams],
+        type: 'bar',
+        marker: { color: [MLCharts.theme.violet, MLCharts.theme.blue] },
+        text: [loraParams.toLocaleString(), fullParams.toLocaleString()],
+        textposition: 'outside',
+        hovertemplate: '%{x}<br>%{y:,} params<extra></extra>',
+      },
+    ];
+
+    const layout = MLCharts.baseLayout({
+      yaxis: { title: { text: 'Trainable parameters' }, range: [0, fullParams * 1.18] },
+      xaxis: { title: { text: '' } },
+      showlegend: false,
+    });
+
+    Plotly.react('l55-rank-chart', traces, layout, MLCharts.config);
+
+    const caption = document.getElementById('l55-rank-caption');
+    if (caption) {
+      const pct = (loraParams / fullParams * 100);
+      const ranksToMatch = Math.ceil(fullParams / (2 * D));
+      caption.textContent =
+        `r = ${r} — LoRA trains ${loraParams.toLocaleString()} parameters vs ${fullParams.toLocaleString()} for full fine-tuning ` +
+        `(${pct.toFixed(2)}%). LoRA would need r = ${ranksToMatch.toLocaleString()} (larger than d itself) to match full fine-tuning's ` +
+        `parameter count — well past any rank used in practice.`;
+    }
+  }
+
+  MLCharts.linkSlider('l55-rank-slider', 'l55-rank-value', renderRankChart, v => String(Math.round(v)));
+})();
+</script>
 <script>
 new MLQuiz('quiz-55', [
   {

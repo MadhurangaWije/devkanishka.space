@@ -1,14 +1,12 @@
 import { CourseSidebar } from '@/components/course/CourseSidebar';
 import { ML_PHASES } from '@/lib/ml-course';
 
-const ML_COMING_SOON = ['Phase 6 — MLOps & Production'];
-
 export default function MLCourseLayout({ children }: { children: React.ReactNode }) {
   return (
     <div className="flex min-h-screen pt-16">
       <CourseSidebar
         phases={ML_PHASES}
-        comingSoonPhases={ML_COMING_SOON}
+        comingSoonPhases={[]}
         courseBase="/tutorials/ml-and-dl-mastery"
         courseTitle="ML & DL Mastery"
         totalPhaseCount={6}

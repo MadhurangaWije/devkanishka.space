@@ -110,6 +110,42 @@
       <p>In most deep learning papers and frameworks, when people say "we trained with SGD", they almost always mean <em>mini-batch</em> gradient descent — not literally one sample at a time. The term "SGD" has come to encompass the whole family. PyTorch's <code>torch.optim.SGD</code> takes whatever you feed it per batch — and you control the batch size via your DataLoader.</p>
     </div>
   </div>
+
+  <div class="diagram-svg-wrap">
+    <svg viewBox="0 0 640 190" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Spectrum of gradient descent variants from one sample to the full dataset">
+      <defs>
+        <marker id="arrowhead-l40-spectrum" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+          <path d="M0,0 L8,4 L0,8 Z" fill="var(--text-muted)"></path>
+        </marker>
+      </defs>
+
+      <!-- Spectrum axis -->
+      <line class="diagram-arrow" x1="60" y1="70" x2="580" y2="70" style="marker-end:url(#arrowhead-l40-spectrum)"></line>
+      <text class="diagram-sublabel" x="320" y="30">Samples used per gradient update →</text>
+
+      <!-- SGD: 1 sample -->
+      <circle class="diagram-node-bad" cx="90" cy="70" r="9"><title>SGD — gradient from 1 sample</title></circle>
+      <text class="diagram-label" x="90" y="105">SGD</text>
+      <text class="diagram-sublabel" x="90" y="120">B = 1</text>
+      <text class="diagram-sublabel" x="90" y="150">Noisy, fast steps,</text>
+      <text class="diagram-sublabel" x="90" y="163">n updates/epoch</text>
+
+      <!-- Mini-batch: B samples -->
+      <circle class="diagram-node-alt" cx="320" cy="70" r="9"><title>Mini-batch GD — gradient from B samples (32-256)</title></circle>
+      <text class="diagram-label" x="320" y="105">Mini-Batch GD ⭐</text>
+      <text class="diagram-sublabel" x="320" y="120">B = 32–256</text>
+      <text class="diagram-sublabel" x="320" y="150">Balanced noise,</text>
+      <text class="diagram-sublabel" x="320" y="163">n/B updates/epoch</text>
+
+      <!-- Batch GD: all n samples -->
+      <circle class="diagram-node-good" cx="550" cy="70" r="9"><title>Batch GD — gradient from all n samples</title></circle>
+      <text class="diagram-label" x="550" y="105">Batch GD</text>
+      <text class="diagram-sublabel" x="550" y="120">B = n</text>
+      <text class="diagram-sublabel" x="550" y="150">Smooth, exact,</text>
+      <text class="diagram-sublabel" x="550" y="163">1 update/epoch</text>
+    </svg>
+    <p class="diagram-svg-caption">All three variants sit on the same spectrum — the only difference is how many samples B contribute to each gradient estimate. Small B → noisy but frequent updates. Large B → smooth but rare updates.</p>
+  </div>
 </div>
 
 <!-- ── Section 2 ── -->
@@ -372,6 +408,26 @@ Mini-batch (10 epochs): Final loss = 0.2501
   </div>
 
   <p>Mini-batch reaches the same loss as Batch GD in far fewer epochs because it makes 32 updates per epoch (n/B = 1000/32 ≈ 32) versus Batch GD's 1 update per epoch. Fewer epochs × more updates per epoch = faster convergence.</p>
+
+  <p>Numbers in a table only tell half the story — the real difference between these three variants is the <em>shape</em> of the loss curve as training progresses. Using the same synthetic linear regression setup as the code above (n=1000, 3 features), the chart below simulates the per-<em>step</em> loss (not just per-epoch) for all three variants on an identical loss surface. Toggle each line on and off to compare them in isolation:</p>
+
+  <div class="diagram-btn-group" id="l40-variant-buttons">
+    <button class="diagram-btn active" data-variant="batch">Batch GD</button>
+    <button class="diagram-btn active" data-variant="mini">Mini-Batch GD (B=32)</button>
+    <button class="diagram-btn active" data-variant="sgd">SGD (B=1)</button>
+  </div>
+  <div class="chart-container">
+    <div id="l40-convergence-chart" style="height:420px;"></div>
+    <p class="chart-caption" id="l40-convergence-caption">Loss per gradient update — Batch GD takes only 1 (very effective) step per epoch, SGD takes 1000 noisy steps per epoch, and Mini-Batch GD takes ~31 comparatively smooth steps per epoch.</p>
+  </div>
+
+  <div class="callout callout-tip">
+    <span class="callout-icon">💡</span>
+    <div class="callout-body">
+      <strong>What the Chart Is Really Showing</strong>
+      <p>Look at the <em>texture</em> of each line, not just its endpoint. Batch GD's curve is a smooth, monotonic staircase — every step is guaranteed to reduce the loss because it's computed from the exact gradient. SGD's curve is jagged and vibrates constantly — some individual steps even increase the loss — because each step reacts to just one noisy sample. Mini-batch GD sits in between: still visibly noisy step-to-step, but the noise averages out over a batch, so the overall trend is far cleaner than SGD while still reaching low loss in a fraction of Batch GD's wall-clock steps. This noise pattern — not just the convergence speed — is the key intuition to take away from this lesson.</p>
+    </div>
+  </div>
 </div>
 
 <!-- ── Section 5 ── -->
@@ -844,7 +900,174 @@ Training 5000 MNIST samples for 10 epochs:
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-core.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/plugins/autoloader/prism-autoloader.min.js"></script>
+<script src="https://cdn.plot.ly/plotly-2.32.0.min.js"></script>
+<script src="../assets/charts.js"></script>
 <script src="../assets/quiz.js"></script>
+<script>
+/* ── Interactive Batch vs Mini-Batch vs SGD convergence chart (Section 4) ── */
+(function () {
+  // Simulate a simple 1D quadratic-ish loss surface via linear regression
+  // on synthetic data — mirrors the n=1000, 3-feature setup used in the
+  // lesson's own mini-batch code example.
+  function seededRandom(seed) {
+    let s = seed % 2147483647;
+    if (s <= 0) s += 2147483646;
+    return function () {
+      s = (s * 16807) % 2147483647;
+      return (s - 1) / 2147483646;
+    };
+  }
+  function gaussian(rand) {
+    // Box-Muller transform
+    const u1 = Math.max(rand(), 1e-9);
+    const u2 = rand();
+    return Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
+  }
+
+  const N = 1000;       // dataset size, matches lesson's mini-batch example
+  const TRUE_W = [2.5, -1.5, 0.8, 3.0]; // w1, w2, w3, bias
+  const rand = seededRandom(42);
+
+  const X = [];
+  const y = [];
+  for (let i = 0; i < N; i++) {
+    const x1 = gaussian(rand), x2 = gaussian(rand), x3 = gaussian(rand);
+    const noise = gaussian(rand) * 0.5;
+    X.push([x1, x2, x3, 1]);
+    y.push(TRUE_W[0] * x1 + TRUE_W[1] * x2 + TRUE_W[2] * x3 + TRUE_W[3] + noise);
+  }
+
+  function predict(w, row) {
+    return w[0] * row[0] + w[1] * row[1] + w[2] * row[2] + w[3] * row[3];
+  }
+  function mseOnAll(w) {
+    let sum = 0;
+    for (let i = 0; i < N; i++) {
+      const r = predict(w, X[i]) - y[i];
+      sum += r * r;
+    }
+    return sum / N;
+  }
+  function gradOnBatch(w, idx) {
+    const g = [0, 0, 0, 0];
+    for (const i of idx) {
+      const r = predict(w, X[i]) - y[i];
+      g[0] += 2 * r * X[i][0];
+      g[1] += 2 * r * X[i][1];
+      g[2] += 2 * r * X[i][2];
+      g[3] += 2 * r * X[i][3];
+    }
+    const B = idx.length;
+    return g.map(v => v / B);
+  }
+  function shuffledIndices(rfn) {
+    const idx = Array.from({ length: N }, (_, i) => i);
+    for (let i = idx.length - 1; i > 0; i--) {
+      const j = Math.floor(rfn() * (i + 1));
+      [idx[i], idx[j]] = [idx[j], idx[i]];
+    }
+    return idx;
+  }
+
+  // Run each variant for a fixed number of EPOCHS, recording loss after
+  // every individual gradient update (so step counts differ naturally:
+  // Batch = 1 step/epoch, Mini-batch = ~31 steps/epoch, SGD = 1000 steps/epoch).
+  function simulate(batchSize, lr, epochs, rSeed) {
+    const r = seededRandom(rSeed);
+    let w = [0, 0, 0, 0];
+    const steps = [];
+    for (let epoch = 0; epoch < epochs; epoch++) {
+      const order = shuffledIndices(r);
+      for (let start = 0; start < N; start += batchSize) {
+        const idx = order.slice(start, start + batchSize);
+        const g = gradOnBatch(w, idx);
+        w = w.map((v, k) => v - lr * g[k]);
+        steps.push(mseOnAll(w));
+      }
+    }
+    return steps;
+  }
+
+  const EPOCHS_BATCH = 30;
+  const EPOCHS_MINI  = 6;
+  const EPOCHS_SGD   = 2;
+
+  const lossBatch = simulate(N,  0.08, EPOCHS_BATCH, 101);   // 1 step/epoch
+  const lossMini  = simulate(32, 0.05, EPOCHS_MINI,  202);   // ~31 steps/epoch
+  const lossSGD   = simulate(1,  0.01, EPOCHS_SGD,   303);   // 1000 steps/epoch
+
+  function renderConvergenceChart(visible) {
+    const traces = [
+      {
+        x: Array.from({ length: lossBatch.length }, (_, i) => i + 1),
+        y: lossBatch, type: 'scatter', mode: 'lines',
+        line: { color: MLCharts.theme.green, width: 2.5 },
+        name: 'Batch GD (1 step/epoch)',
+        visible: visible.batch ? true : 'legendonly',
+        hovertemplate: 'Batch GD<br>step %{x}<br>MSE %{y:.3f}<extra></extra>',
+      },
+      {
+        x: Array.from({ length: lossMini.length }, (_, i) => i + 1),
+        y: lossMini, type: 'scatter', mode: 'lines',
+        line: { color: MLCharts.theme.violet, width: 1.75 },
+        name: 'Mini-Batch GD (B=32, ~31 steps/epoch)',
+        visible: visible.mini ? true : 'legendonly',
+        hovertemplate: 'Mini-Batch GD<br>step %{x}<br>MSE %{y:.3f}<extra></extra>',
+      },
+      {
+        x: Array.from({ length: lossSGD.length }, (_, i) => i + 1),
+        y: lossSGD, type: 'scatter', mode: 'lines',
+        line: { color: MLCharts.theme.amber, width: 1 },
+        name: 'SGD (B=1, 1000 steps/epoch)',
+        visible: visible.sgd ? true : 'legendonly',
+        opacity: 0.85,
+        hovertemplate: 'SGD<br>step %{x}<br>MSE %{y:.3f}<extra></extra>',
+      },
+    ];
+
+    const layout = MLCharts.baseLayout({
+      xaxis: { title: { text: 'Gradient update step' }, type: 'log' },
+      yaxis: { title: { text: 'MSE loss (full dataset)' } },
+      showlegend: false,
+    });
+
+    Plotly.react('l40-convergence-chart', traces, layout, MLCharts.config);
+  }
+
+  function currentVisibility() {
+    const buttons = document.querySelectorAll('#l40-variant-buttons .diagram-btn');
+    const visible = { batch: true, mini: true, sgd: true };
+    buttons.forEach(btn => {
+      visible[btn.dataset.variant] = btn.classList.contains('active');
+    });
+    return visible;
+  }
+
+  function updateCaption(visible) {
+    const caption = document.getElementById('l40-convergence-caption');
+    if (!caption) return;
+    const shown = [];
+    if (visible.batch) shown.push('Batch GD (smooth, 1 step/epoch)');
+    if (visible.mini) shown.push('Mini-Batch GD (moderate noise, ~31 steps/epoch)');
+    if (visible.sgd) shown.push('SGD (very noisy, 1000 steps/epoch)');
+    caption.textContent = shown.length
+      ? 'Showing: ' + shown.join('  ·  ') + '. X-axis is log-scaled so early steps (where the variants differ most) are visible for all three.'
+      : 'Select at least one variant above to plot its loss curve.';
+  }
+
+  renderConvergenceChart(currentVisibility());
+  updateCaption(currentVisibility());
+
+  document.querySelectorAll('#l40-variant-buttons .diagram-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      btn.classList.toggle('active');
+      const visible = currentVisibility();
+      renderConvergenceChart(visible);
+      updateCaption(visible);
+    });
+  });
+})();
+</script>
 <script>
 new MLQuiz('quiz-40', [
   {

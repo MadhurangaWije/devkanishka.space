@@ -187,6 +187,20 @@ Day  99: raw= 23.82°C | EWMA(β=0.9)=21.96°C | EWMA(β=0.99)=19.68°C | true= 
       <p>You've already seen EWMA without knowing it: BatchNorm's running mean and running variance (tracked across training batches for use at inference) are computed using EWMA. The <code>momentum</code> parameter in BatchNorm is actually β in the EWMA formula. It's also used in financial time-series analysis, signal processing, and web server load monitoring — anywhere you need a smooth trend from a noisy signal.</p>
     </div>
   </div>
+
+  <p>Drag the slider to change β and watch the smoothed curve react: low β tracks the noisy raw signal closely (barely smoothing at all), while high β produces a very slow, lagging trend line that averages over many more points.</p>
+
+  <div class="diagram-controls">
+    <div class="diagram-control-row">
+      <span class="diagram-control-label">Decay factor (β)</span>
+      <input type="range" id="l42-ewma-beta-slider" class="diagram-slider" min="0.05" max="0.98" step="0.01" value="0.9">
+      <span class="diagram-control-value" id="l42-ewma-beta-value">0.90</span>
+    </div>
+  </div>
+  <div class="chart-container">
+    <div id="l42-ewma-chart" style="height:400px;"></div>
+    <p class="chart-caption" id="l42-ewma-caption">β = 0.90 — effective window ≈ 10 days. Smooths noise while still tracking the seasonal trend closely.</p>
+  </div>
 </div>
 
 <!-- ── Section 3 ── -->
@@ -519,7 +533,21 @@ optimizer = optim.Adam(
     eps=1e-8,       # ε — numerical stability
     weight_decay=0  # L2 regularisation coefficient (0 means no regularisation)
 )</code></pre>
-</div>
+
+  <h3>Watch All Four Optimizers Race on an Elongated Valley</h3>
+  <p>Numbers in a table are useful, but nothing builds intuition like watching the actual paths. Below is a loss surface <code>L(x, y) = 0.1x² + 2y²</code> — a narrow, elongated valley (20× steeper in y than in x), rendered as a contour plot. All four optimizers start from the exact same point high on the valley wall <code>(x₀, y₀) = (−9, 4.5)</code> and take 60 steps toward the minimum at the origin, using the same update equations you just implemented from scratch above.</p>
+
+  <div class="diagram-btn-group" id="l42-opt-buttons">
+    <button class="diagram-btn active" data-opt="sgd">Plain SGD</button>
+    <button class="diagram-btn active" data-opt="momentum">SGD + Momentum</button>
+    <button class="diagram-btn active" data-opt="rmsprop">RMSProp</button>
+    <button class="diagram-btn active" data-opt="adam">Adam</button>
+  </div>
+  <div class="chart-container">
+    <div id="l42-opt-race-chart" style="height:520px;"></div>
+    <p class="chart-caption" id="l42-opt-race-caption">All four paths shown. Toggle a button to hide/show that optimizer's trajectory.</p>
+  </div>
+  <p style="font-size:0.85rem; color: var(--text-muted);">Notice the shapes: plain SGD (red) zig-zags sharply back and forth across the narrow <em>y</em>-direction for its first several steps and then creeps along the valley floor in tiny increments — after 60 steps it still hasn't reached the minimum. Momentum (amber) builds up velocity along the valley floor; it overshoots past the minimum once or twice (the "ball" has real inertia, so it doesn't stop exactly on target), but it covers far more ground along <em>x</em> in the same number of steps. RMSProp (teal) divides each dimension's step by its own running gradient magnitude, so it automatically shrinks the steep <em>y</em>-steps and stretches the shallow <em>x</em>-steps — it reaches the minimum the fastest and most smoothly of all four, with essentially no oscillation. Adam (violet) — combining both ideas plus bias correction — also converges quickly, with a touch of the same momentum-style overshoot before it settles.</p>
 
 <!-- ── Section 6 ── -->
 <div class="lesson-section">
@@ -797,7 +825,254 @@ for name, opt_fn in configs:
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-core.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/plugins/autoloader/prism-autoloader.min.js"></script>
+<script src="https://cdn.plot.ly/plotly-2.32.0.min.js"></script>
+<script src="../assets/charts.js"></script>
 <script src="../assets/quiz.js"></script>
+<script>
+/* ── Interactive charts for Lesson 42 (EWMA + Optimizer Race) ── */
+(function () {
+
+  /* ---------- EWMA beta-slider chart (Section 2) ---------- */
+  function seededRandom(seed) {
+    let s = seed % 2147483647;
+    if (s <= 0) s += 2147483646;
+    return function () {
+      s = (s * 16807) % 2147483647;
+      return (s - 1) / 2147483646;
+    };
+  }
+
+  function gaussianSeries(rand) {
+    // Box-Muller, using the seeded RNG for reproducibility across reloads.
+    const u1 = rand() || 1e-9;
+    const u2 = rand();
+    return Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
+  }
+
+  const EWMA_DAYS = 100;
+  const rand42 = seededRandom(42);
+  const l42_days = [];
+  const l42_trueTemp = [];
+  const l42_noisyTemp = [];
+  for (let t = 0; t < EWMA_DAYS; t++) {
+    l42_days.push(t);
+    const trend = 20 + 5 * Math.sin(t * 0.2);
+    l42_trueTemp.push(trend);
+    l42_noisyTemp.push(trend + gaussianSeries(rand42) * 3);
+  }
+
+  function ewma(signal, beta) {
+    const out = [];
+    let v = 0;
+    for (let t = 0; t < signal.length; t++) {
+      v = beta * v + (1 - beta) * signal[t];
+      out.push(v);
+    }
+    return out;
+  }
+
+  function renderEwmaChart(beta) {
+    const smoothed = ewma(l42_noisyTemp, beta);
+    const traces = [
+      {
+        x: l42_days, y: l42_noisyTemp, type: 'scatter', mode: 'lines',
+        line: { color: MLCharts.theme.border, width: 1.25 },
+        name: 'Noisy raw signal', hoverinfo: 'skip',
+      },
+      {
+        x: l42_days, y: l42_trueTemp, type: 'scatter', mode: 'lines',
+        line: { color: MLCharts.theme.textMuted, width: 1.5, dash: 'dot' },
+        name: 'True underlying trend', hoverinfo: 'skip',
+      },
+      {
+        x: l42_days, y: smoothed, type: 'scatter', mode: 'lines',
+        line: { color: MLCharts.theme.blue, width: 2.75 },
+        name: `EWMA (β=${beta.toFixed(2)})`,
+        hovertemplate: 'day %{x}<br>EWMA=%{y:.2f}°C<extra></extra>',
+      },
+    ];
+    const layout = MLCharts.baseLayout({
+      xaxis: { title: { text: 'Day' } },
+      yaxis: { title: { text: 'Temperature (°C)' }, range: [5, 35] },
+    });
+    Plotly.react('l42-ewma-chart', traces, layout, MLCharts.config);
+
+    const window = Math.round(1 / (1 - beta));
+    const caption = document.getElementById('l42-ewma-caption');
+    if (caption) {
+      let msg;
+      if (beta < 0.3) msg = `β = ${beta.toFixed(2)} — effective window ≈ ${window} day(s). Barely smooths anything; the EWMA nearly tracks the raw noisy signal.`;
+      else if (beta < 0.8) msg = `β = ${beta.toFixed(2)} — effective window ≈ ${window} days. A good balance: noise is smoothed while the seasonal trend is still tracked closely.`;
+      else if (beta < 0.95) msg = `β = ${beta.toFixed(2)} — effective window ≈ ${window} days. Smoother, but starts lagging behind turns in the true trend.`;
+      else msg = `β = ${beta.toFixed(2)} — effective window ≈ ${window} days. Very smooth but slow to react — the curve lags far behind real trend changes.`;
+      caption.textContent = msg;
+    }
+  }
+
+  MLCharts.linkSlider('l42-ewma-beta-slider', 'l42-ewma-beta-value', renderEwmaChart, v => v.toFixed(2));
+
+  /* ---------- Optimizer race on an elongated valley (Section 5) ---------- */
+  // Loss surface: L(x,y) = 0.1*x^2 + 2*y^2  →  gradient = (0.2x, 4y)
+  function lossXY(x, y) { return 0.1 * x * x + 2 * y * y; }
+  function gradXY(x, y) { return [0.2 * x, 4 * y]; }
+
+  const START = [-9, 4.5];
+  const N_STEPS = 60;
+
+  function runSGD(lr) {
+    let [x, y] = START;
+    const path = [[x, y]];
+    for (let i = 0; i < N_STEPS; i++) {
+      const [gx, gy] = gradXY(x, y);
+      x -= lr * gx;
+      y -= lr * gy;
+      path.push([x, y]);
+    }
+    return path;
+  }
+
+  function runMomentum(lr, beta) {
+    let [x, y] = START;
+    let vx = 0, vy = 0;
+    const path = [[x, y]];
+    for (let i = 0; i < N_STEPS; i++) {
+      const [gx, gy] = gradXY(x, y);
+      vx = beta * vx + gx;
+      vy = beta * vy + gy;
+      x -= lr * vx;
+      y -= lr * vy;
+      path.push([x, y]);
+    }
+    return path;
+  }
+
+  function runRMSProp(lr, beta, eps) {
+    let [x, y] = START;
+    let sx = 0, sy = 0;
+    const path = [[x, y]];
+    for (let i = 0; i < N_STEPS; i++) {
+      const [gx, gy] = gradXY(x, y);
+      sx = beta * sx + (1 - beta) * gx * gx;
+      sy = beta * sy + (1 - beta) * gy * gy;
+      x -= lr * gx / (Math.sqrt(sx) + eps);
+      y -= lr * gy / (Math.sqrt(sy) + eps);
+      path.push([x, y]);
+    }
+    return path;
+  }
+
+  function runAdam(lr, beta1, beta2, eps) {
+    let [x, y] = START;
+    let mx = 0, my = 0, vx = 0, vy = 0;
+    const path = [[x, y]];
+    for (let t = 1; t <= N_STEPS; t++) {
+      const [gx, gy] = gradXY(x, y);
+      mx = beta1 * mx + (1 - beta1) * gx;
+      my = beta1 * my + (1 - beta1) * gy;
+      vx = beta2 * vx + (1 - beta2) * gx * gx;
+      vy = beta2 * vy + (1 - beta2) * gy * gy;
+      const mxHat = mx / (1 - Math.pow(beta1, t));
+      const myHat = my / (1 - Math.pow(beta1, t));
+      const vxHat = vx / (1 - Math.pow(beta2, t));
+      const vyHat = vy / (1 - Math.pow(beta2, t));
+      x -= lr * mxHat / (Math.sqrt(vxHat) + eps);
+      y -= lr * myHat / (Math.sqrt(vyHat) + eps);
+      path.push([x, y]);
+    }
+    return path;
+  }
+
+  // Learning rates chosen so plain SGD is right at the edge of stability in y
+  // (making its zig-zag visible) while the adaptive methods use their typical defaults.
+  const OPT_PATHS = {
+    sgd:      { path: runSGD(0.3),                      color: MLCharts.theme.red,    label: 'Plain SGD' },
+    momentum: { path: runMomentum(0.05, 0.9),           color: MLCharts.theme.amber,  label: 'SGD + Momentum' },
+    rmsprop:  { path: runRMSProp(0.25, 0.99, 1e-8),     color: MLCharts.theme.teal,   label: 'RMSProp' },
+    adam:     { path: runAdam(0.35, 0.9, 0.999, 1e-8),  color: MLCharts.theme.violet, label: 'Adam' },
+  };
+  const OPT_ORDER = ['sgd', 'momentum', 'rmsprop', 'adam'];
+
+  // Contour grid for the background loss surface.
+  const CONTOUR_N = 80;
+  const cx = [], cy = [], cz = [];
+  for (let i = 0; i < CONTOUR_N; i++) cx.push(-10 + 20 * (i / (CONTOUR_N - 1)));
+  for (let j = 0; j < CONTOUR_N; j++) cy.push(-6 + 12 * (j / (CONTOUR_N - 1)));
+  for (let j = 0; j < CONTOUR_N; j++) {
+    const row = [];
+    for (let i = 0; i < CONTOUR_N; i++) row.push(lossXY(cx[i], cy[j]));
+    cz.push(row);
+  }
+
+  function renderOptRaceChart(activeKeys) {
+    const traces = [
+      {
+        x: cx, y: cy, z: cz, type: 'contour',
+        colorscale: [[0, MLCharts.theme.bgCard], [1, MLCharts.theme.bgAlt]],
+        showscale: false,
+        contours: { coloring: 'lines', showlabels: false },
+        line: { color: MLCharts.theme.border, width: 1 },
+        hoverinfo: 'skip',
+        name: 'Loss surface',
+      },
+    ];
+
+    OPT_ORDER.forEach(key => {
+      if (!activeKeys.has(key)) return;
+      const { path, color, label } = OPT_PATHS[key];
+      const xs = path.map(p => p[0]);
+      const ys = path.map(p => p[1]);
+      traces.push({
+        x: xs, y: ys, type: 'scatter', mode: 'lines+markers',
+        line: { color, width: 2.5 },
+        marker: { color, size: 4 },
+        name: label,
+        hovertemplate: label + '<br>step %{pointNumber}<br>x=%{x:.2f}, y=%{y:.2f}<extra></extra>',
+      });
+      // Emphasise the final resting point.
+      traces.push({
+        x: [xs[xs.length - 1]], y: [ys[ys.length - 1]], type: 'scatter', mode: 'markers',
+        marker: { color, size: 10, symbol: 'circle', line: { color: MLCharts.theme.bgCard, width: 1.5 } },
+        showlegend: false, hoverinfo: 'skip',
+      });
+    });
+
+    traces.push({
+      x: [START[0]], y: [START[1]], type: 'scatter', mode: 'markers',
+      marker: { color: MLCharts.theme.heading, size: 12, symbol: 'x' },
+      name: 'Start (all optimizers)',
+    });
+    traces.push({
+      x: [0], y: [0], type: 'scatter', mode: 'markers',
+      marker: { color: MLCharts.theme.green, size: 13, symbol: 'star' },
+      name: 'Minimum (0, 0)',
+    });
+
+    const layout = MLCharts.baseLayout({
+      xaxis: { title: { text: 'x' }, range: [-10, 10] },
+      yaxis: { title: { text: 'y' }, range: [-6, 6] },
+    });
+
+    Plotly.react('l42-opt-race-chart', traces, layout, MLCharts.config);
+  }
+
+  const l42ActiveOpts = new Set(OPT_ORDER);
+  renderOptRaceChart(l42ActiveOpts);
+
+  document.querySelectorAll('#l42-opt-buttons .diagram-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const key = btn.dataset.opt;
+      if (l42ActiveOpts.has(key)) {
+        l42ActiveOpts.delete(key);
+        btn.classList.remove('active');
+      } else {
+        l42ActiveOpts.add(key);
+        btn.classList.add('active');
+      }
+      renderOptRaceChart(l42ActiveOpts);
+    });
+  });
+})();
+</script>
 <script>
 new MLQuiz('quiz-42', [
   {

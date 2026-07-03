@@ -1,0 +1,1047 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lesson 63: MLflow — Experiment Tracking, Model Registry &amp; Centralized Server | ML Mastery</title>
+  <link rel="stylesheet" href="../assets/style.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
+</head>
+<body>
+
+<!-- ── Header ── -->
+<header class="lesson-header">
+  <div class="header-inner">
+    <nav class="breadcrumb">
+      <a href="../reference/curriculum-map.html">ML Mastery</a>
+      <span class="sep">›</span>
+      <span>Phase 6: Production ML &amp; MLOps</span>
+    </nav>
+    <div class="lesson-badges">
+      <span class="phase-badge">Phase 6 · Production ML &amp; MLOps</span>
+      <span class="lesson-num-badge">Lesson 63</span>
+    </div>
+    <h1 class="lesson-title">MLflow: Experiment Tracking, Model Registry &amp; Centralized Server</h1>
+    <p class="lesson-subtitle">Stop tracking hyperparameters in spreadsheets and model files in folders named "final_v3_REAL" — MLflow gives every experiment, model, and deployment decision a permanent, queryable, team-visible record.</p>
+    <div class="meta-pills">
+      <span class="meta-pill">⏱ ~65 min</span>
+      <span class="meta-pill">🐍 Python + MLflow</span>
+      <span class="meta-pill">📋 Experiment Tracking</span>
+      <span class="meta-pill">Requires Lesson 9</span>
+    </div>
+  </div>
+</header>
+
+<main class="lesson-main">
+<div class="content-wrapper">
+
+<!-- Objectives -->
+<div class="objectives-card">
+  <h2>🎯 What You'll Learn</h2>
+  <ul>
+    <li>Understand the reproducibility problem MLflow solves and why ad hoc tracking (spreadsheets, notebook cells, filenames) breaks down past a handful of experiments</li>
+    <li>Use MLflow Tracking to log parameters, metrics, artifacts, and code versions across runs with <code>mlflow.start_run()</code></li>
+    <li>Enable one-line autologging for scikit-learn and PyTorch with <code>mlflow.sklearn.autolog()</code> and <code>mlflow.pytorch.autolog()</code></li>
+    <li>Compare, filter, and sort runs in the MLflow Tracking UI to find the best model for a given metric</li>
+    <li>Package reproducible runs with MLflow Projects (MLproject files and conda/Docker environments)</li>
+    <li>Save and load models in the MLflow Models standard format and understand "flavors"</li>
+    <li>Version models through the Model Registry, moving them through Staging → Production → Archived with lineage and approval gates</li>
+    <li>Stand up a centralized MLflow Tracking Server backed by a database and remote artifact store for team-wide collaboration, and contrast it with the local file-based default</li>
+  </ul>
+</div>
+
+<div class="callout callout-key">
+  <span class="callout-icon">💡</span>
+  <div class="callout-body">
+    <strong>The Big Intuition</strong>
+    <p>You already know how to tune a model (Lessons 27 and 61) — sweep hyperparameters, watch a validation metric, pick the best configuration. The part nobody teaches you is what happens to that knowledge five minutes after you find the winning run. In most teams it evaporates: the learning rate that worked lives in a Jupyter cell that got overwritten, the model file is named <code>model_v2_final_FINAL.pkl</code>, and nobody remembers which preprocessing code produced it. MLflow is the system of record for that knowledge. Every run — its parameters, its metrics, its code version, its output artifacts — gets logged automatically and permanently. Every model that gets promoted to production has a paper trail: who approved it, what metrics it had, what data and code produced it. MLflow doesn't make your models better; it makes your experimentation process auditable, comparable, and reproducible — which is what lets a team of data scientists actually build on each other's work instead of re-discovering it.</p>
+  </div>
+</div>
+
+<!-- ── Section 1 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">1</span> The Problem: Tracking Chaos at Scale</h2>
+
+  <p>By Lesson 61 you've run GridSearchCV sweeps, RandomizedSearchCV sweeps, and Optuna studies with hundreds of trials. Each of those tools gives you the <em>best</em> hyperparameters at the end of a run — but the moment you close that notebook, restart your kernel, or come back the next day, you've usually lost everything except whatever number you wrote down by hand. Scale that to a real project: ten team members, six months, hundreds of model variants, multiple datasets, several feature engineering pipelines. The result is a familiar mess:</p>
+
+  <ul>
+    <li><strong>Spreadsheet tracking</strong>: someone manually copies accuracy numbers into a Google Sheet, which inevitably falls out of sync with what's actually in the model file.</li>
+    <li><strong>Filename versioning</strong>: <code>model.pkl</code>, <code>model_v2.pkl</code>, <code>model_v2_tuned.pkl</code>, <code>model_v2_tuned_FINAL.pkl</code> — with no record of what changed between them or which one is actually deployed.</li>
+    <li><strong>Lost reproducibility</strong>: six weeks later, nobody can answer "what hyperparameters, what training data snapshot, and what code commit produced the model currently in production?"</li>
+    <li><strong>No audit trail</strong>: a regulator, auditor, or incident responder asks "who approved this model for production, and based on what evaluation?" — and there's no answer.</li>
+    <li><strong>Duplicated work</strong>: a colleague reruns an experiment you already tried and discarded three months ago, because there was no shared, searchable record of what had been tried.</li>
+  </ul>
+
+  <p><strong>MLflow</strong> (open-sourced by Databricks in 2018) is the most widely adopted answer to this problem. It is not a single tool but a small platform built from four loosely-coupled components that you can adopt incrementally:</p>
+
+  <table style="width:100%; border-collapse: collapse; margin: 1.25rem 0; font-size: 0.85rem;">
+    <thead>
+      <tr style="background: var(--bg-alt); text-align: left;">
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Component</th>
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Solves</th>
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Core API</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);"><strong>Tracking</strong></td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">"What did I try, and what happened?"</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);"><code>mlflow.log_param</code>, <code>log_metric</code></td>
+      </tr>
+      <tr style="background: var(--bg-subtle);">
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);"><strong>Projects</strong></td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">"How do I rerun this exactly, on any machine?"</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">MLproject file + <code>mlflow run</code></td>
+      </tr>
+      <tr>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);"><strong>Models</strong></td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">"How do I package this so anything can serve it?"</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);"><code>mlflow.sklearn.log_model</code></td>
+      </tr>
+      <tr style="background: var(--bg-subtle);">
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);"><strong>Model Registry</strong></td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">"Which version is in production, and who approved it?"</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);"><code>mlflow.register_model</code></td>
+      </tr>
+    </tbody>
+  </table>
+
+  <p>This lesson covers all four, plus the operational question every team eventually hits: should you run MLflow's default local file store, or a centralized server that the whole team points at?</p>
+
+  <div class="callout callout-tip">
+    <span class="callout-icon">💡</span>
+    <div class="callout-body">
+      <strong>You Already Have the Hard Part</strong>
+      <p>You already know how to design a hyperparameter search (Lessons 27, 61) and how to train and evaluate classical ML and DL models (Lessons 11–60). MLflow doesn't change any of that — it wraps around your existing training loop with a handful of logging calls. Think of this lesson as "instrumentation," not "a new modeling technique." The mental shift is small; the operational payoff is large.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 2 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">2</span> MLflow Tracking: Logging Runs</h2>
+
+  <p>MLflow organizes work into <strong>experiments</strong> (a named collection of related runs, e.g. "churn-model-xgboost") and <strong>runs</strong> (one execution — one training job, one hyperparameter configuration). Each run can log:</p>
+
+  <ul>
+    <li><strong>Parameters</strong> — inputs that don't change during the run: <code>n_estimators=300</code>, <code>learning_rate=0.05</code></li>
+    <li><strong>Metrics</strong> — numeric outputs, optionally logged at multiple steps/epochs: <code>val_auc=0.891</code>, <code>train_loss</code> per epoch</li>
+    <li><strong>Artifacts</strong> — arbitrary files: the trained model, a confusion matrix plot, a SHAP summary plot (Lesson 62), the feature list</li>
+    <li><strong>Tags &amp; source metadata</strong> — git commit hash, source script name, who ran it</li>
+  </ul>
+
+  <pre><code class="language-python">import mlflow
+import mlflow.sklearn
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import roc_auc_score, f1_score, accuracy_score
+from sklearn.model_selection import train_test_split
+import pandas as pd
+
+# Point at a tracking store. Local default: a './mlruns' folder.
+# (Section 8 covers pointing this at a centralized server instead.)
+mlflow.set_tracking_uri("file:./mlruns")
+mlflow.set_experiment("churn-prediction")
+
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.2, stratify=y, random_state=42
+)
+
+params = {
+    "n_estimators": 300,
+    "max_depth": 8,
+    "min_samples_leaf": 5,
+    "random_state": 42,
+}
+
+with mlflow.start_run(run_name="rf-baseline"):
+    # 1. Log parameters
+    mlflow.log_params(params)
+    mlflow.log_param("feature_set", "v3_with_tenure_buckets")
+
+    # 2. Train (exactly as in Lessons 11-20 — nothing changes here)
+    model = RandomForestClassifier(**params)
+    model.fit(X_train, y_train)
+
+    # 3. Evaluate and log metrics
+    val_proba = model.predict_proba(X_test)[:, 1]
+    val_pred  = model.predict(X_test)
+    mlflow.log_metric("val_auc", roc_auc_score(y_test, val_proba))
+    mlflow.log_metric("val_f1", f1_score(y_test, val_pred))
+    mlflow.log_metric("val_accuracy", accuracy_score(y_test, val_pred))
+
+    # 4. Log artifacts — any file at all
+    feature_importance = pd.Series(
+        model.feature_importances_, index=X_train.columns
+    ).sort_values(ascending=False)
+    feature_importance.to_csv("feature_importance.csv")
+    mlflow.log_artifact("feature_importance.csv")
+
+    # 5. Log the model itself in MLflow's standard format (Section 4)
+    mlflow.sklearn.log_model(model, artifact_path="model")
+
+    print(f"Run ID: {mlflow.active_run().info.run_id}")</code></pre>
+
+  <div class="output-block">
+    <div class="output-label">Example Output</div>
+Run ID: 7e3f1a2b9c4d4e8f9a0b1c2d3e4f5a6b
+  </div>
+
+  <h3>Autologging: Zero-Effort Tracking</h3>
+  <p>Manually calling <code>log_param</code> for every hyperparameter gets tedious and you will inevitably forget one. MLflow's <strong>autologging</strong> instruments the most common ML libraries so that calling <code>.fit()</code> automatically logs parameters, metrics, and the model artifact — no manual calls needed.</p>
+
+  <pre><code class="language-python">import mlflow
+import mlflow.sklearn
+from sklearn.ensemble import GradientBoostingClassifier
+
+mlflow.set_experiment("churn-prediction")
+
+# One line. Captures all constructor params, training metrics,
+# the fitted model, and a model signature (input/output schema).
+mlflow.sklearn.autolog()
+
+with mlflow.start_run(run_name="gbm-autolog"):
+    model = GradientBoostingClassifier(
+        n_estimators=250, learning_rate=0.03, max_depth=4, random_state=42
+    )
+    model.fit(X_train, y_train)
+    # No explicit log_metric calls needed — autolog captures
+    # training score, and (if you call model.score / cross_val_score)
+    # those too. You can still log additional custom metrics:
+    test_auc = roc_auc_score(y_test, model.predict_proba(X_test)[:, 1])
+    mlflow.log_metric("test_auc", test_auc)</code></pre>
+
+  <pre><code class="language-python"># Autologging also exists for deep learning frameworks
+import mlflow.pytorch
+import torch
+import torch.nn as nn
+
+mlflow.set_experiment("churn-prediction-dl")
+mlflow.pytorch.autolog(log_models=True, log_every_n_epoch=1)
+
+class ChurnNet(nn.Module):
+    def __init__(self, n_features):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(n_features, 64), nn.ReLU(), nn.Dropout(0.3),
+            nn.Linear(64, 16), nn.ReLU(),
+            nn.Linear(16, 1),
+        )
+    def forward(self, x):
+        return self.net(x)
+
+with mlflow.start_run(run_name="churn-mlp"):
+    model = ChurnNet(n_features=X_train.shape[1])
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+    loss_fn = nn.BCEWithLogitsLoss()
+
+    for epoch in range(20):
+        optimizer.zero_grad()
+        logits = model(torch.tensor(X_train.values, dtype=torch.float32))
+        loss = loss_fn(logits.squeeze(), torch.tensor(y_train.values, dtype=torch.float32))
+        loss.backward()
+        optimizer.step()
+        # mlflow.pytorch.autolog logs the optimizer/loss-fn config automatically;
+        # per-epoch metrics still need an explicit call inside a training loop
+        mlflow.log_metric("train_loss", loss.item(), step=epoch)</code></pre>
+
+  <div class="callout callout-warn">
+    <span class="callout-icon">⚠️</span>
+    <div class="callout-body">
+      <strong>Autolog Covers the Common Case, Not Everything</strong>
+      <p><code>mlflow.pytorch.autolog()</code> logs the model architecture, optimizer hyperparameters, and a final model checkpoint, but it does <em>not</em> automatically wire into a custom training loop the way <code>mlflow.sklearn.autolog()</code> wires into <code>.fit()</code> — there is no universal "training step" hook in raw PyTorch. You still log per-epoch metrics explicitly with <code>mlflow.log_metric(..., step=epoch)</code>. For PyTorch Lightning or Hugging Face Trainer, the built-in MLflow callbacks (<code>MLFlowLogger</code>, <code>transformers.integrations.MLflowCallback</code>) do capture per-step metrics automatically — prefer those when available.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 3 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">3</span> Comparing Runs in the MLflow UI</h2>
+
+  <p>Every run you log accumulates in the tracking store. Launch the UI from the same directory as your <code>mlruns</code> folder:</p>
+
+  <pre><code class="language-bash">mlflow ui --port 5000
+# Then open http://localhost:5000</code></pre>
+
+  <p>The UI lets you select multiple runs and compare them side-by-side — sortable by any logged metric, with parallel-coordinates plots to see which hyperparameters correlate with better performance. This is the payoff for the logging discipline in Section 2: instead of scrolling through notebook output, you get a queryable table.</p>
+
+  <div class="output-block">
+    <div class="output-label">Illustrative MLflow UI — Runs Table for Experiment "churn-prediction"</div>
+Run Name        n_estimators  max_depth  learning_rate  val_auc   val_f1   Duration
+─────────────────────────────────────────────────────────────────────────────────
+gbm-autolog          250          4          0.03         0.913    0.742    18.2s
+rf-tuned-trial-47    400          10         —            0.901    0.731    9.7s
+rf-baseline          300          8          —            0.887    0.706    6.4s
+gbm-trial-12         150          6          0.10         0.879    0.698    11.1s
+rf-shallow           300          3          —            0.842    0.651    4.9s
+  </div>
+
+  <div class="chart-container">
+    <div id="l63-runs-scatter" style="height:460px;"></div>
+    <p class="chart-caption">Illustrative set of 18 GBM hyperparameter-sweep runs (not real training data) — each point is one run, positioned by learning rate (log scale) and validation F1, colored by max_depth. This mirrors the "sort and filter runs by metric and hyperparameter" workflow the MLflow UI's runs table and parallel-coordinates view support, just rendered as a scatter plot: F1 peaks in a mid-range learning-rate band regardless of tree depth, and falls off sharply once the learning rate gets too aggressive.</p>
+  </div>
+
+  <p>You can also query runs programmatically — useful for automated "pick the best model" steps in a pipeline:</p>
+
+  <pre><code class="language-python">from mlflow.tracking import MlflowClient
+
+client = MlflowClient(tracking_uri="file:./mlruns")
+experiment = client.get_experiment_by_name("churn-prediction")
+
+# Search runs, ordered by validation AUC, descending
+runs = client.search_runs(
+    experiment_ids=[experiment.experiment_id],
+    filter_string="metrics.val_auc > 0.88",
+    order_by=["metrics.val_auc DESC"],
+    max_results=5,
+)
+
+print(f"{'Run Name':20s} {'val_auc':>10s} {'val_f1':>10s}")
+for run in runs:
+    name = run.data.tags.get("mlflow.runName", run.info.run_id[:8])
+    print(f"{name:20s} {run.data.metrics.get('val_auc', float('nan')):10.3f} "
+          f"{run.data.metrics.get('val_f1', float('nan')):10.3f}")
+
+best_run = runs[0]
+print(f"\nBest run: {best_run.info.run_id} (val_auc={best_run.data.metrics['val_auc']:.3f})")</code></pre>
+
+  <div class="output-block">
+    <div class="output-label">Example Output</div>
+Run Name             val_auc     val_f1
+gbm-autolog            0.913      0.742
+rf-tuned-trial-47      0.901      0.731
+
+Best run: 7e3f1a2b9c4d4e8f9a0b1c2d3e4f5a6b (val_auc=0.913)
+  </div>
+
+  <div class="callout callout-key">
+    <span class="callout-icon">🔑</span>
+    <div class="callout-body">
+      <strong>Tracking + Optuna: Logging Every Trial</strong>
+      <p>This connects directly to Lesson 61. When you run an Optuna study, wrap the objective function's training step in an MLflow run so every trial — not just the winning one — is logged: <code>with mlflow.start_run(nested=True): mlflow.log_params(trial.params); mlflow.log_metric("val_auc", score)</code>. Nesting runs under a parent run (<code>nested=True</code>) groups an entire Optuna study as one parent with N child runs in the UI, so you can inspect the full search, not just `study.best_params`.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 4 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">4</span> MLflow Models: A Standard Packaging Format</h2>
+
+  <p>A trained scikit-learn model, a PyTorch <code>state_dict</code>, and an XGBoost booster all have different save formats and loading APIs. <strong>MLflow Models</strong> solves this with a uniform packaging convention: every model logged via <code>mlflow.&lt;library&gt;.log_model()</code> is saved as a directory containing the serialized model plus an <code>MLmodel</code> metadata file describing its <strong>flavors</strong> — the different ways the model can be loaded and served.</p>
+
+  <pre><code class="language-python">import mlflow.sklearn
+
+with mlflow.start_run(run_name="rf-for-deployment") as run:
+    model = RandomForestClassifier(n_estimators=300, max_depth=8, random_state=42)
+    model.fit(X_train, y_train)
+
+    # Log with an explicit input/output signature — strongly recommended.
+    # The signature documents (and validates) the expected schema at serve time.
+    from mlflow.models import infer_signature
+    signature = infer_signature(X_train, model.predict(X_train))
+
+    mlflow.sklearn.log_model(
+        sk_model=model,
+        artifact_path="model",
+        signature=signature,
+        input_example=X_train.iloc[:5],
+    )
+    model_uri = f"runs:/{run.info.run_id}/model"
+    print(f"Model logged at: {model_uri}")</code></pre>
+
+  <div class="output-block">
+    <div class="output-label">Contents of the logged "model" artifact directory</div>
+model/
+├── MLmodel              # metadata: flavors, signature, dependencies
+├── model.pkl            # the serialized sklearn estimator
+├── conda.yaml           # conda environment for reproducing it
+├── python_env.yaml      # pip-based environment alternative
+├── requirements.txt     # pinned package versions
+└── input_example.json   # sample input for quick sanity checks
+
+--- MLmodel file (excerpt) ---
+flavors:
+  python_function:
+    loader_module: mlflow.sklearn
+    python_version: 3.10.13
+  sklearn:
+    pickled_model: model.pkl
+    sklearn_version: 1.4.0
+signature:
+  inputs: '[{"name": "tenure_months", "type": "long"}, ...]'
+  outputs: '[{"type": "long"}]'
+  </div>
+
+  <p>The "flavor" system is what makes the format universal: the <code>sklearn</code> flavor lets you load it back as a normal <code>RandomForestClassifier</code>, while the <code>python_function</code> ("pyfunc") flavor is a generic, library-agnostic interface that <em>every</em> MLflow model supports — meaning any serving tool that speaks "pyfunc" can serve a model regardless of whether it was trained with scikit-learn, PyTorch, XGBoost, or LightGBM.</p>
+
+  <pre><code class="language-python">import mlflow.pyfunc
+import mlflow.sklearn
+
+# Load back using the library-specific flavor (returns the raw estimator)
+sk_model = mlflow.sklearn.load_model(model_uri)
+print(type(sk_model))  # <class 'sklearn.ensemble._forest.RandomForestClassifier'>
+
+# Or load using the generic pyfunc flavor (works identically for any model type)
+pyfunc_model = mlflow.pyfunc.load_model(model_uri)
+predictions = pyfunc_model.predict(X_test.iloc[:5])
+print(predictions)</code></pre>
+
+  <p>Because the packaged model already declares its environment, you can serve it as a local REST API with one command — no need to hand-write a Flask app just to test it:</p>
+
+  <pre><code class="language-bash"># Spin up a local REST endpoint for the model — useful for smoke-testing
+# before handing it off to the FastAPI/Docker deployment pipeline (Lesson 64)
+mlflow models serve -m runs:/7e3f1a2b9c4d4e8f9a0b1c2d3e4f5a6b/model -p 1234 --env-manager local</code></pre>
+
+  <pre><code class="language-bash"># Query it like any REST API
+curl -X POST http://127.0.0.1:1234/invocations \
+  -H "Content-Type: application/json" \
+  -d '{"dataframe_split": {"columns": ["tenure_months", "monthly_charges"], "data": [[14, 79.99]]}}'</code></pre>
+
+  <div class="output-block">
+    <div class="output-label">Example Output</div>
+{"predictions": [0]}
+  </div>
+
+  <div class="callout callout-tip">
+    <span class="callout-icon">💡</span>
+    <div class="callout-body">
+      <strong>mlflow models serve Is for Smoke Tests, Not Production Scale</strong>
+      <p><code>mlflow models serve</code> spins up a single-process Flask/FastAPI server — great for local validation and for understanding the request/response schema before you build a real deployment. For production traffic you'll containerize the model (<code>mlflow models build-docker</code>) and deploy it behind a proper serving stack, which is exactly the subject of Lesson 64. Think of this command as the bridge between "I have a model" and "I have a deployable artifact."</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 5 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">5</span> MLflow Projects: Packaging Reproducible Runs</h2>
+
+  <p>Logging a run tells you <em>what happened</em>. An <strong>MLflow Project</strong> tells you <em>how to make it happen again</em> — on a teammate's laptop, on a CI runner, or on a cloud training cluster — without them needing to reverse-engineer your environment from a README. A project is just a directory with an <code>MLproject</code> file declaring entry points, their parameters, and the environment to run them in.</p>
+
+  <pre><code class="language-yaml"># MLproject (no file extension — the filename itself is the convention)
+name: churn-prediction
+
+# Reproducible environment — conda.yaml or a Dockerfile both work
+conda_env: conda.yaml
+
+entry_points:
+  main:
+    parameters:
+      n_estimators: {type: int, default: 300}
+      max_depth: {type: int, default: 8}
+      data_path: {type: str, default: "data/churn.csv"}
+    command: "python train.py --n_estimators {n_estimators} --max_depth {max_depth} --data_path {data_path}"
+
+  evaluate:
+    parameters:
+      model_uri: {type: str}
+      test_data: {type: str, default: "data/churn_test.csv"}
+    command: "python evaluate.py --model_uri {model_uri} --test_data {test_data}"</code></pre>
+
+  <pre><code class="language-yaml"># conda.yaml — pinned environment for the "main" entry point
+name: churn-prediction-env
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10
+  - pip
+  - pip:
+      - mlflow==2.13.0
+      - scikit-learn==1.4.0
+      - pandas==2.2.0</code></pre>
+
+  <p>Anyone with MLflow installed can now run the exact same experiment — MLflow handles creating the conda environment and invoking the entry point command:</p>
+
+  <pre><code class="language-bash"># Run locally from the project directory
+mlflow run . -P n_estimators=500 -P max_depth=10
+
+# Or run directly from a git repo, no manual cloning required —
+# this is the "send a teammate one command" reproducibility story
+mlflow run https://github.com/your-org/churn-prediction.git \
+  -P n_estimators=500 --experiment-name churn-prediction</code></pre>
+
+  <div class="callout callout-warn">
+    <span class="callout-icon">⚠️</span>
+    <div class="callout-body">
+      <strong>Docker Environments Are Often the Better Default</strong>
+      <p>Conda environments are simple to declare but can drift slightly between OSes (especially around compiled dependencies like XGBoost or PyTorch with CUDA). For anything destined for production, prefer <code>docker_env</code> in the MLproject file pointing at a pinned image: <code>docker_env: {image: "myregistry/churn-train:1.4.0"}</code>. This guarantees byte-identical environments across a teammate's M-series laptop, a CI runner, and a GPU training cluster — the same guarantee Docker gives you for serving (Lesson 64), just applied to the training step.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 6 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">6</span> The Model Registry: Versioning and Promotion Workflows</h2>
+
+  <p>Tracking answers "what did I try?" The <strong>Model Registry</strong> answers the question that matters once a model is good enough to matter to the business: "which exact version is live right now, and what's its history?" A registered model is a named, versioned entity, independent of any single run, that tracks a lineage of versions as they move through stages.</p>
+
+  <h3>Registering a Model</h3>
+  <pre><code class="language-python">import mlflow
+from mlflow.tracking import MlflowClient
+
+run_id = "7e3f1a2b9c4d4e8f9a0b1c2d3e4f5a6b"
+model_uri = f"runs:/{run_id}/model"
+
+# Registers a new version under the name "churn-classifier"
+# (creates the registered model the first time it's called)
+result = mlflow.register_model(model_uri=model_uri, name="churn-classifier")
+print(f"Registered '{result.name}' as version {result.version}")</code></pre>
+
+  <div class="output-block">
+    <div class="output-label">Example Output</div>
+Registered 'churn-classifier' as version 4
+  </div>
+
+  <h3>Stages: Staging → Production → Archived</h3>
+  <p>Each version of a registered model carries a <strong>stage</strong>: <code>None</code> (just registered), <code>Staging</code> (under validation), <code>Production</code> (serving live traffic), or <code>Archived</code> (retired). Moving a version between stages is an explicit, logged action — this is the approval gate that gives you an audit trail.</p>
+
+  <div class="diagram-svg-wrap">
+    <svg viewBox="0 0 900 270" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Model registry stage lifecycle: a registered model version moves from None to Staging to Production to Archived, with a rollback path from Production back to Staging if an issue is found">
+      <defs>
+        <marker id="l63-stages-arrowhead" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+          <path d="M0,0 L8,4 L0,8 Z" fill="var(--text-muted)"></path>
+        </marker>
+        <marker id="l63-rollback-arrowhead" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+          <path d="M0,0 L8,4 L0,8 Z" fill="var(--amber)"></path>
+        </marker>
+      </defs>
+
+      <!-- None -->
+      <rect class="diagram-node" x="30" y="100" width="160" height="70" rx="8"></rect>
+      <text class="diagram-label" x="110" y="130">None</text>
+      <text class="diagram-sublabel" x="110" y="148">just registered</text>
+
+      <line class="diagram-arrow" style="marker-end:url(#l63-stages-arrowhead)" x1="190" y1="135" x2="258" y2="135"></line>
+
+      <!-- Staging -->
+      <rect class="diagram-node-alt" x="260" y="100" width="160" height="70" rx="8"></rect>
+      <text class="diagram-label" x="340" y="130">Staging</text>
+      <text class="diagram-sublabel" x="340" y="148">under validation (QA)</text>
+
+      <text class="diagram-mono-label" x="454" y="118" style="font-size:9.5px">transition_model_version_stage()</text>
+      <line class="diagram-arrow" style="marker-end:url(#l63-stages-arrowhead)" x1="420" y1="135" x2="488" y2="135"></line>
+
+      <!-- Production -->
+      <rect class="diagram-node-good" x="490" y="100" width="160" height="70" rx="8"></rect>
+      <text class="diagram-label" x="570" y="130">Production</text>
+      <text class="diagram-sublabel" x="570" y="148">serving live traffic</text>
+
+      <line class="diagram-arrow" style="marker-end:url(#l63-stages-arrowhead)" x1="650" y1="135" x2="708" y2="135"></line>
+
+      <!-- Archived -->
+      <rect class="diagram-node-bad" x="710" y="100" width="160" height="70" rx="8"></rect>
+      <text class="diagram-label" x="790" y="130">Archived</text>
+      <text class="diagram-sublabel" x="790" y="148">retired</text>
+
+      <!-- Rollback -->
+      <path class="diagram-arrow" style="stroke:var(--amber);marker-end:url(#l63-rollback-arrowhead)" d="M 560 170 C 560 225, 350 225, 350 172"></path>
+      <text class="diagram-sublabel" x="455" y="245" style="fill:var(--amber)">rollback: archive the bad Production version and re-promote a previously validated Staging version</text>
+    </svg>
+    <p class="diagram-svg-caption">The Model Registry's stage lifecycle: a version starts at <code>None</code>, moves to <code>Staging</code> for validation, then <code>Production</code> once approved to serve live traffic, and eventually <code>Archived</code> when replaced. If a Production version turns out to have a problem, the amber rollback path shows the practical fix — archive it and re-promote an earlier validated version — since MLflow has no single "undo" button for a bad promotion.</p>
+  </div>
+
+  <pre><code class="language-python">client = MlflowClient()
+
+# Promote version 4 to Staging for QA validation
+client.transition_model_version_stage(
+    name="churn-classifier",
+    version=4,
+    stage="Staging",
+    archive_existing_versions=False,
+)
+
+# ... QA team runs validation checks against the Staging model ...
+# ... a human (or an automated gate) reviews metrics and signs off ...
+
+# Promote to Production. archive_existing_versions=True automatically
+# demotes whatever was previously in Production to Archived — there is
+# always exactly one unambiguous "current production version."
+client.transition_model_version_stage(
+    name="churn-classifier",
+    version=4,
+    stage="Production",
+    archive_existing_versions=True,
+)
+
+# Attach a human-readable note documenting the approval decision
+client.update_model_version(
+    name="churn-classifier",
+    version=4,
+    description=(
+        "Approved for production 2026-07-01 by M. Alvarez (Lead DS). "
+        "val_auc=0.913, beats prior production version (0.887) by 2.6pp. "
+        "Fairness check (Lesson 62 SHAP audit) showed no proxy discrimination "
+        "via tenure_months."
+    ),
+)</code></pre>
+
+  <h3>Loading the Production Model by Alias</h3>
+  <p>Downstream consumers — a batch scoring job, the FastAPI service from Lesson 64 — never hardcode a run ID. They reference the registry by name and stage, so promoting a new version requires zero code changes downstream:</p>
+
+  <pre><code class="language-python">import mlflow.pyfunc
+
+# Always resolves to whichever version currently holds the Production stage
+production_model = mlflow.pyfunc.load_model("models:/churn-classifier/Production")
+predictions = production_model.predict(new_customers_df)</code></pre>
+
+  <div class="output-block">
+    <div class="output-label">Illustrative Registry View — "churn-classifier"</div>
+Version  Stage        Run AUC   Registered          Notes
+──────────────────────────────────────────────────────────────────────
+4        Production   0.913     2026-07-01 09:14   Approved by M. Alvarez
+3        Archived     0.887     2026-05-12 14:02   Previous production
+2        Archived     0.864     2026-03-30 11:47   Replaced — feature set v2
+1        Archived     0.811     2026-02-01 08:55   Initial baseline
+5        Staging      0.918     2026-06-29 16:30   Pending fairness review
+  </div>
+
+  <div class="callout callout-realworld">
+    <span class="callout-icon">🌍</span>
+    <div class="callout-body">
+      <strong>Aliases Are Replacing Stages in Newer MLflow Versions</strong>
+      <p>MLflow 2.9+ introduced <strong>model aliases</strong> (e.g. <code>champion</code>, <code>challenger</code>) and <strong>tags</strong> as a more flexible alternative to the fixed Staging/Production/Archived stages, which are now considered legacy (though still widely used and fully supported). Aliases let you run more sophisticated workflows — e.g. a <code>champion</code> alias for the live model and a <code>challenger</code> alias for a candidate being A/B tested (Lesson 67) — without being boxed into exactly three named stages. The underlying concept this lesson teaches — versioned models with an explicit, logged promotion workflow — is identical either way; only the labeling mechanism differs.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 7 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">7</span> Centralized Tracking Server vs. Local File Store</h2>
+
+  <p>Everything so far has used <code>mlflow.set_tracking_uri("file:./mlruns")</code> — the default, which writes run metadata as files and folders directly on your machine. That's fine for solo experimentation, but it breaks down the moment a team needs to share results: there's no central place to compare a colleague's runs against yours, and the Model Registry doesn't function at all in pure local-file mode (versions and stage transitions need a real database to coordinate concurrent writers safely).</p>
+
+  <div class="diagram-svg-wrap">
+    <svg viewBox="0 0 900 260" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="MLflow architecture: a training script client calls log_param, log_metric, and log_artifact against a Tracking Server REST API, which writes structured data to a Backend Store such as PostgreSQL and large files to an Artifact Store such as S3, both of which feed a Model Registry of versioned models with stages">
+      <defs>
+        <marker id="l63-arch-arrowhead" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+          <path d="M0,0 L8,4 L0,8 Z" fill="var(--text-muted)"></path>
+        </marker>
+      </defs>
+
+      <!-- Client -->
+      <rect class="diagram-node" x="20" y="30" width="150" height="70" rx="8"></rect>
+      <text class="diagram-label" x="95" y="58">Training Script</text>
+      <text class="diagram-sublabel" x="95" y="74">(the client)</text>
+      <text class="diagram-mono-label" x="95" y="90" style="font-size:9.5px">log_param · log_metric · log_artifact</text>
+
+      <line class="diagram-arrow" style="marker-end:url(#l63-arch-arrowhead)" x1="170" y1="65" x2="228" y2="65"></line>
+
+      <!-- Tracking Server -->
+      <rect class="diagram-node-alt" x="230" y="30" width="170" height="70" rx="8"></rect>
+      <text class="diagram-label" x="315" y="58">Tracking Server</text>
+      <text class="diagram-sublabel" x="315" y="74">REST API</text>
+      <text class="diagram-sublabel" x="315" y="90">(mlflow server)</text>
+
+      <line class="diagram-arrow" style="marker-end:url(#l63-arch-arrowhead)" x1="270" y1="100" x2="205" y2="148"></line>
+      <line class="diagram-arrow" style="marker-end:url(#l63-arch-arrowhead)" x1="360" y1="100" x2="405" y2="148"></line>
+
+      <!-- Backend Store -->
+      <rect class="diagram-node-good" x="150" y="150" width="170" height="70" rx="8"></rect>
+      <text class="diagram-label" x="235" y="178">Backend Store</text>
+      <text class="diagram-sublabel" x="235" y="194">PostgreSQL / MySQL</text>
+      <text class="diagram-sublabel" x="235" y="210">params · metrics · tags</text>
+
+      <!-- Artifact Store -->
+      <rect class="diagram-node-bad" x="350" y="150" width="170" height="70" rx="8"></rect>
+      <text class="diagram-label" x="435" y="178">Artifact Store</text>
+      <text class="diagram-sublabel" x="435" y="194">S3 / GCS / Azure Blob</text>
+      <text class="diagram-sublabel" x="435" y="210">model files · plots · datasets</text>
+
+      <line class="diagram-arrow" style="marker-end:url(#l63-arch-arrowhead)" x1="320" y1="180" x2="598" y2="118"></line>
+      <line class="diagram-arrow" style="marker-end:url(#l63-arch-arrowhead)" x1="520" y1="185" x2="598" y2="155"></line>
+
+      <!-- Model Registry -->
+      <rect class="diagram-node-alt" x="600" y="75" width="240" height="100" rx="8"></rect>
+      <text class="diagram-label" x="720" y="105">Model Registry</text>
+      <text class="diagram-sublabel" x="720" y="122">versioned models + stage</text>
+      <text class="diagram-sublabel" x="720" y="138">None → Staging → Production → Archived</text>
+      <text class="diagram-mono-label" x="720" y="156" style="font-size:9.5px">models:/&lt;name&gt;/Production</text>
+    </svg>
+    <p class="diagram-svg-caption">The MLflow architecture behind a centralized deployment: a training script logs to the Tracking Server's REST API, which persists small structured data (params, metrics, tags) to a Backend Store database and large binary files (models, plots) to a separate Artifact Store — the Model Registry then layers versioned models and promotion stages on top of both, so downstream code can always resolve <code>models:/&lt;name&gt;/Production</code> to the current approved version.</p>
+  </div>
+
+  <h3>Local File Store (Default)</h3>
+  <pre><code class="language-python">import mlflow
+# Metadata AND artifacts both land in ./mlruns on local disk.
+# Fine for solo work; breaks down with concurrent writers or remote teammates.
+mlflow.set_tracking_uri("file:./mlruns")</code></pre>
+
+  <h3>Centralized Tracking Server</h3>
+  <p>A production MLflow setup separates three concerns, each backed by infrastructure suited to it:</p>
+
+  <table style="width:100%; border-collapse: collapse; margin: 1.25rem 0; font-size: 0.85rem;">
+    <thead>
+      <tr style="background: var(--bg-alt); text-align: left;">
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Concern</th>
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Typical backend</th>
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Why</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Backend store (params, metrics, registry)</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">PostgreSQL / MySQL</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Concurrent writes, queryable, supports the Model Registry</td>
+      </tr>
+      <tr style="background: var(--bg-subtle);">
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Artifact store (models, plots, datasets)</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Amazon S3 / GCS / Azure Blob</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Cheap, durable, large-object storage; shared across machines</td>
+      </tr>
+      <tr>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Tracking server</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">A small always-on service (EC2, ECS, Kubernetes pod)</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Single HTTP endpoint the whole team and CI talk to</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <pre><code class="language-bash"># Launching a centralized MLflow tracking server
+# (run this once, on a small persistent host/container — not on every laptop)
+mlflow server \
+  --backend-store-uri postgresql://mlflow_user:secret@db.internal:5432/mlflow_db \
+  --default-artifact-root s3://my-company-mlflow-artifacts/ \
+  --host 0.0.0.0 \
+  --port 5000</code></pre>
+
+  <pre><code class="language-python"># Every data scientist's laptop / training script now points at the
+# shared server instead of a local folder — one line changes:
+import mlflow
+
+mlflow.set_tracking_uri("http://mlflow.internal.company.com:5000")
+mlflow.set_experiment("churn-prediction")
+
+# Everything else — log_param, log_metric, log_model, register_model —
+# is IDENTICAL code to the local-file examples above. The tracking URI
+# is the only thing that changes between solo and team mode.
+with mlflow.start_run(run_name="rf-from-shared-server"):
+    mlflow.log_params({"n_estimators": 300, "max_depth": 8})
+    # ... train and log as before ...</code></pre>
+
+  <div class="callout callout-key">
+    <span class="callout-icon">🔑</span>
+    <div class="callout-body">
+      <strong>Why Artifacts and Metadata Live Separately</strong>
+      <p>Run parameters and metrics are small, structured, and need to support fast filtering/sorting queries ("show me all runs with val_auc > 0.9") — a relational database is the right tool. Model files, plots, and datasets can be large binary blobs (a serialized PyTorch model can be gigabytes) — object storage (S3) is built for exactly that, cheaply and durably, and most teams already have it for other purposes. The tracking server is the thin coordination layer in between: clients talk HTTP to the server, the server writes structured data to Postgres and hands back pre-signed URLs (or proxies the bytes) for artifact reads/writes to S3.</p>
+    </div>
+  </div>
+
+  <div class="callout callout-tip">
+    <span class="callout-icon">💡</span>
+    <div class="callout-body">
+      <strong>Managed Alternatives</strong>
+      <p>Running and patching your own Postgres + S3 + tracking-server stack is real operational overhead. Databricks (MLflow's original authors) offers Managed MLflow built into its platform. AWS SageMaker has its own native experiment tracking with an MLflow-compatible API. Azure ML and Google Vertex AI offer similar managed tracking. For a small team, self-hosting MLflow on a single small EC2 instance with an RDS Postgres backend is a perfectly reasonable, low-cost starting point — you can always migrate to a managed option later, since the client-side code (<code>mlflow.log_param</code>, etc.) barely changes.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Real-World ── -->
+<div class="use-case-section">
+  <div class="use-case-header">
+    <span style="font-size:1.5rem">🌍</span>
+    <h2>Real-World Spotlight: Team Collaboration and Production Promotion Gates</h2>
+  </div>
+
+  <h3>Case 1: A 5-Person Team Tracking 200+ Churn Model Experiments</h3>
+  <p>A data science team of five is independently iterating on a customer churn model: different feature sets, different algorithms (logistic regression, random forest, XGBoost, a small MLP), different class-imbalance strategies. Without a shared system, this would fragment into five private notebooks with no way to know who has the best result. Instead, the team agrees on one convention: every run goes to the shared MLflow server under experiment <code>"churn-prediction"</code>, tagged with the author's name and the feature-set version.</p>
+
+  <pre><code class="language-python">import mlflow
+import getpass
+
+mlflow.set_tracking_uri("http://mlflow.internal.company.com:5000")
+mlflow.set_experiment("churn-prediction")
+
+with mlflow.start_run(run_name=f"xgb-{getpass.getuser()}-trial23"):
+    mlflow.set_tags({
+        "author": getpass.getuser(),
+        "feature_set_version": "v4_with_support_ticket_features",
+        "team": "retention-ds",
+    })
+    mlflow.log_params({"max_depth": 6, "n_estimators": 400, "learning_rate": 0.02})
+    # ... train xgboost model ...
+    mlflow.log_metric("val_auc", 0.921)
+    mlflow.xgboost.log_model(model, "model")</code></pre>
+
+  <p>After several weeks, the team has 200+ logged runs across all five contributors. The team lead queries across everyone's work in one place to find the global best, regardless of who ran it:</p>
+
+  <pre><code class="language-python">from mlflow.tracking import MlflowClient
+
+client = MlflowClient(tracking_uri="http://mlflow.internal.company.com:5000")
+exp = client.get_experiment_by_name("churn-prediction")
+
+top_runs = client.search_runs(
+    experiment_ids=[exp.experiment_id],
+    order_by=["metrics.val_auc DESC"],
+    max_results=3,
+)
+for r in top_runs:
+    tags = r.data.tags
+    print(f"{tags.get('author', '?'):10s} | auc={r.data.metrics['val_auc']:.3f} "
+          f"| features={tags.get('feature_set_version', '?')}")</code></pre>
+
+  <div class="output-block">
+    <div class="output-label">Example Output</div>
+priya      | auc=0.921 | features=v4_with_support_ticket_features
+devon      | auc=0.917 | features=v4_with_support_ticket_features
+mateo      | auc=0.908 | features=v3_with_tenure_buckets
+  </div>
+
+  <p>Without the shared server, this query — "across everything anyone on the team has tried, what's the best result and who found it?" — would require manually pinging four colleagues. With it, it's one method call.</p>
+
+  <h3>Case 2: Staging → Production Approval Gate for a Fraud Model</h3>
+  <p>A fraud detection model has real financial and customer-experience consequences if a bad version goes live — blocking legitimate transactions is as costly as missing fraud. The team enforces a hard promotion gate: nothing reaches <code>Production</code> without passing automated checks <em>and</em> a human sign-off, both recorded against the registry.</p>
+
+  <pre><code class="language-python">from mlflow.tracking import MlflowClient
+import mlflow
+
+client = MlflowClient()
+
+def promote_to_staging(model_name, run_id, candidate_metrics, min_auc=0.95, max_fpr=0.02):
+    """Automated gate: only reaches Staging if it clears minimum bars."""
+    if candidate_metrics["val_auc"] < min_auc:
+        raise ValueError(f"AUC {candidate_metrics['val_auc']:.3f} below gate ({min_auc})")
+    if candidate_metrics["false_positive_rate"] > max_fpr:
+        raise ValueError(f"FPR {candidate_metrics['false_positive_rate']:.3f} exceeds gate ({max_fpr})")
+
+    result = mlflow.register_model(f"runs:/{run_id}/model", model_name)
+    client.transition_model_version_stage(model_name, result.version, "Staging")
+    print(f"v{result.version} cleared automated gate -> Staging for human review")
+    return result.version
+
+
+def approve_for_production(model_name, version, approver, justification):
+    """Human approval gate: explicit, named, and logged — required for fraud models."""
+    current_prod = client.get_latest_versions(model_name, stages=["Production"])
+    if current_prod:
+        print(f"Archiving current production v{current_prod[0].version}")
+
+    client.transition_model_version_stage(
+        name=model_name, version=version, stage="Production",
+        archive_existing_versions=True,
+    )
+    client.update_model_version(
+        name=model_name, version=version,
+        description=f"Approved by {approver} on 2026-07-01. Justification: {justification}",
+    )
+    client.set_model_version_tag(model_name, version, "approved_by", approver)
+    print(f"v{version} promoted to Production by {approver}")
+
+
+# Automated gate runs in CI right after training
+version = promote_to_staging(
+    "fraud-detector", run_id="9f8e7d6c5b4a3210",
+    candidate_metrics={"val_auc": 0.962, "false_positive_rate": 0.014},
+)
+
+# Human approval happens separately, e.g. triggered from a review dashboard,
+# only after a risk officer has inspected the Staging model's SHAP explanations
+# (Lesson 62) for any concerning proxy features.
+approve_for_production(
+    "fraud-detector", version,
+    approver="r.chen@company.com",
+    justification="Beats current prod by 1.8pp AUC; SHAP audit clean; "
+                   "shadow-mode test on 50k live transactions showed no FPR regression.",
+)</code></pre>
+
+  <div class="callout callout-realworld">
+    <span class="callout-icon">🌍</span>
+    <div class="callout-body">
+      <strong>Why the Audit Trail Matters Here</strong>
+      <p>Six months later, an incident review asks why the fraud model flagged a particular high-value customer's legitimate transaction as fraud. The registry's history answers, precisely: which model version was live on that date, what its validation metrics were, who approved it and why, and which run (with its exact code commit and training data snapshot) produced it. Reconstructing this from scattered notebooks and Slack messages — the pre-MLflow norm — can take days; with the registry, it's a lookup.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Quiz ── -->
+<div class="quiz-section">
+  <div id="quiz63"></div>
+</div>
+
+<!-- ── Practice ── -->
+<div class="practice-card">
+  <h2>✍️ Practice Exercises</h2>
+  <ol>
+    <li>Take a model you trained in an earlier lesson (e.g. the GridSearchCV sweep from Lesson 27, or an Optuna study from Lesson 61). Re-run the search, but wrap each trial in <code>with mlflow.start_run(nested=True)</code> and log the trial's parameters and validation metric. Open the MLflow UI and confirm you can see every trial as a child run under one parent, sortable by your validation metric.</li>
+    <li>Enable <code>mlflow.sklearn.autolog()</code> and train three different classifiers (logistic regression, random forest, gradient boosting) on the same dataset inside three separate runs. Inspect the <code>MLmodel</code> file MLflow generates for each and identify the differences in their logged "flavors" and dependency files.</li>
+    <li>Write an MLproject file with two entry points — <code>train</code> and <code>evaluate</code> — for a dataset of your choice. Confirm you can run both with <code>mlflow run . -e train ...</code> and <code>mlflow run . -e evaluate ...</code>, passing different parameters each time.</li>
+    <li>Register a model under a name of your choice, transition it through Staging and then Production using <code>MlflowClient</code>, and write a small script that loads <code>models:/&lt;name&gt;/Production</code> and scores a few new examples. Then train an improved version, register it as version 2, promote it to Production, and verify (via <code>client.get_latest_versions</code>) that version 1 was automatically archived and version 2 is now what gets loaded — without changing a single line of your scoring script.</li>
+  </ol>
+  <details>
+    <summary>▶ Show Solution (Exercise 1 — Logging Every Optuna Trial as a Nested MLflow Run)</summary>
+    <pre><code class="language-python">import mlflow
+import optuna
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import cross_val_score
+
+mlflow.set_tracking_uri("file:./mlruns")
+mlflow.set_experiment("churn-prediction-optuna")
+
+def objective(trial, X_train, y_train):
+    params = {
+        "n_estimators": trial.suggest_int("n_estimators", 100, 600, step=50),
+        "max_depth": trial.suggest_int("max_depth", 3, 15),
+        "min_samples_leaf": trial.suggest_int("min_samples_leaf", 1, 10),
+    }
+
+    # Each trial gets logged as its own child run, nested under the
+    # parent run created for the whole study below.
+    with mlflow.start_run(nested=True, run_name=f"trial-{trial.number}"):
+        mlflow.log_params(params)
+
+        model = RandomForestClassifier(**params, random_state=42)
+        scores = cross_val_score(model, X_train, y_train, cv=5, scoring="roc_auc")
+        mean_auc = scores.mean()
+
+        mlflow.log_metric("cv_auc_mean", mean_auc)
+        mlflow.log_metric("cv_auc_std", scores.std())
+
+    return mean_auc
+
+
+# The parent run represents the entire study; every trial above
+# becomes a child run visible underneath it in the MLflow UI.
+with mlflow.start_run(run_name="optuna-study-rf"):
+    study = optuna.create_study(direction="maximize")
+    study.optimize(lambda t: objective(t, X_train, y_train), n_trials=40)
+
+    mlflow.log_params({f"best_{k}": v for k, v in study.best_params.items()})
+    mlflow.log_metric("best_cv_auc", study.best_value)
+
+    print(f"Best trial: #{study.best_trial.number}")
+    print(f"Best params: {study.best_params}")
+    print(f"Best CV AUC: {study.best_value:.4f}")
+    print("Open `mlflow ui` and look under the parent run to see all 40 child runs,")
+    print("sortable by cv_auc_mean — exactly the visibility a spreadsheet never gives you.")</code></pre>
+  </details>
+</div>
+
+<!-- Navigation -->
+<nav class="lesson-nav">
+  <a href="./0062-shap-lime.html" class="nav-btn">← Lesson 62: Model Interpretability</a>
+  <a href="./0064-fastapi-docker-deployment.html" class="nav-btn nav-btn-next">Lesson 64: Deploying ML Models — FastAPI &amp; Docker →</a>
+</nav>
+
+</div><!-- /content-wrapper -->
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-core.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/plugins/autoloader/prism-autoloader.min.js"></script>
+<script src="https://cdn.plot.ly/plotly-2.32.0.min.js"></script>
+<script src="../assets/charts.js"></script>
+<script src="../assets/quiz.js"></script>
+<script>
+/* ── MLflow visualizations (Section 3 run comparison scatter) ── */
+(function () {
+
+  /* ---- Illustrative GBM hyperparameter sweep: val_f1 vs. learning_rate, colored by max_depth ---- */
+  function renderRunsScatter() {
+    const runs = [
+      { lr: 0.001, depth: 4,  f1: 0.601, name: 'run-01' },
+      { lr: 0.002, depth: 6,  f1: 0.634, name: 'run-02' },
+      { lr: 0.003, depth: 8,  f1: 0.658, name: 'run-03' },
+      { lr: 0.005, depth: 5,  f1: 0.671, name: 'run-04' },
+      { lr: 0.008, depth: 6,  f1: 0.695, name: 'run-05' },
+      { lr: 0.010, depth: 4,  f1: 0.702, name: 'run-06' },
+      { lr: 0.015, depth: 7,  f1: 0.718, name: 'run-07' },
+      { lr: 0.020, depth: 6,  f1: 0.734, name: 'run-08' },
+      { lr: 0.030, depth: 4,  f1: 0.742, name: 'gbm-autolog' },
+      { lr: 0.030, depth: 8,  f1: 0.729, name: 'run-10' },
+      { lr: 0.050, depth: 6,  f1: 0.721, name: 'run-11' },
+      { lr: 0.070, depth: 5,  f1: 0.706, name: 'run-12' },
+      { lr: 0.100, depth: 6,  f1: 0.698, name: 'gbm-trial-12' },
+      { lr: 0.100, depth: 10, f1: 0.684, name: 'run-14' },
+      { lr: 0.150, depth: 8,  f1: 0.661, name: 'run-15' },
+      { lr: 0.200, depth: 6,  f1: 0.639, name: 'run-16' },
+      { lr: 0.250, depth: 4,  f1: 0.612, name: 'run-17' },
+      { lr: 0.300, depth: 10, f1: 0.588, name: 'run-18' },
+    ];
+
+    const trace = {
+      x: runs.map(r => r.lr),
+      y: runs.map(r => r.f1),
+      text: runs.map(r => r.name),
+      mode: 'markers',
+      type: 'scatter',
+      marker: {
+        size: 13,
+        color: runs.map(r => r.depth),
+        colorscale: [[0, MLCharts.theme.blue], [0.5, MLCharts.theme.violet], [1, MLCharts.theme.amber]],
+        showscale: true,
+        colorbar: { title: { text: 'max_depth', font: { size: 11 } }, thickness: 14 },
+        line: { color: MLCharts.theme.bgCard, width: 1.5 },
+      },
+      hovertemplate: '%{text}<br>learning_rate=%{x}<br>val_f1=%{y:.3f}<extra></extra>',
+    };
+
+    const layout = MLCharts.baseLayout({
+      xaxis: { title: { text: 'learning_rate (log scale)' }, type: 'log' },
+      yaxis: { title: { text: 'validation F1' } },
+      title: { text: 'Illustrative GBM Run Sweep — val_f1 vs. learning_rate, colored by max_depth' },
+    });
+
+    Plotly.newPlot('l63-runs-scatter', [trace], layout, MLCharts.config);
+  }
+
+  renderRunsScatter();
+})();
+</script>
+<script>
+new MLQuiz('quiz63', [
+  {
+    question: "A team's data scientists each track experiments in personal spreadsheets and locally-named model files. What core problem does MLflow Tracking solve here?",
+    options: [
+      "It centralizes parameters, metrics, artifacts, and code version for every run in a queryable, permanent record, so any run can be compared, reproduced, or audited later without relying on manual notes",
+      "It automatically improves model accuracy by selecting better hyperparameters than a human would choose",
+      "It replaces the need for a train/test split by tracking data leakage automatically during training",
+      "It compresses trained models so they take up less disk space than pickled scikit-learn files"
+    ],
+    correct: 0,
+    explanation: "MLflow Tracking does not change how well a model performs — it changes whether the process that produced it is recorded and recoverable. By wrapping a training run in `mlflow.start_run()` and calling `log_param`/`log_metric`/`log_artifact`, every hyperparameter, resulting metric, and output file (model, plots, feature lists) is permanently associated with a run ID in a backing store. This is what replaces the spreadsheet: instead of someone manually copying a number into a sheet that can drift out of sync with reality, the metric is attached directly to the exact code and data that produced it, queryable later via the UI or `MlflowClient.search_runs`."
+  },
+  {
+    question: "What does `mlflow.sklearn.autolog()` do differently from `mlflow.pytorch.autolog()` in a typical training loop?",
+    options: [
+      "Sklearn's autolog hooks directly into `.fit()` to automatically capture all constructor parameters, training metrics, and the fitted model with zero extra code, while PyTorch's autolog captures model/optimizer configuration but still requires explicit `log_metric` calls inside a custom training loop since there is no universal '.fit()' equivalent to hook into",
+      "They are functionally identical — both automatically log per-epoch metrics, model architecture, and final weights with no further code required",
+      "Sklearn's autolog only logs metrics, while PyTorch's autolog only logs model parameters, so neither is sufficient alone",
+      "PyTorch's autolog requires a paid Databricks license while sklearn's autolog is free in open-source MLflow"
+    ],
+    correct: 0,
+    explanation: "Scikit-learn's API is built around a single standardized `.fit()` method, which MLflow can monkey-patch/wrap to transparently capture every constructor argument, the training score, and the resulting fitted estimator — hence one line of autolog covers an entire training call. PyTorch, by contrast, exposes no single standard training entry point: training loops are hand-written with arbitrary structure (custom loss computation, manual backward/step calls). `mlflow.pytorch.autolog()` still captures useful metadata (model summary, optimizer hyperparameters, and can log a final model checkpoint), but per-epoch metrics inside a raw training loop need explicit `mlflow.log_metric(name, value, step=epoch)` calls. Higher-level frameworks like PyTorch Lightning or Hugging Face's Trainer provide MLflow callbacks that do capture per-step metrics automatically, closing this gap."
+  },
+  {
+    question: "Why does MLflow define a generic 'pyfunc' flavor in addition to library-specific flavors like 'sklearn' or 'pytorch' when saving a model?",
+    options: [
+      "The pyfunc flavor provides a uniform predict() interface that any MLflow-aware serving tool can call regardless of which library trained the model, enabling generic deployment tooling (like `mlflow models serve`) to work the same way for sklearn, PyTorch, XGBoost, or any other supported library",
+      "Pyfunc models run faster than library-specific models because they skip Python's interpreter overhead during inference",
+      "Pyfunc is required because scikit-learn models cannot be pickled directly and must be converted to a generic format first",
+      "Pyfunc only exists for backward compatibility with MLflow versions older than 1.0 and is deprecated in current releases"
+    ],
+    correct: 0,
+    explanation: "If every serving and deployment tool had to special-case every ML library, the ecosystem would be far more fragmented. MLflow's solution is the 'python_function' (pyfunc) flavor: a generic wrapper guaranteeing every logged model exposes the same `predict(data)` interface, regardless of whether the underlying model is a scikit-learn estimator, a PyTorch module, an XGBoost booster, or a custom Python class. This is what lets `mlflow models serve`, `mlflow models build-docker`, and managed deployment targets (SageMaker, Azure ML) work identically across model types — they only need to know how to call pyfunc's `predict`, not the internals of every ML framework."
+  },
+  {
+    question: "In the MLflow Model Registry, what is the practical effect of calling `transition_model_version_stage(name, version, 'Production', archive_existing_versions=True)`?",
+    options: [
+      "The specified version becomes the new Production version, and whatever version previously held the Production stage is automatically moved to Archived — guaranteeing there is always exactly one unambiguous current production version that downstream consumers resolve via `models:/<name>/Production`",
+      "It deletes all older versions of the model permanently, freeing up storage space in the artifact store",
+      "It retrains the model using the parameters from all previously archived versions, blending them into an ensemble",
+      "It immediately deploys the model to a live REST endpoint and begins serving real traffic without any further action"
+    ],
+    correct: 0,
+    explanation: "The Model Registry's stage system exists to answer one question unambiguously: 'which version is currently live?' Setting `archive_existing_versions=True` makes a promotion atomic from the consumer's point of view — the previous Production version is automatically demoted to Archived (not deleted; its history and artifacts remain) at the same time the new version takes over the Production label. Downstream code that loads `models:/churn-classifier/Production` never needs to change when a new version is promoted — it always resolves to whichever version currently holds that stage. Note that the transition itself does not deploy or serve anything; it only updates registry metadata. Actually serving the new version (e.g., restarting a serving container, or having an already-running service pick up the change) is a separate deployment step, covered in Lesson 64."
+  },
+  {
+    question: "A team moves from `mlflow.set_tracking_uri(\"file:./mlruns\")` to a centralized MLflow Tracking Server backed by PostgreSQL and S3. Why are the metadata (params/metrics) and the artifacts (model files, plots) typically stored in two different systems rather than one?",
+    options: [
+      "Params and metrics are small, structured data that benefit from a relational database's fast filtering and sorting (e.g., 'show all runs with val_auc > 0.9'), while model files and plots are large binary blobs better suited to cheap, durable object storage like S3 — using the right tool for each data shape",
+      "PostgreSQL cannot store any data larger than a few kilobytes, so large files are technically impossible to store there under any circumstances",
+      "S3 is required because PostgreSQL cannot be accessed by more than one user at a time, making it unsuitable for any team usage",
+      "Splitting storage is purely a cost-saving measure with no technical justification — a single database could store everything just as well"
+    ],
+    correct: 0,
+    explanation: "The split reflects a genuine difference in data shape and access pattern. Parameters and metrics are small, highly structured key-value data that you frequently want to query and filter across thousands of runs ('which runs had max_depth=8 and val_auc above 0.9?') — exactly what a relational database like PostgreSQL is optimized for. Model artifacts, by contrast, can be large binary blobs (a serialized deep learning checkpoint can be gigabytes) that you mostly just need to write once and read back wholesale — exactly what object storage like S3 is optimized for, at a fraction of the cost per gigabyte of a database. The MLflow Tracking Server acts as the coordination layer: it writes structured run metadata to the backend store (Postgres/MySQL) and reads/writes artifact bytes to the configured artifact store (S3/GCS/Azure Blob), giving clients one unified HTTP API regardless of which physical backend serves which kind of data."
+  }
+]);
+</script>
+
+</body>
+</html>

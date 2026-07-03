@@ -78,7 +78,7 @@ export default async function MLLessonPage({ params }: Props) {
           ) : (
             <div className="ml-lesson-nav-link ml-lesson-nav-link--next ml-lesson-nav-link--complete">
               <span className="ml-lesson-nav-dir">✓ Course complete</span>
-              <span className="ml-lesson-nav-title">All 60 lessons done</span>
+              <span className="ml-lesson-nav-title">All 67 lessons done</span>
             </div>
           )}
         </div>

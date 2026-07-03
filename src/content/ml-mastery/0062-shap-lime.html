@@ -1,0 +1,1264 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lesson 62: Model Interpretability — SHAP &amp; LIME | ML Mastery</title>
+  <link rel="stylesheet" href="../assets/style.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
+</head>
+<body>
+
+<!-- ── Header ── -->
+<header class="lesson-header">
+  <div class="header-inner">
+    <nav class="breadcrumb">
+      <a href="../reference/curriculum-map.html">ML Mastery</a>
+      <span class="sep">›</span>
+      <span>Phase 6: Production ML &amp; MLOps</span>
+    </nav>
+    <div class="lesson-badges">
+      <span class="phase-badge">Phase 6 · Production ML &amp; MLOps</span>
+      <span class="lesson-num-badge">Lesson 62</span>
+    </div>
+    <h1 class="lesson-title">Model Interpretability: SHAP &amp; LIME</h1>
+    <p class="lesson-subtitle">Prying open the black box — game-theoretic and surrogate-model techniques for explaining exactly why your model made a specific prediction, to regulators, stakeholders, and yourself.</p>
+    <div class="meta-pills">
+      <span class="meta-pill">⏱ ~60 min</span>
+      <span class="meta-pill">🐍 SHAP · LIME · scikit-learn · XGBoost</span>
+      <span class="meta-pill">🔍 Interpretability</span>
+      <span class="meta-pill">Requires Lesson 24</span>
+    </div>
+  </div>
+</header>
+
+<main class="lesson-main">
+<div class="content-wrapper">
+
+<!-- Objectives -->
+<div class="objectives-card">
+  <h2>🎯 What You'll Learn</h2>
+  <ul>
+    <li>Explain why interpretability matters: regulation (GDPR, ECOA), debugging, stakeholder trust, and fairness auditing</li>
+    <li>Distinguish global interpretability (how the model behaves overall) from local interpretability (why this one prediction)</li>
+    <li>Distinguish intrinsically interpretable models from post-hoc explanation of black-box models</li>
+    <li>Understand Shapley values and the additive feature attribution property that SHAP is built on</li>
+    <li>Choose the right SHAP explainer — TreeExplainer, KernelExplainer, or DeepExplainer — for a given model type</li>
+    <li>Read and produce SHAP summary plots, force plots, dependence plots, and waterfall plots</li>
+    <li>Use LIME to build local surrogate explanations and articulate the SHAP-vs-LIME tradeoffs in speed, theory, and stability</li>
+    <li>Explain an individual credit-risk or fraud-model decision to a non-technical stakeholder and detect proxy-discrimination in a model</li>
+  </ul>
+</div>
+
+<div class="callout callout-key">
+  <span class="callout-icon">💡</span>
+  <div class="callout-body">
+    <strong>The Big Intuition</strong>
+    <p>You've spent Lessons 11–24 and 36–60 learning to build models that are accurate. This lesson is about a different, equally important question: <em>can you explain why a model did what it did?</em> A random forest or gradient-boosted tree with 500 estimators, or a transformer with hundreds of millions of parameters, is a function so complex that no human can trace through it by hand. Interpretability tools don't change the model — they build a second, much simpler model on top of it whose entire job is to answer "why?" in a way a human can audit. SHAP answers this with game theory: it treats each feature as a "player" contributing to a "payout" (the prediction) and fairly splits credit among them. LIME answers it more pragmatically: zoom in close enough to one prediction and even the wiggliest black box looks locally like a straight line — so just fit that line. Both turn opaque models into accountable ones.</p>
+  </div>
+</div>
+
+<!-- ── Section 1 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">1</span> Why Interpretability Matters</h2>
+
+  <p>Through Lessons 11–24 you optimized for predictive performance — accuracy, AUC, F1, RMSE. In production, performance is necessary but not sufficient. A model that is 94% accurate but cannot explain a single one of its decisions is, in many regulated or high-stakes settings, not deployable at all. Four forces push interpretability from "nice to have" to "required":</p>
+
+  <h3>1. Regulatory requirements</h3>
+  <p>The EU's <strong>GDPR</strong> (Articles 13–15 and 22) grants individuals a qualified "right to explanation" for decisions made by automated systems that produce legal or similarly significant effects — loan denials, insurance pricing, automated hiring screens. In the US, the <strong>Equal Credit Opportunity Act (ECOA)</strong> and Regulation B require lenders to give applicants specific, accurate reasons for credit denial — "the model said no" is not an acceptable adverse action notice. Healthcare (FDA software-as-a-medical-device guidance) and insurance underwriting carry similar obligations. If you can't explain a prediction, you may not be legally allowed to act on it.</p>
+
+  <h3>2. Debugging models</h3>
+  <p>A model can achieve excellent validation accuracy while learning the wrong thing entirely — the classic example is an image classifier that "detects huskies" by learning to detect snow in the background. Interpretability tools surface this kind of <strong>shortcut learning</strong> before it ships. If a fraud model's top feature turns out to be an internal database timestamp rather than any genuine behavioral signal, that's a data leakage bug, and you will only catch it by asking the model "why?" on individual predictions, not by staring at an aggregate AUC score.</p>
+
+  <h3>3. Stakeholder trust</h3>
+  <p>A doctor will not act on a sepsis-risk score they cannot interrogate. A loan officer will not override their own judgment for a black-box number with no rationale. Interpretability is frequently the deciding factor in whether a model that performs well in offline evaluation is ever actually adopted in the field — trust is a prerequisite for the model creating any value at all.</p>
+
+  <h3>4. Bias and fairness auditing</h3>
+  <p>A model can be statistically accurate and still systematically disadvantage a protected group — for instance by relying heavily on a feature like zip code that correlates strongly with race (a classic <strong>proxy variable</strong>). Local and global explanation tools let you check, feature by feature, whether the model's reasoning is defensible, not just whether its aggregate metrics look acceptable. We'll build exactly this kind of audit in the Real-World Spotlight.</p>
+
+  <div class="callout callout-warn">
+    <span class="callout-icon">⚠️</span>
+    <div class="callout-body">
+      <strong>Accuracy and Interpretability Are Not the Same Axis</strong>
+      <p>It's tempting to think "simpler model = more interpretable, but less accurate" and stop there. In practice, for tabular data, gradient-boosted trees (Lesson 24) are often both more accurate <em>and</em>, with SHAP's TreeExplainer, fully and exactly explainable — there is no accuracy tax to pay for interpretability on this data type. The real tradeoff is between models cheap to explain with exact methods (trees) and models that require approximate, sampling-based explanation (deep nets, ensembles of heterogeneous models, anything behind an API you don't control).</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 2 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">2</span> Global vs Local, Intrinsic vs Post-Hoc</h2>
+
+  <p>Two independent axes organize the whole field of interpretability. Knowing where a technique sits on each tells you immediately what question it can and can't answer.</p>
+
+  <h3>Global vs Local</h3>
+  <ul>
+    <li><strong>Global interpretability</strong> describes how the model behaves <em>on average</em>, across the whole input distribution: "Across all applicants, debt-to-income ratio is the single most influential feature, and higher values push predictions toward default." This is what you need for model documentation, regulatory model risk reviews, and sanity-checking that the model learned sensible relationships overall.</li>
+    <li><strong>Local interpretability</strong> describes why the model produced <em>this specific output for this specific input</em>: "Applicant #4471 was denied primarily because of a 41% debt-to-income ratio and two recent missed payments, partially offset by 12 years of credit history." This is what you need for an adverse-action notice, a single clinical decision, or debugging one wrong prediction a user reported.</li>
+  </ul>
+  <p>Critically, a technique that's good at one is not automatically good at the other. Permutation feature importance (which you may have seen used for feature selection) is inherently global — it tells you nothing about any individual row. SHAP and LIME, as we'll see, are fundamentally local methods that can be aggregated upward into global summaries — which is exactly why they have become the dominant tools in this space.</p>
+
+  <h3>Intrinsic vs Post-Hoc</h3>
+  <ul>
+    <li><strong>Intrinsically interpretable models</strong> are simple enough that the model itself <em>is</em> the explanation. A fitted linear regression's coefficients (Lesson 11) tell you exactly how much each unit of a feature moves the prediction, holding others constant. A shallow decision tree (Lesson 13) can be read top-to-bottom as a sequence of human-readable rules. Their feature-importance is built in, not bolted on, and requires no extra machinery.</li>
+    <li><strong>Post-hoc explanation</strong> is required for everything else: random forests, XGBoost/LightGBM ensembles, and any neural network. These models have no transparent internal structure a human can read directly, so a second, separate explanation technique — SHAP or LIME — is run <em>after</em> training to approximate or exactly decompose what the trained black box is doing.</li>
+  </ul>
+
+  <div class="diagram-svg-wrap">
+    <svg viewBox="0 0 760 520" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Two by two grid of interpretability techniques along a Global to Local axis and an Intrinsic to Post-Hoc axis. Global and Intrinsic holds linear regression coefficients and generalized additive models. Global and Post-Hoc holds SHAP summary plots and permutation importance. Local and Intrinsic holds a single decision tree path. Local and Post-Hoc holds SHAP waterfall or force plots and LIME">
+      <!-- Quadrant fills -->
+      <rect class="diagram-node" x="110" y="50" width="260" height="200" rx="8"></rect>
+      <rect class="diagram-node-good" x="370" y="50" width="260" height="200" rx="8"></rect>
+      <rect class="diagram-node-alt" x="110" y="250" width="260" height="200" rx="8"></rect>
+      <rect class="diagram-node-bad" x="370" y="250" width="260" height="200" rx="8"></rect>
+
+      <!-- Axis lines -->
+      <line x1="40" y1="250" x2="690" y2="250" stroke="var(--text-muted)" stroke-width="1.5"></line>
+      <line x1="370" y1="30" x2="370" y2="470" stroke="var(--text-muted)" stroke-width="1.5"></line>
+
+      <!-- Axis end labels -->
+      <text class="diagram-label" x="370" y="20">GLOBAL</text>
+      <text class="diagram-label" x="370" y="495">LOCAL</text>
+      <text class="diagram-sublabel" x="75" y="243" style="font-weight:700; fill:var(--heading)">◀ INTRINSIC</text>
+      <text class="diagram-sublabel" x="725" y="243" style="font-weight:700; fill:var(--heading)">POST-HOC ▶</text>
+
+      <!-- Quadrant 1: Global + Intrinsic -->
+      <text class="diagram-label" x="240" y="90">Global + Intrinsic</text>
+      <text class="diagram-sublabel" x="240" y="125">Linear / logistic regression</text>
+      <text class="diagram-sublabel" x="240" y="141">coefficients</text>
+      <text class="diagram-sublabel" x="240" y="165">Generalized Additive Models (GAMs)</text>
+
+      <!-- Quadrant 2: Global + Post-Hoc -->
+      <text class="diagram-label" x="500" y="90">Global + Post-Hoc</text>
+      <text class="diagram-sublabel" x="500" y="125">SHAP summary (beeswarm) plot</text>
+      <text class="diagram-sublabel" x="500" y="141">Permutation feature importance</text>
+
+      <!-- Quadrant 3: Local + Intrinsic -->
+      <text class="diagram-label" x="240" y="290">Local + Intrinsic</text>
+      <text class="diagram-sublabel" x="240" y="325">A single decision-tree path</text>
+      <text class="diagram-sublabel" x="240" y="341">read top-to-bottom for one row</text>
+
+      <!-- Quadrant 4: Local + Post-Hoc -->
+      <text class="diagram-label" x="500" y="290">Local + Post-Hoc</text>
+      <text class="diagram-sublabel" x="500" y="325">SHAP waterfall / force plot</text>
+      <text class="diagram-sublabel" x="500" y="341">LIME local surrogate explanation</text>
+    </svg>
+    <p class="diagram-svg-caption">The two axes that organize every interpretability technique in this lesson. SHAP and LIME both live natively in the bottom-right (local, post-hoc) cell — but SHAP's local values, uniquely among post-hoc methods, aggregate cleanly upward into the top-right (global, post-hoc) cell, which is exactly why summary plots exist and why SHAP has become the default choice.</p>
+  </div>
+
+  <pre><code class="language-python">import numpy as np
+import pandas as pd
+from sklearn.linear_model import LogisticRegression
+from sklearn.tree import DecisionTreeClassifier, export_text
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.datasets import make_classification
+
+X, y = make_classification(n_samples=2000, n_features=6, n_informative=4,
+                            random_state=42)
+feature_names = ['debt_to_income', 'credit_score', 'income', 'years_employed',
+                  'num_open_accounts', 'recent_inquiries']
+X = pd.DataFrame(X, columns=feature_names)
+
+# ── Intrinsically interpretable: logistic regression coefficients ──
+logreg = LogisticRegression(max_iter=1000).fit(X, y)
+print("Logistic regression — the model IS the explanation:")
+for name, coef in sorted(zip(feature_names, logreg.coef_[0]),
+                          key=lambda t: abs(t[1]), reverse=True):
+    direction = "increases" if coef > 0 else "decreases"
+    print(f"  {name:20s} coef={coef:+.3f}  ({direction} predicted default log-odds)")
+
+# ── Intrinsically interpretable: shallow decision tree as readable rules ──
+tree = DecisionTreeClassifier(max_depth=3, random_state=42).fit(X, y)
+print("\nDecision tree — readable as if/else rules:")
+print(export_text(tree, feature_names=feature_names, max_depth=2))
+
+# ── Black box requiring post-hoc explanation ──
+rf = RandomForestClassifier(n_estimators=500, max_depth=12, random_state=42).fit(X, y)
+print(f"\nRandom forest: {rf.n_estimators} trees, no single readable rule set.")
+print("Built-in .feature_importances_ is GLOBAL ONLY and biased toward high-cardinality")
+print("features — it cannot tell you why any one applicant was scored as it was.")
+print("This is exactly the gap SHAP and LIME are built to fill →")</code></pre>
+
+  <div class="output-block">
+    <div class="output-label">Example Output</div>
+Logistic regression — the model IS the explanation:
+  debt_to_income       coef=+0.891  (increases predicted default log-odds)
+  credit_score         coef=-0.734  (decreases predicted default log-odds)
+  recent_inquiries     coef=+0.412  (increases predicted default log-odds)
+  years_employed       coef=-0.298  (decreases predicted default log-odds)
+  income               coef=-0.205  (decreases predicted default log-odds)
+  num_open_accounts    coef=+0.084  (increases predicted default log-odds)
+
+Decision tree — readable as if/else rules:
+|--- credit_score <= -0.12
+|   |--- debt_to_income <= 0.45
+|   |   |--- class: 0
+|   |   |--- class: 1
+|   |--- debt_to_income >  0.45
+|   |   |--- class: 1
+|--- credit_score >  -0.12
+|   |--- class: 0
+
+Random forest: 500 trees, no single readable rule set.
+  </div>
+
+  <div class="callout callout-tip">
+    <span class="callout-icon">💡</span>
+    <div class="callout-body">
+      <strong>Built-in Tree Importance vs SHAP — Not the Same Thing</strong>
+      <p>You met <code>feature_importances_</code> on random forests and boosted trees back in Lessons 13 and 24. That's a global, gain- or split-count-based statistic with two well-documented weaknesses: it's biased toward high-cardinality and continuous features, and it cannot tell you anything about an individual prediction. SHAP values, covered next, are computed per-row, are consistent (a feature that contributes more can never get a lower attribution), and sum exactly to the model's output — properties the built-in importances do not have.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 3 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">3</span> SHAP and the Shapley Value</h2>
+
+  <p><strong>SHAP</strong> (SHapley Additive exPlanations, Lundberg &amp; Lee, 2017) is built on the <strong>Shapley value</strong>, a concept from 1950s cooperative game theory. The original question Lloyd Shapley answered: if a group of players cooperate to produce some total payout, how do you fairly split the credit among them, accounting for the fact that players contribute different amounts depending on which other players are already "in the room"?</p>
+
+  <h3>From Game Theory to Feature Attribution</h3>
+  <p>SHAP reframes a model prediction as a cooperative game: the "players" are the input features, and the "payout" is the difference between the model's prediction for this instance and the model's average prediction over the training data (the baseline). The Shapley value for feature <code>i</code> is its average marginal contribution to the prediction, computed across <strong>every possible order</strong> in which features could be "added" to the model:</p>
+
+  <pre><code class="language-python"># Conceptual definition of the Shapley value for feature i (not how SHAP
+# actually computes it for trees — see TreeExplainer below for the real algorithm)
+from itertools import permutations
+import numpy as np
+
+def shapley_value_conceptual(model_predict, x, baseline, feature_idx, all_features):
+    """
+    Illustrates the DEFINITION of a Shapley value: average the marginal
+    contribution of `feature_idx` across all orderings of features being
+    'switched on' from the baseline to the real value. Exponential in the
+    number of features — this is why real implementations use smarter
+    algorithms (TreeExplainer's polynomial-time exact algorithm, or
+    KernelExplainer's weighted sampling).
+    """
+    contributions = []
+    other_features = [f for f in all_features if f != feature_idx]
+
+    for perm in permutations(other_features):
+        # Build up the "coalition" in this ordering, then add feature_idx
+        coalition_before = np.array(baseline, dtype=float)
+        for f in perm:
+            coalition_before[f] = x[f]
+        pred_before = model_predict(coalition_before.reshape(1, -1))[0]
+
+        coalition_after = coalition_before.copy()
+        coalition_after[feature_idx] = x[feature_idx]
+        pred_after = model_predict(coalition_after.reshape(1, -1))[0]
+
+        contributions.append(pred_after - pred_before)
+
+    return np.mean(contributions)
+
+# In practice: 10 features -> 9! = 362,880 orderings PER feature. SHAP's
+# TreeExplainer exploits tree structure to compute the exact answer in
+# polynomial time instead — that's the breakthrough that made SHAP practical.</code></pre>
+
+  <h3>The Additive Feature Attribution Property</h3>
+  <p>The reason SHAP values are interpretable — and not just "some numbers" — is that they satisfy a guarantee called <strong>additive feature attribution</strong>: the SHAP values for a single prediction always sum exactly to the gap between that prediction and the baseline (expected) prediction:</p>
+
+  <pre><code class="language-python"># f(x) = base_value + sum of SHAP values for every feature
+#
+#   prediction  =  E[f(X)]      +  φ_1        +  φ_2         + ... +  φ_n
+#                  (avg model      (debt_to_      (credit_
+#                   output)         income          score
+#                                   contrib.)       contrib.)
+#
+# Example for one applicant:
+#   0.81 (predicted default prob.)  =  0.30 (baseline)  +  0.28 (debt_to_income)
+#                                       + (-0.05) (credit_score) + 0.31 (recent_inquiries) + ...
+print("SHAP guarantee: base_value + sum(shap_values) == model.predict(x)")
+print("This is what makes a SHAP force plot or waterfall plot additive and exact —")
+print("every bar you see literally adds up to the final prediction.")</code></pre>
+
+  <p>SHAP additionally guarantees two other properties that ad-hoc attribution schemes don't: <strong>consistency</strong> (if a model changes so that a feature's marginal contribution increases or stays the same regardless of other features, its attributed importance cannot decrease) and <strong>missingness</strong> (a feature that has no effect gets a SHAP value of exactly zero). These are the theoretical guarantees people mean when they say "SHAP values" instead of just "feature importance."</p>
+
+  <div class="callout callout-key">
+    <span class="callout-icon">🔑</span>
+    <div class="callout-body">
+      <strong>Why Computing Exact Shapley Values Is Normally Intractable</strong>
+      <p>The conceptual definition above requires evaluating the model on 2<sup>n</sup> feature subsets (every possible coalition) — for 20 features that's over a million model evaluations, for 100 features it's astronomically infeasible. This is precisely why SHAP isn't one algorithm but a <em>family</em> of explainers, each exploiting structure in a specific model class to make the computation tractable. Picking the right explainer for your model type, covered next, is the single most important practical decision when using SHAP.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 4 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">4</span> Choosing an Explainer: Tree, Kernel, and Deep</h2>
+
+  <p>The <code>shap</code> library ships several explainer classes. They all return SHAP values with the same additive guarantees, but differ enormously in speed and in whether the result is exact or approximate.</p>
+
+  <table style="width:100%; border-collapse: collapse; margin: 1.25rem 0; font-size: 0.85rem;">
+    <thead>
+      <tr style="background: var(--bg-alt); text-align: left;">
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Explainer</th>
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Model types</th>
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Exact?</th>
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Speed</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);"><code>TreeExplainer</code></td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">XGBoost, LightGBM, CatBoost, sklearn trees/forests</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Yes — polynomial-time exact algorithm</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Very fast (milliseconds–seconds)</td>
+      </tr>
+      <tr style="background: var(--bg-subtle);">
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);"><code>DeepExplainer</code></td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Keras / PyTorch neural networks</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Approximate (DeepLIFT-style backprop)</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Fast (one backward pass per sample)</td>
+      </tr>
+      <tr>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);"><code>GradientExplainer</code></td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Differentiable models (NNs)</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Approximate (expected gradients)</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Fast</td>
+      </tr>
+      <tr style="background: var(--bg-subtle);">
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);"><code>KernelExplainer</code></td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Any model — fully model-agnostic</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Approximate (weighted linear regression)</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Slow (thousands of model calls per row)</td>
+      </tr>
+      <tr>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);"><code>LinearExplainer</code></td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Linear / logistic regression</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Yes — closed form</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Instant</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="diagram-svg-wrap">
+    <svg viewBox="0 0 820 480" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Decision flowchart for choosing a SHAP explainer: if the model is a tree ensemble such as Random Forest, XGBoost, or LightGBM, use TreeExplainer, which is fast and exact. Otherwise, if it is a neural network, use DeepExplainer, which is an approximation. Otherwise use KernelExplainer, which is model-agnostic but slow">
+      <defs>
+        <marker id="l62-explainer-arrowhead" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+          <path d="M0,0 L8,4 L0,8 Z" fill="var(--text-muted)"></path>
+        </marker>
+      </defs>
+
+      <!-- Q1: tree ensemble? -->
+      <rect class="diagram-node" x="40" y="20" width="320" height="80" rx="8"></rect>
+      <text class="diagram-label" x="200" y="50">Is the model a tree ensemble?</text>
+      <text class="diagram-sublabel" x="200" y="68">(Random Forest / XGBoost / LightGBM)</text>
+
+      <!-- Q1 -> TreeExplainer (Yes) -->
+      <line class="diagram-arrow" style="marker-end:url(#l62-explainer-arrowhead)" x1="360" y1="58" x2="498" y2="62"></line>
+      <text class="diagram-sublabel" x="430" y="46" style="font-weight:700; fill:var(--green)">Yes</text>
+
+      <rect class="diagram-node-good" x="500" y="20" width="280" height="90" rx="8"></rect>
+      <text class="diagram-label" x="640" y="53">TreeExplainer</text>
+      <text class="diagram-sublabel" x="640" y="73">Fast &amp; exact</text>
+      <text class="diagram-sublabel" x="640" y="89">Polynomial-time algorithm over tree structure</text>
+
+      <!-- Q1 -> Q2 (No) -->
+      <line class="diagram-arrow" style="marker-end:url(#l62-explainer-arrowhead)" x1="200" y1="100" x2="200" y2="198"></line>
+      <text class="diagram-sublabel" x="217" y="155" style="font-weight:700; fill:var(--text-muted); text-anchor:start">No</text>
+
+      <!-- Q2: neural network? -->
+      <rect class="diagram-node" x="40" y="200" width="320" height="80" rx="8"></rect>
+      <text class="diagram-label" x="200" y="230">Is it a neural network?</text>
+      <text class="diagram-sublabel" x="200" y="248">(PyTorch / Keras / TensorFlow)</text>
+
+      <!-- Q2 -> DeepExplainer (Yes) -->
+      <line class="diagram-arrow" style="marker-end:url(#l62-explainer-arrowhead)" x1="360" y1="238" x2="498" y2="242"></line>
+      <text class="diagram-sublabel" x="430" y="226" style="font-weight:700; fill:var(--green)">Yes</text>
+
+      <rect class="diagram-node-alt" x="500" y="200" width="280" height="90" rx="8"></rect>
+      <text class="diagram-label" x="640" y="233">DeepExplainer</text>
+      <text class="diagram-sublabel" x="640" y="253">Approximate — DeepLIFT-style</text>
+      <text class="diagram-sublabel" x="640" y="269">backprop through the network</text>
+
+      <!-- Q2 -> KernelExplainer (No) -->
+      <line class="diagram-arrow" style="marker-end:url(#l62-explainer-arrowhead)" x1="200" y1="280" x2="200" y2="378"></line>
+      <text class="diagram-sublabel" x="217" y="335" style="font-weight:700; fill:var(--text-muted); text-anchor:start">No</text>
+
+      <rect class="diagram-node-bad" x="40" y="380" width="320" height="90" rx="8"></rect>
+      <text class="diagram-label" x="200" y="413">KernelExplainer</text>
+      <text class="diagram-sublabel" x="200" y="433">Model-agnostic, but slow</text>
+      <text class="diagram-sublabel" x="200" y="449">(any predict fn — 100s–1000s of calls per row)</text>
+    </svg>
+    <p class="diagram-svg-caption">A practical explainer-selection flow: check the model class first, since that determines whether SHAP can be exact and fast (TreeExplainer), approximate but still efficient (DeepExplainer), or fully general but slow (KernelExplainer). Always try to fall into the TreeExplainer or LinearExplainer branch before reaching for the model-agnostic fallback.</p>
+  </div>
+
+  <h3>TreeExplainer: Fast and Exact for Tree Models</h3>
+  <p>Because XGBoost, LightGBM, and random forests are by far the most common production models for tabular data (Lessons 13, 18, 24), <code>TreeExplainer</code> is the workhorse of practical SHAP usage. It uses the tree structure itself — which features are split on, and where — to compute exact Shapley values without any sampling, in time proportional to the number of trees times leaf depth, not 2<sup>n</sup>.</p>
+
+  <pre><code class="language-python">import shap
+import xgboost as xgb
+import pandas as pd
+import numpy as np
+from sklearn.model_selection import train_test_split
+
+# Simulated credit risk dataset
+np.random.seed(7)
+n = 5000
+df = pd.DataFrame({
+    'debt_to_income':    np.random.beta(2, 5, n) * 100,
+    'credit_score':      np.random.normal(680, 80, n).clip(300, 850),
+    'income':            np.random.lognormal(10.8, 0.5, n),
+    'years_employed':    np.random.exponential(5, n).clip(0, 40),
+    'num_open_accounts': np.random.poisson(4, n),
+    'recent_inquiries':  np.random.poisson(1.2, n),
+    'months_since_late_payment': np.random.exponential(24, n).clip(0, 120),
+})
+# Default risk increases with DTI and inquiries, decreases with credit score
+logit = (0.05 * df.debt_to_income - 0.015 * (df.credit_score - 680)
+         + 0.4 * df.recent_inquiries - 0.01 * df.months_since_late_payment - 1.0)
+prob_default = 1 / (1 + np.exp(-logit))
+y = np.random.binomial(1, prob_default)
+
+X_train, X_test, y_train, y_test = train_test_split(df, y, test_size=0.2, random_state=42)
+
+model = xgb.XGBClassifier(n_estimators=300, max_depth=4, learning_rate=0.05,
+                           eval_metric='logloss', random_state=42)
+model.fit(X_train, y_train)
+
+# TreeExplainer: exact, fast SHAP values for the whole test set
+explainer = shap.TreeExplainer(model)
+shap_values = explainer(X_test)          # shap.Explanation object
+
+print(f"shap_values.values.shape: {shap_values.values.shape}")   # (n_test, n_features)
+print(f"Base value (expected model output): {shap_values.base_values[0]:.4f}")
+print(f"\nVerifying additivity for row 0:")
+row0_sum = shap_values.base_values[0] + shap_values.values[0].sum()
+raw_pred = model.predict(X_test.iloc[[0]], output_margin=True)[0]
+print(f"  base_value + sum(shap_values) = {row0_sum:.4f}")
+print(f"  model raw margin output       = {raw_pred:.4f}  (should match)")</code></pre>
+
+  <div class="output-block">
+    <div class="output-label">Example Output</div>
+shap_values.values.shape: (1000, 7)
+Base value (expected model output): -1.0842
+
+Verifying additivity for row 0:
+  base_value + sum(shap_values) = 0.7331
+  model raw margin output       = 0.7331  (should match)
+  </div>
+
+  <h3>KernelExplainer: Model-Agnostic, but Slow</h3>
+  <p><code>KernelExplainer</code> makes no assumption about model internals — it treats the model purely as a black-box function it can call. It estimates Shapley values by sampling many random feature coalitions, masking out the "absent" features (typically by replacing them with values from a background dataset), and fitting a weighted linear regression to the resulting predictions. This generality is its strength and its weakness: it works on literally any <code>predict</code> function (an ensemble of heterogeneous models, a model behind a REST API, a scikit-learn pipeline with custom preprocessing) but needs hundreds to thousands of model evaluations per explained row.</p>
+
+  <pre><code class="language-python">import shap
+from sklearn.svm import SVC
+from sklearn.preprocessing import StandardScaler
+from sklearn.pipeline import Pipeline
+
+# A model type TreeExplainer cannot handle: an RBF-kernel SVM
+svm_pipeline = Pipeline([
+    ('scale', StandardScaler()),
+    ('svm', SVC(kernel='rbf', probability=True, random_state=42)),
+]).fit(X_train, y_train)
+
+# KernelExplainer needs a small representative "background" sample —
+# this stands in for the missing features during coalition sampling.
+background = shap.sample(X_train, 100, random_state=42)
+
+kernel_explainer = shap.KernelExplainer(
+    svm_pipeline.predict_proba, background
+)
+
+# Explain just 20 test rows — KernelExplainer is too slow for the full set
+sample_to_explain = X_test.iloc[:20]
+kernel_shap_values = kernel_explainer.shap_values(sample_to_explain, nsamples=200)
+
+print(f"KernelExplainer evaluated the model ~{200 * 20:,} times for 20 rows.")
+print(f"TreeExplainer would have computed all {len(X_test):,} rows exactly,")
+print(f"with zero sampling noise, in a fraction of the time.")</code></pre>
+
+  <h3>DeepExplainer: For Neural Networks</h3>
+  <p>For the deep learning models from Lessons 36–55, <code>DeepExplainer</code> implements an approximation based on DeepLIFT, propagating attributions backward through the network's layers rather than sampling coalitions — much faster than <code>KernelExplainer</code> for high-dimensional inputs like images or embeddings, at the cost of being an approximation rather than an exact Shapley value.</p>
+
+  <pre><code class="language-python">import shap
+import torch
+import torch.nn as nn
+
+# A small tabular neural net (PyTorch) — same credit risk task
+class CreditNet(nn.Module):
+    def __init__(self, n_features):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(n_features, 32), nn.ReLU(),
+            nn.Linear(32, 16), nn.ReLU(),
+            nn.Linear(16, 1),
+        )
+    def forward(self, x):
+        return self.net(x)
+
+torch_model = CreditNet(n_features=X_train.shape[1])
+torch_model.eval()
+
+X_train_t = torch.tensor(X_train.values, dtype=torch.float32)
+X_test_t  = torch.tensor(X_test.values, dtype=torch.float32)
+
+# Background: a sample of training data to integrate over
+background_t = X_train_t[torch.randperm(len(X_train_t))[:100]]
+
+deep_explainer = shap.DeepExplainer(torch_model, background_t)
+deep_shap_values = deep_explainer.shap_values(X_test_t[:50])
+
+print(f"DeepExplainer SHAP values shape: {deep_shap_values.shape}")
+print("Used for tabular NNs, CNN image classifiers, and embedding-based models —")
+print("trades exactness for tractability on models with millions of parameters.")</code></pre>
+
+  <div class="callout callout-warn">
+    <span class="callout-icon">⚠️</span>
+    <div class="callout-body">
+      <strong>Background Data Choice Changes the Answer</strong>
+      <p>Both <code>KernelExplainer</code> and <code>DeepExplainer</code> require a background dataset that defines the "default" or "absent" value of each feature. A SHAP value is always relative to this baseline — change the background sample and the attributed values shift, sometimes substantially. The convention is to use a representative random sample (50–200 rows) of the training distribution, not a single row of zeros or means, which can put the baseline in an unrealistic part of feature space and distort attributions.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 5 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">5</span> Reading SHAP Plots: Summary, Force, Dependence, Waterfall</h2>
+
+  <p>Raw SHAP values are a matrix of numbers; the SHAP library's real value is the standard set of plots built on top of that matrix, each answering a different question.</p>
+
+  <h3>Summary Plot — Global Importance, with Local Detail</h3>
+  <p>The summary plot is usually the first thing you look at after fitting an explainer. Each row is a feature, sorted by overall importance (mean absolute SHAP value); each point is one row of test data, colored by that feature's raw value (red = high, blue = low) and positioned left-right by its SHAP value (impact on the prediction). It compresses a global view and thousands of local explanations into a single chart.</p>
+
+  <pre><code class="language-python">import shap
+import matplotlib.pyplot as plt
+
+shap_values = explainer(X_test)   # from Section 4, TreeExplainer on XGBoost
+
+shap.summary_plot(shap_values, X_test, show=False)
+plt.tight_layout()
+plt.savefig("shap_summary.png", dpi=150)
+plt.close()
+
+# A bar-style global summary (mean |SHAP value| per feature) for executives
+shap.summary_plot(shap_values, X_test, plot_type="bar", show=False)
+plt.tight_layout()
+plt.savefig("shap_summary_bar.png", dpi=150)
+
+print("Summary plot reading guide:")
+print("  - Vertical position: feature, ranked by overall impact")
+print("  - Horizontal position: SHAP value (pushes prediction up or down)")
+print("  - Color: the feature's actual value for that row (red=high, blue=low)")
+print("  e.g. 'debt_to_income' shows red dots clustered on the right ->")
+print("       high DTI consistently pushes default probability UP")</code></pre>
+
+  <div class="chart-container">
+    <div id="l62-summary-beeswarm" style="height:420px;"></div>
+    <p class="chart-caption">Illustrative SHAP summary (beeswarm) plot for the credit-risk model — <strong>not</strong> computed from a real trained model. Feature order and each row's spread are hand-tuned to match the mean |SHAP value| ranking reported by <code>generate_explainability_report()</code> in Section 7 (recent_inquiries ≈0.41, debt_to_income ≈0.39, credit_score ≈0.30, months_since_late_payment ≈0.18, years_employed ≈0.09). Each dot is one applicant, colored by that applicant's raw feature value (blue = low, amber = high). Notice credit_score and years_employed run the opposite direction from recent_inquiries and debt_to_income: high credit_score and long tenure push risk down (negative SHAP), while frequent inquiries and high debt push it up (positive SHAP) — exactly the signs from the logistic regression coefficients in Section 2.</p>
+  </div>
+
+  <h3>Force Plot — One Prediction, Visually</h3>
+  <p>A force plot shows a single row's explanation as a tug-of-war: features pushing the prediction higher than the base value in red, features pushing it lower in blue, with bar width proportional to magnitude. It's the most stakeholder-friendly SHAP visualization — many production dashboards embed a force plot directly next to a model's decision.</p>
+
+  <pre><code class="language-python">import shap
+
+shap.initjs()   # enables the interactive force plot in a Jupyter notebook
+
+row_idx = 0
+shap.force_plot(
+    explainer.expected_value,
+    shap_values.values[row_idx],
+    X_test.iloc[row_idx],
+    matplotlib=True,     # static image instead of interactive JS widget
+    show=False,
+).savefig("force_plot_applicant_0.png", dpi=150, bbox_inches='tight')
+
+print(f"Applicant {row_idx}: base rate = {explainer.expected_value:.3f}")
+top_contributors = sorted(
+    zip(X_test.columns, shap_values.values[row_idx]),
+    key=lambda t: abs(t[1]), reverse=True
+)[:3]
+for feat, val in top_contributors:
+    direction = "increased" if val > 0 else "decreased"
+    print(f"  {feat:25s} {direction} risk by {abs(val):.3f}")</code></pre>
+
+  <div class="output-block">
+    <div class="output-label">Example Output</div>
+Applicant 0: base rate = -1.084
+  recent_inquiries          increased risk by 0.612
+  debt_to_income            increased risk by 0.483
+  credit_score              decreased risk by 0.301
+  </div>
+
+  <h3>Dependence Plot — How One Feature Drives Predictions</h3>
+  <p>A dependence plot scatters one feature's raw value (x-axis) against its SHAP value (y-axis) across every row, revealing the shape of the relationship the model learned — linear, threshold-like, or U-shaped — and automatically colors points by a second feature SHAP detects the strongest interaction with.</p>
+
+  <pre><code class="language-python">import shap
+import matplotlib.pyplot as plt
+
+shap.dependence_plot(
+    "debt_to_income", shap_values.values, X_test,
+    interaction_index="auto",   # auto-picks the feature with strongest interaction
+    show=False,
+)
+plt.tight_layout()
+plt.savefig("dependence_dti.png", dpi=150)
+
+print("Dependence plot for debt_to_income reveals:")
+print("  - Roughly monotonic: higher DTI -> higher SHAP value (more predicted risk)")
+print("  - A visible 'knee' around DTI=40%: the model learned a soft threshold")
+print("    effect, not a smooth linear one -- info a linear model could never show")</code></pre>
+
+  <h3>Waterfall Plot — The Modern Single-Prediction View</h3>
+  <p>The waterfall plot is the newer, typically preferred alternative to the force plot for explaining one row: it shows the same additive decomposition as a vertical staircase from the base value up (or down) to the final prediction, ordered by magnitude, which many people find easier to read than the force plot's horizontal bars.</p>
+
+  <pre><code class="language-python">import shap
+import matplotlib.pyplot as plt
+
+shap_explanation = explainer(X_test)
+
+shap.plots.waterfall(shap_explanation[0], show=False)
+plt.tight_layout()
+plt.savefig("waterfall_applicant_0.png", dpi=150)
+plt.close()
+
+print("Waterfall plot for applicant 0:")
+print(f"  E[f(X)] = {shap_explanation.base_values[0]:.3f}  (start)")
+for feat, val in sorted(zip(X_test.columns, shap_explanation.values[0]),
+                         key=lambda t: abs(t[1]), reverse=True):
+    sign = "+" if val >= 0 else "-"
+    print(f"  {sign} {feat:25s} {val:+.3f}")
+print(f"  f(x) = {shap_explanation.base_values[0] + shap_explanation.values[0].sum():.3f}  (final prediction)")</code></pre>
+
+  <div class="chart-container">
+    <div id="l62-waterfall" style="height:420px;"></div>
+    <p class="chart-caption">A full waterfall built from the applicant example in Section 3's additive-property callout: 0.81 = 0.30 (baseline) + 0.28 (debt_to_income) − 0.05 (credit_score) + 0.31 (recent_inquiries) + …. Two small remaining contributions (years_employed, income) are added here, sized only to close the gap to the stated final 0.81 — numbers chosen to match the lesson's own text exactly, not output from a real trained model. Red bars push the predicted probability up, blue bars pull it down, and the violet bars are the running totals (base rate and final prediction).</p>
+  </div>
+
+  <div class="callout callout-realworld">
+    <span class="callout-icon">🌍</span>
+    <div class="callout-body">
+      <strong>Which Plot for Which Audience</strong>
+      <p>In practice: ship the <strong>bar summary plot</strong> to executives and model-risk committees who want "what matters most, overall" in one glance; use the <strong>full summary (beeswarm) plot</strong> in model documentation and validation reports because it shows both importance and direction; embed a <strong>waterfall or force plot</strong> directly in customer-facing or analyst-facing tools that need to justify one specific decision; reach for <strong>dependence plots</strong> only during model debugging and feature engineering, when you need to understand a relationship's shape, not communicate it externally.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 6 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">6</span> LIME: Local Surrogate Models</h2>
+
+  <p><strong>LIME</strong> (Local Interpretable Model-agnostic Explanations, Ribeiro, Singh &amp; Guestrin, 2016) predates SHAP and takes a more pragmatic, less theoretically grounded approach to the same problem: explain one prediction by approximating the model's behavior in the immediate neighborhood of that one input.</p>
+
+  <h3>How LIME Works</h3>
+  <ol>
+    <li><strong>Perturb</strong>: generate many synthetic samples by randomly perturbing the instance being explained (for tabular data: sample nearby feature values; for text: randomly remove words; for images: turn superpixels on/off)</li>
+    <li><strong>Predict</strong>: run the black-box model on every perturbed sample to get its predictions</li>
+    <li><strong>Weight</strong>: weight each perturbed sample by its proximity to the original instance — closer perturbations matter more</li>
+    <li><strong>Fit a surrogate</strong>: fit a simple, inherently interpretable model (almost always weighted linear regression, sometimes a shallow tree) to this weighted, perturbed dataset</li>
+    <li><strong>Explain</strong>: the surrogate model's coefficients, which are only ever claimed to be valid in this local neighborhood, become the explanation for the original prediction</li>
+  </ol>
+
+  <pre><code class="language-python">import lime
+import lime.lime_tabular
+import numpy as np
+
+# LIME needs to know the training distribution to generate realistic perturbations
+explainer_lime = lime.lime_tabular.LimeTabularExplainer(
+    training_data=X_train.values,
+    feature_names=list(X_train.columns),
+    class_names=['repaid', 'default'],
+    mode='classification',
+    discretize_continuous=True,   # bins continuous features for readability
+    random_state=42,
+)
+
+row_idx = 0
+instance = X_test.iloc[row_idx].values
+
+explanation = explainer_lime.explain_instance(
+    data_row=instance,
+    predict_fn=model.predict_proba,   # any function: array -> class probabilities
+    num_features=7,
+    num_samples=5000,                 # perturbed samples used to fit the surrogate
+)
+
+print(f"LIME explanation for applicant {row_idx} (local surrogate model):")
+for feature_rule, weight in explanation.as_list():
+    direction = "increases" if weight > 0 else "decreases"
+    print(f"  {feature_rule:35s} {direction} default probability by {abs(weight):.3f}")
+
+# Surrogate model's own fit quality -- LOW R^2 means the local linear
+# approximation is unreliable in this region of feature space
+print(f"\nLocal surrogate R^2 (fit quality): {explanation.score:.3f}")</code></pre>
+
+  <div class="output-block">
+    <div class="output-label">Example Output</div>
+LIME explanation for applicant 0 (local surrogate model):
+  recent_inquiries > 2              increases default probability by 0.187
+  35.20 < debt_to_income <= 48.10   increases default probability by 0.142
+  credit_score <= 612.00            increases default probability by 0.121
+  months_since_late_payment <= 8.0  increases default probability by 0.098
+  years_employed <= 2.10            increases default probability by 0.054
+  income <= 38400.00                decreases default probability by 0.031
+  num_open_accounts <= 3            decreases default probability by 0.018
+
+Local surrogate R^2 (fit quality): 0.81
+  </div>
+
+  <h3>SHAP vs LIME: The Practical Tradeoffs</h3>
+  <table style="width:100%; border-collapse: collapse; margin: 1.25rem 0; font-size: 0.85rem;">
+    <thead>
+      <tr style="background: var(--bg-alt); text-align: left;">
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Dimension</th>
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">SHAP</th>
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">LIME</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Theoretical guarantees</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Strong — uniquely satisfies additivity, consistency, missingness (Shapley axioms)</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">None — explanation quality depends on the local fit being good</td>
+      </tr>
+      <tr style="background: var(--bg-subtle);">
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Speed (tree models)</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Very fast and exact with TreeExplainer</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Moderate — thousands of perturbed predictions per explanation, every time</td>
+      </tr>
+      <tr>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Stability</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Deterministic for TreeExplainer; same input always gives same output</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Stochastic — re-running on the same row can give noticeably different weights</td>
+      </tr>
+      <tr style="background: var(--bg-subtle);">
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Model coverage</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Needs a matching explainer type for full speed; KernelExplainer covers the rest, slowly</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Always model-agnostic, same algorithm regardless of model type</td>
+      </tr>
+      <tr>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Global aggregation</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Natural — sum/average local values into summary and dependence plots</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Awkward — each explanation is an independent local fit, not designed to aggregate</td>
+      </tr>
+      <tr style="background: var(--bg-subtle);">
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Best fit</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Default choice for tabular tree models and when guarantees matter (regulatory)</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Quick sanity checks, text/image explanations, or when SHAP is too slow to run at all</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="callout callout-warn">
+    <span class="callout-icon">⚠️</span>
+    <div class="callout-body">
+      <strong>LIME's Instability Is a Real Production Risk</strong>
+      <p>Because LIME refits a brand-new linear surrogate from freshly sampled random perturbations every time you call <code>explain_instance</code>, running it twice on the exact same row with the exact same model can surface different "top reasons" — sometimes flipping the sign of a feature's contribution. This is a serious problem for regulatory use cases where an adverse-action notice must be reproducible. Mitigate it by fixing the random seed, increasing <code>num_samples</code> substantially (5,000+), and treating the local surrogate's R² (<code>explanation.score</code>) as a confidence check — a low R² means the linear surrogate isn't a trustworthy local approximation at all, regardless of what coefficients it spits out.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 7 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">7</span> Putting It Together: An Explainability Workflow</h2>
+
+  <p>In a real MLOps pipeline (which you'll formalize with MLflow in the next lesson), interpretability isn't a one-off notebook cell — it's a repeatable step that runs alongside evaluation, every time a model is trained or retrained.</p>
+
+  <pre><code class="language-python">import shap
+import pandas as pd
+import numpy as np
+import json
+
+def generate_explainability_report(model, X_test, y_test, feature_names,
+                                    top_k_global=5, sample_local=3):
+    """
+    Produces a structured interpretability report suitable for attaching
+    to a model card or a model-risk-review document.
+    """
+    explainer = shap.TreeExplainer(model)
+    shap_exp = explainer(X_test)
+
+    # Global summary: mean absolute SHAP value per feature
+    mean_abs_shap = np.abs(shap_exp.values).mean(axis=0)
+    global_ranking = sorted(
+        zip(feature_names, mean_abs_shap), key=lambda t: t[1], reverse=True
+    )
+
+    report = {
+        "global_top_features": [
+            {"feature": f, "mean_abs_shap": round(float(v), 4)}
+            for f, v in global_ranking[:top_k_global]
+        ],
+        "local_examples": [],
+    }
+
+    # A handful of representative local explanations
+    rng = np.random.RandomState(42)
+    sample_idx = rng.choice(len(X_test), size=sample_local, replace=False)
+    for idx in sample_idx:
+        contributions = sorted(
+            zip(feature_names, shap_exp.values[idx]),
+            key=lambda t: abs(t[1]), reverse=True
+        )[:3]
+        report["local_examples"].append({
+            "row_index": int(idx),
+            "predicted_prob": float(model.predict_proba(X_test.iloc[[idx]])[0, 1]),
+            "base_value": float(shap_exp.base_values[idx]),
+            "top_reasons": [
+                {"feature": f, "shap_value": round(float(v), 4)} for f, v in contributions
+            ],
+        })
+
+    return report
+
+
+report = generate_explainability_report(
+    model, X_test, y_test, list(X_test.columns)
+)
+print(json.dumps(report, indent=2))</code></pre>
+
+  <div class="output-block">
+    <div class="output-label">Example Output</div>
+{
+  "global_top_features": [
+    {"feature": "recent_inquiries", "mean_abs_shap": 0.4123},
+    {"feature": "debt_to_income", "mean_abs_shap": 0.3871},
+    {"feature": "credit_score", "mean_abs_shap": 0.3014},
+    {"feature": "months_since_late_payment", "mean_abs_shap": 0.1822},
+    {"feature": "years_employed", "mean_abs_shap": 0.0911}
+  ],
+  "local_examples": [
+    {
+      "row_index": 102,
+      "predicted_prob": 0.79,
+      "base_value": -1.084,
+      "top_reasons": [
+        {"feature": "recent_inquiries", "shap_value": 0.612},
+        {"feature": "debt_to_income", "shap_value": 0.483},
+        {"feature": "credit_score", "shap_value": -0.301}
+      ]
+    }
+  ]
+}
+  </div>
+
+  <p>This report is the kind of artifact you attach to a model card, feed into automated regression tests ("did the top global feature change unexpectedly after retraining?"), and surface in a customer-facing explanation API. Notice it deliberately separates the <strong>global</strong> section (model-level summary, useful for model risk review) from the <strong>local</strong> section (per-decision detail, useful for individual adverse-action notices) — exactly the distinction from Section 2.</p>
+
+  <div class="callout callout-tip">
+    <span class="callout-icon">💡</span>
+    <div class="callout-body">
+      <strong>Monitor SHAP Importance Drift, Not Just Accuracy Drift</strong>
+      <p>A model can keep the same accuracy after retraining while quietly shifting which features it relies on — for example because a correlated feature became more predictive due to a data pipeline change. Tracking the global SHAP feature ranking over time, the same way you'd track AUC or RMSE, catches this kind of silent behavioral drift that pure performance metrics miss entirely.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Real-World ── -->
+<div class="use-case-section">
+  <div class="use-case-header">
+    <span style="font-size:1.5rem">🌍</span>
+    <h2>Real-World Spotlight: Credit Denials and Hiring Bias</h2>
+  </div>
+
+  <h3>Case 1: Explaining a Credit Denial to a Loan Applicant</h3>
+  <p>ECOA's Regulation B requires that an adverse action notice list the <em>specific</em> principal reasons for denial — generic statements like "your application did not meet our criteria" are not compliant. A SHAP waterfall decomposition for the denied applicant's row maps directly onto this requirement: take the top-magnitude negative contributors (the reasons pushing toward denial) and translate each into the applicant-facing language a compliance team pre-approves.</p>
+
+  <pre><code class="language-python">import shap
+
+FEATURE_TO_PLAIN_LANGUAGE = {
+    "debt_to_income":            "Your debt-to-income ratio is higher than our threshold",
+    "credit_score":              "Your credit score is below the level we typically approve",
+    "recent_inquiries":          "You have had several recent credit inquiries",
+    "months_since_late_payment": "You have a recent history of late payments",
+    "years_employed":            "Your employment history is shorter than typical for approval",
+    "income":                    "Your reported income is a contributing factor",
+    "num_open_accounts":         "The number of open credit accounts is a contributing factor",
+}
+
+def generate_adverse_action_notice(model, explainer, applicant_row, feature_names,
+                                    n_reasons=4, decision_threshold=0.5):
+    shap_exp = explainer(applicant_row)
+    pred_prob = model.predict_proba(applicant_row)[0, 1]
+
+    if pred_prob < decision_threshold:
+        return {"decision": "approved"}
+
+    # Only reasons that pushed TOWARD denial (positive SHAP value for default risk)
+    risk_factors = [
+        (f, v) for f, v in zip(feature_names, shap_exp.values[0]) if v > 0
+    ]
+    risk_factors.sort(key=lambda t: t[1], reverse=True)
+    top_reasons = risk_factors[:n_reasons]
+
+    return {
+        "decision": "denied",
+        "predicted_default_probability": round(float(pred_prob), 3),
+        "principal_reasons": [
+            FEATURE_TO_PLAIN_LANGUAGE.get(f, f) for f, _ in top_reasons
+        ],
+    }
+
+
+notice = generate_adverse_action_notice(
+    model, explainer, X_test.iloc[[0]], list(X_test.columns)
+)
+print(json.dumps(notice, indent=2))</code></pre>
+
+  <div class="output-block">
+    <div class="output-label">Example Output</div>
+{
+  "decision": "denied",
+  "predicted_default_probability": 0.79,
+  "principal_reasons": [
+    "You have had several recent credit inquiries",
+    "Your debt-to-income ratio is higher than our threshold",
+    "Your credit score is below the level we typically approve"
+  ]
+}
+  </div>
+
+  <h3>Case 2: Detecting Proxy Discrimination in a Hiring Model</h3>
+  <p>A hiring screening model may never see a "race" or "gender" column directly (often deliberately excluded) and still discriminate, if it relies heavily on a feature that correlates strongly with a protected attribute — zip code standing in for race, "years since graduation" standing in for age, or college name standing in for socioeconomic background. SHAP makes this auditable: compute SHAP values for the full applicant pool, then check whether the global importance or the sign/magnitude of a suspect feature differs systematically across protected groups, even though the model never used the protected attribute as an input.</p>
+
+  <pre><code class="language-python">import shap
+import pandas as pd
+import numpy as np
+from scipy import stats
+
+def audit_proxy_discrimination(model, X, protected_attribute, feature_names,
+                                suspect_feature, alpha=0.05):
+    """
+    Checks whether a feature's SHAP contribution differs significantly
+    across groups of a protected attribute NOT used as a model input.
+    A significant difference suggests the model is using `suspect_feature`
+    as a proxy for the protected attribute.
+    """
+    explainer = shap.TreeExplainer(model)
+    shap_exp = explainer(X)
+    suspect_idx = feature_names.index(suspect_feature)
+    suspect_shap = shap_exp.values[:, suspect_idx]
+
+    groups = protected_attribute.unique()
+    group_shap = {g: suspect_shap[protected_attribute == g] for g in groups}
+
+    print(f"Mean SHAP contribution of '{suspect_feature}' by group:")
+    for g, vals in group_shap.items():
+        print(f"  {g:15s} mean={vals.mean():+.4f}  n={len(vals)}")
+
+    # Two-group case: independent t-test on the SHAP value distributions
+    if len(groups) == 2:
+        g1, g2 = groups
+        t_stat, p_value = stats.ttest_ind(group_shap[g1], group_shap[g2])
+        print(f"\nWelch's t-test on SHAP values: t={t_stat:.3f}, p={p_value:.4f}")
+        if p_value < alpha:
+            print(f"FLAG: '{suspect_feature}' contributes significantly differently "
+                  f"across {protected_attribute.name} groups -- investigate as a "
+                  f"potential proxy variable, even though the model never saw "
+                  f"{protected_attribute.name} directly.")
+        else:
+            print("No significant disparity detected for this feature.")
+
+
+# Simulated hiring dataset: 'zip_code_income_tier' as a stand-in for a
+# feature that may correlate with race, audited against a protected attribute
+# that was withheld from training but is available for fairness auditing
+hiring_df = pd.DataFrame({
+    'years_experience':      np.random.exponential(5, 2000),
+    'zip_code_income_tier':  np.random.randint(1, 11, 2000),
+    'university_tier':       np.random.randint(1, 5, 2000),
+    'interview_score':       np.random.normal(70, 15, 2000),
+})
+protected_group = pd.Series(
+    np.random.choice(['Group A', 'Group B'], 2000, p=[0.6, 0.4]), name='demographic_group'
+)
+# Simulate the proxy effect: zip_code_income_tier correlates with the group
+hiring_df.loc[protected_group == 'Group B', 'zip_code_income_tier'] -= 2
+hire_label = (hiring_df.sum(axis=1) > hiring_df.sum(axis=1).median()).astype(int)
+
+hiring_model = xgb.XGBClassifier(n_estimators=200, max_depth=4, random_state=42)
+hiring_model.fit(hiring_df, hire_label)   # demographic_group is NOT a feature
+
+audit_proxy_discrimination(
+    hiring_model, hiring_df, protected_group,
+    list(hiring_df.columns), suspect_feature='zip_code_income_tier'
+)</code></pre>
+
+  <div class="output-block">
+    <div class="output-label">Example Output</div>
+Mean SHAP contribution of 'zip_code_income_tier' by group:
+  Group A         mean=+0.1842  n=1199
+  Group B         mean=-0.2107  n=801
+
+Welch's t-test on SHAP values: t=14.762, p=0.0000
+FLAG: 'zip_code_income_tier' contributes significantly differently across
+demographic_group groups -- investigate as a potential proxy variable, even
+though the model never saw demographic_group directly.
+  </div>
+
+  <p>This kind of audit is exactly why "we don't use protected attributes as features" is not, by itself, a defense against disparate impact — regulators and internal fairness reviews increasingly expect this SHAP-based proxy analysis as standard due diligence before a hiring or lending model goes into production.</p>
+</div>
+
+<!-- ── Quiz ── -->
+<div class="quiz-section">
+  <div id="quiz62"></div>
+</div>
+
+<!-- ── Practice ── -->
+<div class="practice-card">
+  <h2>✍️ Practice Exercises</h2>
+  <ol>
+    <li>Train an <code>XGBClassifier</code> on a tabular dataset of your choice (e.g. the UCI Adult/Census Income dataset, or a Kaggle credit dataset). Use <code>shap.TreeExplainer</code> to generate a summary plot and a waterfall plot for the single highest-confidence positive prediction and the single highest-confidence negative prediction. Write one sentence per plot describing what a non-technical reviewer should take away.</li>
+    <li>On the same model, explain the same 10 rows with both <code>shap.TreeExplainer</code> and <code>lime.lime_tabular.LimeTabularExplainer</code>. For each row, compare the top-3 features each method reports. Where do they agree? Run LIME twice on the same row with different random seeds — how much does the top reason change, and does increasing <code>num_samples</code> from 500 to 5000 stabilize it?</li>
+    <li>Build a model where you intentionally engineer a "leaky" feature (one that's a near-copy of the target, e.g. derived using future information). Confirm that SHAP correctly identifies it as overwhelmingly dominant in the summary plot, then remove it, retrain, and confirm the global SHAP ranking changes sensibly. This simulates the debugging use case from Section 1.</li>
+    <li>Using the proxy-discrimination audit pattern from the Real-World Spotlight, pick a public dataset that includes a sensitive attribute withheld from training (e.g. the COMPAS recidivism dataset or a hiring dataset with a `gender`/`race` column you exclude from features). Run the t-test-based audit against every remaining feature, not just one, and report which features show a statistically significant SHAP disparity across groups.</li>
+  </ol>
+  <details>
+    <summary>▶ Show Solution (Exercise 1 — Summary &amp; Waterfall Plots for Extreme Predictions)</summary>
+    <pre><code class="language-python">import shap
+import xgboost as xgb
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.model_selection import train_test_split
+from sklearn.datasets import fetch_openml
+
+# UCI Adult / Census Income dataset (predict income > $50K)
+adult = fetch_openml(name="adult", version=2, as_frame=True)
+X = adult.data.select_dtypes(include=[np.number]).fillna(0)
+y = (adult.target == '>50K').astype(int)
+
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.2, random_state=42, stratify=y
+)
+
+model = xgb.XGBClassifier(n_estimators=300, max_depth=5, learning_rate=0.05,
+                           eval_metric='logloss', random_state=42)
+model.fit(X_train, y_train)
+
+explainer = shap.TreeExplainer(model)
+shap_exp = explainer(X_test)
+
+# Global summary plot
+shap.summary_plot(shap_exp, X_test, show=False)
+plt.tight_layout()
+plt.savefig("ex1_summary.png", dpi=150)
+plt.close()
+
+# Find the most confident positive and negative predictions
+probs = model.predict_proba(X_test)[:, 1]
+most_confident_positive = int(np.argmax(probs))
+most_confident_negative = int(np.argmin(probs))
+
+print(f"Most confident '>50K' prediction: row {most_confident_positive}, "
+      f"P={probs[most_confident_positive]:.4f}")
+print(f"Most confident '<=50K' prediction: row {most_confident_negative}, "
+      f"P={probs[most_confident_negative]:.4f}")
+
+for label, idx in [("highest-confidence positive", most_confident_positive),
+                    ("highest-confidence negative", most_confident_negative)]:
+    shap.plots.waterfall(shap_exp[idx], show=False)
+    plt.tight_layout()
+    plt.savefig(f"ex1_waterfall_{idx}.png", dpi=150)
+    plt.close()
+
+    top = sorted(zip(X_test.columns, shap_exp.values[idx]),
+                 key=lambda t: abs(t[1]), reverse=True)[:3]
+    print(f"\n{label.title()} (row {idx}) top reasons:")
+    for feat, val in top:
+        print(f"  {feat:20s} SHAP={val:+.4f}")
+
+# Takeaways:
+# - Summary plot: shows which features matter most ACROSS the whole population,
+#   and whether high values push toward or away from '>50K' (color vs position).
+# - Waterfall (positive case): typically shows education/hours-per-week/age
+#   pushing strongly UP from the base rate toward the '>50K' prediction.
+# - Waterfall (negative case): shows the mirror image -- the same features
+#   at low values pushing DOWN, confirming the model is using them consistently
+#   in both directions, which is exactly what the consistency property guarantees.</code></pre>
+  </details>
+</div>
+
+<!-- Navigation -->
+<nav class="lesson-nav">
+  <a href="./0061-optuna-bayesian-search.html" class="nav-btn">← Lesson 61: Advanced Hyperparameter Tuning</a>
+  <a href="./0063-mlflow.html" class="nav-btn nav-btn-next">Lesson 63: MLflow — Experiment Tracking &amp; Model Registry →</a>
+</nav>
+
+</div><!-- /content-wrapper -->
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-core.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/plugins/autoloader/prism-autoloader.min.js"></script>
+<script src="https://cdn.plot.ly/plotly-2.32.0.min.js"></script>
+<script src="../assets/charts.js"></script>
+<script src="../assets/quiz.js"></script>
+<script>
+/* ── SHAP & LIME visualizations (Section 5 summary beeswarm + waterfall) ── */
+(function () {
+
+  /* Small deterministic PRNG so the illustrative point cloud is stable across reloads. */
+  function mulberry32(seed) {
+    return function () {
+      seed |= 0; seed = (seed + 0x6D2B79F5) | 0;
+      let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
+  /* ---- 1. Illustrative SHAP summary (beeswarm) plot ---- */
+  function renderSummaryBeeswarm() {
+    // Feature order + mean |SHAP| magnitudes taken directly from the
+    // generate_explainability_report() output in Section 7. `direction`
+    // encodes which way a HIGH raw feature value pushes the SHAP value,
+    // matching the logistic regression coefficients from Section 2.
+    const features = [
+      { name: 'recent_inquiries',          meanAbs: 0.412, direction:  1 },
+      { name: 'debt_to_income',            meanAbs: 0.387, direction:  1 },
+      { name: 'credit_score',              meanAbs: 0.301, direction: -1 },
+      { name: 'months_since_late_payment', meanAbs: 0.182, direction: -1 },
+      { name: 'years_employed',            meanAbs: 0.091, direction: -1 },
+    ];
+
+    const rand = mulberry32(62);
+    const nPerFeature = 32;
+    const xs = [], ys = [], colors = [];
+
+    features.forEach((f, i) => {
+      const yBase = features.length - i; // most important feature drawn at the top
+      for (let p = 0; p < nPerFeature; p++) {
+        const featureValue = rand();               // this applicant's raw feature value, normalized 0..1
+        const noise = (rand() - 0.5) * f.meanAbs * 1.1;
+        const shap = f.direction * (featureValue - 0.5) * f.meanAbs * 2.6 + noise;
+        xs.push(shap);
+        ys.push(yBase + (rand() - 0.5) * 0.62);     // vertical jitter -> beeswarm spread
+        colors.push(featureValue);
+      }
+    });
+
+    const trace = {
+      x: xs, y: ys, mode: 'markers', type: 'scatter',
+      marker: {
+        size: 7,
+        color: colors,
+        colorscale: [[0, MLCharts.theme.blue], [1, MLCharts.theme.amber]],
+        opacity: 0.75,
+        line: { width: 0 },
+        colorbar: {
+          title: { text: 'Feature value', font: { size: 11 } },
+          tickvals: [0, 1], ticktext: ['Low', 'High'], thickness: 14,
+        },
+      },
+      hovertemplate: 'SHAP value: %{x:.3f}<extra></extra>',
+    };
+
+    const layout = MLCharts.baseLayout({
+      xaxis: {
+        title: { text: 'SHAP value (impact on predicted default probability)' },
+        zeroline: true, zerolinewidth: 1.5, zerolinecolor: MLCharts.theme.border,
+      },
+      yaxis: {
+        tickvals: features.map((_, i) => features.length - i),
+        ticktext: features.map(f => f.name),
+        range: [0.2, features.length + 0.8],
+      },
+      margin: { l: 170, r: 24, t: 20, b: 48 },
+      showlegend: false,
+    });
+
+    Plotly.newPlot('l62-summary-beeswarm', [trace], layout, MLCharts.config);
+  }
+
+  /* ---- 2. Waterfall for the Section 3 additive-property applicant example ---- */
+  function renderWaterfall() {
+    // 0.81 = 0.30 (baseline) + 0.28 (debt_to_income) - 0.05 (credit_score)
+    //        + 0.31 (recent_inquiries) + ...  (Section 3's own worked example).
+    // years_employed and income are added here only to close the "+ ..." gap
+    // to the stated final 0.81 -- illustrative, matched to the lesson's text.
+    const xLabels = ['Base rate<br>E[f(X)]', 'recent_inquiries', 'debt_to_income',
+                      'credit_score', 'years_employed', 'income', 'Predicted<br>probability'];
+    const measure  = ['absolute', 'relative', 'relative', 'relative', 'relative', 'relative', 'total'];
+    const values   = [0.30, 0.31, 0.28, -0.05, -0.02, -0.01, 0.81];
+
+    const trace = {
+      type: 'waterfall',
+      orientation: 'v',
+      measure: measure,
+      x: xLabels,
+      y: values,
+      connector: { line: { color: MLCharts.theme.border, width: 1.5 } },
+      increasing: { marker: { color: MLCharts.theme.red } },
+      decreasing: { marker: { color: MLCharts.theme.blue } },
+      totals: { marker: { color: MLCharts.theme.violet } },
+      text: values.map(v => (v >= 0 ? '+' : '') + v.toFixed(2)),
+      textposition: 'outside',
+    };
+
+    const layout = MLCharts.baseLayout({
+      yaxis: { title: { text: 'Predicted default probability' }, range: [0, 1] },
+      margin: { l: 60, r: 24, t: 20, b: 70 },
+      showlegend: false,
+    });
+
+    Plotly.newPlot('l62-waterfall', [trace], layout, MLCharts.config);
+  }
+
+  renderSummaryBeeswarm();
+  renderWaterfall();
+})();
+</script>
+<script>
+new MLQuiz('quiz62', [
+  {
+    question: "What does the 'additive feature attribution' property of SHAP values guarantee?",
+    options: [
+      "For any given prediction, the base value (expected model output) plus the sum of all feature SHAP values exactly equals the model's actual output for that input",
+      "All SHAP values across the entire dataset sum to exactly 1.0, like a probability distribution",
+      "Features with additive relationships in the original data will always have positive SHAP values",
+      "SHAP values can only be computed for models that use additive combinations of features, such as linear models and generalized additive models"
+    ],
+    correct: 0,
+    explanation: "Additive feature attribution means: prediction = base_value + φ_1 + φ_2 + ... + φ_n, where base_value is the model's average output over the background/training data and each φ_i is feature i's Shapley value for this specific row. This is what makes force plots and waterfall plots exact rather than approximate visualizations — every bar in the chart literally adds up to the gap between the average prediction and this prediction. This property holds for SHAP applied to any model type (trees, neural nets, SVMs) — it's a property of how SHAP values are defined and computed, not a restriction on which models can be explained."
+  },
+  {
+    question: "You need to explain predictions from a 500-tree XGBoost model on a dataset with 40 features, and you need the explanations to be both fast and exact (no sampling approximation). Which SHAP explainer should you use?",
+    options: [
+      "TreeExplainer, because it exploits the tree structure to compute exact Shapley values in polynomial time, unlike KernelExplainer which relies on slow sampling",
+      "KernelExplainer, because it is the only explainer that works correctly on ensembles of many trees",
+      "DeepExplainer, because XGBoost's gradient boosting process is mathematically equivalent to gradient descent in a neural network",
+      "LinearExplainer, because XGBoost's final prediction is a linear sum of all the individual trees' outputs"
+    ],
+    correct: 0,
+    explanation: "TreeExplainer is specifically designed for tree-based models (XGBoost, LightGBM, CatBoost, sklearn random forests and gradient boosting). It exploits the discrete, recursive structure of decision trees to compute exact Shapley values in time polynomial in the number of trees and their depth, rather than the exponential time the naive definition would require. KernelExplainer would also technically work since it's model-agnostic, but it would be drastically slower (sampling thousands of coalitions per row) and only approximate. LinearExplainer is for linear models only, and DeepExplainer is built around backpropagation through differentiable neural network layers, not tree ensembles."
+  },
+  {
+    question: "What is the fundamental mechanism LIME uses to generate a local explanation for one prediction?",
+    options: [
+      "It perturbs the instance to generate many nearby synthetic samples, gets the black-box model's predictions on them, weights samples by proximity to the original instance, and fits a simple interpretable model (typically weighted linear regression) to approximate the black box locally",
+      "It computes the exact gradient of the model's output with respect to each input feature at that point",
+      "It exhaustively enumerates every possible subset of features and averages the model's output over all subsets, similar to a Shapley value calculation",
+      "It looks up the k most similar training examples to the instance and reports their average feature values as the explanation"
+    ],
+    correct: 0,
+    explanation: "LIME's name describes its mechanism: Local (valid only in the neighborhood of one instance), Interpretable (the explanation is a simple model, usually linear), Model-agnostic (it only needs query access to the model's predict function, no internal structure). The algorithm: perturb the instance into many synthetic neighbors, predict on all of them with the real model, weight each by a proximity kernel, and fit a weighted linear regression to those weighted (perturbation, prediction) pairs. The fitted linear model's coefficients become the explanation. Crucially, this is a heuristic approximation with no Shapley-style theoretical guarantees, and because the perturbation sampling is random, results can vary between runs."
+  },
+  {
+    question: "A team explains the same loan applicant's denial with LIME twice (same model, same row, default settings) and gets two different top-3 'reasons.' What is the most likely cause, and how does this compare to SHAP's TreeExplainer in the same situation?",
+    options: [
+      "LIME generates a new set of random perturbed samples and refits its local linear surrogate each time it's called, so results can vary run to run; TreeExplainer computes exact Shapley values deterministically, so the same input always produces identical SHAP values",
+      "The model itself is non-deterministic, which would also cause TreeExplainer's results to differ between runs on the identical input",
+      "LIME and SHAP would both give different results each time because both methods rely on random sampling of feature coalitions by design",
+      "This indicates a bug in the LIME implementation, since the algorithm is mathematically guaranteed to converge to the same linear surrogate every time given enough perturbed samples"
+    ],
+    correct: 0,
+    explanation: "LIME's instability is a well-documented practical limitation: every call to explain_instance draws a fresh batch of random perturbations and refits a linear regression on them, so without a fixed random seed and a large enough num_samples, the resulting coefficients (and hence the 'top reasons') can shift between runs, sometimes even flipping sign. TreeExplainer, by contrast, computes the exact Shapley values via a deterministic polynomial-time algorithm over the fixed tree structure — calling it twice on the same row of the same fitted model always returns identical numbers. This instability is a real concern for regulated use cases (like adverse action notices) where the explanation must be reproducible, and is a key practical reason teams often prefer SHAP with TreeExplainer when it's available for their model type."
+  },
+  {
+    question: "A hiring model never includes a candidate's race or zip code's demographic makeup as a feature, yet a SHAP-based audit shows that 'zip_code_income_tier' has a significantly different mean SHAP contribution for one demographic group versus another. What does this most likely indicate?",
+    options: [
+      "The model may be using 'zip_code_income_tier' as a proxy variable that correlates with the protected attribute, producing disparate impact even though the protected attribute itself was never used as a direct input",
+      "The SHAP values are invalid in this scenario because Shapley values cannot be computed for any feature that correlates with a variable excluded from the model",
+      "The model is functioning correctly and fairly, since excluding the protected attribute from training is sufficient by definition to guarantee a non-discriminatory outcome",
+      "This is a sign that the background dataset used by the explainer was chosen incorrectly and should be resampled until the disparity disappears"
+    ],
+    correct: 0,
+    explanation: "Excluding a protected attribute from a model's features ('fairness through unawareness') does not prevent the model from learning a proxy relationship through correlated features — zip code, in many real-world datasets, correlates strongly with race due to historical housing patterns, and similar dynamics occur with college name and socioeconomic background, or graduation year and age. A statistically significant difference in a feature's SHAP contribution across protected groups, even with the protected attribute withheld from training, is exactly the kind of signal a fairness audit is designed to catch — it indicates the feature may be functioning as a proxy and warrants further investigation, potential feature removal, or a fairness-constrained retraining approach, not dismissal as a SHAP computation artifact."
+  }
+]);
+</script>
+
+</body>
+</html>

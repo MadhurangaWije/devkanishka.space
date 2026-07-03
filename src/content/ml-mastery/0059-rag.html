@@ -152,6 +152,13 @@ Top 2 results:
   [0.231] Battery life of the Model X is approximately 12 hours under normal usage conditions.
   </div>
 
+  <p>The 384-dimensional embeddings above can't be plotted directly, but a 2D projection of the same five documents and the query makes the nearest-neighbour idea concrete: the query embedding lands closest to the "reset camera" chunk, next-closest to "battery life," and far from the unrelated chunks.</p>
+
+  <div class="chart-container">
+    <div id="l59-nn-scatter" style="height:420px;"></div>
+    <p class="chart-caption">A 2D projection of the query and document-chunk embeddings from the example above. The dashed circle marks the top-<em>k</em> = 2 nearest neighbours — the chunks retrieval actually returns to the LLM.</p>
+  </div>
+
   <h3>Bi-encoder vs Cross-encoder</h3>
   <p>There are two architectures for relevance scoring. A <strong>bi-encoder</strong> independently encodes the query and each document, then computes cosine similarity. This is fast: encode all documents once offline, then at query time encode only the query and do vector search. A <strong>cross-encoder</strong> jointly processes the (query, document) pair through a single transformer, producing a single relevance score. This is much more accurate but scales poorly: for 10,000 documents, you'd need 10,000 forward passes per query. Solution: use bi-encoder for initial retrieval of top-100 candidates, then cross-encoder for reranking to top-5.</p>
 
@@ -191,6 +198,45 @@ for score, doc in sorted(zip(scores, candidates), reverse=True):
 
   <h3>Why Chunk Size Matters</h3>
   <p>There is a fundamental tension in chunk size: smaller chunks are retrieved more precisely (the retrieved text is highly relevant to the query) but provide less context to the LLM (a single short sentence may lack enough information to answer the question). Larger chunks provide more context but are retrieved less precisely (they might contain both relevant and irrelevant information). A typical starting point: 512 tokens with 50-token overlap.</p>
+
+  <div class="diagram-svg-wrap">
+    <svg viewBox="0 0 900 220" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="A long document split into overlapping fixed-size chunks with chunk_size=200 characters and chunk_overlap=40 characters">
+      <!-- Full document bar -->
+      <rect class="diagram-node" x="20" y="20" width="860" height="34" rx="6"></rect>
+      <text class="diagram-label" x="450" y="42">Original Document (sample_text, ~640 characters)</text>
+
+      <!-- Chunk 0 -->
+      <rect class="diagram-node-alt" x="20" y="90" width="230" height="34" rx="6"></rect>
+      <text class="diagram-mono-label" x="135" y="112" style="font-size:10.5px">Chunk 0  [0:200]</text>
+
+      <!-- Chunk 1 (overlaps chunk 0 by 40 chars) -->
+      <rect class="diagram-node-alt" x="210" y="134" width="230" height="34" rx="6"></rect>
+      <text class="diagram-mono-label" x="325" y="156" style="font-size:10.5px">Chunk 1  [160:360]</text>
+
+      <!-- Chunk 2 -->
+      <rect class="diagram-node-alt" x="400" y="90" width="230" height="34" rx="6"></rect>
+      <text class="diagram-mono-label" x="515" y="112" style="font-size:10.5px">Chunk 2  [320:520]</text>
+
+      <!-- Chunk 3 -->
+      <rect class="diagram-node-alt" x="590" y="134" width="230" height="34" rx="6"></rect>
+      <text class="diagram-mono-label" x="705" y="156" style="font-size:10.5px">Chunk 3  [480:640]</text>
+
+      <!-- Overlap markers -->
+      <rect x="210" y="90" width="40" height="34" fill="var(--amber)" opacity="0.35"></rect>
+      <rect x="400" y="134" width="30" height="34" fill="var(--amber)" opacity="0.35"></rect>
+      <rect x="590" y="90" width="30" height="34" fill="var(--amber)" opacity="0.35"></rect>
+
+      <!-- connecting lines from doc to chunks -->
+      <line class="diagram-arrow" x1="135" y1="54" x2="135" y2="86"></line>
+      <line class="diagram-arrow" x1="325" y1="54" x2="325" y2="130"></line>
+      <line class="diagram-arrow" x1="515" y1="54" x2="515" y2="86"></line>
+      <line class="diagram-arrow" x1="705" y1="54" x2="705" y2="130"></line>
+
+      <text class="diagram-sublabel" x="450" y="190">chunk_size = 200 characters · chunk_overlap = 40 characters</text>
+      <text class="diagram-sublabel" x="450" y="205" fill="var(--amber)">amber = overlapping region shared between adjacent chunks</text>
+    </svg>
+    <p class="diagram-svg-caption">The <code>RecursiveCharacterTextSplitter(chunk_size=200, chunk_overlap=40)</code> call from the code below in action: each chunk shares its first 40 characters with the tail of the previous chunk, so a fact or sentence sitting near a boundary still appears intact in at least one chunk.</p>
+  </div>
 
   <h3>Chunking Strategies</h3>
   <pre><code class="language-python">from langchain.text_splitter import (
@@ -424,6 +470,88 @@ Top 3 results:
   <h2><span class="section-num">5</span> The Complete RAG Pipeline</h2>
 
   <p>Let's build a complete RAG system from scratch, combining everything from the previous sections. This gives you full understanding of each step before using the higher-level frameworks in Section 6.</p>
+
+  <div class="diagram-svg-wrap">
+    <svg viewBox="0 0 980 460" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="The full RAG pipeline: user query is embedded, matched against a vector database of document chunks, the top-k chunks are combined with the query into an augmented prompt, and an LLM generates a grounded answer">
+      <defs>
+        <marker id="l59-arrowhead" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+          <path d="M0,0 L8,4 L0,8 Z" fill="var(--text-muted)"></path>
+        </marker>
+      </defs>
+
+      <!-- Step 1: User query -->
+      <rect class="diagram-node" x="20" y="30" width="180" height="56" rx="8"></rect>
+      <text class="diagram-label" x="110" y="54">User Query</text>
+      <text class="diagram-mono-label" x="110" y="72" style="font-size:9.5px">"How do I reset my camera</text>
+      <text class="diagram-mono-label" x="110" y="83" style="font-size:9.5px">to factory settings?"</text>
+
+      <line class="diagram-arrow" x1="200" y1="58" x2="240" y2="58" marker-end="url(#l59-arrowhead)"></line>
+
+      <!-- Step 2: Embed query -->
+      <rect class="diagram-node-alt" x="244" y="30" width="150" height="56" rx="8"></rect>
+      <text class="diagram-label" x="319" y="54">Embed Query</text>
+      <text class="diagram-sublabel" x="319" y="70">SentenceTransformer</text>
+      <text class="diagram-mono-label" x="319" y="83" style="font-size:9.5px">query_embedding (384-dim)</text>
+
+      <line class="diagram-arrow" x1="319" y1="86" x2="319" y2="126" marker-end="url(#l59-arrowhead)"></line>
+
+      <!-- Step 3: Vector DB similarity search -->
+      <rect class="diagram-node-alt" x="180" y="130" width="280" height="90" rx="8"></rect>
+      <text class="diagram-label" x="320" y="153">Vector Database — Similarity Search</text>
+      <text class="diagram-sublabel" x="320" y="169">cosine similarity vs. every indexed chunk</text>
+      <!-- mini dots representing indexed chunks -->
+      <circle cx="215" cy="192" r="5" fill="var(--border)"></circle>
+      <circle cx="240" cy="200" r="5" fill="var(--border)"></circle>
+      <circle cx="270" cy="185" r="5" fill="var(--border)"></circle>
+      <circle cx="300" cy="203" r="6" fill="var(--green)"></circle>
+      <circle cx="330" cy="192" r="6" fill="var(--green)"></circle>
+      <circle cx="360" cy="180" r="5" fill="var(--border)"></circle>
+      <circle cx="390" cy="200" r="5" fill="var(--border)"></circle>
+      <circle cx="420" cy="188" r="5" fill="var(--border)"></circle>
+      <text class="diagram-sublabel" x="320" y="216" fill="var(--green)">green = top-k nearest chunks</text>
+
+      <line class="diagram-arrow" x1="320" y1="220" x2="320" y2="260" marker-end="url(#l59-arrowhead)"></line>
+
+      <!-- Step 4: Top-k retrieved chunks -->
+      <rect class="diagram-node-good" x="20" y="264" width="290" height="90" rx="8"></rect>
+      <text class="diagram-label" x="165" y="286">Top-k Retrieved Chunks</text>
+      <text class="diagram-mono-label" x="35" y="304" style="font-size:9px; text-anchor:start">[1] "…reset to factory settings by</text>
+      <text class="diagram-mono-label" x="35" y="317" style="font-size:9px; text-anchor:start">    holding the power button 10s…"</text>
+      <text class="diagram-mono-label" x="35" y="335" style="font-size:9px; text-anchor:start">[2] "Battery life is approximately</text>
+      <text class="diagram-mono-label" x="35" y="348" style="font-size:9px; text-anchor:start">    12 hours under normal usage…"</text>
+
+      <line class="diagram-arrow" x1="310" y1="309" x2="360" y2="309" marker-end="url(#l59-arrowhead)"></line>
+
+      <!-- Step 5: Augmented prompt -->
+      <rect class="diagram-node-alt" x="364" y="264" width="290" height="90" rx="8"></rect>
+      <text class="diagram-label" x="509" y="286">Augmented Prompt</text>
+      <text class="diagram-mono-label" x="379" y="304" style="font-size:9px; text-anchor:start">"Answer using ONLY the context.</text>
+      <text class="diagram-mono-label" x="379" y="317" style="font-size:9px; text-anchor:start">Context: [Source 1]…[Source 2]…</text>
+      <text class="diagram-mono-label" x="379" y="335" style="font-size:9px; text-anchor:start">Question: How do I reset my</text>
+      <text class="diagram-mono-label" x="379" y="348" style="font-size:9px; text-anchor:start">camera? Answer:"</text>
+
+      <line class="diagram-arrow" x1="654" y1="309" x2="700" y2="309" marker-end="url(#l59-arrowhead)"></line>
+
+      <!-- Step 6: LLM -->
+      <rect class="diagram-node" x="704" y="264" width="130" height="90" rx="8"></rect>
+      <text class="diagram-label" x="769" y="300">LLM</text>
+      <text class="diagram-sublabel" x="769" y="318">generates answer</text>
+      <text class="diagram-sublabel" x="769" y="332">conditioned on</text>
+      <text class="diagram-sublabel" x="769" y="346">retrieved context</text>
+
+      <line class="diagram-arrow" x1="769" y1="354" x2="769" y2="394" marker-end="url(#l59-arrowhead)"></line>
+
+      <!-- Step 7: Grounded answer -->
+      <rect class="diagram-node-good" x="614" y="398" width="310" height="56" rx="8"></rect>
+      <text class="diagram-label" x="769" y="420">Grounded Final Answer</text>
+      <text class="diagram-mono-label" x="769" y="437" style="font-size:9px">"Hold the power button for 10 seconds</text>
+      <text class="diagram-mono-label" x="769" y="449" style="font-size:9px">until the LED flashes three times."</text>
+
+      <text class="diagram-sublabel" x="490" y="20">RETRIEVAL</text>
+      <text class="diagram-sublabel" x="769" y="245">GENERATION</text>
+    </svg>
+    <p class="diagram-svg-caption">The full RAG flow using this lesson's running example: the query is embedded, compared against every indexed chunk in the vector database, the top-k nearest chunks are retrieved, combined with the original query into an augmented prompt, and fed to the LLM — which generates an answer grounded in the retrieved text instead of relying on parametric memory alone.</p>
+  </div>
 
   <pre><code class="language-python">from sentence_transformers import SentenceTransformer
 import chromadb
@@ -1012,6 +1140,84 @@ for q in queries:
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-core.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/plugins/autoloader/prism-autoloader.min.js"></script>
+<script src="https://cdn.plot.ly/plotly-2.32.0.min.js"></script>
+<script src="../assets/charts.js"></script>
+<script>
+(function () {
+  // 2D projection standing in for the 384-dim MiniLM embeddings used in the
+  // lesson's similarity-search example. Positions are chosen so that
+  // Euclidean distance from the query roughly matches (1 - cosine similarity)
+  // from that example: reset (0.754) closest, battery (0.231) next,
+  // aperture (0.198), night mode (0.187), warranty (0.143) farthest.
+  const query = { x: 0, y: 0, label: 'Query', text: '"How do I reset my camera\nto default settings?"' };
+
+  const docs = [
+    { x: 0.6,  y: 0.4,  sim: 0.754, retrieved: true,  label: 'reset_camera',
+      text: 'The Model X camera can be reset to factory\nsettings by holding the power button for 10s.' },
+    { x: 1.6,  y: -1.1, sim: 0.231, retrieved: true,  label: 'battery_life',
+      text: 'Battery life of the Model X is approximately\n12 hours under normal usage conditions.' },
+    { x: -1.9, y: 1.7,  sim: 0.198, retrieved: false, label: 'lens_aperture',
+      text: 'The lens aperture ranges from f/2.8 to f/16\non the standard zoom configuration.' },
+    { x: 2.3,  y: 1.6,  sim: 0.187, retrieved: false, label: 'night_mode',
+      text: 'To enable night mode, press the mode button\ntwice and select the moon icon.' },
+    { x: -2.1, y: -1.9, sim: 0.143, retrieved: false, label: 'warranty',
+      text: 'Warranty coverage lasts 2 years from the date\nof purchase for manufacturing defects.' },
+  ];
+
+  const topK = docs.filter(d => d.retrieved);
+  const rest = docs.filter(d => !d.retrieved);
+
+  // Dashed circle enclosing the top-k retrieved neighbours, centred on the query.
+  const maxRetrievedDist = Math.max(...topK.map(d => Math.hypot(d.x - query.x, d.y - query.y)));
+  const radius = maxRetrievedDist + 0.35;
+  const circlePts = 64;
+  const circleX = [], circleY = [];
+  for (let i = 0; i <= circlePts; i++) {
+    const theta = (i / circlePts) * 2 * Math.PI;
+    circleX.push(query.x + radius * Math.cos(theta));
+    circleY.push(query.y + radius * Math.sin(theta));
+  }
+
+  const traces = [
+    {
+      x: circleX, y: circleY, mode: 'lines', type: 'scatter',
+      line: { color: MLCharts.theme.green, width: 2, dash: 'dash' },
+      hoverinfo: 'skip', showlegend: false,
+    },
+    {
+      x: rest.map(d => d.x), y: rest.map(d => d.y), mode: 'markers+text', type: 'scatter',
+      name: 'Not retrieved',
+      text: rest.map(d => d.label), textposition: 'bottom center', textfont: { size: 10.5, color: MLCharts.theme.textMuted },
+      marker: { size: 13, color: MLCharts.theme.bgAlt, line: { color: MLCharts.theme.textMuted, width: 1.5 } },
+      hovertext: rest.map(d => `${d.label}\ncos-sim: ${d.sim.toFixed(3)}\n${d.text}`),
+      hovertemplate: '%{hovertext}<extra></extra>',
+    },
+    {
+      x: topK.map(d => d.x), y: topK.map(d => d.y), mode: 'markers+text', type: 'scatter',
+      name: 'Retrieved (top-k=2)',
+      text: topK.map(d => d.label), textposition: 'bottom center', textfont: { size: 10.5, color: MLCharts.theme.heading, family: MLCharts.theme.fontSans },
+      marker: { size: 15, color: MLCharts.theme.green, line: { color: MLCharts.theme.heading, width: 1.5 } },
+      hovertext: topK.map(d => `${d.label}\ncos-sim: ${d.sim.toFixed(3)}\n${d.text}`),
+      hovertemplate: '%{hovertext}<extra></extra>',
+    },
+    {
+      x: [query.x], y: [query.y], mode: 'markers+text', type: 'scatter',
+      name: 'Query',
+      text: [query.label], textposition: 'top center', textfont: { size: 11.5, color: MLCharts.theme.violet, family: MLCharts.theme.fontSans },
+      marker: { size: 17, symbol: 'star', color: MLCharts.theme.violet, line: { color: MLCharts.theme.heading, width: 1 } },
+      hovertext: [`Query\n${query.text}`],
+      hovertemplate: '%{hovertext}<extra></extra>',
+    },
+  ];
+
+  Plotly.newPlot('l59-nn-scatter', traces, MLCharts.baseLayout({
+    title: { text: 'Nearest-Neighbour Retrieval in Embedding Space (2D projection)' },
+    xaxis: { title: { text: 'embedding dim 1 (projected)' }, zeroline: true, range: [-3.2, 3.2] },
+    yaxis: { title: { text: 'embedding dim 2 (projected)' }, zeroline: true, range: [-2.8, 2.8], scaleanchor: 'x' },
+    showlegend: true,
+  }), MLCharts.config);
+})();
+</script>
 <script src="../assets/quiz.js"></script>
 <script>
 new MLQuiz('quiz59', [

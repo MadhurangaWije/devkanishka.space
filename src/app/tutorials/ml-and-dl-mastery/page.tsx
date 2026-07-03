@@ -26,7 +26,7 @@ export default function MLCourseOverviewPage() {
             intermediate
           </span>
           <span className="font-mono text-xs text-text-muted">
-            {totalLessons} lessons · {ML_PHASES.length} of 6 phases available
+            {totalLessons} lessons · {ML_PHASES.length} phases
           </span>
         </div>
         <h1 className="font-sans text-3xl md:text-4xl font-black tracking-tighter text-text-primary mb-4">
@@ -87,15 +87,6 @@ export default function MLCourseOverviewPage() {
         >
           Start from the beginning →
         </Link>
-      </div>
-
-      {/* Coming soon */}
-      <div className="mt-12 border-t border-site-border pt-10">
-        <p className="font-mono text-xs text-text-muted uppercase tracking-widest mb-3">Phase 6 — MLOps &amp; Production</p>
-        <p className="font-mono text-sm text-text-muted leading-relaxed">
-          Packaging, monitoring, and deploying ML models to production is being written.
-          Master Phases 1–5 first — MLOps only makes sense once you have a model worth shipping.
-        </p>
       </div>
     </div>
   );

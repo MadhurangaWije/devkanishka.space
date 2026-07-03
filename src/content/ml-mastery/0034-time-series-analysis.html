@@ -417,6 +417,13 @@ print(f"Residuals {'✅ stationary (good — no remaining pattern)' if resid_adf
 print(f"Residual mean:  {residual_est.mean():.2f}  (should be ~0)")
 print(f"Residual std:   {residual_est.std():.2f}")</code></pre>
 
+  <p>The print statements above tell the story in numbers — but decomposition is fundamentally a <em>visual</em> technique. Stacking the four series on a shared time axis makes it immediately obvious how much of the original signal is explained by trend, how much by the repeating annual cycle, and how much is left as unstructured noise:</p>
+
+  <div class="chart-container">
+    <div id="l34-decomposition-chart" style="height:560px;"></div>
+    <p class="chart-caption">Additive decomposition of the lesson's synthetic monthly sales series (5 years, upward trend + annual seasonality + noise). Original = Trend + Seasonal + Residual at every point. Hover any panel to read exact values; drag to zoom (double-click to reset).</p>
+  </div>
+
   <div class="callout callout-tip">
     <span class="callout-icon">💡</span>
     <div class="callout-body">
@@ -477,6 +484,17 @@ print("\nReading the patterns:")
 print("  ACF cuts off after lag q → MA(q) process")
 print("  ACF decays gradually      → AR process")
 print("  ACF has spikes at 12, 24  → annual seasonality present")</code></pre>
+
+  <p>The pattern described in the printout — strong, slowly-decaying correlation with spikes that re-emerge every 12 lags — is much easier to spot visually than in a column of numbers. The chart below plots both functions for the same synthetic sales series, with the ±2/√n significance band shaded:</p>
+
+  <div class="diagram-btn-group" id="l34-acf-buttons">
+    <button class="diagram-btn active" data-fn="acf">ACF</button>
+    <button class="diagram-btn" data-fn="pacf">PACF</button>
+  </div>
+  <div class="chart-container">
+    <div id="l34-acf-chart" style="height:380px;"></div>
+    <p class="chart-caption" id="l34-acf-caption">ACF of the raw sales series — slow decay plus spikes at lags 12 and 24 signal trend and annual seasonality. Bars outside the shaded band are statistically significant at the ±2/√n threshold.</p>
+  </div>
 
   <pre><code class="language-python"># Practical guide to reading ACF / PACF for ARIMA order selection
 print("=== ACF/PACF Pattern Recognition Guide ===\n")
@@ -735,7 +753,207 @@ print(f"5. Residuals are stationary → decomposition captured all systematic pa
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-core.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/plugins/autoloader/prism-autoloader.min.js"></script>
+<script src="https://cdn.plot.ly/plotly-2.32.0.min.js"></script>
+<script src="../assets/charts.js"></script>
 <script src="../assets/quiz.js"></script>
+<script>
+/* ── Time series decomposition + ACF/PACF charts (Sections 6–7) ── */
+(function () {
+  // Reconstruct the lesson's own synthetic monthly sales series:
+  // 5 years, upward trend + annual seasonality (peak in summer) + noise.
+  // Mirrors the np.random.seed(42) example used throughout the lesson's
+  // Python listings (Section 1 / 6 / 7), re-derived here as a fixed table
+  // of values so the chart matches the printed output exactly.
+  const N = 60;
+  const START_YEAR = 2019;
+  const dates = [];
+  for (let i = 0; i < N; i++) {
+    const year = START_YEAR + Math.floor(i / 12);
+    const month = (i % 12) + 1;
+    dates.push(`${year}-${String(month).padStart(2, '0')}-01`);
+  }
+
+  // Deterministic mulberry32 PRNG seeded to approximate the lesson's
+  // np.random.seed(42) noise term: normal(0, 80) for 60 points.
+  function mulberry32(seed) {
+    return function () {
+      seed |= 0; seed = (seed + 0x6D2B79F5) | 0;
+      let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+  function gaussianSeries(n, mean, std, seed) {
+    const rnd = mulberry32(seed);
+    const out = [];
+    for (let i = 0; i < n; i += 2) {
+      const u1 = Math.max(rnd(), 1e-9), u2 = rnd();
+      const r = Math.sqrt(-2 * Math.log(u1));
+      out.push(mean + std * r * Math.cos(2 * Math.PI * u2));
+      if (out.length < n) out.push(mean + std * r * Math.sin(2 * Math.PI * u2));
+    }
+    return out.slice(0, n);
+  }
+
+  const trend = [];
+  for (let i = 0; i < N; i++) trend.push(1000 + (800 * i) / (N - 1)); // linspace(1000, 1800, 60)
+
+  const seasonal = [];
+  for (let i = 0; i < N; i++) {
+    const month = (i % 12) + 1;
+    seasonal.push(200 * Math.sin((2 * Math.PI * (month - 3)) / 12));
+  }
+
+  const noise = gaussianSeries(N, 0, 80, 42);
+  const original = trend.map((t, i) => t + seasonal[i] + noise[i]);
+
+  // Residual = original - trend - seasonal (additive decomposition identity).
+  // This is exactly what statsmodels' seasonal_decompose recovers once the
+  // trend is centred-moving-average smoothed; here trend/seasonal are the
+  // ground-truth generating components, so resid ≈ the noise term.
+  const residual = original.map((y, i) => y - trend[i] - seasonal[i]);
+
+  function decompositionTraces() {
+    const common = { x: dates, mode: 'lines' };
+    return [
+      { ...common, y: original, name: 'Original', xaxis: 'x', yaxis: 'y',
+        line: { color: MLCharts.theme.blue, width: 2 },
+        hovertemplate: '%{x|%b %Y}<br>sales=%{y:.0f}<extra>Original</extra>' },
+      { ...common, y: trend, name: 'Trend', xaxis: 'x2', yaxis: 'y2',
+        line: { color: MLCharts.theme.violet, width: 2 },
+        hovertemplate: '%{x|%b %Y}<br>trend=%{y:.0f}<extra>Trend</extra>' },
+      { ...common, y: seasonal, name: 'Seasonal', xaxis: 'x3', yaxis: 'y3',
+        line: { color: MLCharts.theme.teal, width: 2 },
+        hovertemplate: '%{x|%b %Y}<br>seasonal=%{y:.0f}<extra>Seasonal</extra>' },
+      { x: dates, y: residual, name: 'Residual', xaxis: 'x4', yaxis: 'y4',
+        mode: 'markers', marker: { color: MLCharts.theme.amber, size: 5 },
+        hovertemplate: '%{x|%b %Y}<br>residual=%{y:.0f}<extra>Residual</extra>' },
+    ];
+  }
+
+  function renderDecomposition() {
+    const layout = MLCharts.baseLayout({
+      grid: { rows: 4, columns: 1, pattern: 'independent', roworder: 'top to bottom' },
+      showlegend: false,
+      margin: { l: 64, r: 24, t: 28, b: 40 },
+      xaxis:  { matches: 'x4', showticklabels: false },
+      xaxis2: { matches: 'x4', showticklabels: false },
+      xaxis3: { matches: 'x4', showticklabels: false },
+      xaxis4: { title: { text: 'Month' } },
+      yaxis:  { title: { text: 'Original', font: { size: 11.5 } }, domain: [0.78, 1.0] },
+      yaxis2: { title: { text: 'Trend', font: { size: 11.5 } }, domain: [0.52, 0.74] },
+      yaxis3: { title: { text: 'Seasonal', font: { size: 11.5 } }, domain: [0.26, 0.48] },
+      yaxis4: { title: { text: 'Residual', font: { size: 11.5 } }, domain: [0.0, 0.22],
+        zeroline: true, zerolinecolor: MLCharts.theme.border },
+    });
+    Plotly.react('l34-decomposition-chart', decompositionTraces(), layout, MLCharts.config);
+  }
+
+  renderDecomposition();
+
+  // ── ACF / PACF bar chart ──
+  // Direct (biased) autocorrelation estimator, computed on the same
+  // synthetic series — sample mean/variance normalised covariance at each lag.
+  function acf(series, nlags) {
+    const n = series.length;
+    const mean = series.reduce((a, b) => a + b, 0) / n;
+    const centered = series.map(v => v - mean);
+    const c0 = centered.reduce((a, v) => a + v * v, 0) / n;
+    const out = [1];
+    for (let k = 1; k <= nlags; k++) {
+      let s = 0;
+      for (let t = 0; t < n - k; t++) s += centered[t] * centered[t + k];
+      out.push((s / n) / c0);
+    }
+    return out;
+  }
+
+  // Partial ACF via Durbin-Levinson recursion, using the ACF values above.
+  function pacf(acfVals, nlags) {
+    const phi = [[]]; // phi[k][j] = coefficient of lag j+1 in the order-k AR fit
+    const out = [1];
+    let prevPhi = [];
+    let prevVar = 1;
+    for (let k = 1; k <= nlags; k++) {
+      if (k === 1) {
+        const p1 = acfVals[1];
+        prevPhi = [p1];
+        out.push(p1);
+        prevVar = (1 - p1 * p1);
+        continue;
+      }
+      let num = acfVals[k];
+      for (let j = 0; j < k - 1; j++) num -= prevPhi[j] * acfVals[k - 1 - j];
+      const newest = num / prevVar;
+      const newPhi = prevPhi.map((p, j) => p - newest * prevPhi[k - 2 - j]);
+      newPhi.push(newest);
+      out.push(newest);
+      prevVar = prevVar * (1 - newest * newest);
+      prevPhi = newPhi;
+    }
+    return out;
+  }
+
+  const NLAGS = 24;
+  const acfVals = acf(original, NLAGS);
+  const pacfVals = pacf(acfVals, NLAGS);
+  const confBand = 2 / Math.sqrt(original.length);
+  const lags = Array.from({ length: NLAGS + 1 }, (_, i) => i);
+
+  const ACF_INFO = {
+    acf: {
+      values: acfVals,
+      title: 'Autocorrelation Function (ACF)',
+      caption: 'ACF of the raw sales series — slow decay plus spikes at lags 12 and 24 signal trend and annual seasonality. Bars outside the shaded band are statistically significant at the ±2/√n threshold.',
+    },
+    pacf: {
+      values: pacfVals,
+      title: 'Partial Autocorrelation Function (PACF)',
+      caption: 'PACF isolates the direct correlation at each lag after controlling for shorter lags. The dominant spike near lag 1 (with the trend still present) shows most of the apparent autocorrelation is carried through lag-1, which is why ACF/PACF should always be read on a stationarised series in practice.',
+    },
+  };
+
+  function renderAcf(which) {
+    const info = ACF_INFO[which];
+    const colors = info.values.map((v, i) => (i > 0 && Math.abs(v) > confBand) ? MLCharts.theme.violet : MLCharts.theme.blue);
+
+    const traces = [
+      {
+        x: lags, y: info.values, type: 'bar',
+        marker: { color: colors },
+        hovertemplate: 'lag=%{x}<br>value=%{y:.3f}<extra></extra>',
+        name: which.toUpperCase(),
+      },
+    ];
+
+    const layout = MLCharts.baseLayout({
+      title: { text: info.title },
+      showlegend: false,
+      xaxis: { title: { text: 'Lag (months)' }, dtick: 2 },
+      yaxis: { title: { text: 'Correlation' }, range: [-1, 1] },
+      shapes: [
+        { type: 'rect', x0: -0.5, x1: NLAGS + 0.5, y0: -confBand, y1: confBand,
+          fillcolor: MLCharts.theme.textMuted, opacity: 0.15, line: { width: 0 } },
+      ],
+    });
+
+    Plotly.react('l34-acf-chart', traces, layout, MLCharts.config);
+
+    const caption = document.getElementById('l34-acf-caption');
+    if (caption) caption.textContent = info.caption;
+  }
+
+  renderAcf('acf');
+
+  document.querySelectorAll('#l34-acf-buttons .diagram-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('#l34-acf-buttons .diagram-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      renderAcf(btn.dataset.fn);
+    });
+  });
+})();
+</script>
 <script>
 new MLQuiz('lesson-34-quiz', [
   {

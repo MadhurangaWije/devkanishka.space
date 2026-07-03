@@ -161,6 +161,20 @@ for linkage in ['ward', 'average', 'complete', 'single']:
 
   <p>To decide on K clusters from the dendrogram: draw a horizontal line across it. The number of vertical lines the horizontal cut crosses equals the number of clusters. A natural choice is to cut where the vertical "gaps" (distances between merge heights) are largest — long vertical lines before the cut indicate that you're merging quite dissimilar clusters, suggesting the data has a natural break there.</p>
 
+  <p>Drag the slider below to slide the "cut line" up and down a dendrogram built from 7 sample points. Watch the cluster count update live — this is exactly the visual process described above, just made interactive:</p>
+
+  <div class="diagram-controls">
+    <div class="diagram-control-row">
+      <span class="diagram-control-label">Cut Height</span>
+      <input type="range" id="l29-cut-slider" class="diagram-slider" min="0" max="10" step="0.05" value="0">
+      <span class="diagram-control-value" id="l29-cut-value">0.00</span>
+    </div>
+  </div>
+  <div class="chart-container">
+    <div id="l29-dendrogram-chart" style="height:420px;"></div>
+    <p class="chart-caption" id="l29-dendrogram-caption">Cut height = 0.00 — every point is its own cluster (7 clusters).</p>
+  </div>
+
   <pre><code class="language-python">import numpy as np
 import matplotlib.pyplot as plt
 from scipy.cluster.hierarchy import dendrogram, linkage, fcluster
@@ -305,6 +319,20 @@ print(f"\nWith connectivity constraint: Silhouette = {silhouette_score(X_iris_sc
   </ul>
 
   <p>A cluster is defined as the set of all points reachable from a core point through other core points. Two core points are in the same cluster if you can "hop" between them through a chain of core points that are within <code>eps</code> of each other.</p>
+
+  <p>Use the slider to change <code>eps</code> (with <code>min_samples</code> fixed at 4) on a fixed set of 2D points, and watch each point's role flip live between core (<span class="text-mono">●</span> green), border (amber), and noise (red) — the shaded circle around each core point shows its eps-neighbourhood:</p>
+
+  <div class="diagram-controls">
+    <div class="diagram-control-row">
+      <span class="diagram-control-label">eps</span>
+      <input type="range" id="l29-eps-slider" class="diagram-slider" min="0.3" max="2.5" step="0.05" value="0.6">
+      <span class="diagram-control-value" id="l29-eps-value">0.60</span>
+    </div>
+  </div>
+  <div class="chart-container">
+    <div id="l29-dbscan-chart" style="height:440px;"></div>
+    <p class="chart-caption" id="l29-dbscan-caption">eps = 0.60, min_samples = 4 — counting core / border / noise points.</p>
+  </div>
 
   <pre><code class="language-python">import numpy as np
 from sklearn.cluster import DBSCAN
@@ -712,7 +740,239 @@ print(f"Silhouette score: {silhouette_score(X_cust, cust_labels):.4f}")</code></
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-core.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/plugins/autoloader/prism-autoloader.min.js"></script>
+<script src="https://cdn.plot.ly/plotly-2.32.0.min.js"></script>
+<script src="../assets/charts.js"></script>
 <script src="../assets/quiz.js"></script>
+<script>
+/* ── Interactive charts for Lesson 29: Hierarchical & DBSCAN Clustering ── */
+(function () {
+
+  /* ============================================================
+     1. Dendrogram with interactive cut-height slider (Section 3)
+     ============================================================ */
+  // 7 sample points (1D-ish toy values) and their precomputed
+  // agglomerative merge history (single linkage on |a-b| distance),
+  // expressed directly as a dendrogram structure so we can draw it
+  // and compute "clusters at height h" without recomputing scipy.
+  const leafLabels = ['A', 'B', 'C', 'D', 'E', 'F', 'G'];
+
+  // Each merge: [leftNodeId, rightNodeId, height]. Node ids 0-6 are leaves,
+  // 7+ are internal nodes created by merges, in order.
+  const merges = [
+    { id: 7,  left: 0, right: 1, height: 0.8 },  // A+B
+    { id: 8,  left: 5, right: 6, height: 1.1 },  // F+G
+    { id: 9,  left: 2, right: 3, height: 1.6 },  // C+D
+    { id: 10, left: 9, right: 4, height: 2.4 },  // (C+D)+E
+    { id: 11, left: 7, right: 8, height: 4.5 },  // (A+B)+(F+G)
+    { id: 12, left: 10, right: 11, height: 8.2 }, // everything
+  ];
+
+  // Compute the x-position (in leaf order) and id list for every node
+  // by doing a simple in-order leaf layout.
+  const nodeInfo = {}; // id -> { x, height, leaves: [...] }
+  leafLabels.forEach((lbl, i) => { nodeInfo[i] = { x: i, height: 0, leaves: [i] }; });
+  merges.forEach(m => {
+    const l = nodeInfo[m.left], r = nodeInfo[m.right];
+    const leaves = l.leaves.concat(r.leaves);
+    nodeInfo[m.id] = { x: (l.x + r.x) / 2, height: m.height, leaves };
+  });
+
+  const rootId = 12;
+  const maxHeight = nodeInfo[rootId].height;
+
+  function clustersAtHeight(h) {
+    // Simulate union-find over leaves: apply every merge whose height
+    // is at or below the cut height h, then count the resulting groups.
+    const uf = {};
+    for (let i = 0; i < leafLabels.length; i++) uf[i] = i;
+    function ufind(x) { while (uf[x] !== x) x = uf[x]; return x; }
+    function uunion(a, b) { const ra = ufind(a), rb = ufind(b); if (ra !== rb) uf[ra] = rb; }
+    merges.forEach(m => {
+      if (m.height <= h) {
+        const leftLeaves = nodeInfo[m.left].leaves;
+        const rightLeaves = nodeInfo[m.right].leaves;
+        uunion(leftLeaves[0], rightLeaves[0]);
+      }
+    });
+    const groups = new Set();
+    for (let i = 0; i < leafLabels.length; i++) groups.add(ufind(i));
+    return groups.size;
+  }
+
+  function buildDendrogramTraces(cutHeight) {
+    const lineShapes = [];
+    const xs = [], ys = [], texts = [];
+
+    // Draw each merge as a "⊓" shape: vertical from left child up to height,
+    // horizontal across to right child, vertical from right child up to height.
+    merges.forEach(m => {
+      const l = nodeInfo[m.left], r = nodeInfo[m.right];
+      const h = m.height;
+      // vertical line up from left child
+      lineShapes.push({ x: [l.x, l.x], y: [l.height, h] });
+      // vertical line up from right child
+      lineShapes.push({ x: [r.x, r.x], y: [r.height, h] });
+      // horizontal connector
+      lineShapes.push({ x: [l.x, r.x], y: [h, h] });
+    });
+
+    const lineTraces = lineShapes.map(s => ({
+      x: s.x, y: s.y, type: 'scatter', mode: 'lines',
+      line: { color: MLCharts.theme.blue, width: 2 },
+      hoverinfo: 'skip', showlegend: false,
+    }));
+
+    const leafTrace = {
+      x: leafLabels.map((_, i) => nodeInfo[i].x),
+      y: leafLabels.map(() => 0),
+      type: 'scatter', mode: 'markers+text',
+      text: leafLabels, textposition: 'bottom center',
+      marker: { color: MLCharts.theme.violet, size: 10 },
+      name: 'Points', hovertemplate: '%{text}<extra></extra>',
+    };
+
+    const cutTrace = {
+      x: [-0.6, 6.6], y: [cutHeight, cutHeight],
+      type: 'scatter', mode: 'lines',
+      line: { color: MLCharts.theme.red, width: 2, dash: 'dash' },
+      name: `Cut height = ${cutHeight.toFixed(2)}`,
+      hoverinfo: 'skip',
+    };
+
+    return [...lineTraces, leafTrace, cutTrace];
+  }
+
+  function renderDendrogram(cutHeight) {
+    const traces = buildDendrogramTraces(cutHeight);
+    const layout = MLCharts.baseLayout({
+      xaxis: { title: { text: 'Sample points' }, tickvals: [0,1,2,3,4,5,6], ticktext: leafLabels, range: [-0.8, 6.8], zeroline: false },
+      yaxis: { title: { text: 'Merge distance' }, range: [-0.6, maxHeight + 1] },
+      showlegend: false,
+    });
+    Plotly.react('l29-dendrogram-chart', traces, layout, MLCharts.config);
+
+    const k = clustersAtHeight(cutHeight);
+    const caption = document.getElementById('l29-dendrogram-caption');
+    if (caption) {
+      if (cutHeight <= 0) {
+        caption.textContent = `Cut height = 0.00 — every point is its own cluster (${leafLabels.length} clusters).`;
+      } else if (cutHeight >= maxHeight) {
+        caption.textContent = `Cut height = ${cutHeight.toFixed(2)} — above the root merge, so all points collapse into 1 cluster.`;
+      } else {
+        caption.textContent = `Cut height = ${cutHeight.toFixed(2)} — the dashed line crosses ${k} vertical line${k === 1 ? '' : 's'}, giving K = ${k} cluster${k === 1 ? '' : 's'}.`;
+      }
+    }
+  }
+
+  MLCharts.linkSlider('l29-cut-slider', 'l29-cut-value', renderDendrogram, v => v.toFixed(2));
+
+  /* ============================================================
+     2. DBSCAN core / border / noise explorer (Section 5)
+     ============================================================ */
+  // Fixed 2D point set: two dense-ish blobs plus a few sparse/outlier
+  // points so that changing eps visibly changes point roles.
+  const dbscanPoints = [
+    // Cluster A (left blob)
+    [0.0, 0.0], [0.4, 0.2], [-0.3, 0.3], [0.2, -0.4], [-0.4, -0.2],
+    [0.6, -0.1], [-0.1, 0.6], [0.3, 0.5],
+    // Cluster B (right blob)
+    [3.2, 3.0], [3.6, 3.2], [2.9, 3.3], [3.1, 2.6], [3.5, 2.8],
+    [3.8, 3.1], [3.0, 3.6],
+    // Bridge / sparse points between the blobs
+    [1.6, 1.5], [2.2, 2.0],
+    // Noise / far outliers
+    [-2.2, 2.4], [4.6, -0.6], [1.0, -2.3],
+  ];
+  const MIN_SAMPLES = 4;
+
+  function dist(p, q) { return Math.hypot(p[0] - q[0], p[1] - q[1]); }
+
+  function classifyPoints(eps) {
+    const n = dbscanPoints.length;
+    const neighborSets = dbscanPoints.map((p, i) => {
+      const neigh = [];
+      for (let j = 0; j < n; j++) {
+        if (i === j) continue;
+        if (dist(p, dbscanPoints[j]) <= eps) neigh.push(j);
+      }
+      return neigh;
+    });
+    const isCore = neighborSets.map(neigh => (neigh.length + 1) >= MIN_SAMPLES);
+    const role = dbscanPoints.map((_, i) => {
+      if (isCore[i]) return 'core';
+      // border: within eps of some core point
+      const nearCore = neighborSets[i].some(j => isCore[j]);
+      return nearCore ? 'border' : 'noise';
+    });
+    return { role, isCore };
+  }
+
+  function circlePath(cx, cy, r, steps) {
+    steps = steps || 48;
+    const xs = [], ys = [];
+    for (let i = 0; i <= steps; i++) {
+      const a = (2 * Math.PI * i) / steps;
+      xs.push(cx + r * Math.cos(a));
+      ys.push(cy + r * Math.sin(a));
+    }
+    return { xs, ys };
+  }
+
+  function renderDbscan(eps) {
+    const { role } = classifyPoints(eps);
+
+    const groups = { core: [], border: [], noise: [] };
+    dbscanPoints.forEach((p, i) => groups[role[i]].push(p));
+
+    const neighborhoodTraces = groups.core.map(p => {
+      const { xs, ys } = circlePath(p[0], p[1], eps);
+      return {
+        x: xs, y: ys, type: 'scatter', mode: 'lines',
+        line: { color: MLCharts.theme.green, width: 0 },
+        fill: 'toself', fillcolor: 'rgba(22, 163, 74, 0.08)',
+        hoverinfo: 'skip', showlegend: false,
+      };
+    });
+
+    function pointTrace(name, pts, color) {
+      return {
+        x: pts.map(p => p[0]), y: pts.map(p => p[1]),
+        type: 'scatter', mode: 'markers', name: `${name} (${pts.length})`,
+        marker: { color, size: 11, line: { color: MLCharts.theme.bgCard, width: 1 } },
+        hovertemplate: `${name}<br>(%{x:.2f}, %{y:.2f})<extra></extra>`,
+      };
+    }
+
+    const traces = [
+      ...neighborhoodTraces,
+      pointTrace('Core', groups.core, MLCharts.theme.green),
+      pointTrace('Border', groups.border, MLCharts.theme.amber),
+      pointTrace('Noise', groups.noise, MLCharts.theme.red),
+    ];
+
+    const layout = MLCharts.baseLayout({
+      xaxis: { title: { text: 'x' }, range: [-3.2, 5.6], scaleanchor: 'y' },
+      yaxis: { title: { text: 'y' }, range: [-3.2, 4.4] },
+    });
+
+    Plotly.react('l29-dbscan-chart', traces, layout, MLCharts.config);
+
+    const caption = document.getElementById('l29-dbscan-caption');
+    if (caption) {
+      caption.textContent = `eps = ${eps.toFixed(2)}, min_samples = ${MIN_SAMPLES} — ` +
+        `${groups.core.length} core, ${groups.border.length} border, ${groups.noise.length} noise. ` +
+        (eps < 0.6
+          ? 'Small eps: blobs fragment and most points read as noise.'
+          : eps > 1.6
+            ? 'Large eps: the two blobs merge into one cluster via the bridge points.'
+            : 'Each blob forms its own cluster, with a few border points at the edges.');
+    }
+  }
+
+  MLCharts.linkSlider('l29-eps-slider', 'l29-eps-value', renderDbscan, v => v.toFixed(2));
+
+})();
+</script>
 <script>
 new MLQuiz('lesson-29-quiz', [
   {

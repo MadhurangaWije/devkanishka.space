@@ -49,10 +49,10 @@ export const tutorials: Tutorial[] = [
     slug: 'ml-and-dl-mastery',
     title: 'ML & DL Mastery',
     description:
-      'A structured, from-scratch path through machine learning and deep learning — built for engineers who want to understand the math and code, not just import sklearn. Five phases available now covering data science foundations, classical ML, deep learning, NLP & LLMs, and computer vision — 60 lessons in total.',
+      'A structured, from-scratch path through machine learning and deep learning — built for engineers who want to understand the math and code, not just import sklearn. Six phases covering data science foundations, supervised and unsupervised ML, deep learning, NLP & LLMs, and production MLOps — 67 lessons in total.',
     difficulty: 'intermediate',
     parts: 6,
-    estimatedHours: 60,
+    estimatedHours: 75,
     tags: ['python', 'numpy', 'pandas', 'machine-learning', 'deep-learning', 'pytorch'],
     featured: true,
     learningOutcomes: [
@@ -62,6 +62,7 @@ export const tutorials: Tutorial[] = [
       'Design CNNs, RNNs, LSTMs, and understand transfer learning in practice',
       'Apply transformers, BERT, GPT-2, and LoRA fine-tuning for NLP tasks',
       'Build object detectors, GANs, diffusion models, and RAG pipelines',
+      'Track experiments, deploy with FastAPI/Docker, and monitor models for drift in production',
     ],
     prerequisites: [
       'Solid Python programming (functions, classes, list comprehensions)',
@@ -69,12 +70,12 @@ export const tutorials: Tutorial[] = [
       'No ML experience needed — we build intuition before formulas',
     ],
     parts_list: [
-      { title: 'Phase 1 — Data Science Foundations (9 lessons)', duration: 225 },
-      { title: 'Phase 2 — Classical Machine Learning (26 lessons)', duration: 780 },
-      { title: 'Phase 3 — Deep Learning Fundamentals (12 lessons)', duration: 360 },
-      { title: 'Phase 4 — NLP & Large Language Models (8 lessons)', duration: 240 },
-      { title: 'Phase 5 — Computer Vision & Multimodal (5 lessons)', duration: 150 },
-      { title: 'Phase 6 — MLOps & Production (coming soon)', duration: 360 },
+      { title: 'Phase 1 — Data Science Foundations (8 lessons)', duration: 480 },
+      { title: 'Phase 2 — Supervised Machine Learning (19 lessons)', duration: 1320 },
+      { title: 'Phase 3 — Unsupervised Learning & Time Series (8 lessons)', duration: 480 },
+      { title: 'Phase 4 — Deep Learning Foundations (12 lessons)', duration: 840 },
+      { title: 'Phase 5 — Advanced Deep Learning & NLP (13 lessons)', duration: 900 },
+      { title: 'Phase 6 — Production ML & MLOps (7 lessons)', duration: 480 },
     ],
   },
   {

@@ -159,6 +159,26 @@ print(f"Centroids:\n{centroids.round(3)}")
       <p>K-Means always converges because WCSS (see Section 3) decreases or stays the same at every step and is bounded below by 0. However, it may converge to a <em>local</em> minimum — a suboptimal assignment that depends on the random initialisation. This is why sklearn runs K-Means multiple times with different seeds (<code>n_init=10</code>) and keeps the best result.</p>
     </div>
   </div>
+
+  <h3>Watch It Run: K-Means Step by Step</h3>
+  <p>K-Means is not a one-shot calculation — it's an <em>iterative</em> process that alternates between two steps until the assignments stop changing. The simulator below runs the exact algorithm from the code above on a small synthetic dataset with natural-looking groups. Choose a number of clusters K, then click <strong>Step</strong> repeatedly to watch centroids (the large ✕ markers) jump to the mean of their assigned points, and watch points switch colour as they get reassigned to a closer centroid. Click <strong>Reset</strong> to re-randomise the starting centroids, or <strong>Run to Convergence</strong> to fast-forward to the final result.</p>
+
+  <div class="diagram-controls">
+    <div class="diagram-control-row">
+      <span class="diagram-control-label">Number of Clusters (K)</span>
+      <input type="range" id="l28-k-slider" class="diagram-slider" min="2" max="6" step="1" value="4">
+      <span class="diagram-control-value" id="l28-k-value">4</span>
+    </div>
+  </div>
+  <div class="diagram-btn-group" id="l28-step-buttons">
+    <button class="diagram-btn active" id="l28-btn-step">▶ Step</button>
+    <button class="diagram-btn" id="l28-btn-run">⏭ Run to Convergence</button>
+    <button class="diagram-btn" id="l28-btn-reset">↺ Reset (new random init)</button>
+  </div>
+  <div class="chart-container">
+    <div id="l28-kmeans-chart" style="height:440px;"></div>
+    <p class="chart-caption" id="l28-kmeans-caption">Iteration 0 — initial centroids placed (K-Means++ style seeding). Click Step to assign points.</p>
+  </div>
 </div>
 
 <!-- ── Section 3 ── -->
@@ -259,6 +279,13 @@ print(f"\nElbow detected at K = {elbow_k}")</code></pre>
       <strong>When the Elbow Is Ambiguous</strong>
       <p>Real-world data rarely has a sharp elbow. If the elbow plot looks like a smooth curve, use silhouette score (Section 5) as a second opinion. In practice, try 2–3 candidate K values from the elbow region, run silhouette analysis on each, and pick the one with the highest average silhouette score.</p>
     </div>
+  </div>
+
+  <p>Here is the actual elbow curve computed on the same synthetic dataset used in the simulator above (run K-Means to convergence for each K from 1 to 8, recording the final WCSS). Notice how steeply WCSS drops for the first few values of K, then flattens out — the "elbow" marks the point of diminishing returns:</p>
+
+  <div class="chart-container">
+    <div id="l28-elbow-chart" style="height:380px;"></div>
+    <p class="chart-caption" id="l28-elbow-caption">WCSS (inertia) vs K for the lesson's synthetic dataset. The elbow is marked in red.</p>
   </div>
 </div>
 
@@ -717,7 +744,267 @@ print(f"ARI: {adjusted_rand_score(iris.target, labels):.4f}")
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-core.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/plugins/autoloader/prism-autoloader.min.js"></script>
+<script src="https://cdn.plot.ly/plotly-2.32.0.min.js"></script>
+<script src="../assets/charts.js"></script>
 <script src="../assets/quiz.js"></script>
+<script>
+/* ── Interactive K-Means simulator (Section 2) + Elbow chart (Section 4) ── */
+(function () {
+  // ── Synthetic dataset: 4 natural-ish blobs, fixed (seeded) positions ──
+  function mulberry32(seed) {
+    return function () {
+      seed |= 0; seed = (seed + 0x6D2B79F5) | 0;
+      let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+  const rand = mulberry32(28028);
+  function gaussian(rng) {
+    const u1 = Math.max(rng(), 1e-9), u2 = rng();
+    return Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
+  }
+
+  const BLOB_CENTERS = [[2, 8], [8, 9], [3, 2], [9, 2]];
+  const POINTS_PER_BLOB = 18;
+  const SPREAD = 1.05;
+
+  const DATA = [];
+  BLOB_CENTERS.forEach(([cx, cy]) => {
+    for (let i = 0; i < POINTS_PER_BLOB; i++) {
+      DATA.push([cx + gaussian(rand) * SPREAD, cy + gaussian(rand) * SPREAD]);
+    }
+  });
+
+  const POINT_COLORS = [MLCharts.theme.blue, MLCharts.theme.amber, MLCharts.theme.green, MLCharts.theme.violet, MLCharts.theme.red, MLCharts.theme.teal];
+
+  // ── K-Means primitives ──
+  function dist2(a, b) {
+    const dx = a[0] - b[0], dy = a[1] - b[1];
+    return dx * dx + dy * dy;
+  }
+
+  // K-Means++ initialisation
+  function initCentroids(points, k, rng) {
+    const centroids = [points[Math.floor(rng() * points.length)].slice()];
+    while (centroids.length < k) {
+      const dists = points.map(p => Math.min(...centroids.map(c => dist2(p, c))));
+      const total = dists.reduce((a, b) => a + b, 0);
+      let r = rng() * total;
+      let idx = 0;
+      for (; idx < dists.length; idx++) {
+        r -= dists[idx];
+        if (r <= 0) break;
+      }
+      centroids.push(points[Math.min(idx, points.length - 1)].slice());
+    }
+    return centroids;
+  }
+
+  function assign(points, centroids) {
+    return points.map(p => {
+      let best = 0, bestD = Infinity;
+      centroids.forEach((c, i) => {
+        const d = dist2(p, c);
+        if (d < bestD) { bestD = d; best = i; }
+      });
+      return best;
+    });
+  }
+
+  function updateCentroids(points, labels, k, prevCentroids) {
+    const sums = Array.from({ length: k }, () => [0, 0, 0]);
+    points.forEach((p, i) => {
+      const l = labels[i];
+      sums[l][0] += p[0]; sums[l][1] += p[1]; sums[l][2] += 1;
+    });
+    return sums.map((s, i) => s[2] > 0 ? [s[0] / s[2], s[1] / s[2]] : prevCentroids[i].slice());
+  }
+
+  function inertia(points, labels, centroids) {
+    return points.reduce((acc, p, i) => acc + dist2(p, centroids[labels[i]]), 0);
+  }
+
+  function runFull(points, k, seedOffset) {
+    const rng = mulberry32(28028 + seedOffset);
+    let centroids = initCentroids(points, k, rng);
+    let labels = new Array(points.length).fill(-1);
+    for (let iter = 0; iter < 100; iter++) {
+      const newLabels = assign(points, centroids);
+      const changed = newLabels.some((l, i) => l !== labels[i]);
+      labels = newLabels;
+      const newCentroids = updateCentroids(points, labels, k, centroids);
+      const moved = newCentroids.some((c, i) => dist2(c, centroids[i]) > 1e-10);
+      centroids = newCentroids;
+      if (!changed && !moved) break;
+    }
+    return inertia(points, labels, centroids);
+  }
+
+  // ── Simulator state ──
+  let state = {
+    k: 4,
+    centroids: [],
+    labels: new Array(DATA.length).fill(-1),
+    iteration: 0,
+    converged: false,
+    seedOffset: 0,
+  };
+
+  function resetState(k) {
+    const rng = mulberry32(28028 + state.seedOffset);
+    state.k = k;
+    state.centroids = initCentroids(DATA, k, rng);
+    state.labels = new Array(DATA.length).fill(-1);
+    state.iteration = 0;
+    state.converged = false;
+  }
+
+  // One full iteration = assign step + update step
+  function stepOnce() {
+    if (state.converged) return false;
+    const newLabels = assign(DATA, state.centroids);
+    const labelsChanged = newLabels.some((l, i) => l !== state.labels[i]);
+    state.labels = newLabels;
+    const newCentroids = updateCentroids(DATA, state.labels, state.k, state.centroids);
+    const centroidsMoved = newCentroids.some((c, i) => dist2(c, state.centroids[i]) > 1e-10);
+    state.centroids = newCentroids;
+    state.iteration += 1;
+    if (!labelsChanged && !centroidsMoved) state.converged = true;
+    return true;
+  }
+
+  function renderSimulator() {
+    const traces = [];
+    // Points grouped by cluster (or all grey if unassigned, iteration 0)
+    for (let c = 0; c < state.k; c++) {
+      const xs = [], ys = [];
+      DATA.forEach((p, i) => { if (state.labels[i] === c) { xs.push(p[0]); ys.push(p[1]); } });
+      traces.push({
+        x: xs, y: ys, type: 'scatter', mode: 'markers',
+        marker: { color: POINT_COLORS[c % POINT_COLORS.length], size: 9, opacity: 0.8, line: { color: MLCharts.theme.bgCard, width: 0.5 } },
+        name: `Cluster ${c}`,
+        hovertemplate: `cluster ${c}<extra></extra>`,
+      });
+    }
+    if (state.iteration === 0) {
+      // Before first assignment, show points unclustered (grey)
+      traces.length = 0;
+      traces.push({
+        x: DATA.map(p => p[0]), y: DATA.map(p => p[1]), type: 'scatter', mode: 'markers',
+        marker: { color: MLCharts.theme.textMuted, size: 9, opacity: 0.55 },
+        name: 'Unassigned', hoverinfo: 'skip',
+      });
+    }
+    traces.push({
+      x: state.centroids.map(c => c[0]), y: state.centroids.map(c => c[1]),
+      type: 'scatter', mode: 'markers',
+      marker: { color: state.centroids.map((c, i) => POINT_COLORS[i % POINT_COLORS.length]), size: 18, symbol: 'x', line: { color: MLCharts.theme.heading, width: 2.5 } },
+      name: 'Centroids',
+      hovertemplate: 'centroid %{pointNumber}<extra></extra>',
+    });
+
+    const layout = MLCharts.baseLayout({
+      xaxis: { title: { text: 'Feature 1' }, range: [-1, 12] },
+      yaxis: { title: { text: 'Feature 2' }, range: [-1, 12] },
+      showlegend: false,
+    });
+
+    Plotly.react('l28-kmeans-chart', traces, layout, MLCharts.config);
+
+    const caption = document.getElementById('l28-kmeans-caption');
+    if (caption) {
+      if (state.iteration === 0) {
+        caption.textContent = `Iteration 0 — K=${state.k} initial centroids placed (K-Means++ style seeding). Click Step to assign points.`;
+      } else {
+        const wcss = inertia(DATA, state.labels, state.centroids);
+        if (state.converged) {
+          caption.textContent = `Converged after ${state.iteration} iteration${state.iteration === 1 ? '' : 's'} — assignments stopped changing. WCSS = ${wcss.toFixed(1)}.`;
+        } else {
+          caption.textContent = `Iteration ${state.iteration} — points reassigned to nearest centroid, centroids moved to new cluster means. WCSS = ${wcss.toFixed(1)}.`;
+        }
+      }
+    }
+  }
+
+  function setRunButtonsEnabled(running) {
+    document.getElementById('l28-btn-step').disabled = running;
+    document.getElementById('l28-btn-run').disabled = running;
+  }
+
+  document.getElementById('l28-btn-step').addEventListener('click', () => {
+    stepOnce();
+    renderSimulator();
+  });
+
+  document.getElementById('l28-btn-run').addEventListener('click', () => {
+    let guard = 0;
+    while (!state.converged && guard < 100) { stepOnce(); guard++; }
+    renderSimulator();
+  });
+
+  document.getElementById('l28-btn-reset').addEventListener('click', () => {
+    state.seedOffset += 1;
+    resetState(state.k);
+    renderSimulator();
+  });
+
+  MLCharts.linkSlider('l28-k-slider', 'l28-k-value', (v) => {
+    resetState(Math.round(v));
+    renderSimulator();
+  }, v => String(Math.round(v)));
+
+  // ── Elbow chart (Section 4): WCSS vs K on the same dataset ──
+  function renderElbowChart() {
+    const ks = [];
+    const wcssVals = [];
+    for (let k = 1; k <= 8; k++) {
+      ks.push(k);
+      wcssVals.push(runFull(DATA, k, 0));
+    }
+    // Detect elbow via max second-derivative (same heuristic as the lesson's Python code)
+    let elbowK = 4, bestCurve = -Infinity;
+    for (let i = 1; i < wcssVals.length - 1; i++) {
+      const curve = wcssVals[i - 1] - 2 * wcssVals[i] + wcssVals[i + 1];
+      if (curve > bestCurve) { bestCurve = curve; elbowK = ks[i]; }
+    }
+
+    const traces = [
+      {
+        x: ks, y: wcssVals, type: 'scatter', mode: 'lines+markers',
+        line: { color: MLCharts.theme.blue, width: 2.5 },
+        marker: { color: MLCharts.theme.blue, size: 9 },
+        name: 'WCSS',
+        hovertemplate: 'K=%{x}<br>WCSS=%{y:.1f}<extra></extra>',
+      },
+      {
+        x: [elbowK], y: [wcssVals[ks.indexOf(elbowK)]], type: 'scatter', mode: 'markers',
+        marker: { color: MLCharts.theme.red, size: 15, symbol: 'circle-open', line: { width: 3 } },
+        name: `Elbow (K=${elbowK})`,
+        hovertemplate: `elbow at K=${elbowK}<extra></extra>`,
+      },
+    ];
+
+    const layout = MLCharts.baseLayout({
+      xaxis: { title: { text: 'Number of Clusters (K)' }, dtick: 1 },
+      yaxis: { title: { text: 'WCSS (Inertia)' } },
+      showlegend: false,
+    });
+
+    Plotly.react('l28-elbow-chart', traces, layout, MLCharts.config);
+
+    const caption = document.getElementById('l28-elbow-caption');
+    if (caption) {
+      caption.textContent = `WCSS (inertia) vs K for the lesson's synthetic dataset (4 true blobs). The elbow lands at K=${elbowK} — circled in red — matching the visually obvious cluster count.`;
+    }
+  }
+
+  // ── Initialise both visuals ──
+  resetState(state.k);
+  renderSimulator();
+  renderElbowChart();
+})();
+</script>
 <script>
 new MLQuiz('lesson-28-quiz', [
   {
