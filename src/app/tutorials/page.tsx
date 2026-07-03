@@ -26,6 +26,15 @@ export default function TutorialsPage() {
             Practical, in-depth guides for engineers who want to go beyond the tutorial
             and understand how things actually work. We build real things. We go deep.
           </p>
+
+          <p className="font-mono text-sm text-text-muted max-w-xl leading-relaxed mt-6 pl-4 border-l-2 border-site-border">
+            These come out of my own self-learning — the same problems I ran into, in the
+            order I actually learned them. I&apos;m publishing them here hoping they make
+            someone else&apos;s journey a little smoother. But reading these isn&apos;t the
+            work — you still have to sit with the hard parts, think them through on your
+            own, and get your hands dirty applying it. Consider this a push in the right
+            direction, not a shortcut around the effort.
+          </p>
         </div>
 
         {/* Stats bar */}

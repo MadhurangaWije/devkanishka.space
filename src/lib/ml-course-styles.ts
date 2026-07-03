@@ -239,6 +239,68 @@ export const ML_COURSE_CSS = `
 .ml-lesson-host .array-cell.dim { background: var(--bg-alt); border-color: var(--border); color: var(--text-muted); }
 .ml-lesson-host .array-dim-label { font-family: var(--font-mono); font-size: 0.68rem; color: var(--text-muted); text-align: center; margin-top: 0.35rem; }
 
+/* Charts & diagrams */
+.ml-lesson-host .chart-container {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  padding: 1.25rem 1.25rem 0.75rem;
+  margin: 1.75rem 0 1.25rem;
+}
+.ml-lesson-host .chart-caption {
+  font-size: 0.8rem; color: var(--text-muted); text-align: center; font-style: italic; margin: 0.5rem 0 0.25rem;
+}
+.ml-lesson-host .diagram-controls {
+  display: flex; flex-wrap: wrap; gap: 1.5rem; align-items: center;
+  background: var(--bg-alt); border: 1px solid var(--border); border-radius: var(--r-md);
+  padding: 0.85rem 1.1rem; margin-bottom: 1rem;
+}
+.ml-lesson-host .diagram-control-row { display: flex; align-items: center; gap: 0.65rem; flex: 1 1 220px; }
+.ml-lesson-host .diagram-control-label { font-size: 0.8rem; font-weight: 600; color: var(--heading); white-space: nowrap; }
+.ml-lesson-host .diagram-slider {
+  flex: 1; appearance: none; -webkit-appearance: none; height: 5px; border-radius: 3px;
+  background: var(--border-md); outline: none;
+}
+.ml-lesson-host .diagram-slider::-webkit-slider-thumb {
+  appearance: none; -webkit-appearance: none; width: 16px; height: 16px; border-radius: 50%;
+  background: var(--violet); border: 2px solid var(--bg-card); cursor: pointer;
+}
+.ml-lesson-host .diagram-slider::-moz-range-thumb {
+  width: 16px; height: 16px; border-radius: 50%;
+  background: var(--violet); border: 2px solid var(--bg-card); cursor: pointer;
+}
+.ml-lesson-host .diagram-control-value {
+  font-family: var(--font-mono); font-size: 0.82rem; font-weight: 600; color: var(--violet); min-width: 3.4rem; text-align: right;
+}
+.ml-lesson-host .diagram-btn-group { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-bottom: 1rem; }
+.ml-lesson-host .diagram-btn {
+  font-family: var(--font-sans); font-size: 0.8rem; font-weight: 600; padding: 0.45rem 0.9rem;
+  border-radius: 20px; border: 1.5px solid var(--border-md); background: var(--bg-card); color: var(--text-muted);
+  cursor: pointer; transition: border-color 0.15s, background 0.15s, color 0.15s;
+}
+.ml-lesson-host .diagram-btn:hover { border-color: var(--violet); color: var(--violet); }
+.ml-lesson-host .diagram-btn.active { background: var(--violet); border-color: var(--violet); color: #fff; }
+.ml-lesson-host .chart-row { display: flex; gap: 1.25rem; flex-wrap: wrap; }
+.ml-lesson-host .chart-row .chart-container { flex: 1 1 280px; margin-top: 0; }
+.ml-lesson-host .diagram-svg-wrap {
+  background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--r-lg);
+  padding: 1.5rem; margin: 1.75rem 0 1.25rem; overflow-x: auto; text-align: center;
+}
+.ml-lesson-host .diagram-svg-wrap svg { max-width: 100%; height: auto; }
+.ml-lesson-host .diagram-svg-caption { font-size: 0.8rem; color: var(--text-muted); text-align: center; font-style: italic; margin-top: 0.75rem; }
+.ml-lesson-host .diagram-node { fill: var(--blue-50); stroke: var(--blue); stroke-width: 1.5; transition: fill 0.15s, stroke-width 0.15s; }
+.ml-lesson-host .diagram-node:hover { fill: var(--blue-100); stroke-width: 2.5; }
+.ml-lesson-host .diagram-node-alt { fill: var(--violet-50); stroke: var(--violet); stroke-width: 1.5; transition: fill 0.15s, stroke-width 0.15s; }
+.ml-lesson-host .diagram-node-alt:hover { fill: var(--violet-100); stroke-width: 2.5; }
+.ml-lesson-host .diagram-node-good { fill: var(--green-50); stroke: var(--green); stroke-width: 1.5; transition: fill 0.15s, stroke-width 0.15s; }
+.ml-lesson-host .diagram-node-good:hover { fill: var(--green-100); stroke-width: 2.5; }
+.ml-lesson-host .diagram-node-bad { fill: var(--amber-50); stroke: var(--amber); stroke-width: 1.5; transition: fill 0.15s, stroke-width 0.15s; }
+.ml-lesson-host .diagram-node-bad:hover { fill: var(--amber-100); stroke-width: 2.5; }
+.ml-lesson-host .diagram-arrow { stroke: var(--text-muted); stroke-width: 1.75; fill: none; marker-end: url(#diagram-arrowhead); }
+.ml-lesson-host .diagram-label { font-family: var(--font-sans); font-size: 12px; font-weight: 600; fill: var(--heading); text-anchor: middle; }
+.ml-lesson-host .diagram-sublabel { font-family: var(--font-sans); font-size: 10.5px; fill: var(--text-muted); text-anchor: middle; }
+.ml-lesson-host .diagram-mono-label { font-family: var(--font-mono); font-size: 11px; font-weight: 600; text-anchor: middle; }
+
 /* Real-world use case */
 .ml-lesson-host .use-case-section {
   background: var(--teal-50);

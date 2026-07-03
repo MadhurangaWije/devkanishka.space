@@ -172,6 +172,79 @@ function replaceNavLinks(html: string): string {
   return result;
 }
 
+// ── Chart helper (inlined from assets/charts.js, colors hardcoded to the
+//    site's dark theme instead of read from CSS custom properties, since
+//    the lesson's --bg-card/--text-base etc. are scoped to .ml-lesson-host
+//    and wouldn't be visible to getComputedStyle(document.documentElement))
+
+const ML_CHARTS_JS = `const MLCharts = (() => {
+  const theme = {
+    bgCard: '#1a1d27', bgAlt: '#22263a', textBase: '#e2e4f0', textMuted: '#8b90a8',
+    heading: '#ffffff', border: '#2e3350', blue: '#7c6ff7', blue700: '#6457e8',
+    violet: '#a78bfa', green: '#4ade80', amber: '#fbbf24', red: '#f87171', teal: '#2dd4bf',
+    fontSans: "'Inter', system-ui, sans-serif", fontMono: "'JetBrains Mono', 'Fira Code', monospace",
+  };
+  const palette = [theme.blue, theme.violet, theme.amber, theme.teal, theme.green, theme.red];
+  function deepMerge(target, source) {
+    const out = Object.assign({}, target);
+    for (const key in source) {
+      const sv = source[key];
+      const tv = target[key];
+      if (sv && typeof sv === 'object' && !Array.isArray(sv) && tv && typeof tv === 'object' && !Array.isArray(tv)) {
+        out[key] = deepMerge(tv, sv);
+      } else {
+        out[key] = sv;
+      }
+    }
+    return out;
+  }
+  function baseLayout(overrides) {
+    const base = {
+      font: { family: theme.fontSans, color: theme.textBase, size: 13 },
+      paper_bgcolor: theme.bgCard,
+      plot_bgcolor: theme.bgCard,
+      margin: { l: 56, r: 24, t: 40, b: 48 },
+      colorway: palette,
+      xaxis: {
+        gridcolor: theme.border, zerolinecolor: theme.border, linecolor: theme.border,
+        automargin: true, title: { font: { size: 12.5, color: theme.textMuted } },
+      },
+      yaxis: {
+        gridcolor: theme.border, zerolinecolor: theme.border, linecolor: theme.border,
+        automargin: true, title: { font: { size: 12.5, color: theme.textMuted } },
+      },
+      legend: { font: { size: 12 }, orientation: 'h', y: -0.22, x: 0.5, xanchor: 'center' },
+      hoverlabel: { font: { family: theme.fontSans, size: 12 }, bgcolor: theme.bgCard, bordercolor: theme.border },
+      title: { font: { family: theme.fontSans, size: 14.5, color: theme.heading }, x: 0.02 },
+    };
+    return overrides ? deepMerge(base, overrides) : base;
+  }
+  const config = {
+    responsive: true,
+    displayModeBar: 'hover',
+    modeBarButtonsToRemove: ['lasso2d', 'select2d', 'autoScale2d', 'toggleSpikelines'],
+    scrollZoom: false,
+    displaylogo: false,
+  };
+  function linkSlider(sliderId, valueId, onChange, formatValue) {
+    const slider = document.getElementById(sliderId);
+    if (!slider) {
+      console.warn('MLCharts.linkSlider: no element with id "' + sliderId + '"');
+      return;
+    }
+    const valueEl = valueId ? document.getElementById(valueId) : null;
+    const fmt = formatValue || (v => v);
+    const fire = () => {
+      const v = parseFloat(slider.value);
+      if (valueEl) valueEl.textContent = fmt(v);
+      onChange(v);
+    };
+    slider.addEventListener('input', fire);
+    fire();
+  }
+  return { theme, palette, baseLayout, config, linkSlider, deepMerge };
+})();`;
+
 // ── Quiz widget (inlined from assets/quiz.js) ──────────────────────────────
 
 const ML_QUIZ_JS = `class MLQuiz {
@@ -303,7 +376,7 @@ function parseMLLesson(rawHtml: string): { bodyHtml: string; script: string } {
     return true;
   });
 
-  const script = ML_QUIZ_JS + '\n\n' + uniqueScripts.join('\n\n');
+  const script = ML_CHARTS_JS + '\n\n' + ML_QUIZ_JS + '\n\n' + uniqueScripts.join('\n\n');
   return { bodyHtml, script };
 }
 
