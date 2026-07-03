@@ -16,7 +16,7 @@ const COMMANDS: Record<string, string> = {
   skills      → tech stack
   work        → selected projects
   blog        → recent writing
-  tutorials   → learning resources
+  guides      → learning resources
   contact     → get in touch
   clear       → clear terminal`,
 
@@ -42,28 +42,28 @@ OBSERV.      Prometheus · Grafana · OpenTelemetry · Jaeger
 
   work: `selected projects:
 
-→  HyperQueue           Go · Redis · Kubernetes
-   Distributed task queue, 1M+ jobs/day, zero job loss
+→  Industrial Process Analytics Platform   Go · Python · Kubernetes
+   Distributed analytics platform + AI agent layer for industrial ops
 
-→  MLOps Orchestrator   Go · Python · K8s · MLflow
-   Kubernetes-native ML training pipeline
+→  Serverless Data Hub Platform            AWS Lambda · Glue · Kafka
+   Fully serverless data platform at airline scale
 
-→  StreamLens           Next.js · ClickHouse · Kafka
-   Real-time analytics, 50K events/second
+→  Internal Developer Portal               Kubernetes · GitOps · Low-Code
+   Self-service platform for shipping services faster
 
 run: open /work  to see full case studies`,
 
-  blog: `recent writing:
+  blog: `writing:
 
-→  Why I Stopped Using ORMs in Production
-→  Kubernetes at 3am: A Post-Mortem
-→  Building a Redis Clone in Go: Part 1
-→  The Hidden Costs of Microservices
-→  Go vs Python for Backend Services
+No posts yet — the first ones are still being written.
 
-run: open /blog  to read all posts`,
+Topics: gnarly production bugs, tricky migrations, incidents,
+and the not-so-straightforward problems I had to think my way
+out of.
 
-  tutorials: `learning resources:
+run: open /blog  for details`,
+
+  guides: `learning resources:
 
 →  Distributed Systems from Scratch  [advanced · 14h]
 →  Go for Python Developers          [intermediate · 8h]

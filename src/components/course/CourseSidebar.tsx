@@ -45,7 +45,7 @@ export function CourseSidebar({
         className="flex items-center gap-2 font-mono text-xs text-text-secondary hover:text-accent transition-colors mb-8 group"
       >
         <span className="text-text-muted group-hover:text-accent transition-colors">←</span>
-        all tutorials
+        all guides
       </Link>
 
       {/* Course title */}
