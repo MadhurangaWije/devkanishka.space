@@ -39,12 +39,13 @@ export function CaseStudyModal({ project, onClose }: CaseStudyModalProps) {
           />
 
           {/* Panel */}
+          <div className="fixed inset-0 z-50 flex items-end justify-center md:items-center pointer-events-none">
           <motion.div
             initial={{ opacity: 0, y: 40 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: 40 }}
             transition={{ duration: 0.3, ease: [0.16, 1, 0.3, 1] }}
-            className="fixed inset-x-0 bottom-0 md:inset-x-auto md:left-1/2 md:-translate-x-1/2 md:top-1/2 md:-translate-y-1/2 z-50 w-full md:w-[700px] max-h-[90vh] overflow-y-auto bg-surface border border-site-border rounded-t-2xl md:rounded-2xl"
+            className="pointer-events-auto w-full md:w-[700px] max-h-[90vh] overflow-y-auto bg-surface border border-site-border rounded-t-2xl md:rounded-2xl"
           >
             {/* Header */}
             <div className="sticky top-0 bg-surface border-b border-site-border px-6 py-4 flex items-center justify-between">
@@ -121,6 +122,7 @@ export function CaseStudyModal({ project, onClose }: CaseStudyModalProps) {
               )}
             </div>
           </motion.div>
+          </div>
         </>
       )}
     </AnimatePresence>
