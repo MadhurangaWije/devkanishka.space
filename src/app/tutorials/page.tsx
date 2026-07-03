@@ -18,16 +18,11 @@ export default function TutorialsPage() {
       <div className="container-site">
         {/* Header */}
         <div className="mb-20">
-          <p className="label text-accent mb-4">tutorials</p>
+          <p className="label text-accent mb-4">for the ❤️ of teaching</p>
           <h1 className="font-sans text-5xl md:text-6xl font-black tracking-tighter mb-6">
-            Learn by building.
+            Learn it the way I did.
           </h1>
           <p className="font-mono text-base text-text-secondary max-w-xl leading-relaxed">
-            Practical, in-depth guides for engineers who want to go beyond the tutorial
-            and understand how things actually work. We build real things. We go deep.
-          </p>
-
-          <p className="font-mono text-sm text-text-muted max-w-xl leading-relaxed mt-6 pl-4 border-l-2 border-site-border">
             These come out of my own self-learning — the same problems I ran into, in the
             order I actually learned them. I&apos;m publishing them here hoping they make
             someone else&apos;s journey a little smoother. But reading these isn&apos;t the
