@@ -7,6 +7,7 @@
 // rules (`.foo`) on specificity, regardless of DOM insertion order.
 export const SD_COURSE_CSS = `
 .sd-lesson-host {
+  color-scheme: dark;
   --bg:            #0f1117;
   --text:          #e2e4f0;
   --text-muted:    #8b90a8;
@@ -178,6 +179,26 @@ export const SD_COURSE_CSS = `
   margin-bottom: 0.75rem;
 }
 
+/* Form controls — browser UA defaults give these a white background
+   regardless of surrounding theme, even though text color inherits, so
+   they need an explicit dark background or the (inherited light) text
+   becomes invisible against native white. */
+.sd-lesson-host input[type="text"],
+.sd-lesson-host input[type="number"],
+.sd-lesson-host input:not([type]),
+.sd-lesson-host textarea,
+.sd-lesson-host select {
+  background: var(--code-bg) !important;
+  color: var(--text) !important;
+  border-color: var(--border);
+  -webkit-appearance: none;
+  appearance: none;
+}
+.sd-lesson-host select option {
+  background: var(--code-bg);
+  color: var(--text);
+}
+
 /* Buttons for interactive elements */
 .sd-lesson-host button {
   font-family: var(--font-heading);
@@ -250,6 +271,7 @@ export const SD_COURSE_CSS = `
 /* ── Interview Q&A — variant A (Chapters 1–3) ─────────────────────────────
    Bare classes: .question-card (reused role — bordered card), .answer-block,
    .key-points, .follow-ups, .btn-reveal. */
+.sd-lesson-host .question-card h3 { color: var(--text); }
 .sd-lesson-host .answer-block { display: none; margin-top: 1rem; padding: 1rem; background: var(--code-bg); border-left: 4px solid var(--accent-blue); border-radius: 4px; }
 .sd-lesson-host .answer-block.visible { display: block; }
 .sd-lesson-host .answer-block p { line-height: 1.7; color: var(--text); }
