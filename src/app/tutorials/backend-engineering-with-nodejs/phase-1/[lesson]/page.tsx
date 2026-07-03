@@ -3,6 +3,7 @@ import { notFound } from 'next/navigation';
 import Link from 'next/link';
 import { getLessonData, PHASES } from '@/lib/backend-course';
 import { LessonReader } from '@/components/course/LessonReader';
+import { LessonTOC } from '@/components/course/LessonTOC';
 import { SHARED_COURSE_CSS } from '@/lib/course-styles';
 
 type Props = {
@@ -41,11 +42,16 @@ export default async function LessonPage({ params }: Props) {
     <div className="lesson-page-wrapper">
       <style dangerouslySetInnerHTML={{ __html: SHARED_COURSE_CSS }} />
 
-      <LessonReader
-        lessonCss={data.lessonCss}
-        bodyHtml={data.bodyHtml}
-        script={data.script}
-      />
+      <div className="flex items-start gap-6 xl:pl-6">
+        <LessonTOC headings={data.headings} />
+        <div className="min-w-0 flex-1">
+          <LessonReader
+            lessonCss={data.lessonCss}
+            bodyHtml={data.bodyHtml}
+            script={data.script}
+          />
+        </div>
+      </div>
 
       <nav className="lesson-bottom-nav">
         <div className="lesson-bottom-nav-inner">

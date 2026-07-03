@@ -39,6 +39,7 @@ export const AZURE_COURSE_CSS = `
   font-size: 1.3rem; font-weight: 700; margin-top: 2.8rem;
   margin-bottom: 0.7rem; color: var(--az-dark);
   border-bottom: 2px solid var(--az-light); padding-bottom: 0.3rem;
+  scroll-margin-top: 6rem;
 }
 .azure-lesson-host h3 {
   font-size: 1.05rem; font-weight: 600; margin-top: 1.8rem;

@@ -29,7 +29,7 @@ export const SHARED_COURSE_CSS = `
 
 /* Typography */
 .lesson-host h1 { font-family: var(--lh-sans); font-size: 2rem; font-weight: 700; line-height: 1.2; color: #fff; margin-bottom: 8px; letter-spacing: -0.02em; }
-.lesson-host h2 { font-family: var(--lh-sans); font-size: 0.85rem; font-weight: 600; color: var(--accent); margin: 40px 0 12px; letter-spacing: 0.06em; text-transform: uppercase; }
+.lesson-host h2 { font-family: var(--lh-sans); font-size: 0.85rem; font-weight: 600; color: var(--accent); margin: 40px 0 12px; letter-spacing: 0.06em; text-transform: uppercase; scroll-margin-top: 6rem; }
 .lesson-host h3 { font-family: var(--lh-sans); font-size: 1.1rem; font-weight: 600; color: #fff; margin: 24px 0 8px; }
 .lesson-host h4 { font-family: var(--lh-sans); }
 .lesson-host p  { color: var(--text); margin-bottom: 16px; font-family: var(--lh-sans); font-weight: 400; line-height: 1.7; }

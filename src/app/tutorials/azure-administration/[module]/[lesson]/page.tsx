@@ -3,6 +3,7 @@ import { notFound } from 'next/navigation';
 import Link from 'next/link';
 import { getAzureLessonData, AZURE_PHASES } from '@/lib/azure-course';
 import { AzureLessonReader } from '@/components/course/AzureLessonReader';
+import { LessonTOC } from '@/components/course/LessonTOC';
 import { AZURE_COURSE_CSS } from '@/lib/azure-course-styles';
 
 type Props = {
@@ -48,7 +49,12 @@ export default async function AzureLessonPage({ params }: Props) {
     <div className="lesson-page-wrapper">
       <style dangerouslySetInnerHTML={{ __html: AZURE_COURSE_CSS }} />
 
-      <AzureLessonReader bodyHtml={data.bodyHtml} script={data.script} />
+      <div className="flex items-start gap-6 xl:pl-6">
+        <LessonTOC headings={data.headings} />
+        <div className="min-w-0 flex-1">
+          <AzureLessonReader bodyHtml={data.bodyHtml} script={data.script} />
+        </div>
+      </div>
 
       <nav className="az-bottom-nav">
         <div className="az-bottom-nav-inner">

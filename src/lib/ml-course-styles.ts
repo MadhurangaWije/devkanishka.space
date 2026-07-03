@@ -79,6 +79,7 @@ export const ML_COURSE_CSS = `
   display: flex;
   align-items: baseline;
   gap: 0.5rem;
+  scroll-margin-top: 6rem;
 }
 .ml-lesson-host h2:first-child, .ml-lesson-host .lesson-section:first-child h2 { margin-top: 0; }
 .ml-lesson-host h3 {

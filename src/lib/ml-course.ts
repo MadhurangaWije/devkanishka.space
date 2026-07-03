@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import type { LessonMeta, PhaseMeta } from '@/lib/backend-course';
+import { extractHeadingsAndInjectIds, type LessonHeading } from '@/lib/lesson-toc';
 
 export type { LessonMeta as MLLessonMeta, PhaseMeta as MLPhaseMeta };
 
@@ -9,6 +10,7 @@ export type MLLessonData = LessonMeta & {
   phaseName: string;
   bodyHtml: string;
   script: string;
+  headings: LessonHeading[];
   prev: { slug: string; title: string; urlSegment: string } | null;
   next: { slug: string; title: string; urlSegment: string } | null;
 };
@@ -318,7 +320,8 @@ export function getMLLessonData(phaseUrlSegment: string, slug: string): MLLesson
 
   const contentPath = path.join(process.cwd(), 'src', 'content', 'ml-mastery', meta.file);
   const rawHtml = fs.readFileSync(contentPath, 'utf-8');
-  const { bodyHtml, script } = parseMLLesson(rawHtml);
+  const { bodyHtml: parsedBodyHtml, script } = parseMLLesson(rawHtml);
+  const { bodyHtml, headings } = extractHeadingsAndInjectIds(parsedBodyHtml);
 
   const prevMeta = allIndex > 0 ? ALL_ML_LESSONS[allIndex - 1] : null;
   const nextMeta = allIndex < ALL_ML_LESSONS.length - 1 ? ALL_ML_LESSONS[allIndex + 1] : null;
@@ -329,6 +332,7 @@ export function getMLLessonData(phaseUrlSegment: string, slug: string): MLLesson
     phaseName: phase.name,
     bodyHtml,
     script,
+    headings,
     prev: prevMeta
       ? { slug: prevMeta.slug, title: prevMeta.title, urlSegment: prevMeta.urlSegment }
       : null,

@@ -3,6 +3,7 @@ import { notFound } from 'next/navigation';
 import Link from 'next/link';
 import { getMLLessonData, ML_PHASES } from '@/lib/ml-course';
 import { MLLessonReader } from '@/components/course/MLLessonReader';
+import { LessonTOC } from '@/components/course/LessonTOC';
 import { ML_COURSE_CSS } from '@/lib/ml-course-styles';
 
 type Props = {
@@ -48,7 +49,12 @@ export default async function MLLessonPage({ params }: Props) {
     <div className="lesson-page-wrapper">
       <style dangerouslySetInnerHTML={{ __html: ML_COURSE_CSS }} />
 
-      <MLLessonReader bodyHtml={data.bodyHtml} script={data.script} />
+      <div className="flex items-start gap-6 xl:pl-6">
+        <LessonTOC headings={data.headings} />
+        <div className="min-w-0 flex-1">
+          <MLLessonReader bodyHtml={data.bodyHtml} script={data.script} />
+        </div>
+      </div>
 
       <nav className="ml-lesson-bottom-nav">
         <div className="ml-lesson-bottom-nav-inner">

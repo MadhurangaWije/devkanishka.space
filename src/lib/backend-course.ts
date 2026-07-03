@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import { extractHeadingsAndInjectIds, type LessonHeading } from '@/lib/lesson-toc';
 
 export type LessonMeta = {
   slug: string;
@@ -23,6 +24,7 @@ export type LessonData = LessonMeta & {
   lessonCss: string;
   bodyHtml: string;
   script: string;
+  headings: LessonHeading[];
   prev: { slug: string; title: string; urlSegment: string } | null;
   next: { slug: string; title: string; urlSegment: string } | null;
 };
@@ -135,7 +137,8 @@ export function getLessonData(phaseNumber: number, slug: string): LessonData {
   const meta = phase.lessons[lessonIndex];
   const contentDir = path.join(process.cwd(), 'src', 'content', phase.contentDir);
   const rawHtml = fs.readFileSync(path.join(contentDir, meta.file), 'utf-8');
-  const { lessonCss, bodyHtml, script } = parseLesson(rawHtml);
+  const { lessonCss, bodyHtml: parsedBodyHtml, script } = parseLesson(rawHtml);
+  const { bodyHtml, headings } = extractHeadingsAndInjectIds(parsedBodyHtml);
 
   const prevLesson = lessonIndex > 0 ? phase.lessons[lessonIndex - 1] : null;
   const nextLesson = lessonIndex < phase.lessons.length - 1 ? phase.lessons[lessonIndex + 1] : null;
@@ -147,6 +150,7 @@ export function getLessonData(phaseNumber: number, slug: string): LessonData {
     lessonCss,
     bodyHtml,
     script,
+    headings,
     prev: prevLesson ? { ...prevLesson, urlSegment: phase.urlSegment } : null,
     next: nextLesson ? { ...nextLesson, urlSegment: phase.urlSegment } : null,
   };

@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import type { LessonMeta, PhaseMeta } from '@/lib/backend-course';
+import { extractHeadingsAndInjectIds, type LessonHeading } from '@/lib/lesson-toc';
 
 export type { LessonMeta as AzureLessonMeta, PhaseMeta as AzurePhaseMeta };
 
@@ -9,6 +10,7 @@ export type AzureLessonData = LessonMeta & {
   phaseName: string;
   bodyHtml: string;
   script: string;
+  headings: LessonHeading[];
   prev: { slug: string; title: string; urlSegment: string } | null;
   next: { slug: string; title: string; urlSegment: string } | null;
 };
@@ -212,7 +214,8 @@ export function getAzureLessonData(moduleSlug: string, slug: string): AzureLesso
     meta.file
   );
   const rawHtml = fs.readFileSync(contentPath, 'utf-8');
-  const bodyHtml = parseAzureLesson(rawHtml);
+  const parsedBodyHtml = parseAzureLesson(rawHtml);
+  const { bodyHtml, headings } = extractHeadingsAndInjectIds(parsedBodyHtml);
 
   const prevMeta = allIndex > 0 ? ALL_LESSONS[allIndex - 1] : null;
   const nextMeta = allIndex < ALL_LESSONS.length - 1 ? ALL_LESSONS[allIndex + 1] : null;
@@ -223,6 +226,7 @@ export function getAzureLessonData(moduleSlug: string, slug: string): AzureLesso
     phaseName: phase.name,
     bodyHtml,
     script: AZURE_QUIZ_JS,
+    headings,
     prev: prevMeta
       ? { slug: prevMeta.slug, title: prevMeta.title, urlSegment: prevMeta.urlSegment }
       : null,
