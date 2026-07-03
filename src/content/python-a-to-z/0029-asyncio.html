@@ -1,0 +1,852 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>L29 · Async / Await (asyncio) — Python A→Z</title>
+<link rel="stylesheet" href="../assets/style.css" />
+</head>
+<body>
+
+<div id="sidebar-placeholder"></div>
+
+<div id="main">
+
+  <!-- ── Lesson Header ── -->
+  <div id="lesson-header">
+    <div class="lesson-track track-advanced">🟣 Advanced</div>
+    <h1>Async / Await (asyncio)</h1>
+    <div class="lesson-meta">
+      <span>📖 Lesson 29</span>
+      <span>⏱ 45 min</span>
+      <span>🧪 5 questions</span>
+      <span>💻 3 exercises</span>
+    </div>
+  </div>
+
+  <!-- ── Content ── -->
+  <div id="content">
+
+    <!-- Objectives -->
+    <div class="objectives">
+      <h4>🎯 Learning Objectives</h4>
+      <ul>
+        <li>Understand the event loop and cooperative multitasking model</li>
+        <li>Write coroutines with <code>async def</code> and <code>await</code></li>
+        <li>Run coroutines concurrently with <code>asyncio.gather</code> and <code>asyncio.create_task</code></li>
+        <li>Use async context managers and async iterators</li>
+        <li>Handle timeouts and cancellation</li>
+        <li>Integrate synchronous blocking code with <code>run_in_executor</code></li>
+        <li>Understand when asyncio beats threads and when it doesn't</li>
+      </ul>
+    </div>
+
+
+    <!-- ── 1. The Problem asyncio Solves ── -->
+    <h2 id="the-problem">The Problem asyncio Solves</h2>
+    <p>
+      Threads handle concurrency by having the OS switch between them. This works,
+      but threads are expensive (each costs ~8 MB of stack) and synchronisation is
+      error-prone. <strong>asyncio</strong> takes a different approach:
+      a single thread runs many tasks by <em>cooperatively</em> yielding control
+      whenever it would otherwise block on I/O.
+    </p>
+
+    <div style="position:relative">
+      <pre><code class="language-text">Threading (preemptive — OS switches):
+Thread 1: ██▒▒██▒▒██   (▒ = OS-forced context switch overhead)
+Thread 2: ▒▒██▒▒██▒▒
+
+asyncio (cooperative — task yields at await):
+Task 1:   ██░░██░░██   (░ = waiting for I/O, yields to event loop)
+Task 2:   ░░██░░██░░
+All on ONE thread — no locking needed!</code></pre>
+      <span class="code-label">concurrency_models.txt</span>
+    </div>
+
+    <div class="callout callout-concept">
+      asyncio is ideal for <strong>I/O-bound workloads with many concurrent tasks</strong> —
+      thousands of simultaneous HTTP connections, WebSocket clients, or database queries.
+      A single asyncio event loop can handle far more concurrent connections than a thread pool,
+      with much lower memory overhead. It does <em>not</em> help with CPU-bound work.
+    </div>
+
+
+    <!-- ── 2. Coroutines ── -->
+    <h2 id="coroutines">Coroutines: <code>async def</code> and <code>await</code></h2>
+    <p>
+      A <strong>coroutine</strong> is a function defined with <code>async def</code>.
+      Inside it, <code>await</code> suspends execution until an awaitable completes —
+      yielding control back to the event loop so other tasks can run.
+    </p>
+
+    <div style="position:relative">
+      <pre><code class="language-python">import asyncio
+
+async def greet(name, delay):
+    print(f"Hello, {name}!")
+    await asyncio.sleep(delay)   # yields control to the event loop
+    print(f"Goodbye, {name}!")
+
+# A coroutine function returns a coroutine OBJECT when called
+coro = greet("Alice", 1)
+print(type(coro))   # &lt;class 'coroutine'&gt;
+
+# To actually RUN it, schedule it on an event loop
+asyncio.run(greet("Alice", 1))
+# Hello, Alice!
+# (1 second pause)
+# Goodbye, Alice!</code></pre>
+      <span class="code-label">coroutine_basics.py</span>
+    </div>
+
+    <div class="callout callout-warning">
+      <code>asyncio.run()</code> is the entry point — it creates a new event loop,
+      runs the coroutine until it completes, and tears down the loop. Call it once
+      at the top level. Never call it from inside a running event loop (use
+      <code>await</code> or <code>asyncio.create_task()</code> instead).
+    </div>
+
+
+    <!-- ── 3. Sequential vs Concurrent ── -->
+    <h2 id="sequential-vs-concurrent">Sequential vs Concurrent Execution</h2>
+
+    <div style="position:relative">
+      <pre><code class="language-python">import asyncio
+import time
+
+async def fetch(url, delay):
+    print(f"Fetching {url}…")
+    await asyncio.sleep(delay)   # simulate network I/O
+    print(f"Done: {url}")
+    return f"data from {url}"
+
+# ── Sequential: awaiting one at a time ── (~6 seconds)
+async def sequential():
+    start = time.perf_counter()
+    r1 = await fetch("url1", 2)
+    r2 = await fetch("url2", 3)
+    r3 = await fetch("url3", 1)
+    print(f"Sequential: {time.perf_counter()-start:.1f}s")
+
+# ── Concurrent: all start at once ── (~3 seconds — longest single task)
+async def concurrent():
+    start = time.perf_counter()
+    r1, r2, r3 = await asyncio.gather(
+        fetch("url1", 2),
+        fetch("url2", 3),
+        fetch("url3", 1),
+    )
+    print(f"Concurrent: {time.perf_counter()-start:.1f}s")
+
+asyncio.run(sequential())   # ~6s
+asyncio.run(concurrent())   # ~3s</code></pre>
+      <span class="code-label">sequential_vs_concurrent.py</span>
+    </div>
+
+
+    <!-- ── 4. Tasks ── -->
+    <h2 id="tasks">Tasks — <code>asyncio.create_task</code></h2>
+    <p>
+      <code>asyncio.gather()</code> is the simplest way to run coroutines concurrently.
+      For more control — cancellation, timeouts, dynamic scheduling — use
+      <strong>Tasks</strong>:
+    </p>
+
+    <div style="position:relative">
+      <pre><code class="language-python">import asyncio
+
+async def worker(name, delay):
+    print(f"{name} starting")
+    await asyncio.sleep(delay)
+    print(f"{name} done")
+    return f"result from {name}"
+
+async def main():
+    # create_task schedules coroutines to run concurrently
+    # (they start immediately, not just when awaited)
+    task1 = asyncio.create_task(worker("A", 2), name="task-A")
+    task2 = asyncio.create_task(worker("B", 1), name="task-B")
+    task3 = asyncio.create_task(worker("C", 3), name="task-C")
+
+    print("Tasks created — doing other work while they run…")
+    await asyncio.sleep(0)   # yield to let tasks start
+
+    # Wait for all and collect results
+    results = await asyncio.gather(task1, task2, task3)
+    print(results)
+    # B finishes first (delay=1), then A (2), then C (3)
+
+asyncio.run(main())</code></pre>
+      <span class="code-label">tasks.py</span>
+    </div>
+
+    <h3>asyncio.gather vs asyncio.wait</h3>
+    <div style="position:relative">
+      <pre><code class="language-python">import asyncio
+
+async def job(n, delay):
+    await asyncio.sleep(delay)
+    if n == 2:
+        raise ValueError("job 2 failed!")
+    return n * 10
+
+async def main():
+    # gather — raises on first exception by default
+    try:
+        results = await asyncio.gather(job(1, 1), job(2, 0.5), job(3, 1.5))
+    except ValueError as e:
+        print(f"gather raised: {e}")
+
+    # gather with return_exceptions=True — all results, errors as values
+    results = await asyncio.gather(
+        job(1, 1), job(2, 0.5), job(3, 1.5),
+        return_exceptions=True
+    )
+    for r in results:
+        if isinstance(r, Exception):
+            print(f"Error: {r}")
+        else:
+            print(f"Result: {r}")
+
+asyncio.run(main())</code></pre>
+      <span class="code-label">gather_errors.py</span>
+    </div>
+
+
+    <!-- ── 5. Timeouts and Cancellation ── -->
+    <h2 id="timeouts">Timeouts &amp; Cancellation</h2>
+
+    <div style="position:relative">
+      <pre><code class="language-python">import asyncio
+
+async def slow_operation():
+    print("Starting slow operation…")
+    await asyncio.sleep(10)
+    return "done"
+
+async def main():
+    # ── asyncio.wait_for: cancel if it takes too long ──
+    try:
+        result = await asyncio.wait_for(slow_operation(), timeout=2.0)
+    except asyncio.TimeoutError:
+        print("Timed out!")
+
+    # ── asyncio.timeout (Python 3.11+) ──
+    try:
+        async with asyncio.timeout(2.0):
+            result = await slow_operation()
+    except asyncio.TimeoutError:
+        print("Timed out again!")
+
+asyncio.run(main())</code></pre>
+      <span class="code-label">timeout.py</span>
+    </div>
+
+    <div style="position:relative">
+      <pre><code class="language-python">import asyncio
+
+async def cancellable():
+    try:
+        print("Working…")
+        await asyncio.sleep(5)
+        print("Finished")
+    except asyncio.CancelledError:
+        print("I was cancelled — cleaning up")
+        raise   # always re-raise CancelledError!
+
+async def main():
+    task = asyncio.create_task(cancellable())
+    await asyncio.sleep(1)
+    task.cancel()          # request cancellation
+    try:
+        await task         # wait for it to actually stop
+    except asyncio.CancelledError:
+        print("Task confirmed cancelled")
+
+asyncio.run(main())
+# Working…
+# I was cancelled — cleaning up
+# Task confirmed cancelled</code></pre>
+      <span class="code-label">cancellation.py</span>
+    </div>
+
+    <div class="callout callout-warning">
+      Always <strong>re-raise <code>CancelledError</code></strong> after cleanup.
+      Swallowing it prevents asyncio from knowing the task was cancelled, breaking
+      the cancellation chain. This is the async equivalent of not swallowing
+      <code>KeyboardInterrupt</code>.
+    </div>
+
+
+    <!-- ── 6. Async Context Managers ── -->
+    <h2 id="async-context-managers">Async Context Managers</h2>
+    <p>
+      Use <code>async with</code> for context managers whose setup or teardown
+      involves I/O (e.g. connecting to a database, acquiring an async lock):
+    </p>
+
+    <div style="position:relative">
+      <pre><code class="language-python">import asyncio
+from contextlib import asynccontextmanager
+
+@asynccontextmanager
+async def managed_connection(url):
+    print(f"Connecting to {url}…")
+    await asyncio.sleep(0.1)   # simulate async connect
+    conn = {"url": url, "open": True}
+    try:
+        yield conn
+    finally:
+        print("Closing connection")
+        conn["open"] = False
+
+async def main():
+    async with managed_connection("postgres://localhost/db") as conn:
+        print(f"Using connection: {conn}")
+        await asyncio.sleep(0.1)  # simulate query
+
+asyncio.run(main())
+
+# asyncio also ships with AsyncLock, AsyncSemaphore, etc.
+async def safe_write(lock, data):
+    async with lock:    # asyncio.Lock — async version
+        print(f"Writing: {data}")
+        await asyncio.sleep(0.1)</code></pre>
+      <span class="code-label">async_cm.py</span>
+    </div>
+
+
+    <!-- ── 7. Async Iterators and Generators ── -->
+    <h2 id="async-iterators">Async Iterators &amp; Generators</h2>
+
+    <div style="position:relative">
+      <pre><code class="language-python">import asyncio
+
+# ── async generator ──
+async def ticker(delay, count):
+    """Yield numbers with an async delay between each."""
+    for i in range(count):
+        await asyncio.sleep(delay)
+        yield i
+
+# ── async for ── consumes an async iterable
+async def main():
+    async for tick in ticker(0.2, 5):
+        print(f"Tick: {tick}")
+
+    # ── async comprehension ──
+    values = [tick async for tick in ticker(0.1, 5)]
+    print(values)   # [0, 1, 2, 3, 4]
+
+asyncio.run(main())</code></pre>
+      <span class="code-label">async_iter.py</span>
+    </div>
+
+
+    <!-- ── 8. asyncio Synchronisation ── -->
+    <h2 id="sync-primitives">asyncio Synchronisation Primitives</h2>
+
+    <div style="position:relative">
+      <pre><code class="language-python">import asyncio
+
+# ── asyncio.Lock ──
+lock = asyncio.Lock()
+
+async def protected():
+    async with lock:
+        print("In protected section")
+        await asyncio.sleep(0.1)
+
+# ── asyncio.Event ──
+ready = asyncio.Event()
+
+async def setter():
+    await asyncio.sleep(1)
+    ready.set()
+
+async def waiter():
+    await ready.wait()
+    print("Event fired!")
+
+# ── asyncio.Semaphore — limit concurrency ──
+sem = asyncio.Semaphore(3)
+
+async def limited(n):
+    async with sem:
+        print(f"Task {n} running")
+        await asyncio.sleep(0.5)
+
+async def main():
+    # At most 3 tasks run at once
+    await asyncio.gather(*[limited(i) for i in range(10)])
+
+asyncio.run(main())</code></pre>
+      <span class="code-label">async_sync.py</span>
+    </div>
+
+    <!-- ── 9. asyncio.Queue ── -->
+    <h2 id="async-queue">asyncio.Queue</h2>
+    <div style="position:relative">
+      <pre><code class="language-python">import asyncio
+import random
+
+async def producer(q, n):
+    for i in range(n):
+        await asyncio.sleep(random.uniform(0.05, 0.2))
+        await q.put(i)
+        print(f"Produced: {i}")
+    await q.put(None)   # sentinel
+
+async def consumer(q):
+    while True:
+        item = await q.get()
+        if item is None:
+            break
+        print(f"Consumed: {item}")
+        await asyncio.sleep(0.1)
+        q.task_done()
+
+async def main():
+    q = asyncio.Queue(maxsize=5)
+    await asyncio.gather(producer(q, 10), consumer(q))
+
+asyncio.run(main())</code></pre>
+      <span class="code-label">async_queue.py</span>
+    </div>
+
+
+    <!-- ── 10. Running Blocking Code ── -->
+    <h2 id="run-in-executor">Running Blocking Code with <code>run_in_executor</code></h2>
+    <p>
+      Blocking (synchronous) code stalls the entire event loop. Use
+      <code>loop.run_in_executor()</code> to offload it to a thread or process pool:
+    </p>
+
+    <div style="position:relative">
+      <pre><code class="language-python">import asyncio
+import time
+
+def blocking_io(path):
+    """Synchronous file read — blocks the caller."""
+    time.sleep(0.5)   # simulate slow disk
+    return f"data from {path}"
+
+def cpu_heavy(n):
+    """Synchronous CPU work."""
+    return sum(i*i for i in range(n))
+
+async def main():
+    loop = asyncio.get_event_loop()
+
+    # Run blocking I/O in a thread pool (default executor)
+    result = await loop.run_in_executor(None, blocking_io, "file.txt")
+    print(result)
+
+    # Convenience wrapper (Python 3.9+)
+    result = await asyncio.to_thread(blocking_io, "file2.txt")
+    print(result)
+
+    # Run CPU work in a process pool
+    from concurrent.futures import ProcessPoolExecutor
+    with ProcessPoolExecutor() as pool:
+        result = await loop.run_in_executor(pool, cpu_heavy, 1_000_000)
+    print(result)
+
+asyncio.run(main())</code></pre>
+      <span class="code-label">run_in_executor.py</span>
+    </div>
+
+    <div class="callout callout-tip">
+      <code>asyncio.to_thread()</code> (Python 3.9+) is the clean, modern way to run
+      a blocking function in a thread without touching the event loop directly.
+      Use it whenever you need to call synchronous libraries (like <code>requests</code>,
+      file I/O, or database drivers) from async code.
+    </div>
+
+
+    <!-- ── 11. Patterns ── -->
+    <h2 id="patterns">Common Patterns</h2>
+
+    <h3>Bounded concurrency with Semaphore</h3>
+    <div style="position:relative">
+      <pre><code class="language-python">import asyncio
+
+async def fetch(session_sem, url):
+    async with session_sem:   # limit to N concurrent requests
+        await asyncio.sleep(0.2)   # simulate HTTP
+        return f"response from {url}"
+
+async def fetch_all(urls, concurrency=10):
+    sem     = asyncio.Semaphore(concurrency)
+    tasks   = [fetch(sem, url) for url in urls]
+    return await asyncio.gather(*tasks)
+
+async def main():
+    urls    = [f"https://api.example.com/{i}" for i in range(50)]
+    results = await fetch_all(urls, concurrency=5)
+    print(f"Fetched {len(results)} URLs")
+
+asyncio.run(main())</code></pre>
+      <span class="code-label">bounded_concurrency.py</span>
+    </div>
+
+    <h3>First result wins — asyncio.wait with FIRST_COMPLETED</h3>
+    <div style="position:relative">
+      <pre><code class="language-python">import asyncio, random
+
+async def race(name, delay):
+    await asyncio.sleep(delay)
+    return f"{name} finished!"
+
+async def main():
+    tasks = [
+        asyncio.create_task(race("A", random.uniform(0.5, 2))),
+        asyncio.create_task(race("B", random.uniform(0.5, 2))),
+        asyncio.create_task(race("C", random.uniform(0.5, 2))),
+    ]
+
+    done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+
+    winner = done.pop()
+    print(f"Winner: {winner.result()}")
+
+    # Cancel the remaining tasks
+    for task in pending:
+        task.cancel()
+
+asyncio.run(main())</code></pre>
+      <span class="code-label">first_completed.py</span>
+    </div>
+
+
+    <!-- ── 12. When to Use asyncio ── -->
+    <h2 id="when-to-use">asyncio vs Threads vs Processes</h2>
+
+    <table>
+      <thead><tr><th>Workload</th><th>Best tool</th><th>Why</th></tr></thead>
+      <tbody>
+        <tr><td>Many concurrent I/O tasks (HTTP, DB, WebSocket)</td><td><code>asyncio</code></td><td>Single thread, minimal overhead, scales to 10k+ connections</td></tr>
+        <tr><td>Handful of I/O tasks, existing sync code</td><td><code>ThreadPoolExecutor</code></td><td>Simpler to integrate with sync libraries</td></tr>
+        <tr><td>CPU-bound parallel work</td><td><code>ProcessPoolExecutor</code></td><td>True parallelism, bypasses GIL</td></tr>
+        <tr><td>Blocking library inside async code</td><td><code>asyncio.to_thread()</code></td><td>Offloads blocking call without stalling event loop</td></tr>
+        <tr><td>Real-time streaming / WebSockets</td><td><code>asyncio</code></td><td>Native async I/O, no thread-per-connection overhead</td></tr>
+      </tbody>
+    </table>
+
+    <div class="callout callout-info">
+      <strong>Popular async libraries:</strong>
+      <code>aiohttp</code> (HTTP client/server),
+      <code>httpx</code> (HTTP client with async mode),
+      <code>asyncpg</code> (PostgreSQL),
+      <code>motor</code> (MongoDB),
+      <code>aiofiles</code> (file I/O),
+      <code>fastapi</code> (web framework — Lesson 37).
+      All of these are designed to work natively with <code>asyncio</code>.
+    </div>
+
+
+    <div class="primary-source">
+      <p>
+        <strong>Primary sources:</strong>
+        <a href="https://docs.python.org/3/library/asyncio.html" target="_blank" rel="noopener">Python Docs — asyncio</a>
+        &nbsp;·&nbsp;
+        <a href="https://docs.python.org/3/library/asyncio-task.html" target="_blank" rel="noopener">Python Docs — Coroutines and Tasks</a>
+        &nbsp;·&nbsp;
+        <a href="https://peps.python.org/pep-0492/" target="_blank" rel="noopener">PEP 492 — Coroutines with async and await</a>
+      </p>
+    </div>
+
+    <div class="ask-ai-reminder">
+      <span class="ai-icon">🤖</span>
+      <p>
+        <strong>Ask your AI tutor!</strong> Getting <code>RuntimeError: no running event loop</code>?
+        Not sure how to mix sync and async code? Want to understand how
+        <code>await</code> actually suspends execution? asyncio concepts click best
+        with a step-by-step walkthrough.
+      </p>
+    </div>
+
+
+    <!-- ── Quiz ── -->
+    <div id="quiz-section"></div>
+
+
+    <!-- ── Exercises ── -->
+    <div id="exercise-section">
+      <h2>💻 Exercises</h2>
+
+      <div class="exercise">
+        <div class="exercise-title"><span class="exercise-num">01</span> Concurrent URL Fetcher</div>
+        <p>
+          Write an async function <code>fetch_all(urls, concurrency=5)</code> that:
+        </p>
+        <ul>
+          <li>Fetches all URLs concurrently, limiting to <code>concurrency</code> at a time using <code>asyncio.Semaphore</code></li>
+          <li>Simulates each request with <code>asyncio.sleep(random.uniform(0.1, 0.5))</code></li>
+          <li>Returns a dict mapping each URL to its response (or error string)</li>
+          <li>Prints progress as each request completes</li>
+        </ul>
+        <p>Compare total time to a sequential version for 20 URLs.</p>
+        <details class="solution">
+          <summary>Show solution</summary>
+          <pre><code class="language-python">import asyncio
+import random
+import time
+
+async def fetch(sem, url):
+    async with sem:
+        delay = random.uniform(0.1, 0.5)
+        await asyncio.sleep(delay)
+        if "error" in url:
+            raise ValueError(f"HTTP 500 from {url}")
+        result = f"200 OK ({delay:.2f}s)"
+        print(f"  ✓ {url}")
+        return result
+
+async def fetch_all(urls, concurrency=5):
+    sem     = asyncio.Semaphore(concurrency)
+    tasks   = {url: asyncio.create_task(fetch(sem, url)) for url in urls}
+    results = {}
+    for url, task in tasks.items():
+        try:
+            results[url] = await task
+        except Exception as e:
+            results[url] = f"ERROR: {e}"
+            print(f"  ✗ {url}: {e}")
+    return results
+
+async def sequential_fetch(urls):
+    results = {}
+    for url in urls:
+        delay = random.uniform(0.1, 0.5)
+        await asyncio.sleep(delay)
+        results[url] = f"200 OK ({delay:.2f}s)"
+    return results
+
+async def main():
+    urls = [f"https://api.example.com/item/{i}" for i in range(20)]
+    urls[5] = "https://api.example.com/error/5"
+
+    random.seed(42)
+    t = time.perf_counter()
+    await sequential_fetch(urls)
+    print(f"Sequential: {time.perf_counter()-t:.2f}s")
+
+    random.seed(42)
+    t = time.perf_counter()
+    results = await fetch_all(urls, concurrency=5)
+    print(f"Concurrent: {time.perf_counter()-t:.2f}s")
+    print(f"Got {len(results)} results")
+
+asyncio.run(main())</code></pre>
+        </details>
+      </div>
+
+      <div class="exercise">
+        <div class="exercise-title"><span class="exercise-num">02</span> Async Rate Limiter</div>
+        <p>
+          Build an <code>AsyncRateLimiter</code> class that:
+        </p>
+        <ul>
+          <li>Accepts <code>rate</code> (calls per second) in <code>__init__</code></li>
+          <li>Has an <code>async def acquire()</code> method that waits if calls would exceed the rate</li>
+          <li>Can be used as <code>async with limiter:</code> (async context manager)</li>
+        </ul>
+        <p>Test it by firing 10 requests through the limiter at 3 req/s and verifying the timing.</p>
+        <details class="solution">
+          <summary>Show solution</summary>
+          <pre><code class="language-python">import asyncio
+import time
+
+class AsyncRateLimiter:
+    """Token bucket rate limiter."""
+
+    def __init__(self, rate):
+        self.rate      = rate          # calls per second
+        self.interval  = 1.0 / rate    # minimum seconds between calls
+        self._last     = 0.0
+        self._lock     = asyncio.Lock()
+
+    async def acquire(self):
+        async with self._lock:
+            now   = asyncio.get_event_loop().time()
+            wait  = self._last + self.interval - now
+            if wait > 0:
+                await asyncio.sleep(wait)
+            self._last = asyncio.get_event_loop().time()
+
+    async def __aenter__(self):
+        await self.acquire()
+        return self
+
+    async def __aexit__(self, *args):
+        pass
+
+async def make_request(limiter, n):
+    async with limiter:
+        t = time.perf_counter()
+        await asyncio.sleep(0.01)   # simulate fast API call
+        print(f"Request {n:2d} at t={t:.3f}s")
+        return n
+
+async def main():
+    limiter = AsyncRateLimiter(rate=3)   # 3 requests per second
+    start = time.perf_counter()
+    results = await asyncio.gather(*[make_request(limiter, i) for i in range(10)])
+    elapsed = time.perf_counter() - start
+    print(f"\n{len(results)} requests in {elapsed:.2f}s "
+          f"(expected ≥ {(len(results)-1)/3:.2f}s at 3 req/s)")
+
+asyncio.run(main())</code></pre>
+        </details>
+      </div>
+
+      <div class="exercise">
+        <div class="exercise-title"><span class="exercise-num">03</span> Async Pipeline</div>
+        <p>
+          Build a three-stage async pipeline using <code>asyncio.Queue</code>:
+        </p>
+        <ul>
+          <li><strong>Stage 1 — Generator</strong>: produces numbers 1–15 with a 0.05s delay each</li>
+          <li><strong>Stage 2 — Transformer</strong> (2 workers): takes a number, computes <code>n²</code> with a 0.1s delay</li>
+          <li><strong>Stage 3 — Collector</strong>: receives results, accumulates them, prints a summary</li>
+        </ul>
+        <p>Use sentinel values to signal shutdown at each stage. Verify total time is less than sequential.</p>
+        <details class="solution">
+          <summary>Show solution</summary>
+          <pre><code class="language-python">import asyncio
+import time
+
+NUM_WORKERS = 2
+SENTINEL    = None
+
+async def generator(out_q, items):
+    for item in items:
+        await asyncio.sleep(0.05)
+        await out_q.put(item)
+        print(f"  Gen  → {item}")
+    # One sentinel per worker
+    for _ in range(NUM_WORKERS):
+        await out_q.put(SENTINEL)
+
+async def transformer(worker_id, in_q, out_q):
+    while True:
+        item = await in_q.get()
+        if item is SENTINEL:
+            await out_q.put(SENTINEL)
+            break
+        await asyncio.sleep(0.1)   # simulate work
+        result = item ** 2
+        print(f"  W{worker_id}   → {item}² = {result}")
+        await out_q.put(result)
+        in_q.task_done()
+
+async def collector(in_q, num_workers):
+    results = []
+    finished = 0
+    while finished < num_workers:
+        item = await in_q.get()
+        if item is SENTINEL:
+            finished += 1
+        else:
+            results.append(item)
+    print(f"\nCollected {len(results)} results")
+    print(f"Sum of squares: {sum(results)}")
+    return results
+
+async def main():
+    work_q    = asyncio.Queue(maxsize=5)
+    results_q = asyncio.Queue()
+
+    start = time.perf_counter()
+
+    await asyncio.gather(
+        generator(work_q, range(1, 16)),
+        *[transformer(i, work_q, results_q) for i in range(NUM_WORKERS)],
+        collector(results_q, NUM_WORKERS),
+    )
+
+    print(f"\nPipeline completed in {time.perf_counter()-start:.2f}s")
+    # Sequential would take 15*0.05 + 15*0.1 = 2.25s
+    # Pipeline overlaps stages: ~(15*0.05) + (15/2 * 0.1) ≈ 1.5s
+
+asyncio.run(main())</code></pre>
+        </details>
+      </div>
+
+    </div><!-- /exercise-section -->
+
+    <div id="lesson-nav-footer"></div>
+  </div><!-- /content -->
+
+</div><!-- /main -->
+
+<script src="../assets/nav-data.js"></script>
+<script src="../assets/nav.js"></script>
+<script src="../assets/quiz.js"></script>
+<script src="../assets/highlight.js"></script>
+
+<script>
+buildLessonFooter();
+
+QuizWidget.render("quiz-section", [
+  {
+    question: "What does 'await' do inside an async function?",
+    options: [
+      "It runs the awaitable in a separate thread",
+      "It suspends the current coroutine and yields control to the event loop until the awaitable completes",
+      "It blocks the entire program until the awaitable finishes",
+      "It creates a new event loop for the awaitable"
+    ],
+    correct: 1,
+    explanation: "await suspends the current coroutine at that point and gives control back to the event loop. The event loop can then run other tasks. When the awaitable completes, the event loop resumes the suspended coroutine from where it left off."
+  },
+  {
+    question: "What is the difference between asyncio.gather() and asyncio.create_task()?",
+    options: [
+      "gather() runs tasks sequentially; create_task() runs them concurrently",
+      "create_task() schedules a coroutine as a Task immediately; gather() accepts multiple awaitables and waits for all of them, also scheduling them concurrently",
+      "They are identical — just different syntax",
+      "create_task() is for CPU-bound work; gather() is for I/O-bound work"
+    ],
+    correct: 1,
+    explanation: "create_task() schedules a coroutine to run as soon as the event loop gets control — it starts immediately even before you await the task. gather() takes multiple awaitables, schedules them all concurrently, and returns when all are done. gather() internally creates tasks for coroutines passed to it."
+  },
+  {
+    question: "What happens if blocking (synchronous) code runs inside an async function without using run_in_executor or to_thread?",
+    options: [
+      "It runs in a separate thread automatically",
+      "It raises a RuntimeError",
+      "It blocks the entire event loop — no other tasks can run until it completes",
+      "It is silently converted to async code by Python"
+    ],
+    correct: 2,
+    explanation: "asyncio uses a single thread. If blocking code (like time.sleep, a synchronous database call, or a CPU loop) runs inside an async function without yielding, the entire event loop freezes — no other coroutines can make progress. Use asyncio.to_thread() or run_in_executor() to offload blocking calls."
+  },
+  {
+    question: "Why should you always re-raise CancelledError after catching it?",
+    options: [
+      "Re-raising is optional — it is just a style convention",
+      "Not re-raising prevents asyncio from knowing the task was cancelled, breaking the cancellation chain and potentially causing hangs",
+      "CancelledError must be re-raised or it converts to a RuntimeError",
+      "Re-raising causes the event loop to schedule the task again"
+    ],
+    correct: 1,
+    explanation: "When a task is cancelled, asyncio injects CancelledError at the await point. If you catch it for cleanup but don't re-raise, the task appears to have completed normally — the cancellation request is silently ignored. Always catch CancelledError only for cleanup, then re-raise it."
+  },
+  {
+    question: "What does asyncio.to_thread() do?",
+    options: [
+      "Converts an async function to a synchronous one",
+      "Creates a new event loop in a thread",
+      "Runs a synchronous blocking function in a thread pool without blocking the event loop",
+      "Moves an asyncio Task to a different thread"
+    ],
+    correct: 2,
+    explanation: "asyncio.to_thread(func, *args) (Python 3.9+) runs the blocking synchronous function in a ThreadPoolExecutor, returning an awaitable. The event loop remains unblocked while the function runs in a thread, and the coroutine resumes when the thread finishes."
+  }
+]);
+</script>
+</body>
+</html>

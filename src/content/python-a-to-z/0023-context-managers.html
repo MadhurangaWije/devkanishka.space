@@ -1,0 +1,812 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>L23 · Context Managers — Python A→Z</title>
+<link rel="stylesheet" href="../assets/style.css" />
+</head>
+<body>
+
+<div id="sidebar-placeholder"></div>
+
+<div id="main">
+
+  <!-- ── Lesson Header ── -->
+  <div id="lesson-header">
+    <div class="lesson-track track-intermediate">🔵 Intermediate</div>
+    <h1>Context Managers</h1>
+    <div class="lesson-meta">
+      <span>📖 Lesson 23</span>
+      <span>⏱ 35 min</span>
+      <span>🧪 5 questions</span>
+      <span>💻 3 exercises</span>
+    </div>
+  </div>
+
+  <!-- ── Content ── -->
+  <div id="content">
+
+    <!-- Objectives -->
+    <div class="objectives">
+      <h4>🎯 Learning Objectives</h4>
+      <ul>
+        <li>Understand what a context manager is and why it exists</li>
+        <li>Use the <code>with</code> statement correctly</li>
+        <li>Build context managers with <code>__enter__</code> / <code>__exit__</code></li>
+        <li>Build context managers with <code>@contextmanager</code> and <code>yield</code></li>
+        <li>Use <code>contextlib</code> utilities: <code>suppress</code>, <code>redirect_stdout</code>, <code>ExitStack</code></li>
+        <li>Apply context managers to real-world patterns: timers, transactions, temporary files</li>
+      </ul>
+    </div>
+
+
+    <!-- ── 1. The Problem Context Managers Solve ── -->
+    <h2 id="the-problem">The Problem They Solve</h2>
+    <p>
+      Many operations require a matching pair of setup and teardown actions —
+      open/close, lock/unlock, start/stop, connect/disconnect. The risk is that
+      an exception in the middle leaves the teardown unexecuted:
+    </p>
+
+    <div style="position:relative">
+      <pre><code class="language-python"># ❌ Fragile — close() may never be called if an exception occurs
+f = open("data.txt")
+data = process(f)   # what if this raises?
+f.close()           # skipped on exception!
+
+# ✓ Context manager guarantees close() — even on exception
+with open("data.txt") as f:
+    data = process(f)
+# f.close() called here, always</code></pre>
+      <span class="code-label">problem.py</span>
+    </div>
+
+    <div class="callout callout-concept">
+      A <strong>context manager</strong> is any object that implements the
+      <strong>context manager protocol</strong>:
+      <code>__enter__</code> (setup) and <code>__exit__</code> (teardown).
+      The <code>with</code> statement calls these automatically and guarantees
+      teardown even when exceptions occur.
+    </div>
+
+
+    <!-- ── 2. The with Statement ── -->
+    <h2 id="with-statement">The <code>with</code> Statement in Depth</h2>
+
+    <div style="position:relative">
+      <pre><code class="language-python"># Full form — 'as target' binds the return value of __enter__
+with expression as target:
+    body
+
+# What Python actually does:
+manager = expression
+target  = manager.__enter__()
+try:
+    body
+except:
+    if not manager.__exit__(*sys.exc_info()):
+        raise      # re-raise if __exit__ returns falsy
+else:
+    manager.__exit__(None, None, None)</code></pre>
+      <span class="code-label">with_expansion.py</span>
+    </div>
+
+    <h3>Multiple contexts in one line</h3>
+    <div style="position:relative">
+      <pre><code class="language-python"># Open two files simultaneously — both are closed even if one raises
+with open("input.txt", "r") as src, open("output.txt", "w") as dst:
+    dst.write(src.read().upper())
+
+# Python 3.10+ parenthesised form — easier to read with many managers
+with (
+    open("input.txt",  "r", encoding="utf-8") as src,
+    open("output.txt", "w", encoding="utf-8") as dst,
+):
+    dst.write(src.read().upper())</code></pre>
+      <span class="code-label">multiple_with.py</span>
+    </div>
+
+
+    <!-- ── 3. Class-Based Context Managers ── -->
+    <h2 id="class-based">Class-Based Context Managers</h2>
+    <p>
+      Implement <code>__enter__</code> and <code>__exit__</code> on any class
+      to make it a context manager:
+    </p>
+
+    <div style="position:relative">
+      <pre><code class="language-python">import time
+
+class Timer:
+    """Measure the wall-clock time of a block of code."""
+
+    def __enter__(self):
+        self.start   = time.perf_counter()
+        self.elapsed = None
+        return self          # bound to the 'as' variable
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.elapsed = time.perf_counter() - self.start
+        # exc_type/val/tb are None when no exception occurred
+        return False         # don't suppress exceptions
+
+with Timer() as t:
+    result = sum(range(10_000_000))
+
+print(f"Result: {result:,}")
+print(f"Time:   {t.elapsed:.4f}s")</code></pre>
+      <span class="code-label">timer_class.py</span>
+    </div>
+
+    <div style="position:relative">
+      <pre><code class="language-python">import threading
+
+class ManagedLock:
+    """Acquire a threading lock, release it on exit."""
+
+    def __init__(self, lock):
+        self._lock = lock
+
+    def __enter__(self):
+        self._lock.acquire()
+        return self._lock
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self._lock.release()
+        return False
+
+lock = threading.Lock()
+
+with ManagedLock(lock):
+    # Only one thread can be here at a time
+    print("Protected section")</code></pre>
+      <span class="code-label">managed_lock.py</span>
+    </div>
+
+    <div class="callout callout-info">
+      <code>__exit__</code> receives three arguments:
+      <code>exc_type</code>, <code>exc_val</code>, <code>exc_tb</code> — all
+      <code>None</code> if no exception occurred. Return <strong><code>True</code></strong>
+      to suppress the exception; return <strong><code>False</code></strong> (or <code>None</code>)
+      to propagate it.
+    </div>
+
+
+    <!-- ── 4. @contextmanager ── -->
+    <h2 id="contextmanager-decorator"><code>@contextmanager</code> — Generator-Based</h2>
+    <p>
+      <code>contextlib.contextmanager</code> lets you write a context manager as a
+      simple generator function — often cleaner than a full class:
+    </p>
+
+    <div style="position:relative">
+      <pre><code class="language-python">from contextlib import contextmanager
+
+@contextmanager
+def timer():
+    """Measure elapsed time of a with-block."""
+    import time
+    start = time.perf_counter()
+    try:
+        yield          # execution of the with-block happens here
+    finally:
+        elapsed = time.perf_counter() - start
+        print(f"Elapsed: {elapsed:.4f}s")
+
+with timer():
+    total = sum(range(10_000_000))</code></pre>
+      <span class="code-label">contextmanager_basic.py</span>
+    </div>
+
+    <div style="position:relative">
+      <pre><code class="language-python">from contextlib import contextmanager
+
+@contextmanager
+def managed_file(path, mode="r", **kwargs):
+    """Open a file, yield it, always close it."""
+    f = open(path, mode, **kwargs)
+    try:
+        yield f
+    finally:
+        f.close()
+
+with managed_file("notes.txt", "w", encoding="utf-8") as f:
+    f.write("Hello from a generator-based context manager!\n")</code></pre>
+      <span class="code-label">managed_file.py</span>
+    </div>
+
+    <div class="callout callout-concept">
+      <strong>How it works:</strong> Everything <em>before</em> <code>yield</code> is
+      the <code>__enter__</code> logic. The value after <code>yield</code> is what gets
+      bound to the <code>as</code> variable. Everything <em>after</em> <code>yield</code>
+      (typically in a <code>finally</code> block) is the <code>__exit__</code> logic.
+    </div>
+
+    <h3>Yielding a value</h3>
+    <div style="position:relative">
+      <pre><code class="language-python">from contextlib import contextmanager
+
+@contextmanager
+def temp_directory():
+    """Create a temporary directory; delete it on exit."""
+    import tempfile, shutil, os
+    tmpdir = tempfile.mkdtemp()
+    try:
+        yield tmpdir          # bound to 'as' variable
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+with temp_directory() as tmpdir:
+    filepath = f"{tmpdir}/test.txt"
+    with open(filepath, "w") as f:
+        f.write("temporary data")
+    print(f"Working in: {tmpdir}")
+# Directory is deleted here, even if an exception occurred</code></pre>
+      <span class="code-label">temp_dir.py</span>
+    </div>
+
+    <h3>Handling exceptions inside @contextmanager</h3>
+    <div style="position:relative">
+      <pre><code class="language-python">from contextlib import contextmanager
+
+@contextmanager
+def database_transaction(db):
+    """Commit on success, rollback on exception."""
+    db.begin()
+    try:
+        yield db
+    except Exception:
+        db.rollback()
+        raise          # re-raise after rollback
+    else:
+        db.commit()    # only if no exception
+
+# Usage:
+# with database_transaction(db) as conn:
+#     conn.execute("INSERT INTO ...")</code></pre>
+      <span class="code-label">transaction.py</span>
+    </div>
+
+
+    <!-- ── 5. contextlib Utilities ── -->
+    <h2 id="contextlib">Useful <code>contextlib</code> Utilities</h2>
+
+    <h3>suppress — silence specific exceptions</h3>
+    <div style="position:relative">
+      <pre><code class="language-python">from contextlib import suppress
+from pathlib import Path
+
+# Equivalent to try/except/pass — but clearer intent
+with suppress(FileNotFoundError):
+    Path("maybe_missing.txt").unlink()
+
+# Multiple exception types
+with suppress(KeyError, AttributeError):
+    value = data["missing_key"].strip()</code></pre>
+      <span class="code-label">suppress.py</span>
+    </div>
+
+    <h3>redirect_stdout / redirect_stderr</h3>
+    <div style="position:relative">
+      <pre><code class="language-python">import io
+from contextlib import redirect_stdout
+
+# Capture print() output as a string
+buffer = io.StringIO()
+with redirect_stdout(buffer):
+    print("Hello")
+    print("World")
+
+output = buffer.getvalue()
+print(repr(output))   # 'Hello\nWorld\n'
+
+# Useful for testing functions that print to stdout
+def noisy_function():
+    print("lots of debug output")
+
+with redirect_stdout(io.StringIO()):
+    noisy_function()   # output discarded</code></pre>
+      <span class="code-label">redirect.py</span>
+    </div>
+
+    <h3>nullcontext — optional context manager</h3>
+    <div style="position:relative">
+      <pre><code class="language-python">from contextlib import nullcontext
+
+def process(data, lock=None):
+    """Use a lock if provided; otherwise no-op context manager."""
+    ctx = lock if lock is not None else nullcontext()
+    with ctx:
+        return [x * 2 for x in data]
+
+# No lock — nullcontext is a no-op
+result = process([1, 2, 3])
+print(result)   # [2, 4, 6]
+
+# With a lock — uses it transparently
+import threading
+result = process([1, 2, 3], lock=threading.Lock())
+print(result)   # [2, 4, 6]</code></pre>
+      <span class="code-label">nullcontext.py</span>
+    </div>
+
+    <h3>ExitStack — dynamic context managers</h3>
+    <div style="position:relative">
+      <pre><code class="language-python">from contextlib import ExitStack
+
+# Open a variable number of files — can't use a fixed with statement
+filenames = ["a.txt", "b.txt", "c.txt"]
+
+with ExitStack() as stack:
+    files = [
+        stack.enter_context(open(f, "w", encoding="utf-8"))
+        for f in filenames
+    ]
+    for i, fh in enumerate(files):
+        fh.write(f"File {i}\n")
+# All files are closed here, even if one raised an exception
+
+# Also useful for conditional context managers
+def process(path, verbose=False):
+    with ExitStack() as stack:
+        f = stack.enter_context(open(path, encoding="utf-8"))
+        if verbose:
+            stack.enter_context(Timer())   # add timer only when verbose
+        return f.read()</code></pre>
+      <span class="code-label">exit_stack.py</span>
+    </div>
+
+    <div class="callout callout-tip">
+      <code>ExitStack</code> is the go-to tool when the number of context managers
+      is not known until runtime. It also works as a manual cleanup stack: call
+      <code>stack.callback(func)</code> to register any zero-argument cleanup function.
+    </div>
+
+
+    <!-- ── 6. Real-World Patterns ── -->
+    <h2 id="patterns">Real-World Patterns</h2>
+
+    <h3>Atomic file write</h3>
+    <div style="position:relative">
+      <pre><code class="language-python">from contextlib import contextmanager
+from pathlib import Path
+import os
+
+@contextmanager
+def atomic_write(path, mode="w", **kwargs):
+    """Write to a temp file; replace target only on clean exit."""
+    tmp = Path(str(path) + ".tmp")
+    try:
+        with open(tmp, mode, **kwargs) as f:
+            yield f
+        tmp.replace(path)   # atomic rename — only reached if no exception
+    except:
+        tmp.unlink(missing_ok=True)
+        raise
+
+with atomic_write("config.json", encoding="utf-8") as f:
+    import json
+    json.dump({"version": 2, "debug": False}, f, indent=2)
+# config.json is updated atomically</code></pre>
+      <span class="code-label">atomic_write.py</span>
+    </div>
+
+    <h3>Temporary environment variable</h3>
+    <div style="position:relative">
+      <pre><code class="language-python">from contextlib import contextmanager
+import os
+
+@contextmanager
+def env_var(name, value):
+    """Temporarily set an environment variable, restore original on exit."""
+    original = os.environ.get(name)
+    os.environ[name] = str(value)
+    try:
+        yield
+    finally:
+        if original is None:
+            del os.environ[name]
+        else:
+            os.environ[name] = original
+
+with env_var("DEBUG", "1"):
+    print(os.environ["DEBUG"])   # 1
+
+print(os.environ.get("DEBUG"))   # None (or original value)</code></pre>
+      <span class="code-label">env_var.py</span>
+    </div>
+
+    <h3>Indented printing</h3>
+    <div style="position:relative">
+      <pre><code class="language-python">from contextlib import contextmanager
+
+_indent = 0
+
+@contextmanager
+def indent(level=2):
+    global _indent
+    _indent += level
+    try:
+        yield
+    finally:
+        _indent -= level
+
+def iprint(msg):
+    print(" " * _indent + msg)
+
+iprint("Start")
+with indent():
+    iprint("Level 1")
+    with indent():
+        iprint("Level 2")
+    iprint("Back to 1")
+iprint("End")
+# Start
+#   Level 1
+#     Level 2
+#   Back to 1
+# End</code></pre>
+      <span class="code-label">indent_print.py</span>
+    </div>
+
+
+    <!-- ── 7. When to Use Each Approach ── -->
+    <h2 id="class-vs-generator">Class vs <code>@contextmanager</code></h2>
+
+    <table>
+      <thead><tr><th></th><th>Class (<code>__enter__/__exit__</code>)</th><th><code>@contextmanager</code></th></tr></thead>
+      <tbody>
+        <tr><td>Verbosity</td><td>More code</td><td>Concise</td></tr>
+        <tr><td>State between enter/exit</td><td>Easy — store on <code>self</code></td><td>Local variables work fine</td></tr>
+        <tr><td>Reusable as base class</td><td>Yes — inheritable</td><td>No</td></tr>
+        <tr><td>Exception handling</td><td><code>__exit__</code> receives all info</td><td>Use <code>try/except/finally</code> around <code>yield</code></td></tr>
+        <tr><td>Best for</td><td>Complex managers, reusable libraries</td><td>Simple, one-off managers</td></tr>
+      </tbody>
+    </table>
+
+
+    <!-- ── 8. Best Practices ── -->
+    <h2 id="best-practices">Best Practices</h2>
+    <ul>
+      <li><strong>Always use <code>with</code></strong> for resources that need cleanup (files, locks, connections, temp directories).</li>
+      <li><strong>Keep <code>with</code> blocks focused.</strong> Only the code that needs the resource should be inside the block.</li>
+      <li><strong>Use <code>@contextmanager</code></strong> for simple cases; use a class when you need inheritance or complex state.</li>
+      <li><strong>Always wrap the <code>yield</code> in a <code>try/finally</code></strong> inside <code>@contextmanager</code> — otherwise exceptions skip the cleanup.</li>
+      <li><strong>Only return <code>True</code> from <code>__exit__</code></strong> if you deliberately want to suppress the exception — be explicit about this.</li>
+      <li><strong>Use <code>contextlib.suppress</code></strong> instead of <code>try/except/pass</code> for conciseness.</li>
+    </ul>
+
+    <div style="position:relative">
+      <pre><code class="language-python">from contextlib import contextmanager
+
+# ❌ Missing finally — exception leaks without cleanup
+@contextmanager
+def bad_cm(resource):
+    resource.open()
+    yield resource
+    resource.close()   # skipped if an exception occurs in the with-block!
+
+# ✓ Always use try/finally
+@contextmanager
+def good_cm(resource):
+    resource.open()
+    try:
+        yield resource
+    finally:
+        resource.close()   # guaranteed</code></pre>
+      <span class="code-label">best_practice.py</span>
+    </div>
+
+
+    <div class="primary-source">
+      <p>
+        <strong>Primary sources:</strong>
+        <a href="https://docs.python.org/3/reference/compound_stmts.html#the-with-statement" target="_blank" rel="noopener">Python Docs — The with statement</a>
+        &nbsp;·&nbsp;
+        <a href="https://docs.python.org/3/library/contextlib.html" target="_blank" rel="noopener">Python Docs — contextlib</a>
+        &nbsp;·&nbsp;
+        <a href="https://peps.python.org/pep-0343/" target="_blank" rel="noopener">PEP 343 — The "with" Statement</a>
+      </p>
+    </div>
+
+    <div class="ask-ai-reminder">
+      <span class="ai-icon">🤖</span>
+      <p>
+        <strong>Ask your AI tutor!</strong> Not sure whether to use a class or
+        <code>@contextmanager</code> for your use case? Want to see how
+        <code>ExitStack</code> handles cleanup for a variable number of resources?
+        Great patterns to work through with concrete code.
+      </p>
+    </div>
+
+
+    <!-- ── Quiz ── -->
+    <div id="quiz-section"></div>
+
+
+    <!-- ── Exercises ── -->
+    <div id="exercise-section">
+      <h2>💻 Exercises</h2>
+
+      <div class="exercise">
+        <div class="exercise-title"><span class="exercise-num">01</span> Retry Context Manager</div>
+        <p>
+          Write a <code>@contextmanager</code> called <code>retry(times, exceptions)</code>
+          that re-runs the body of the <code>with</code> block up to <code>times</code>
+          attempts whenever one of the specified exceptions is raised.
+          After all attempts are exhausted, re-raise the last exception.
+        </p>
+        <pre><code class="language-python">import random
+
+for attempt in retry(times=5, exceptions=(ValueError,)):
+    with attempt:
+        if random.random() < 0.7:
+            raise ValueError("random failure")
+        print("Success!")
+        break</code></pre>
+        <p><em>Hint: yield attempt objects that know whether to continue looping.</em></p>
+        <details class="solution">
+          <summary>Show solution</summary>
+          <pre><code class="language-python">from contextlib import contextmanager
+
+class _Attempt:
+    """Sentinel object yielded to the with-block."""
+    def __enter__(self): return self
+    def __exit__(self, *args): return False
+
+def retry(times, exceptions=(Exception,)):
+    last_exc = None
+    for attempt in range(times):
+        try:
+            yield _Attempt()
+            return   # success — stop iterating
+        except exceptions as e:
+            last_exc = e
+            print(f"Attempt {attempt + 1}/{times} failed: {e}")
+    raise last_exc
+
+import random, types
+
+# Make it a generator-based loop
+def retry_loop(times, exceptions=(Exception,)):
+    last_exc = None
+    for i in range(times):
+        try:
+            yield i
+            return
+        except exceptions as e:
+            last_exc = e
+            print(f"Attempt {i+1}/{times} failed: {e}")
+    if last_exc:
+        raise last_exc
+
+# Simpler contextmanager version
+@contextmanager
+def retry_ctx(times=3, exceptions=(Exception,), delay=0):
+    import time
+    last_exc = None
+    for attempt in range(1, times + 1):
+        try:
+            yield attempt
+            return   # clean exit — done
+        except exceptions as e:
+            last_exc = e
+            print(f"Attempt {attempt}/{times} failed: {e}")
+            if attempt < times and delay:
+                time.sleep(delay)
+    raise last_exc
+
+# Usage
+random.seed(42)
+for _ in range(10):
+    try:
+        with retry_ctx(times=5, exceptions=(ValueError,)) as attempt:
+            if random.random() < 0.7:
+                raise ValueError("random failure")
+            print(f"Succeeded on attempt {attempt}")
+        break
+    except ValueError:
+        print("All attempts failed")</code></pre>
+        </details>
+      </div>
+
+      <div class="exercise">
+        <div class="exercise-title"><span class="exercise-num">02</span> Managed Database Connection</div>
+        <p>
+          Build a <code>DatabaseConnection</code> class-based context manager that simulates
+          a database connection with transaction support:
+        </p>
+        <ul>
+          <li><code>__enter__</code>: "connect" (print a message) and return <code>self</code></li>
+          <li><code>execute(sql)</code>: append SQL to an internal log; raise <code>RuntimeError</code> if not connected</li>
+          <li><code>__exit__</code>: if no exception → commit (print log); if exception → rollback; always disconnect</li>
+          <li>A <code>queries</code> property returning the list of executed SQL strings</li>
+        </ul>
+        <details class="solution">
+          <summary>Show solution</summary>
+          <pre><code class="language-python">class DatabaseConnection:
+    def __init__(self, url):
+        self.url       = url
+        self._log      = []
+        self._connected = False
+
+    @property
+    def queries(self):
+        return list(self._log)
+
+    def execute(self, sql):
+        if not self._connected:
+            raise RuntimeError("Not connected")
+        self._log.append(sql)
+        print(f"  EXEC: {sql}")
+
+    def __enter__(self):
+        self._connected = True
+        self._log.clear()
+        print(f"Connected to {self.url}")
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if exc_type is None:
+            print(f"COMMIT — {len(self._log)} statement(s)")
+        else:
+            print(f"ROLLBACK — {exc_val}")
+            self._log.clear()
+        self._connected = False
+        print("Disconnected")
+        return False   # don't suppress exceptions
+
+# Happy path
+with DatabaseConnection("postgres://localhost/app") as db:
+    db.execute("INSERT INTO users VALUES (1, 'Alice')")
+    db.execute("UPDATE stats SET logins = logins + 1")
+
+print(db.queries)
+
+# Error path — rollback
+try:
+    with DatabaseConnection("postgres://localhost/app") as db:
+        db.execute("DELETE FROM users WHERE id = 99")
+        raise ValueError("Something went wrong")
+except ValueError:
+    pass  # already rolled back
+print(db.queries)   # []</code></pre>
+        </details>
+      </div>
+
+      <div class="exercise">
+        <div class="exercise-title"><span class="exercise-num">03</span> Temporary Config Override</div>
+        <p>
+          Write a <code>@contextmanager</code> called <code>config_override(config_dict, **overrides)</code>
+          that temporarily patches a config dictionary with new values and restores all
+          original values on exit — even if an exception occurs. Demonstrate it with a
+          simple app config dict.
+        </p>
+        <pre><code class="language-python">config = {"debug": False, "log_level": "WARNING", "port": 8080}
+
+with config_override(config, debug=True, log_level="DEBUG"):
+    print(config)   # debug=True, log_level='DEBUG', port=8080
+
+print(config)       # fully restored</code></pre>
+        <details class="solution">
+          <summary>Show solution</summary>
+          <pre><code class="language-python">from contextlib import contextmanager
+
+@contextmanager
+def config_override(cfg, **overrides):
+    """Temporarily patch a dict; restore originals on exit."""
+    # Save originals (or sentinel for keys that didn't exist)
+    _MISSING = object()
+    saved = {k: cfg.get(k, _MISSING) for k in overrides}
+
+    # Apply overrides
+    cfg.update(overrides)
+    try:
+        yield cfg
+    finally:
+        # Restore
+        for k, original in saved.items():
+            if original is _MISSING:
+                cfg.pop(k, None)
+            else:
+                cfg[k] = original
+
+config = {"debug": False, "log_level": "WARNING", "port": 8080}
+
+print("Before:", config)
+
+with config_override(config, debug=True, log_level="DEBUG", new_key="added"):
+    print("Inside:", config)
+    # {"debug": True, "log_level": "DEBUG", "port": 8080, "new_key": "added"}
+
+print("After: ", config)
+# {"debug": False, "log_level": "WARNING", "port": 8080}
+# 'new_key' is removed because it didn't exist before
+
+# Works even when an exception occurs
+try:
+    with config_override(config, debug=True):
+        raise RuntimeError("crash!")
+except RuntimeError:
+    pass
+
+print("After exception:", config["debug"])   # False — restored</code></pre>
+        </details>
+      </div>
+
+    </div><!-- /exercise-section -->
+
+    <div id="lesson-nav-footer"></div>
+  </div><!-- /content -->
+
+</div><!-- /main -->
+
+<script src="../assets/nav-data.js"></script>
+<script src="../assets/nav.js"></script>
+<script src="../assets/quiz.js"></script>
+<script src="../assets/highlight.js"></script>
+
+<script>
+buildLessonFooter();
+
+QuizWidget.render("quiz-section", [
+  {
+    question: "What is guaranteed by the 'with' statement that a plain try/finally is not?",
+    options: [
+      "The with statement is faster than try/finally",
+      "The with statement calls __enter__ for setup and guarantees __exit__ is called for teardown even if an exception occurs",
+      "The with statement catches all exceptions automatically",
+      "The with statement prevents any exceptions from being raised"
+    ],
+    correct: 1,
+    explanation: "The 'with' statement is syntactic sugar that calls __enter__ on entry and guarantees __exit__ is called on exit — whether the block completes normally or raises an exception. This is equivalent to a try/finally but cleaner and reusable."
+  },
+  {
+    question: "In a @contextmanager generator, where does execution of the 'with' block happen?",
+    options: [
+      "Before the yield statement",
+      "After the yield statement",
+      "At the yield statement — the with block runs while the generator is paused at yield",
+      "In a separate thread"
+    ],
+    correct: 2,
+    explanation: "Everything before 'yield' is __enter__ logic. When yield is reached, the generator pauses and the with-block body executes. When the with-block ends (normally or via exception), the generator resumes after the yield. Everything after yield (usually in a finally) is __exit__ logic."
+  },
+  {
+    question: "What does __exit__ returning True do?",
+    options: [
+      "Signals that cleanup was successful",
+      "Suppresses (swallows) any exception that occurred inside the with block",
+      "Re-raises the exception with additional context",
+      "Causes the with block to run again"
+    ],
+    correct: 1,
+    explanation: "Returning True from __exit__ suppresses the exception — execution continues after the with statement as if nothing happened. Return False (or None) to let the exception propagate normally. Suppression is rarely the right choice; be deliberate about it."
+  },
+  {
+    question: "What problem does contextlib.ExitStack solve?",
+    options: [
+      "It makes context managers run faster",
+      "It allows managing a variable or dynamically-determined number of context managers",
+      "It converts exceptions into return values",
+      "It allows nesting with statements more than two levels deep"
+    ],
+    correct: 1,
+    explanation: "ExitStack lets you enter context managers dynamically at runtime — when the number of managers isn't known until the code runs (e.g. opening a list of files). You call stack.enter_context(cm) for each one, and all are cleaned up when the ExitStack's with block exits."
+  },
+  {
+    question: "Why must you wrap 'yield' in try/finally inside a @contextmanager?",
+    options: [
+      "Python requires it for syntax reasons",
+      "Without finally, an exception in the with block skips all code after yield, leaking resources",
+      "finally makes the generator run faster",
+      "It is only needed when the context manager returns a value"
+    ],
+    correct: 1,
+    explanation: "If an exception occurs in the with block, execution jumps out of the generator at the yield point. Without a finally block, any cleanup code after yield is never reached — resources leak. The finally block guarantees cleanup runs regardless of whether an exception occurred."
+  }
+]);
+</script>
+</body>
+</html>

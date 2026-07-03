@@ -134,6 +134,36 @@ export const tutorials: Tutorial[] = [
     ],
   },
   {
+    slug: 'python-from-a-to-z',
+    title: 'Python: Print to Production',
+    description:
+      "A complete path through Python — from your very first print(\"Hello\") to production-ready code. Covers core language fundamentals, intermediate patterns (decorators, generators, context managers), and advanced topics like concurrency, async, type hints, and packaging. FastAPI and applying Python to ML/AI are being written next.",
+    difficulty: 'beginner',
+    parts: 5,
+    estimatedHours: 16,
+    tags: ['python', 'fundamentals', 'async', 'oop', 'fastapi'],
+    featured: true,
+    learningOutcomes: [
+      'Write idiomatic Python — from variables and control flow to classes and decorators',
+      'Use comprehensions, generators, and context managers the way experienced Python developers do',
+      'Understand concurrency in Python: threading, multiprocessing, and asyncio — and when to reach for each',
+      'Add type hints and mypy checking to a codebase without giving up Python\'s dynamism',
+      'Package a project properly with pyproject.toml instead of ad hoc scripts',
+      'Build production APIs with FastAPI and apply Python to ML/AI workflows (coming soon)',
+    ],
+    prerequisites: [
+      'No programming experience required — we start from installing Python',
+      'A willingness to type code out and run it, not just read it',
+    ],
+    parts_list: [
+      { title: 'Phase 1 — Python Foundations (13 lessons)', duration: 320 },
+      { title: 'Phase 2 — Intermediate Python (13 lessons)', duration: 360 },
+      { title: 'Phase 3 — Advanced Python (6 lessons)', duration: 180 },
+      { title: 'Phase 4 — FastAPI & Web APIs (coming soon)', duration: 210 },
+      { title: 'Phase 5 — Python for ML & AI (coming soon)', duration: 210 },
+    ],
+  },
+  {
     slug: 'distributed-systems-from-scratch',
     title: "Distributed Systems from Scratch",
     description:

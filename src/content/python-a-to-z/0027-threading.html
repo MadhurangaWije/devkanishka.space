@@ -1,0 +1,853 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>L27 · Threading &amp; the GIL — Python A→Z</title>
+<link rel="stylesheet" href="../assets/style.css" />
+</head>
+<body>
+
+<div id="sidebar-placeholder"></div>
+
+<div id="main">
+
+  <!-- ── Lesson Header ── -->
+  <div id="lesson-header">
+    <div class="lesson-track track-advanced">🟣 Advanced</div>
+    <h1>Threading &amp; the GIL</h1>
+    <div class="lesson-meta">
+      <span>📖 Lesson 27</span>
+      <span>⏱ 40 min</span>
+      <span>🧪 5 questions</span>
+      <span>💻 3 exercises</span>
+    </div>
+  </div>
+
+  <!-- ── Content ── -->
+  <div id="content">
+
+    <!-- Objectives -->
+    <div class="objectives">
+      <h4>🎯 Learning Objectives</h4>
+      <ul>
+        <li>Understand what threads are and when to use them</li>
+        <li>Create and manage threads with <code>threading.Thread</code></li>
+        <li>Synchronise threads with <code>Lock</code>, <code>Event</code>, <code>Semaphore</code>, and <code>Condition</code></li>
+        <li>Use <code>ThreadPoolExecutor</code> for managed thread pools</li>
+        <li>Understand the GIL and its implications for CPU-bound vs I/O-bound work</li>
+        <li>Avoid common threading pitfalls: race conditions, deadlocks</li>
+      </ul>
+    </div>
+
+
+    <!-- ── 1. What is a Thread? ── -->
+    <h2 id="what-is-a-thread">What is a Thread?</h2>
+    <p>
+      A <strong>thread</strong> is the smallest unit of execution within a process.
+      Multiple threads share the same memory space — they can read and write the same
+      variables — but each has its own call stack and program counter, allowing them
+      to run (or appear to run) simultaneously.
+    </p>
+
+    <div style="position:relative">
+      <pre><code class="language-python">import threading
+import time
+
+def worker(name, delay):
+    print(f"{name} starting")
+    time.sleep(delay)      # simulate I/O work
+    print(f"{name} done after {delay}s")
+
+# Without threads — sequential: ~3 seconds total
+worker("A", 1)
+worker("B", 2)
+
+# With threads — concurrent: ~2 seconds total
+t1 = threading.Thread(target=worker, args=("A", 1))
+t2 = threading.Thread(target=worker, args=("B", 2))
+
+t1.start()
+t2.start()
+
+t1.join()   # wait for t1 to finish
+t2.join()   # wait for t2 to finish
+print("All done")</code></pre>
+      <span class="code-label">basic_threads.py</span>
+    </div>
+
+    <div class="callout callout-concept">
+      Threads are ideal for <strong>I/O-bound</strong> work — downloading files,
+      querying databases, calling APIs — where most time is spent waiting.
+      While one thread waits for I/O, others can run. For
+      <strong>CPU-bound</strong> work (number crunching), threads are limited by
+      the GIL — use <code>multiprocessing</code> (Lesson 28) instead.
+    </div>
+
+
+    <!-- ── 2. The GIL ── -->
+    <h2 id="gil">The Global Interpreter Lock (GIL)</h2>
+    <p>
+      CPython (the standard Python interpreter) has a
+      <strong>Global Interpreter Lock (GIL)</strong> — a mutex that ensures only one
+      thread executes Python bytecode at a time. This simplifies memory management
+      but limits true parallelism for CPU-bound code.
+    </p>
+
+    <div style="position:relative">
+      <pre><code class="language-text">With the GIL — CPU-bound threads take turns (no speedup):
+
+Thread 1: ██░░██░░██░░██     (GIL acquired → released → acquired…)
+Thread 2: ░░██░░██░░██░░
+
+Without the GIL (e.g. multiprocessing) — true parallel:
+
+Process 1: ████████████████
+Process 2: ████████████████</code></pre>
+      <span class="code-label">gil_diagram.txt</span>
+    </div>
+
+    <div style="position:relative">
+      <pre><code class="language-python">import threading
+import time
+
+def cpu_work(n):
+    """Purely CPU-bound — count to n."""
+    total = 0
+    for i in range(n):
+        total += i
+    return total
+
+N = 50_000_000
+
+# Sequential — one thread
+start = time.perf_counter()
+cpu_work(N)
+cpu_work(N)
+seq_time = time.perf_counter() - start
+
+# Two threads — NOT faster for CPU work (GIL)
+start = time.perf_counter()
+t1 = threading.Thread(target=cpu_work, args=(N,))
+t2 = threading.Thread(target=cpu_work, args=(N,))
+t1.start(); t2.start()
+t1.join();  t2.join()
+par_time = time.perf_counter() - start
+
+print(f"Sequential: {seq_time:.2f}s")
+print(f"Threaded:   {par_time:.2f}s  (similar or slower — GIL!)")</code></pre>
+      <span class="code-label">gil_demo.py</span>
+    </div>
+
+    <div class="callout callout-info">
+      The GIL is <strong>released</strong> during I/O operations, C extensions, and
+      certain numpy/scipy operations. This is why threads <em>do</em> speed up
+      I/O-bound work — the waiting thread releases the GIL so other threads can run.
+      Python 3.13+ introduces an experimental free-threaded mode (<code>--disable-gil</code>).
+    </div>
+
+
+    <!-- ── 3. Thread Lifecycle ── -->
+    <h2 id="thread-lifecycle">Thread Lifecycle &amp; Options</h2>
+
+    <div style="position:relative">
+      <pre><code class="language-python">import threading
+import time
+
+# ── Subclassing Thread ──
+class DownloadThread(threading.Thread):
+    def __init__(self, url):
+        super().__init__(daemon=True)  # daemon: dies when main thread exits
+        self.url    = url
+        self.result = None
+
+    def run(self):
+        """Overriding run() is the alternative to target=."""
+        print(f"Downloading {self.url}")
+        time.sleep(1)   # simulate network
+        self.result = f"data from {self.url}"
+
+threads = [DownloadThread(f"https://example.com/page/{i}") for i in range(5)]
+for t in threads:
+    t.start()
+for t in threads:
+    t.join(timeout=5)   # wait at most 5s
+
+results = [t.result for t in threads]
+print(results)</code></pre>
+      <span class="code-label">thread_subclass.py</span>
+    </div>
+
+    <table>
+      <thead><tr><th>Option / method</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>target=func</code></td><td>Function to run in the thread</td></tr>
+        <tr><td><code>args=(…)</code></td><td>Positional arguments to target</td></tr>
+        <tr><td><code>kwargs={…}</code></td><td>Keyword arguments to target</td></tr>
+        <tr><td><code>daemon=True</code></td><td>Thread exits when main thread exits</td></tr>
+        <tr><td><code>t.start()</code></td><td>Launch the thread</td></tr>
+        <tr><td><code>t.join(timeout)</code></td><td>Wait for thread to finish</td></tr>
+        <tr><td><code>t.is_alive()</code></td><td>Check if thread is still running</td></tr>
+        <tr><td><code>t.name</code></td><td>Thread name (for debugging)</td></tr>
+        <tr><td><code>threading.current_thread()</code></td><td>The running thread object</td></tr>
+        <tr><td><code>threading.enumerate()</code></td><td>All live threads</td></tr>
+      </tbody>
+    </table>
+
+
+    <!-- ── 4. Race Conditions and Locks ── -->
+    <h2 id="race-conditions">Race Conditions &amp; Locks</h2>
+    <p>
+      When multiple threads read and write shared state, the result depends on the
+      timing of their interleaving — a <strong>race condition</strong>:
+    </p>
+
+    <div style="position:relative">
+      <pre><code class="language-python">import threading
+
+counter = 0
+
+def increment(n):
+    global counter
+    for _ in range(n):
+        counter += 1   # NOT atomic: read → add 1 → write (3 steps!)
+
+threads = [threading.Thread(target=increment, args=(100_000,)) for _ in range(10)]
+for t in threads: t.start()
+for t in threads: t.join()
+
+print(counter)  # Should be 1,000,000 but is often less — race condition!</code></pre>
+      <span class="code-label">race_condition.py</span>
+    </div>
+
+    <h3>Fixing with Lock</h3>
+    <div style="position:relative">
+      <pre><code class="language-python">import threading
+
+counter = 0
+lock    = threading.Lock()
+
+def increment(n):
+    global counter
+    for _ in range(n):
+        with lock:          # acquire lock → do work → release lock
+            counter += 1   # now atomic
+
+threads = [threading.Thread(target=increment, args=(100_000,)) for _ in range(10)]
+for t in threads: t.start()
+for t in threads: t.join()
+
+print(counter)   # Always 1,000,000 ✓</code></pre>
+      <span class="code-label">lock_fix.py</span>
+    </div>
+
+    <h3>RLock — reentrant lock</h3>
+    <div style="position:relative">
+      <pre><code class="language-python">import threading
+
+# RLock can be acquired multiple times by the SAME thread
+# (regular Lock would deadlock on second acquire from same thread)
+rlock = threading.RLock()
+
+def outer():
+    with rlock:
+        print("outer acquired")
+        inner()   # same thread acquires again — OK with RLock
+
+def inner():
+    with rlock:   # second acquire by same thread
+        print("inner acquired")
+
+outer()
+# outer acquired
+# inner acquired</code></pre>
+      <span class="code-label">rlock.py</span>
+    </div>
+
+
+    <!-- ── 5. Synchronisation Primitives ── -->
+    <h2 id="sync-primitives">Synchronisation Primitives</h2>
+
+    <h3>Event — signal between threads</h3>
+    <div style="position:relative">
+      <pre><code class="language-python">import threading
+import time
+
+ready = threading.Event()
+
+def producer():
+    print("Producer: preparing data…")
+    time.sleep(2)
+    print("Producer: data ready!")
+    ready.set()   # signal the event
+
+def consumer():
+    print("Consumer: waiting for data…")
+    ready.wait()  # block until event is set
+    print("Consumer: processing data!")
+
+t1 = threading.Thread(target=producer)
+t2 = threading.Thread(target=consumer)
+t2.start(); t1.start()
+t1.join();  t2.join()
+# Consumer: waiting for data…
+# Producer: preparing data…
+# Producer: data ready!
+# Consumer: processing data!</code></pre>
+      <span class="code-label">event.py</span>
+    </div>
+
+    <h3>Semaphore — limit concurrent access</h3>
+    <div style="position:relative">
+      <pre><code class="language-python">import threading
+import time
+import random
+
+# Allow at most 3 threads to run simultaneously (connection pool pattern)
+pool = threading.Semaphore(3)
+
+def worker(name):
+    with pool:   # acquire one slot; release on exit
+        print(f"{name} working")
+        time.sleep(random.uniform(0.5, 1.5))
+        print(f"{name} done")
+
+threads = [threading.Thread(target=worker, args=(f"T{i}",)) for i in range(8)]
+for t in threads: t.start()
+for t in threads: t.join()</code></pre>
+      <span class="code-label">semaphore.py</span>
+    </div>
+
+    <h3>Condition — wait for a state change</h3>
+    <div style="position:relative">
+      <pre><code class="language-python">import threading
+
+queue  = []
+cond   = threading.Condition()
+MAX    = 3
+
+def producer():
+    for i in range(10):
+        with cond:
+            while len(queue) >= MAX:
+                cond.wait()    # release lock + wait for notify
+            queue.append(i)
+            print(f"Produced {i}, queue={queue}")
+            cond.notify_all()
+
+def consumer():
+    received = 0
+    while received < 10:
+        with cond:
+            while not queue:
+                cond.wait()
+            item = queue.pop(0)
+            received += 1
+            print(f"Consumed {item}, queue={queue}")
+            cond.notify_all()
+
+threading.Thread(target=producer).start()
+threading.Thread(target=consumer).start()</code></pre>
+      <span class="code-label">condition.py</span>
+    </div>
+
+
+    <!-- ── 6. Thread-Local Storage ── -->
+    <h2 id="thread-local">Thread-Local Storage</h2>
+    <p>
+      <code>threading.local()</code> creates an object where each thread has its
+      own independent copy of the attributes — useful for per-thread state like
+      database connections:
+    </p>
+
+    <div style="position:relative">
+      <pre><code class="language-python">import threading
+
+# Each thread gets its own 'local.value' — they don't share
+local = threading.local()
+
+def worker(name, value):
+    local.value = value          # set in THIS thread only
+    import time; time.sleep(0.1)
+    print(f"{name}: local.value = {local.value}")   # sees its own value
+
+threads = [
+    threading.Thread(target=worker, args=(f"Thread-{i}", i))
+    for i in range(5)
+]
+for t in threads: t.start()
+for t in threads: t.join()
+# Thread-0: local.value = 0
+# Thread-1: local.value = 1  (etc. — no mixing)</code></pre>
+      <span class="code-label">thread_local.py</span>
+    </div>
+
+
+    <!-- ── 7. ThreadPoolExecutor ── -->
+    <h2 id="thread-pool">ThreadPoolExecutor</h2>
+    <p>
+      <code>concurrent.futures.ThreadPoolExecutor</code> manages a pool of worker
+      threads and provides a high-level <code>Future</code>-based API — much cleaner
+      than managing threads manually for most use cases:
+    </p>
+
+    <div style="position:relative">
+      <pre><code class="language-python">from concurrent.futures import ThreadPoolExecutor, as_completed
+import time
+
+def fetch(url):
+    """Simulate fetching a URL."""
+    time.sleep(0.5)
+    return f"Response from {url}"
+
+urls = [f"https://example.com/page/{i}" for i in range(10)]
+
+# ── map: submit all, collect results in order ──
+with ThreadPoolExecutor(max_workers=4) as executor:
+    results = list(executor.map(fetch, urls))
+
+print(results[:3])
+
+# ── submit + as_completed: results arrive as they finish ──
+with ThreadPoolExecutor(max_workers=4) as executor:
+    futures = {executor.submit(fetch, url): url for url in urls}
+
+    for future in as_completed(futures):
+        url    = futures[future]
+        result = future.result()   # blocks until this future is done
+        print(f"Done: {url} → {result[:30]}")</code></pre>
+      <span class="code-label">thread_pool.py</span>
+    </div>
+
+    <div style="position:relative">
+      <pre><code class="language-python">from concurrent.futures import ThreadPoolExecutor
+import time
+
+# ── Exception handling ──
+def risky(n):
+    if n == 3:
+        raise ValueError(f"Bad value: {n}")
+    return n * 2
+
+with ThreadPoolExecutor(max_workers=4) as executor:
+    futures = [executor.submit(risky, i) for i in range(6)]
+
+for i, future in enumerate(futures):
+    try:
+        print(f"Result {i}: {future.result()}")
+    except ValueError as e:
+        print(f"Error  {i}: {e}")</code></pre>
+      <span class="code-label">pool_errors.py</span>
+    </div>
+
+    <div class="callout callout-tip">
+      The <code>with</code> block waits for all submitted futures to complete before
+      exiting — equivalent to calling <code>executor.shutdown(wait=True)</code>.
+      Always use <code>ThreadPoolExecutor</code> as a context manager.
+    </div>
+
+
+    <!-- ── 8. Queue — thread-safe communication ── -->
+    <h2 id="queue">Thread-Safe Queues</h2>
+    <p>
+      <code>queue.Queue</code> is a thread-safe FIFO queue — the standard way to
+      pass data between producer and consumer threads:
+    </p>
+
+    <div style="position:relative">
+      <pre><code class="language-python">import threading
+import queue
+import time
+
+work_queue = queue.Queue(maxsize=5)  # bounded — blocks producers when full
+
+def producer(q, items):
+    for item in items:
+        q.put(item)          # blocks if queue is full
+        print(f"Produced: {item}")
+    q.put(None)              # sentinel: signal "no more work"
+
+def consumer(q):
+    while True:
+        item = q.get()       # blocks until an item is available
+        if item is None:
+            break
+        print(f"Consumed: {item}")
+        time.sleep(0.2)
+        q.task_done()        # signal that this item is processed
+
+q   = queue.Queue(maxsize=5)
+t_p = threading.Thread(target=producer, args=(q, range(10)))
+t_c = threading.Thread(target=consumer, args=(q,))
+
+t_p.start(); t_c.start()
+t_p.join();  t_c.join()
+
+print("Done")</code></pre>
+      <span class="code-label">queue_example.py</span>
+    </div>
+
+
+    <!-- ── 9. Deadlocks ── -->
+    <h2 id="deadlocks">Deadlocks</h2>
+    <p>
+      A <strong>deadlock</strong> occurs when two or more threads are each waiting
+      for a lock held by another — they all block forever:
+    </p>
+
+    <div style="position:relative">
+      <pre><code class="language-python">import threading
+
+lock_a = threading.Lock()
+lock_b = threading.Lock()
+
+def thread1():
+    with lock_a:
+        print("T1 acquired A, waiting for B…")
+        import time; time.sleep(0.1)
+        with lock_b:   # waits forever — T2 holds B
+            print("T1 acquired B")
+
+def thread2():
+    with lock_b:
+        print("T2 acquired B, waiting for A…")
+        import time; time.sleep(0.1)
+        with lock_a:   # waits forever — T1 holds A
+            print("T2 acquired A")
+
+# t1 = threading.Thread(target=thread1)
+# t2 = threading.Thread(target=thread2)
+# t1.start(); t2.start()  # DEADLOCK!
+
+# ── Fix: always acquire locks in the same order ──
+def thread1_safe():
+    with lock_a:   # always acquire A before B
+        with lock_b:
+            print("T1 done")
+
+def thread2_safe():
+    with lock_a:   # same order — no deadlock
+        with lock_b:
+            print("T2 done")</code></pre>
+      <span class="code-label">deadlock.py</span>
+    </div>
+
+    <div class="callout callout-warning">
+      <strong>Deadlock prevention rules:</strong>
+      <ol style="margin: 0.4rem 0 0">
+        <li>Always acquire multiple locks in the same order across all threads.</li>
+        <li>Use <code>lock.acquire(timeout=…)</code> and handle failure.</li>
+        <li>Keep lock-holding sections as short as possible.</li>
+        <li>Prefer higher-level abstractions (<code>Queue</code>, <code>ThreadPoolExecutor</code>) that handle locking for you.</li>
+      </ol>
+    </div>
+
+
+    <!-- ── 10. When to Use Threads ── -->
+    <h2 id="when-to-use">When to Use Threads</h2>
+
+    <table>
+      <thead><tr><th>Task type</th><th>Best tool</th><th>Why</th></tr></thead>
+      <tbody>
+        <tr><td>I/O-bound (network, files, DB)</td><td><code>threading</code> or <code>asyncio</code></td><td>GIL released during I/O; threads overlap waiting</td></tr>
+        <tr><td>CPU-bound (computation)</td><td><code>multiprocessing</code></td><td>Bypasses GIL with separate processes</td></tr>
+        <tr><td>Many concurrent I/O tasks</td><td><code>asyncio</code></td><td>Single thread, cooperative, very low overhead</td></tr>
+        <tr><td>Parallel + shared memory</td><td><code>threading</code></td><td>Threads share data without IPC overhead</td></tr>
+        <tr><td>Background task in a GUI</td><td><code>threading</code></td><td>Keep UI responsive while work runs in background</td></tr>
+      </tbody>
+    </table>
+
+
+    <div class="primary-source">
+      <p>
+        <strong>Primary sources:</strong>
+        <a href="https://docs.python.org/3/library/threading.html" target="_blank" rel="noopener">Python Docs — threading</a>
+        &nbsp;·&nbsp;
+        <a href="https://docs.python.org/3/library/concurrent.futures.html" target="_blank" rel="noopener">Python Docs — concurrent.futures</a>
+        &nbsp;·&nbsp;
+        <a href="https://docs.python.org/3/library/queue.html" target="_blank" rel="noopener">Python Docs — queue</a>
+        &nbsp;·&nbsp;
+        <a href="https://wiki.python.org/moin/GlobalInterpreterLock" target="_blank" rel="noopener">Python Wiki — GIL</a>
+      </p>
+    </div>
+
+    <div class="ask-ai-reminder">
+      <span class="ai-icon">🤖</span>
+      <p>
+        <strong>Ask your AI tutor!</strong> Seeing inconsistent results in threaded code?
+        Not sure whether your task is I/O-bound or CPU-bound? Want to understand exactly
+        when the GIL is released? Threading bugs can be subtle — talk through your code.
+      </p>
+    </div>
+
+
+    <!-- ── Quiz ── -->
+    <div id="quiz-section"></div>
+
+
+    <!-- ── Exercises ── -->
+    <div id="exercise-section">
+      <h2>💻 Exercises</h2>
+
+      <div class="exercise">
+        <div class="exercise-title"><span class="exercise-num">01</span> Concurrent File Downloader</div>
+        <p>
+          Write a function <code>download_all(urls, max_workers=4)</code> that:
+        </p>
+        <ul>
+          <li>Uses <code>ThreadPoolExecutor</code> to fetch each URL concurrently</li>
+          <li>Returns a dict mapping each URL to its response text (or an error string on failure)</li>
+          <li>Prints progress as each download completes (using <code>as_completed</code>)</li>
+        </ul>
+        <p>
+          Since we can't make real HTTP requests here, simulate with a function
+          that sleeps a random amount and returns a fake response.
+        </p>
+        <details class="solution">
+          <summary>Show solution</summary>
+          <pre><code class="language-python">from concurrent.futures import ThreadPoolExecutor, as_completed
+import time
+import random
+
+def fake_fetch(url):
+    """Simulate an HTTP request."""
+    time.sleep(random.uniform(0.2, 1.0))
+    if "error" in url:
+        raise ConnectionError(f"Failed to connect to {url}")
+    return f"&lt;html&gt;Content of {url}&lt;/html&gt;"
+
+def download_all(urls, max_workers=4):
+    results = {}
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(fake_fetch, url): url for url in urls}
+        for future in as_completed(futures):
+            url = futures[future]
+            try:
+                data = future.result()
+                results[url] = data
+                print(f"✓ {url} ({len(data)} bytes)")
+            except Exception as e:
+                results[url] = f"ERROR: {e}"
+                print(f"✗ {url}: {e}")
+    return results
+
+urls = [
+    "https://example.com/page/1",
+    "https://example.com/page/2",
+    "https://example.com/error/3",
+    "https://example.com/page/4",
+    "https://example.com/page/5",
+]
+
+results = download_all(urls)
+print(f"\nCompleted {len(results)} requests")</code></pre>
+        </details>
+      </div>
+
+      <div class="exercise">
+        <div class="exercise-title"><span class="exercise-num">02</span> Thread-Safe Counter</div>
+        <p>
+          Implement a <code>ThreadSafeCounter</code> class that:
+        </p>
+        <ul>
+          <li>Stores an integer value (default 0)</li>
+          <li><code>increment(amount=1)</code> — add to the counter</li>
+          <li><code>decrement(amount=1)</code> — subtract from the counter</li>
+          <li><code>reset()</code> — set to zero</li>
+          <li><code>value</code> — property returning current count</li>
+          <li>All operations protected by a <code>Lock</code></li>
+        </ul>
+        <p>
+          Verify thread-safety by running 100 threads each incrementing 1000 times —
+          the result must always equal exactly 100,000.
+        </p>
+        <details class="solution">
+          <summary>Show solution</summary>
+          <pre><code class="language-python">import threading
+
+class ThreadSafeCounter:
+    def __init__(self, initial=0):
+        self._value = initial
+        self._lock  = threading.Lock()
+
+    @property
+    def value(self):
+        with self._lock:
+            return self._value
+
+    def increment(self, amount=1):
+        with self._lock:
+            self._value += amount
+
+    def decrement(self, amount=1):
+        with self._lock:
+            self._value -= amount
+
+    def reset(self):
+        with self._lock:
+            self._value = 0
+
+    def __repr__(self):
+        return f"ThreadSafeCounter({self._value})"
+
+# Verification
+counter = ThreadSafeCounter()
+THREADS = 100
+INC_PER_THREAD = 1000
+
+threads = [
+    threading.Thread(target=lambda: [counter.increment() for _ in range(INC_PER_THREAD)])
+    for _ in range(THREADS)
+]
+for t in threads: t.start()
+for t in threads: t.join()
+
+expected = THREADS * INC_PER_THREAD
+print(f"Result:   {counter.value}")
+print(f"Expected: {expected}")
+print(f"Correct:  {counter.value == expected}")</code></pre>
+        </details>
+      </div>
+
+      <div class="exercise">
+        <div class="exercise-title"><span class="exercise-num">03</span> Producer-Consumer Pipeline</div>
+        <p>
+          Build a producer-consumer pipeline using <code>queue.Queue</code>:
+        </p>
+        <ul>
+          <li><strong>Producer</strong>: generates numbers 1–20 with a small delay, puts them on a work queue</li>
+          <li><strong>Workers</strong> (3 threads): take a number, compute its square, put the result on a results queue</li>
+          <li><strong>Collector</strong>: reads results and stores them; prints a summary when all work is done</li>
+        </ul>
+        <p>Use sentinel values (<code>None</code>) to signal shutdown to each stage.</p>
+        <details class="solution">
+          <summary>Show solution</summary>
+          <pre><code class="language-python">import threading
+import queue
+import time
+
+NUM_WORKERS = 3
+work_q    = queue.Queue()
+results_q = queue.Queue()
+
+def producer(items):
+    for item in items:
+        time.sleep(0.05)
+        work_q.put(item)
+    # Send one sentinel per worker
+    for _ in range(NUM_WORKERS):
+        work_q.put(None)
+    print("Producer done")
+
+def worker(worker_id):
+    while True:
+        item = work_q.get()
+        if item is None:
+            results_q.put(None)   # forward sentinel to collector
+            break
+        result = item ** 2
+        results_q.put((item, result))
+        work_q.task_done()
+        print(f"Worker-{worker_id}: {item}² = {result}")
+
+def collector(num_workers):
+    finished = 0
+    results  = {}
+    while finished < num_workers:
+        item = results_q.get()
+        if item is None:
+            finished += 1
+        else:
+            n, sq = item
+            results[n] = sq
+    print(f"\nCollector: gathered {len(results)} results")
+    print("Squares:", dict(sorted(results.items())))
+
+# Launch all threads
+threads = []
+threads.append(threading.Thread(target=producer, args=(range(1, 21),)))
+for i in range(NUM_WORKERS):
+    threads.append(threading.Thread(target=worker, args=(i,)))
+threads.append(threading.Thread(target=collector, args=(NUM_WORKERS,)))
+
+for t in threads: t.start()
+for t in threads: t.join()
+print("Pipeline complete")</code></pre>
+        </details>
+      </div>
+
+    </div><!-- /exercise-section -->
+
+    <div id="lesson-nav-footer"></div>
+  </div><!-- /content -->
+
+</div><!-- /main -->
+
+<script src="../assets/nav-data.js"></script>
+<script src="../assets/nav.js"></script>
+<script src="../assets/quiz.js"></script>
+<script src="../assets/highlight.js"></script>
+
+<script>
+buildLessonFooter();
+
+QuizWidget.render("quiz-section", [
+  {
+    question: "For which type of work do Python threads provide the most benefit?",
+    options: [
+      "CPU-bound work — number crunching and data processing",
+      "I/O-bound work — network requests, file reads, database queries",
+      "Both equally — threads always speed up Python programs",
+      "Neither — threads never improve performance in Python"
+    ],
+    correct: 1,
+    explanation: "The GIL prevents true parallelism for CPU-bound code — threads take turns running bytecode. For I/O-bound work the GIL is released while waiting for I/O, so other threads run during that wait time, giving genuine concurrency speedup."
+  },
+  {
+    question: "What is the Global Interpreter Lock (GIL)?",
+    options: [
+      "A lock that prevents two processes from sharing memory",
+      "A mutex in CPython that ensures only one thread executes Python bytecode at a time",
+      "A security feature that prevents unauthorised code execution",
+      "A lock that prevents global variables from being modified"
+    ],
+    correct: 1,
+    explanation: "The GIL is a mutex (mutual exclusion lock) in CPython that allows only one thread to execute Python bytecode at any given moment. It simplifies CPython's memory management but limits CPU-bound multi-threaded performance. It is released during I/O and C extensions."
+  },
+  {
+    question: "What is a race condition?",
+    options: [
+      "A situation where one thread runs faster than another",
+      "A bug where the result depends on the unpredictable timing of thread execution",
+      "A deadlock between two threads competing for the same lock",
+      "When a thread finishes before join() is called"
+    ],
+    correct: 1,
+    explanation: "A race condition occurs when two or more threads access shared mutable state without synchronisation, and the correctness of the result depends on which thread executes first. The classic example is a non-atomic read-modify-write (counter += 1) performed by multiple threads simultaneously."
+  },
+  {
+    question: "What is a deadlock?",
+    options: [
+      "When a thread raises an unhandled exception and dies",
+      "When a thread holds a Lock and tries to acquire the same Lock again",
+      "When two or more threads each wait for a lock held by another, blocking forever",
+      "When join() is called on a daemon thread"
+    ],
+    correct: 2,
+    explanation: "A deadlock occurs when thread A holds lock X and waits for lock Y, while thread B holds lock Y and waits for lock X. Neither can proceed. The most common fix is to always acquire multiple locks in the same order across all threads."
+  },
+  {
+    question: "What advantage does ThreadPoolExecutor have over creating threads manually?",
+    options: [
+      "It bypasses the GIL for CPU-bound work",
+      "It manages a reusable pool of threads, provides Future objects for results, and handles exceptions cleanly",
+      "It is faster than threading.Thread for I/O work",
+      "It automatically chooses between threads and processes based on workload"
+    ],
+    correct: 1,
+    explanation: "ThreadPoolExecutor manages a pool of reusable worker threads (avoiding the overhead of creating/destroying threads per task), returns Future objects that let you retrieve results or exceptions cleanly, and integrates with as_completed() for processing results as they arrive."
+  }
+]);
+</script>
+</body>
+</html>

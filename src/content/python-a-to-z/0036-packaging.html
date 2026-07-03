@@ -1,0 +1,639 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>L36 · Packaging &amp; pyproject.toml — Python A→Z</title>
+<link rel="stylesheet" href="../assets/style.css" />
+</head>
+<body>
+<div id="sidebar-placeholder"></div>
+<div id="main">
+  <div id="lesson-header">
+    <div class="lesson-track track-advanced">🟣 Advanced</div>
+    <h1>Packaging &amp; pyproject.toml</h1>
+    <div class="lesson-meta">
+      <span>📖 Lesson 36</span>
+      <span>⏱ 45 min</span>
+      <span>🧪 5 questions</span>
+      <span>💻 3 exercises</span>
+    </div>
+  </div>
+  <div id="content">
+
+    <div class="objectives"><h4>🎯 Learning Objectives</h4><ul>
+      <li>Understand the Python packaging ecosystem and the role of <code>pyproject.toml</code></li>
+      <li>Structure a distributable package with <code>src/</code> layout</li>
+      <li>Configure build metadata with Hatchling, Flit, or Setuptools</li>
+      <li>Declare dependencies, optional extras, and version constraints</li>
+      <li>Build source distributions (sdist) and wheels with <code>build</code></li>
+      <li>Publish packages to TestPyPI and PyPI with <code>twine</code></li>
+      <li>Automate versioning and releases with tools like <code>bump-my-version</code></li>
+    </ul></div>
+
+    <!-- ──────────────────────────────────────────── -->
+    <h2 id="why-package">1 · Why Package?</h2>
+
+    <p>In Python a <strong>module</strong> is a single <code>.py</code> file, a <strong>package</strong> is a directory containing an <code>__init__.py</code> (or, since Python 3.3, a namespace package without one), and a <strong>distribution package</strong> is the archive you upload to PyPI so others can <code>pip install</code> it.</p>
+
+    <p>Why bother turning your code into a proper distribution package?</p>
+    <ul>
+      <li><strong>Reusability</strong> — install the same library in many projects without copy-pasting.</li>
+      <li><strong>Dependency pinning</strong> — declare exactly what you need; pip resolves and installs it.</li>
+      <li><strong>Reproducible installs</strong> — lockfiles and wheels guarantee identical environments.</li>
+      <li><strong>Sharing</strong> — publish to PyPI and anyone in the world can <code>pip install yourpackage</code>.</li>
+    </ul>
+
+    <p>The tooling has evolved significantly over the years:</p>
+    <ol>
+      <li><code>distutils</code> (stdlib, now deprecated and removed in 3.12)</li>
+      <li><code>setuptools</code> with an imperative <code>setup.py</code></li>
+      <li>Declarative <code>setup.cfg</code> alongside a shim <code>setup.py</code></li>
+      <li><strong><code>pyproject.toml</code></strong> — the modern standard defined by PEP 517, PEP 518, and PEP 621</li>
+    </ol>
+
+    <div class="callout callout-concept">
+      <strong>pyproject.toml is the standard.</strong> As of 2024, <code>pyproject.toml</code> is the single canonical configuration file for Python projects. The old <code>setup.py</code> / <code>setup.cfg</code> approach still works but is considered legacy. New projects should always start with <code>pyproject.toml</code>.
+    </div>
+
+    <!-- ──────────────────────────────────────────── -->
+    <h2 id="project-layout">2 · Project Layout</h2>
+
+    <p>The recommended layout uses a <code>src/</code> directory to hold your importable package:</p>
+
+<pre><code>mypackage/                  ← repo root
+├── src/
+│   └── mypackage/
+│       ├── __init__.py
+│       ├── core.py
+│       └── utils.py
+├── tests/
+│   ├── __init__.py
+│   └── test_core.py
+├── pyproject.toml
+├── README.md
+└── LICENSE</code></pre>
+
+    <p><strong>Why the <code>src/</code> layout?</strong></p>
+    <ul>
+      <li>Prevents accidentally importing your <em>uninstalled</em> source tree (Python adds <code>.</code> to <code>sys.path</code>, so without <code>src/</code> you'd import from the repo root instead of the installed version).</li>
+      <li>Forces you to install the package (<code>pip install -e .</code>) before testing — catching packaging bugs early.</li>
+      <li>Produces cleaner wheel contents — only the code under <code>src/</code> ships.</li>
+    </ul>
+
+    <p>The <code>tests/</code> directory lives <em>outside</em> <code>src/</code> so it is not included in the built wheel by default.</p>
+
+    <p>A minimal <code>__init__.py</code> sets the public API and version:</p>
+
+    <div style="position:relative"><pre><code class="language-python">"""mypackage — a demonstration package."""
+
+__version__ = "0.1.0"
+
+from mypackage.core import process_data
+from mypackage.utils import slugify
+
+__all__ = ["process_data", "slugify"]</code></pre><span class="code-label">src/mypackage/__init__.py</span></div>
+
+    <!-- ──────────────────────────────────────────── -->
+    <h2 id="pyproject-anatomy">3 · <code>pyproject.toml</code> Anatomy</h2>
+
+    <p>A <code>pyproject.toml</code> is composed of three logical sections:</p>
+    <ol>
+      <li><strong><code>[build-system]</code></strong> — tells pip/build which backend to use.</li>
+      <li><strong><code>[project]</code></strong> — standard metadata (PEP 621): name, version, dependencies, etc.</li>
+      <li><strong>Tool-specific tables</strong> — e.g. <code>[tool.hatch]</code>, <code>[tool.pytest.ini_options]</code>, <code>[tool.ruff]</code>.</li>
+    </ol>
+
+    <p>Here is a complete, annotated example using <strong>Hatchling</strong>:</p>
+
+    <div style="position:relative"><pre><code class="language-toml">[build-system]
+requires      = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name            = "mypackage"
+version         = "0.1.0"
+description     = "A short description of what mypackage does"
+readme          = "README.md"
+license         = { text = "MIT" }
+requires-python = ">=3.10"
+authors         = [{ name = "Alice Dev", email = "alice@example.com" }]
+keywords        = ["example", "packaging"]
+classifiers     = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+
+dependencies = [
+    "httpx>=0.27,<1",
+    "pydantic>=2.0",
+]
+
+[project.optional-dependencies]
+dev  = ["pytest>=8", "pytest-cov", "mypy", "ruff"]
+docs = ["mkdocs", "mkdocs-material"]
+
+[project.urls]
+Homepage      = "https://github.com/alice/mypackage"
+Documentation = "https://mypackage.readthedocs.io"
+"Bug Tracker" = "https://github.com/alice/mypackage/issues"
+
+[project.scripts]
+mypackage-cli = "mypackage.cli:main"</code></pre><span class="code-label">pyproject.toml</span></div>
+
+    <p><strong>Field-by-field breakdown:</strong></p>
+    <ul>
+      <li><code>name</code> — the distribution name on PyPI. Must be unique; normalised to lowercase with hyphens replaced by dashes (e.g. <code>My_Package</code> → <code>my-package</code>).</li>
+      <li><code>version</code> — follows <a href="https://semver.org">SemVer</a>. Can also be dynamic (read from source).</li>
+      <li><code>description</code> — one-line summary shown on PyPI.</li>
+      <li><code>readme</code> — path to the long description file (rendered as the PyPI project page).</li>
+      <li><code>license</code> — SPDX expression or <code>{ text = "..." }</code>.</li>
+      <li><code>requires-python</code> — minimum Python version using PEP 440 specifiers.</li>
+      <li><code>authors</code> — list of <code>{ name, email }</code> tables.</li>
+      <li><code>classifiers</code> — <a href="https://pypi.org/classifiers/">Trove classifiers</a> for discovery on PyPI.</li>
+      <li><code>dependencies</code> — runtime requirements using PEP 440 version specifiers.</li>
+      <li><code>optional-dependencies</code> — extras installed via <code>pip install mypackage[dev]</code>.</li>
+      <li><code>urls</code> — links shown on the PyPI sidebar.</li>
+      <li><code>scripts</code> — console entry points. <code>"mypackage.cli:main"</code> means "import <code>main</code> from <code>mypackage.cli</code> and call it".</li>
+    </ul>
+
+    <!-- ──────────────────────────────────────────── -->
+    <h2 id="version-specifiers">4 · Version Specifiers &amp; Dependency Pinning</h2>
+
+    <p>PEP 440 defines how to express version constraints. Mastering these is critical for writing correct <code>dependencies</code>.</p>
+
+    <table>
+      <thead><tr><th>Specifier</th><th>Meaning</th><th>When to use</th></tr></thead>
+      <tbody>
+        <tr><td><code>&gt;=1.2,&lt;2</code></td><td>At least 1.2, below 2.0</td><td>Libraries — allows compatible updates</td></tr>
+        <tr><td><code>~=1.4.2</code></td><td>Compatible release (≥1.4.2, &lt;1.5.0)</td><td>When you trust patch/minor semver</td></tr>
+        <tr><td><code>==1.2.3</code></td><td>Exact pin</td><td>Lockfiles &amp; applications only</td></tr>
+        <tr><td><code>!=1.3.*</code></td><td>Exclude all 1.3.x releases</td><td>Known-broken versions</td></tr>
+        <tr><td><em>(no specifier)</em></td><td>Any version at all</td><td>⚠️ Dangerous — avoid</td></tr>
+      </tbody>
+    </table>
+
+    <div class="callout callout-warn">
+      <strong>Libraries vs Applications:</strong> In a <em>library's</em> <code>pyproject.toml</code> pin <strong>loosely</strong> (<code>>=1.2,<2</code>) so consumers can resolve compatible versions. In an <em>application's</em> lockfile (<code>requirements.txt</code>, <code>uv.lock</code>) pin <strong>tightly</strong> (<code>==1.2.3</code>) for reproducibility.
+    </div>
+
+    <p>Tools for generating lockfiles from loose constraints:</p>
+    <ul>
+      <li><code>pip-compile</code> (from <strong>pip-tools</strong>) — <code>pip-compile pyproject.toml -o requirements.lock</code></li>
+      <li><code>uv lock</code> (from <strong>uv</strong>) — extremely fast Rust-based resolver</li>
+    </ul>
+
+    <!-- ──────────────────────────────────────────── -->
+    <h2 id="build-backends">5 · Build Backends</h2>
+
+    <p>PEP 517 introduced a clean separation between <em>build frontends</em> (like <code>pip</code> or <code>python -m build</code>) and <em>build backends</em> that actually produce the wheel. You pick a backend via <code>[build-system]</code>:</p>
+
+    <table>
+      <thead><tr><th>Backend</th><th><code>requires</code> value</th><th>Best for</th></tr></thead>
+      <tbody>
+        <tr><td><strong>Hatchling</strong></td><td><code>hatchling</code></td><td>Modern projects, zero config</td></tr>
+        <tr><td><strong>Flit-core</strong></td><td><code>flit_core&gt;=3.2.0</code></td><td>Pure-Python, minimal config</td></tr>
+        <tr><td><strong>Setuptools</strong></td><td><code>setuptools&gt;=61</code></td><td>Legacy/complex builds, C extensions</td></tr>
+        <tr><td><strong>Maturin</strong></td><td><code>maturin</code></td><td>Rust extensions (PyO3)</td></tr>
+        <tr><td><strong>scikit-build-core</strong></td><td><code>scikit-build-core</code></td><td>CMake / C++ extensions</td></tr>
+      </tbody>
+    </table>
+
+    <p>Example <code>[build-system]</code> blocks:</p>
+
+    <div style="position:relative"><pre><code class="language-toml"># Hatchling (recommended default)
+[build-system]
+requires      = ["hatchling"]
+build-backend = "hatchling.build"
+
+# Flit
+[build-system]
+requires      = ["flit_core>=3.2.0"]
+build-backend = "flit_core.buildapi"
+
+# Setuptools (modern declarative)
+[build-system]
+requires      = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+# Maturin (Rust)
+[build-system]
+requires      = ["maturin>=1.0"]
+build-backend = "maturin"</code></pre><span class="code-label">pyproject.toml (build-system variants)</span></div>
+
+    <div class="callout callout-concept">
+      <strong>Frontend ≠ Backend.</strong> PEP 517 decouples the build frontend (<code>pip</code>, <code>build</code>, <code>uv</code>) from the backend. You can swap backends without changing your build command — just update <code>[build-system]</code>.
+    </div>
+
+    <!-- ──────────────────────────────────────────── -->
+    <h2 id="building">6 · Building a Distribution</h2>
+
+    <p>Install the standard build frontend:</p>
+
+    <div style="position:relative"><pre><code class="language-bash">pip install build</code></pre><span class="code-label">terminal</span></div>
+
+    <p>Then build your package:</p>
+
+    <div style="position:relative"><pre><code class="language-bash"># Build both sdist and wheel (recommended)
+python -m build
+
+# Build only wheel
+python -m build --wheel
+
+# Build only source distribution
+python -m build --sdist</code></pre><span class="code-label">terminal</span></div>
+
+    <p>After a successful build, the <code>dist/</code> directory contains:</p>
+    <ul>
+      <li><code>mypackage-0.1.0.tar.gz</code> — the <strong>sdist</strong> (source distribution). Contains your source code plus <code>pyproject.toml</code>; anyone can build a wheel from it.</li>
+      <li><code>mypackage-0.1.0-py3-none-any.whl</code> — the <strong>wheel</strong>. Pre-built, installs in milliseconds with no build step required.</li>
+    </ul>
+
+    <p><strong>Wheel filename anatomy:</strong></p>
+<pre><code>{name}-{version}-{python_tag}-{abi_tag}-{platform_tag}.whl
+
+mypackage-0.1.0-py3-none-any.whl
+│             │   │    │     └─ any platform
+│             │   │    └─ no ABI dependency
+│             │   └─ Python 3 (any minor)
+│             └─ version
+└─ distribution name</code></pre>
+
+    <p>A pure-Python wheel uses <code>py3-none-any</code>. Packages with C extensions produce platform-specific wheels like <code>cp312-cp312-manylinux_2_17_x86_64.whl</code>.</p>
+
+    <div class="callout callout-tip">
+      <strong>Build in isolation.</strong> By default <code>python -m build</code> creates a temporary virtualenv for the build. This ensures reproducibility. Only use <code>--no-isolation</code> if you have a specific reason (e.g. pre-installed build deps in CI).
+    </div>
+
+    <!-- ──────────────────────────────────────────── -->
+    <h2 id="publishing">7 · Publishing to PyPI</h2>
+
+    <p>The full publish workflow:</p>
+
+    <div style="position:relative"><pre><code class="language-bash"># 1 — Install twine
+pip install twine
+
+# 2 — Check the distribution files for common errors
+twine check dist/*
+
+# 3 — Upload to TestPyPI first (always test before real PyPI)
+twine upload --repository testpypi dist/*
+
+# 4 — Install from TestPyPI to verify
+pip install --index-url https://test.pypi.org/simple/ mypackage
+
+# 5 — Publish to real PyPI
+twine upload dist/*</code></pre><span class="code-label">terminal</span></div>
+
+    <p><strong>Key points:</strong></p>
+    <ul>
+      <li>Create accounts at <a href="https://pypi.org">pypi.org</a> and <a href="https://test.pypi.org">test.pypi.org</a> (they are separate).</li>
+      <li>Use <strong>API tokens</strong> — not username/password. Store them in <code>~/.pypirc</code> or as environment variables.</li>
+      <li>Package names must be <strong>globally unique</strong> on PyPI.</li>
+      <li>Once a version is uploaded it <strong>cannot be overwritten</strong> — always bump the version for fixes.</li>
+    </ul>
+
+    <p>A minimal <code>~/.pypirc</code>:</p>
+
+    <div style="position:relative"><pre><code class="language-ini">[distutils]
+index-servers = pypi testpypi
+
+[pypi]
+repository = https://upload.pypi.org/legacy/
+username   = __token__
+password   = pypi-&lt;YOUR_API_TOKEN&gt;
+
+[testpypi]
+repository = https://test.pypi.org/legacy/
+username   = __token__
+password   = pypi-&lt;YOUR_TESTPYPI_TOKEN&gt;</code></pre><span class="code-label">~/.pypirc</span></div>
+
+    <div class="callout callout-warn">
+      <strong>Never commit API tokens to git.</strong> Use environment variables (<code>TWINE_USERNAME</code> / <code>TWINE_PASSWORD</code>) or a secrets manager in CI. Add <code>.pypirc</code> to your global gitignore.
+    </div>
+
+    <!-- ──────────────────────────────────────────── -->
+    <h2 id="ci-releases">8 · Automating Releases with CI</h2>
+
+    <p>A minimal GitHub Actions workflow that publishes to PyPI whenever you push a version tag:</p>
+
+    <div style="position:relative"><pre><code class="language-yaml">name: Publish to PyPI
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install build twine
+      - run: python -m build
+      - run: twine upload dist/*
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}</code></pre><span class="code-label">.github/workflows/publish.yml</span></div>
+
+    <p><strong>Trusted Publishing (OIDC)</strong> — the modern, zero-secret alternative. Instead of storing a long-lived API token, you configure PyPI to trust your GitHub Actions workflow directly via OpenID Connect. No secrets to rotate, no tokens to leak. See the <a href="https://docs.pypi.org/trusted-publishers/">PyPI Trusted Publishers documentation</a>.</p>
+
+    <p><strong>Automating version bumps</strong> with <code>bump-my-version</code>:</p>
+
+    <div style="position:relative"><pre><code class="language-bash"># Install
+pip install bump-my-version
+
+# Bump patch: 0.1.0 → 0.1.1 (commits + tags automatically)
+bump-my-version bump patch
+
+# Bump minor: 0.1.1 → 0.2.0
+bump-my-version bump minor
+
+# Bump major: 0.2.0 → 1.0.0
+bump-my-version bump major
+
+# Push the tag to trigger the CI publish workflow
+git push --follow-tags</code></pre><span class="code-label">terminal</span></div>
+
+    <p>Configure it in <code>pyproject.toml</code>:</p>
+
+    <div style="position:relative"><pre><code class="language-toml">[tool.bumpversion]
+current_version = "0.1.0"
+commit          = true
+tag             = true
+
+[[tool.bumpversion.files]]
+filename = "pyproject.toml"
+search   = 'version = "{current_version}"'
+replace  = 'version = "{new_version}"'
+
+[[tool.bumpversion.files]]
+filename = "src/mypackage/__init__.py"
+search   = '__version__ = "{current_version}"'
+replace  = '__version__ = "{new_version}"'</code></pre><span class="code-label">pyproject.toml (bump-my-version config)</span></div>
+
+    <p>With this setup, a single <code>bump-my-version bump patch &amp;&amp; git push --follow-tags</code> updates the version everywhere, commits, tags, and pushes — triggering your CI to build and publish automatically.</p>
+
+    <!-- ── 9. Editable Installs & Development Workflow ── -->
+    <h2 id="editable-installs">Editable Installs &amp; Development Workflow</h2>
+    <p>
+      During development you want changes to your source files to be reflected immediately
+      without reinstalling. An <strong>editable install</strong> (also called a "develop install")
+      links the package into your environment rather than copying it.
+    </p>
+    <div style="position:relative">
+      <pre><code class="language-bash"># Install your package in editable mode
+pip install -e .
+
+# Install with optional dev extras too
+pip install -e ".[dev]"
+
+# Verify it is listed as editable
+pip show mypackage        # Location points to your src/ directory</code></pre>
+      <span class="code-label">terminal</span>
+    </div>
+    <p>
+      With an editable install, editing <code>src/mypackage/core.py</code> is immediately
+      visible to any script that imports <code>mypackage</code> — no reinstall required.
+      Tests, scripts, and notebooks all see live changes.
+    </p>
+    <div class="callout callout-concept">
+      PEP 660 standardised editable installs for PEP 517 backends. Hatchling, Setuptools ≥ 64,
+      and Flit-core all support it. If <code>pip install -e .</code> fails, upgrade pip:
+      <code>pip install --upgrade pip</code>.
+    </div>
+
+    <h3>Recommended Daily Workflow</h3>
+    <ol>
+      <li>Create and activate a virtual environment: <code>python -m venv .venv &amp;&amp; source .venv/bin/activate</code></li>
+      <li>Editable-install with dev extras: <code>pip install -e ".[dev]"</code></li>
+      <li>Code, run tests with <code>pytest</code>, lint with <code>ruff check .</code></li>
+      <li>Bump version: <code>bump-my-version bump patch</code></li>
+      <li>Build: <code>python -m build</code> — inspect <code>dist/</code></li>
+      <li>Publish: <code>twine upload dist/*</code> (or push a tag to trigger CI)</li>
+    </ol>
+
+    <!-- ── 10. Best Practices ── -->
+    <h2 id="best-practices">Best Practices</h2>
+    <ul>
+      <li><strong>Always use the <code>src/</code> layout</strong> — it prevents your uninstalled package from being importable by accident and mirrors how it will behave once installed.</li>
+      <li><strong>Specify <code>requires-python</code></strong> — prevents installation on unsupported Python versions and communicates your support matrix clearly.</li>
+      <li><strong>Pin loosely in library dependencies</strong> — use ranges like <code>httpx&gt;=0.27,&lt;1</code> in <code>pyproject.toml</code>; reserve tight pins for application lockfiles (<code>requirements.txt</code>, <code>uv.lock</code>).</li>
+      <li><strong>Use API tokens, not passwords</strong> — create per-project tokens on PyPI with minimal scope; rotate them regularly.</li>
+      <li><strong>Test on TestPyPI first</strong> — once a version is uploaded to PyPI it cannot be deleted or overwritten. Always verify with TestPyPI.</li>
+      <li><strong>Automate with CI</strong> — tag-triggered GitHub Actions workflows remove human error from the release process.</li>
+      <li><strong>Include a <code>LICENSE</code> file</strong> — without one, legally no one can use your code. MIT or Apache-2.0 are standard open-source choices.</li>
+      <li><strong>Write a useful <code>README.md</code></strong> — it becomes your PyPI landing page. Include install instructions, a quick-start example, and a link to full docs.</li>
+    </ul>
+
+    <div class="callout callout-tip">
+      <strong>Modern alternative: <code>uv</code></strong> — <code>uv</code> (from Astral) is a next-generation
+      package manager that replaces pip, pip-tools, venv, and twine in one blazing-fast tool.
+      <code>uv build</code> builds distributions; <code>uv publish</code> uploads them; <code>uv lock</code>
+      generates a lockfile. It reads the same <code>pyproject.toml</code> — no migration needed.
+    </div>
+
+    <!-- ── Exercises ── -->
+    <h2 id="exercises">Exercises</h2>
+    <div class="exercise-section">
+
+      <div class="exercise">
+        <h3>Exercise 1 — Create and Install a Package</h3>
+        <p>Build a distributable package called <code>texttools</code> from scratch:</p>
+        <ul>
+          <li>Create the <code>src/texttools/</code> layout with <code>__init__.py</code> and <code>transforms.py</code>.</li>
+          <li>Implement three functions in <code>transforms.py</code>: <code>slugify(text)</code> (lowercase, spaces→hyphens, strip non-alphanumeric), <code>truncate(text, max_len, suffix="…")</code>, and <code>word_count(text) -&gt; dict[str, int]</code>.</li>
+          <li>Write a <code>pyproject.toml</code> using Hatchling with <code>requires-python = "&gt;=3.10"</code>, no external dependencies, and a <code>dev</code> extra for <code>pytest</code>.</li>
+          <li>Install with <code>pip install -e ".[dev]"</code> and verify <code>import texttools</code> works.</li>
+          <li>Write three pytest tests (one per function) in <code>tests/test_transforms.py</code> and run them with <code>pytest -v</code>.</li>
+        </ul>
+        <details>
+          <summary>💡 Hint — pyproject.toml</summary>
+          <pre><code class="language-toml">[build-system]
+requires      = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name            = "texttools"
+version         = "0.1.0"
+description     = "Handy text transformation utilities"
+readme          = "README.md"
+requires-python = ">=3.10"
+dependencies    = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]</code></pre>
+        </details>
+        <details>
+          <summary>💡 Hint — transforms.py</summary>
+          <pre><code class="language-python">import re
+from collections import Counter
+
+def slugify(text: str) -> str:
+    text = text.lower().strip()
+    text = re.sub(r"[^\w\s-]", "", text)
+    return re.sub(r"[\s_]+", "-", text)
+
+def truncate(text: str, max_len: int, suffix: str = "…") -> str:
+    if len(text) <= max_len:
+        return text
+    return text[: max_len - len(suffix)] + suffix
+
+def word_count(text: str) -> dict[str, int]:
+    words = re.findall(r"\b\w+\b", text.lower())
+    return dict(Counter(words))</code></pre>
+        </details>
+      </div>
+
+      <div class="exercise">
+        <h3>Exercise 2 — Optional Extras &amp; Entry Points</h3>
+        <p>Extend the <code>texttools</code> package from Exercise 1:</p>
+        <ul>
+          <li>Add a <code>cli.py</code> module with a <code>main()</code> function that accepts a subcommand: <code>texttools-cli slugify "Hello World"</code>, <code>texttools-cli wordcount "some text here"</code>.</li>
+          <li>Register it as a <code>[project.scripts]</code> entry point in <code>pyproject.toml</code>.</li>
+          <li>Add an <code>http</code> optional extra that depends on <code>httpx&gt;=0.27</code>; add a <code>fetch.py</code> module that uses it.</li>
+          <li>Re-install with <code>pip install -e ".[dev,http]"</code> and verify the CLI works: <code>texttools-cli slugify "Hello World"</code> should print <code>hello-world</code>.</li>
+        </ul>
+        <details>
+          <summary>💡 Hint — cli.py</summary>
+          <pre><code class="language-python">import sys
+from texttools.transforms import slugify, word_count
+
+def main() -> None:
+    if len(sys.argv) < 3:
+        print("Usage: texttools-cli <command> <text>")
+        sys.exit(1)
+    cmd, text = sys.argv[1], sys.argv[2]
+    if cmd == "slugify":
+        print(slugify(text))
+    elif cmd == "wordcount":
+        for word, count in sorted(word_count(text).items()):
+            print(f"{word}: {count}")
+    else:
+        print(f"Unknown command: {cmd}")
+        sys.exit(1)</code></pre>
+        </details>
+        <details>
+          <summary>💡 Hint — pyproject.toml additions</summary>
+          <pre><code class="language-toml">[project.scripts]
+texttools-cli = "texttools.cli:main"
+
+[project.optional-dependencies]
+dev  = ["pytest>=8"]
+http = ["httpx>=0.27,<1"]</code></pre>
+        </details>
+      </div>
+
+      <div class="exercise">
+        <h3>Exercise 3 — Build, Check &amp; Publish to TestPyPI</h3>
+        <p>Take <code>texttools</code> through the full release pipeline:</p>
+        <ul>
+          <li>Ensure your <code>README.md</code> has an install snippet and a 3-line usage example.</li>
+          <li>Run <code>python -m build</code> — confirm both a <code>.tar.gz</code> and a <code>.whl</code> appear in <code>dist/</code>.</li>
+          <li>Run <code>twine check dist/*</code> — fix any warnings before continuing.</li>
+          <li>Create a free account at <a href="https://test.pypi.org" target="_blank">test.pypi.org</a>, generate an API token, and upload: <code>twine upload --repository testpypi dist/*</code>.</li>
+          <li>In a fresh virtualenv, install from TestPyPI and confirm the CLI works end-to-end.</li>
+        </ul>
+        <details>
+          <summary>💡 Full command sequence</summary>
+          <pre><code class="language-bash"># Build
+python -m build
+
+# Check metadata
+twine check dist/*
+
+# Upload to TestPyPI
+TWINE_USERNAME=__token__ TWINE_PASSWORD=pypi-&lt;token&gt; \
+  twine upload --repository-url https://test.pypi.org/legacy/ dist/*
+
+# Fresh environment test
+python -m venv /tmp/test-env
+source /tmp/test-env/bin/activate
+pip install --index-url https://test.pypi.org/simple/ texttools
+texttools-cli slugify "Hello World"    # → hello-world</code></pre>
+        </details>
+      </div>
+
+    </div><!-- /exercise-section -->
+
+    <div id="quiz-section"></div>
+
+    <div id="lesson-nav-footer"></div>
+  </div><!-- /content -->
+</div><!-- /main -->
+
+<script src="../assets/nav-data.js"></script>
+<script src="../assets/nav.js"></script>
+<script src="../assets/quiz.js"></script>
+<script src="../assets/highlight.js"></script>
+
+<script>
+buildLessonFooter();
+
+QuizWidget.render("quiz-section", [
+  {
+    question: "What is the main advantage of the src/ layout over placing your package directly in the repo root?",
+    options: [
+      "It makes Python find the package faster at import time",
+      "It prevents accidentally importing the uninstalled source instead of the installed package, and keeps tests honest",
+      "It is required by pyproject.toml and will fail to build otherwise",
+      "It automatically generates __init__.py files for all sub-packages"
+    ],
+    correct: 1,
+    explanation: "With a flat layout (mypackage/ at the repo root), Python's import system finds the source directory on sys.path before the installed package — so you can run tests that pass locally but fail for users who installed it. The src/ layout forces you to pip install -e . first, meaning tests always exercise the installed package exactly as users will see it."
+  },
+  {
+    question: "Which PEP 440 version specifier means 'compatible with 1.4.2 — same as >=1.4.2,<1.5'?",
+    options: [
+      "==1.4.*",
+      ">=1.4.2",
+      "~=1.4.2",
+      "^1.4.2"
+    ],
+    correct: 2,
+    explanation: "~=1.4.2 is the 'compatible release' specifier — it expands to >=1.4.2,<1.5. It allows patch-level updates but not minor-version bumps. Note that ^1.4.2 (caret) is NOT valid PEP 440 — it is a npm/Poetry concept. ==1.4.* matches any 1.4.x but is an exact wildcard, not a compatible-release specifier."
+  },
+  {
+    question: "What does `twine check dist/*` do?",
+    options: [
+      "Uploads the distributions to TestPyPI in dry-run mode",
+      "Validates distribution metadata and renders the README to catch formatting errors before upload",
+      "Checks that the package version does not already exist on PyPI",
+      "Runs the test suite inside the built wheel to verify correctness"
+    ],
+    correct: 1,
+    explanation: "twine check validates the distribution's metadata (PKG-INFO / METADATA) and attempts to render the README as reStructuredText or Markdown. It catches common issues — missing fields, invalid classifiers, broken README markup — before you waste an upload attempt on PyPI. It does NOT contact PyPI or run tests."
+  },
+  {
+    question: "In pyproject.toml, where should you declare a command-line script entry point so that `pip install` creates an executable?",
+    options: [
+      "[project.entry-points.console_scripts]",
+      "[project.scripts]",
+      "[build-system.scripts]",
+      "[tool.setuptools.scripts]"
+    ],
+    correct: 1,
+    explanation: "[project.scripts] is the PEP 621 standard table for console scripts. Each key becomes the command name installed on PATH; the value is 'module:callable'. For example: my-cli = 'mypackage.cli:main'. The older [project.entry-points.console_scripts] table is the setuptools-era equivalent and still works, but [project.scripts] is the modern PEP 621 spelling."
+  },
+  {
+    question: "Why should library packages use loose version ranges (e.g. httpx>=0.27,<1) rather than exact pins (httpx==0.27.3) in their pyproject.toml dependencies?",
+    options: [
+      "Exact pins are not valid PEP 440 syntax in pyproject.toml",
+      "Loose ranges let pip's resolver find a compatible version that satisfies all installed packages; exact pins cause conflicts when multiple libraries pin different versions of the same dependency",
+      "Loose ranges make pip download faster because it skips version negotiation",
+      "Exact pins are reserved for dev extras and are ignored for runtime dependencies"
+    ],
+    correct: 1,
+    explanation: "When many libraries are installed together, pip's resolver must find one version of each dependency that satisfies all constraints. If library A pins httpx==0.27.3 and library B pins httpx==0.28.1, resolution is impossible. Loose ranges give the resolver room to manoeuvre. Save exact pins for application lockfiles (requirements.txt, uv.lock) where you control the full environment."
+  }
+]);
+</script>
+</body>
+</html>

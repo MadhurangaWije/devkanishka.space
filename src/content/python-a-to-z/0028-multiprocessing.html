@@ -1,0 +1,796 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>L28 · Multiprocessing — Python A→Z</title>
+<link rel="stylesheet" href="../assets/style.css" />
+</head>
+<body>
+
+<div id="sidebar-placeholder"></div>
+
+<div id="main">
+
+  <!-- ── Lesson Header ── -->
+  <div id="lesson-header">
+    <div class="lesson-track track-advanced">🟣 Advanced</div>
+    <h1>Multiprocessing</h1>
+    <div class="lesson-meta">
+      <span>📖 Lesson 28</span>
+      <span>⏱ 40 min</span>
+      <span>🧪 5 questions</span>
+      <span>💻 3 exercises</span>
+    </div>
+  </div>
+
+  <!-- ── Content ── -->
+  <div id="content">
+
+    <!-- Objectives -->
+    <div class="objectives">
+      <h4>🎯 Learning Objectives</h4>
+      <ul>
+        <li>Understand how multiprocessing bypasses the GIL for true parallelism</li>
+        <li>Create and manage processes with <code>multiprocessing.Process</code></li>
+        <li>Use <code>ProcessPoolExecutor</code> for high-level parallel execution</li>
+        <li>Share data between processes with <code>Queue</code>, <code>Pipe</code>, <code>Value</code>, and <code>Array</code></li>
+        <li>Understand pickling requirements and platform differences</li>
+        <li>Choose between threads, processes, and async for different workloads</li>
+      </ul>
+    </div>
+
+
+    <!-- ── 1. Processes vs Threads ── -->
+    <h2 id="processes-vs-threads">Processes vs Threads</h2>
+    <p>
+      While threads share memory within one process, each <strong>process</strong>
+      gets its own completely independent memory space and Python interpreter.
+      This means there is <strong>no GIL contention</strong> — CPU-bound code runs
+      truly in parallel across all CPU cores.
+    </p>
+
+    <div style="position:relative">
+      <pre><code class="language-text">Threading (shared memory, one GIL):
+┌──────────────────────────────────┐
+│          Process (1 GIL)         │
+│  Thread 1 ──┐                    │
+│  Thread 2 ──┤── shared memory    │
+│  Thread 3 ──┘                    │
+└──────────────────────────────────┘
+
+Multiprocessing (separate memory, no GIL):
+┌───────────────┐  ┌───────────────┐  ┌───────────────┐
+│  Process 1    │  │  Process 2    │  │  Process 3    │
+│  own GIL      │  │  own GIL      │  │  own GIL      │
+│  own memory   │  │  own memory   │  │  own memory   │
+└───────────────┘  └───────────────┘  └───────────────┘</code></pre>
+      <span class="code-label">comparison.txt</span>
+    </div>
+
+    <div style="position:relative">
+      <pre><code class="language-python">import multiprocessing
+import threading
+import time
+
+def cpu_work(n):
+    return sum(i * i for i in range(n))
+
+N = 5_000_000
+WORKERS = 4
+
+# Sequential baseline
+start = time.perf_counter()
+for _ in range(WORKERS):
+    cpu_work(N)
+seq = time.perf_counter() - start
+
+# Threading — limited by GIL
+start = time.perf_counter()
+threads = [threading.Thread(target=cpu_work, args=(N,)) for _ in range(WORKERS)]
+for t in threads: t.start()
+for t in threads: t.join()
+thr = time.perf_counter() - start
+
+# Multiprocessing — true parallelism
+start = time.perf_counter()
+procs = [multiprocessing.Process(target=cpu_work, args=(N,)) for _ in range(WORKERS)]
+for p in procs: p.start()
+for p in procs: p.join()
+mp = time.perf_counter() - start
+
+print(f"Sequential:     {seq:.2f}s")
+print(f"Threading:      {thr:.2f}s  (~same as sequential)")
+print(f"Multiprocessing:{mp:.2f}s  (~{seq/mp:.1f}x faster)")</code></pre>
+      <span class="code-label">perf_comparison.py</span>
+    </div>
+
+    <div class="callout callout-concept">
+      Use <strong>multiprocessing</strong> when your bottleneck is the CPU.
+      Use <strong>threading</strong> or <strong>asyncio</strong> when your bottleneck
+      is I/O. Spawning processes is expensive (seconds of startup vs microseconds
+      for threads) — always use a pool rather than creating processes per-task.
+    </div>
+
+
+    <!-- ── 2. multiprocessing.Process ── -->
+    <h2 id="process-basics">multiprocessing.Process</h2>
+
+    <div style="position:relative">
+      <pre><code class="language-python">import multiprocessing
+import os
+
+def worker(name):
+    print(f"Worker {name}: PID={os.getpid()}, parent={os.getppid()}")
+
+if __name__ == "__main__":   # ← REQUIRED on Windows / macOS (spawn start method)
+    p = multiprocessing.Process(target=worker, args=("Alpha",))
+    p.start()
+    p.join()
+    print(f"Main PID={os.getpid()}")
+
+# Each process has its own PID and memory — changes don't affect the parent</code></pre>
+      <span class="code-label">process_basic.py</span>
+    </div>
+
+    <div class="callout callout-warning">
+      <strong>Always guard with <code>if __name__ == "__main__":</code></strong> when
+      using multiprocessing on Windows and macOS (which use the <em>spawn</em> start
+      method). Without this guard, each new process re-imports the module, spawning
+      more processes recursively until the OS runs out of resources.
+    </div>
+
+    <h3>Process options</h3>
+    <div style="position:relative">
+      <pre><code class="language-python">import multiprocessing
+
+def task(x):
+    return x ** 2
+
+if __name__ == "__main__":
+    p = multiprocessing.Process(
+        target=task,
+        args=(5,),
+        name="squarer",
+        daemon=False,    # daemon process exits when parent exits
+    )
+    p.start()
+    p.join(timeout=10)   # wait at most 10 seconds
+
+    if p.is_alive():
+        p.terminate()    # SIGTERM — ask to stop
+        p.join()
+
+    print(f"Exit code: {p.exitcode}")   # 0 = clean exit</code></pre>
+      <span class="code-label">process_options.py</span>
+    </div>
+
+
+    <!-- ── 3. ProcessPoolExecutor ── -->
+    <h2 id="process-pool">ProcessPoolExecutor</h2>
+    <p>
+      The high-level way to run CPU-bound tasks in parallel — mirrors
+      <code>ThreadPoolExecutor</code> from Lesson 27:
+    </p>
+
+    <div style="position:relative">
+      <pre><code class="language-python">from concurrent.futures import ProcessPoolExecutor, as_completed
+import math
+
+def is_prime(n):
+    """CPU-bound primality test."""
+    if n < 2: return False
+    if n == 2: return True
+    if n % 2 == 0: return False
+    for i in range(3, int(math.sqrt(n)) + 1, 2):
+        if n % i == 0:
+            return False
+    return True
+
+if __name__ == "__main__":
+    candidates = range(10_000_000, 10_001_000)
+
+    # map — submit all, get results in order
+    with ProcessPoolExecutor() as executor:   # defaults to cpu_count() workers
+        primes = [n for n, p in zip(candidates, executor.map(is_prime, candidates)) if p]
+    print(f"Found {len(primes)} primes: {primes[:5]}…")
+
+    # submit + as_completed — results arrive as they finish
+    with ProcessPoolExecutor(max_workers=4) as executor:
+        futures = {executor.submit(is_prime, n): n for n in candidates[:20]}
+        for future in as_completed(futures):
+            n = futures[future]
+            if future.result():
+                print(f"{n} is prime")</code></pre>
+      <span class="code-label">process_pool.py</span>
+    </div>
+
+    <div class="callout callout-tip">
+      <code>ProcessPoolExecutor()</code> with no argument defaults to
+      <code>os.cpu_count()</code> workers. For most CPU-bound workloads this is optimal.
+      Don't create more workers than CPU cores — you get context-switching overhead
+      without extra throughput.
+    </div>
+
+
+    <!-- ── 4. multiprocessing.Pool (legacy) ── -->
+    <h2 id="mp-pool">multiprocessing.Pool</h2>
+    <p>
+      The older (but still widely used) pool API. Prefer
+      <code>ProcessPoolExecutor</code> for new code, but you will see
+      <code>Pool</code> in many codebases:
+    </p>
+
+    <div style="position:relative">
+      <pre><code class="language-python">import multiprocessing
+
+def square(n):
+    return n ** 2
+
+if __name__ == "__main__":
+    with multiprocessing.Pool(processes=4) as pool:
+        # map — synchronous: blocks until all results are ready
+        results = pool.map(square, range(10))
+        print(results)   # [0, 1, 4, 9, 16, 25, 36, 49, 64, 81]
+
+        # imap — lazy iterator version (memory efficient)
+        for result in pool.imap(square, range(10)):
+            print(result, end=" ")
+
+        # starmap — when each task takes multiple arguments
+        pairs = [(2, 3), (4, 5), (6, 7)]
+        results = pool.starmap(pow, pairs)
+        print(results)   # [8, 1024, 279936]
+
+        # apply_async — non-blocking single call
+        ar = pool.apply_async(square, (42,))
+        print(ar.get(timeout=5))   # 1764</code></pre>
+      <span class="code-label">mp_pool.py</span>
+    </div>
+
+
+    <!-- ── 5. Sharing Data Between Processes ── -->
+    <h2 id="sharing-data">Sharing Data Between Processes</h2>
+    <p>
+      Processes don't share memory. Python provides several mechanisms to pass
+      data between them:
+    </p>
+
+    <h3>Queue — thread & process safe FIFO</h3>
+    <div style="position:relative">
+      <pre><code class="language-python">import multiprocessing
+
+def producer(q, items):
+    for item in items:
+        q.put(item)
+    q.put(None)   # sentinel
+
+def consumer(q, results):
+    while True:
+        item = q.get()
+        if item is None:
+            break
+        results.put(item ** 2)
+    results.put(None)
+
+if __name__ == "__main__":
+    work_q    = multiprocessing.Queue()
+    results_q = multiprocessing.Queue()
+
+    p1 = multiprocessing.Process(target=producer, args=(work_q, range(10)))
+    p2 = multiprocessing.Process(target=consumer, args=(work_q, results_q))
+
+    p1.start(); p2.start()
+    p1.join();  p2.join()
+
+    squares = []
+    while True:
+        item = results_q.get()
+        if item is None: break
+        squares.append(item)
+    print(squares)</code></pre>
+      <span class="code-label">mp_queue.py</span>
+    </div>
+
+    <h3>Pipe — two-way communication</h3>
+    <div style="position:relative">
+      <pre><code class="language-python">import multiprocessing
+
+def child(conn):
+    msg = conn.recv()          # receive from parent
+    print(f"Child got: {msg}")
+    conn.send(msg.upper())     # send back
+    conn.close()
+
+if __name__ == "__main__":
+    parent_conn, child_conn = multiprocessing.Pipe()
+
+    p = multiprocessing.Process(target=child, args=(child_conn,))
+    p.start()
+
+    parent_conn.send("hello from parent")
+    reply = parent_conn.recv()
+    print(f"Parent got: {reply}")   # HELLO FROM PARENT
+
+    p.join()</code></pre>
+      <span class="code-label">mp_pipe.py</span>
+    </div>
+
+    <h3>Shared memory — Value and Array</h3>
+    <div style="position:relative">
+      <pre><code class="language-python">import multiprocessing
+
+def increment(counter, lock, n):
+    for _ in range(n):
+        with lock:
+            counter.value += 1
+
+if __name__ == "__main__":
+    # Value — single shared typed value
+    counter = multiprocessing.Value("i", 0)   # "i" = signed int
+    lock    = multiprocessing.Lock()
+
+    procs = [
+        multiprocessing.Process(target=increment, args=(counter, lock, 10_000))
+        for _ in range(4)
+    ]
+    for p in procs: p.start()
+    for p in procs: p.join()
+
+    print(f"Counter: {counter.value}")   # 40000
+
+    # Array — fixed-size shared array
+    shared = multiprocessing.Array("d", [1.0, 2.0, 3.0, 4.0])   # "d" = double
+    print(list(shared))   # [1.0, 2.0, 3.0, 4.0]</code></pre>
+      <span class="code-label">shared_memory.py</span>
+    </div>
+
+    <h3>Manager — proxy objects for complex types</h3>
+    <div style="position:relative">
+      <pre><code class="language-python">import multiprocessing
+
+def worker(results, key, value):
+    results[key] = value   # modify the shared dict
+
+if __name__ == "__main__":
+    with multiprocessing.Manager() as manager:
+        # manager creates proxy objects backed by a server process
+        shared_dict = manager.dict()
+        shared_list = manager.list()
+
+        procs = [
+            multiprocessing.Process(target=worker, args=(shared_dict, i, i**2))
+            for i in range(5)
+        ]
+        for p in procs: p.start()
+        for p in procs: p.join()
+
+        print(dict(shared_dict))   # {0: 0, 1: 1, 2: 4, 3: 9, 4: 16}</code></pre>
+      <span class="code-label">manager.py</span>
+    </div>
+
+    <table>
+      <thead><tr><th>Mechanism</th><th>Best for</th><th>Notes</th></tr></thead>
+      <tbody>
+        <tr><td><code>Queue</code></td><td>Producer-consumer pipelines</td><td>Thread &amp; process safe; FIFO</td></tr>
+        <tr><td><code>Pipe</code></td><td>Two-process communication</td><td>Faster than Queue; duplex by default</td></tr>
+        <tr><td><code>Value</code> / <code>Array</code></td><td>Simple numeric shared state</td><td>Low overhead; use with <code>Lock</code></td></tr>
+        <tr><td><code>Manager</code></td><td>Shared dicts, lists, arbitrary objects</td><td>Slowest; uses proxy process</td></tr>
+        <tr><td>Return via <code>Pool.map</code></td><td>Results from worker tasks</td><td>Simplest — just return values</td></tr>
+      </tbody>
+    </table>
+
+
+    <!-- ── 6. Pickling ── -->
+    <h2 id="pickling">Pickling — What Can Cross Process Boundaries</h2>
+    <p>
+      Data passed between processes is <strong>serialised (pickled)</strong> and
+      sent through OS pipes. Only picklable objects can be passed:
+    </p>
+
+    <div style="position:relative">
+      <pre><code class="language-python">import pickle
+
+# ✓ Picklable
+pickle.dumps(42)
+pickle.dumps([1, 2, 3])
+pickle.dumps({"a": 1})
+pickle.dumps(lambda x: x)     # lambdas CAN be pickled in Python 3.8+
+                               # (but NOT in all contexts — e.g. Pool.map)
+
+# ❌ Common unpicklable things
+# - Lambda functions passed to Pool.map (use top-level def instead)
+# - Nested functions (defined inside another function)
+# - File handles, sockets, database connections
+# - Objects with non-picklable attributes</code></pre>
+      <span class="code-label">pickling.py</span>
+    </div>
+
+    <div style="position:relative">
+      <pre><code class="language-python">import multiprocessing
+
+# ❌ Lambdas don't work with Pool.map
+# pool.map(lambda x: x**2, range(10))  # PicklingError!
+
+# ✓ Use top-level functions
+def square(x):
+    return x ** 2
+
+if __name__ == "__main__":
+    with multiprocessing.Pool(4) as pool:
+        print(pool.map(square, range(10)))</code></pre>
+      <span class="code-label">pickling_fix.py</span>
+    </div>
+
+    <div class="callout callout-warning">
+      Pickling and unpickling happens for <em>every</em> argument and return value
+      sent to/from worker processes. For large objects (e.g. a 1 GB numpy array),
+      this serialisation overhead can dwarf the computation time. Use shared memory
+      or memory-mapped files instead.
+    </div>
+
+
+    <!-- ── 7. Start Methods ── -->
+    <h2 id="start-methods">Start Methods</h2>
+    <p>
+      Python supports three ways to start a new process — the default varies by OS:
+    </p>
+
+    <table>
+      <thead><tr><th>Method</th><th>Default on</th><th>How it works</th><th>Notes</th></tr></thead>
+      <tbody>
+        <tr><td><code>fork</code></td><td>Linux</td><td>Copy parent's memory (copy-on-write)</td><td>Fast; can cause issues with threads or locks held at fork time</td></tr>
+        <tr><td><code>spawn</code></td><td>Windows, macOS (3.8+)</td><td>Start fresh Python interpreter, import module</td><td>Safe but slower; requires <code>if __name__ == "__main__"</code></td></tr>
+        <tr><td><code>forkserver</code></td><td>Some Linux configs</td><td>Server process handles all forks</td><td>Avoids fork-in-thread issues</td></tr>
+      </tbody>
+    </table>
+
+    <div style="position:relative">
+      <pre><code class="language-python">import multiprocessing
+
+if __name__ == "__main__":
+    # Explicitly set start method (call once, before any Process creation)
+    multiprocessing.set_start_method("spawn")
+
+    # Or use a context to avoid changing global state
+    ctx = multiprocessing.get_context("spawn")
+    p   = ctx.Process(target=print, args=("hello from spawn",))
+    p.start()
+    p.join()</code></pre>
+      <span class="code-label">start_method.py</span>
+    </div>
+
+
+    <!-- ── 8. Chunking for Performance ── -->
+    <h2 id="chunking">Chunking for Performance</h2>
+    <p>
+      For large numbers of small tasks, the per-task pickling overhead can dominate.
+      Chunking groups items into batches before sending to workers:
+    </p>
+
+    <div style="position:relative">
+      <pre><code class="language-python">import multiprocessing
+
+def process_batch(batch):
+    return [x ** 2 for x in batch]
+
+def chunk(lst, size):
+    for i in range(0, len(lst), size):
+        yield lst[i:i + size]
+
+if __name__ == "__main__":
+    data       = list(range(1_000_000))
+    batch_size = 10_000
+
+    with multiprocessing.Pool() as pool:
+        # Each worker gets a batch of 10,000 items — fewer pickle round-trips
+        batches = list(chunk(data, batch_size))
+        nested  = pool.map(process_batch, batches)
+        results = [item for batch in nested for item in batch]
+
+    print(f"Processed {len(results):,} items")</code></pre>
+      <span class="code-label">chunking.py</span>
+    </div>
+
+
+    <!-- ── 9. When to Use Multiprocessing ── -->
+    <h2 id="when-to-use">Threads vs Processes vs Async</h2>
+
+    <table>
+      <thead><tr><th>Scenario</th><th>Best choice</th></tr></thead>
+      <tbody>
+        <tr><td>CPU-bound: number crunching, image processing</td><td><code>multiprocessing</code> / <code>ProcessPoolExecutor</code></td></tr>
+        <tr><td>I/O-bound: HTTP requests, file reads, DB queries</td><td><code>asyncio</code> or <code>ThreadPoolExecutor</code></td></tr>
+        <tr><td>Many lightweight concurrent tasks</td><td><code>asyncio</code></td></tr>
+        <tr><td>Parallel + need shared memory</td><td><code>threading</code></td></tr>
+        <tr><td>Parallel + data science (numpy/pandas)</td><td><code>multiprocessing</code> or <code>joblib</code></td></tr>
+        <tr><td>Simple parallel map over a list</td><td><code>ProcessPoolExecutor.map()</code></td></tr>
+      </tbody>
+    </table>
+
+
+    <div class="primary-source">
+      <p>
+        <strong>Primary sources:</strong>
+        <a href="https://docs.python.org/3/library/multiprocessing.html" target="_blank" rel="noopener">Python Docs — multiprocessing</a>
+        &nbsp;·&nbsp;
+        <a href="https://docs.python.org/3/library/concurrent.futures.html" target="_blank" rel="noopener">Python Docs — concurrent.futures</a>
+        &nbsp;·&nbsp;
+        <a href="https://docs.python.org/3/library/multiprocessing.shared_memory.html" target="_blank" rel="noopener">Python Docs — shared_memory</a>
+      </p>
+    </div>
+
+    <div class="ask-ai-reminder">
+      <span class="ai-icon">🤖</span>
+      <p>
+        <strong>Ask your AI tutor!</strong> Getting <code>PicklingError</code> or
+        mysterious hangs? Not sure whether to use <code>Pool.map</code> or
+        <code>ProcessPoolExecutor</code>? Want to benchmark your specific workload?
+        Multiprocessing bugs are hard to debug alone — talk through your code.
+      </p>
+    </div>
+
+
+    <!-- ── Quiz ── -->
+    <div id="quiz-section"></div>
+
+
+    <!-- ── Exercises ── -->
+    <div id="exercise-section">
+      <h2>💻 Exercises</h2>
+
+      <div class="exercise">
+        <div class="exercise-title"><span class="exercise-num">01</span> Parallel Prime Finder</div>
+        <p>
+          Write a function <code>find_primes(start, end)</code> that returns all prime
+          numbers in the range <code>[start, end)</code>. Then write
+          <code>parallel_primes(end, workers=4)</code> that splits the range into equal
+          chunks and uses <code>ProcessPoolExecutor</code> to find primes in parallel,
+          returning a sorted list of all primes found.
+        </p>
+        <p>Compare the runtime against a sequential version for the range 0–500,000.</p>
+        <details class="solution">
+          <summary>Show solution</summary>
+          <pre><code class="language-python">import math
+import time
+from concurrent.futures import ProcessPoolExecutor
+
+def is_prime(n):
+    if n < 2: return False
+    if n == 2: return True
+    if n % 2 == 0: return False
+    for i in range(3, int(math.sqrt(n)) + 1, 2):
+        if n % i == 0:
+            return False
+    return True
+
+def find_primes(start, end):
+    return [n for n in range(start, end) if is_prime(n)]
+
+def parallel_primes(end, workers=4):
+    chunk_size = end // workers
+    ranges = [
+        (i * chunk_size, (i + 1) * chunk_size if i < workers - 1 else end)
+        for i in range(workers)
+    ]
+    with ProcessPoolExecutor(max_workers=workers) as executor:
+        results = executor.map(lambda r: find_primes(*r), ranges)
+        # Note: lambda won't pickle — use a helper
+    return sorted(p for chunk in results for p in chunk)
+
+# Picklable helper
+def find_primes_range(args):
+    return find_primes(*args)
+
+def parallel_primes(end, workers=4):
+    chunk_size = (end + workers - 1) // workers
+    ranges = [
+        (i * chunk_size, min((i + 1) * chunk_size, end))
+        for i in range(workers)
+    ]
+    with ProcessPoolExecutor(max_workers=workers) as executor:
+        chunks = list(executor.map(find_primes_range, ranges))
+    return sorted(p for chunk in chunks for p in chunk)
+
+if __name__ == "__main__":
+    END = 100_000
+
+    t = time.perf_counter()
+    seq = find_primes(0, END)
+    print(f"Sequential: {time.perf_counter()-t:.3f}s — {len(seq)} primes")
+
+    t = time.perf_counter()
+    par = parallel_primes(END, workers=4)
+    print(f"Parallel:   {time.perf_counter()-t:.3f}s — {len(par)} primes")
+
+    print(f"Results match: {seq == par}")</code></pre>
+        </details>
+      </div>
+
+      <div class="exercise">
+        <div class="exercise-title"><span class="exercise-num">02</span> Word Frequency Counter</div>
+        <p>
+          Write a parallel word frequency counter that:
+        </p>
+        <ol>
+          <li>Splits a large list of text lines into chunks</li>
+          <li>Uses <code>ProcessPoolExecutor</code> to count word frequencies in each chunk</li>
+          <li>Merges the per-chunk <code>Counter</code> results in the main process</li>
+          <li>Returns the top-N most common words overall</li>
+        </ol>
+        <details class="solution">
+          <summary>Show solution</summary>
+          <pre><code class="language-python">from collections import Counter
+from concurrent.futures import ProcessPoolExecutor
+import re
+
+def count_words_chunk(lines):
+    """Count words in a list of lines (runs in a worker process)."""
+    counter = Counter()
+    for line in lines:
+        words = re.findall(r"\b[a-z]+\b", line.lower())
+        counter.update(words)
+    return counter
+
+def parallel_word_count(lines, top_n=10, workers=4):
+    # Split into roughly equal chunks
+    chunk_size = max(1, len(lines) // workers)
+    chunks = [lines[i:i+chunk_size] for i in range(0, len(lines), chunk_size)]
+
+    with ProcessPoolExecutor(max_workers=workers) as executor:
+        partial_counts = list(executor.map(count_words_chunk, chunks))
+
+    # Merge all partial counters in the main process
+    total = Counter()
+    for partial in partial_counts:
+        total.update(partial)
+
+    return total.most_common(top_n)
+
+if __name__ == "__main__":
+    # Generate synthetic text
+    import random
+    words = ["the", "quick", "brown", "fox", "jumps", "over",
+             "lazy", "dog", "python", "is", "great"]
+    lines = [" ".join(random.choices(words, k=20)) for _ in range(10_000)]
+
+    top = parallel_word_count(lines, top_n=5)
+    for word, count in top:
+        print(f"  {word:<12} {count:>6}")</code></pre>
+        </details>
+      </div>
+
+      <div class="exercise">
+        <div class="exercise-title"><span class="exercise-num">03</span> Shared Progress Counter</div>
+        <p>
+          Write a program where multiple worker processes each perform a task
+          (simulate with <code>time.sleep</code>) and report progress to the main
+          process via a shared <code>multiprocessing.Value</code> counter.
+          The main process should print a live progress bar until all workers finish.
+        </p>
+        <details class="solution">
+          <summary>Show solution</summary>
+          <pre><code class="language-python">import multiprocessing
+import time
+import random
+
+def worker(worker_id, counter, lock, total_tasks):
+    """Perform tasks and increment the shared counter."""
+    tasks = total_tasks // multiprocessing.cpu_count()
+    for _ in range(tasks):
+        time.sleep(random.uniform(0.01, 0.05))  # simulate work
+        with lock:
+            counter.value += 1
+
+def progress_bar(current, total, width=40):
+    pct   = current / total
+    filled = int(width * pct)
+    bar   = "█" * filled + "░" * (width - filled)
+    return f"\r[{bar}] {current}/{total} ({pct:.0%})"
+
+if __name__ == "__main__":
+    NUM_WORKERS  = 4
+    TOTAL_TASKS  = 100
+
+    counter = multiprocessing.Value("i", 0)
+    lock    = multiprocessing.Lock()
+
+    workers = [
+        multiprocessing.Process(
+            target=worker,
+            args=(i, counter, lock, TOTAL_TASKS)
+        )
+        for i in range(NUM_WORKERS)
+    ]
+
+    for w in workers:
+        w.start()
+
+    # Main process: print live progress
+    while any(w.is_alive() for w in workers):
+        print(progress_bar(counter.value, TOTAL_TASKS), end="", flush=True)
+        time.sleep(0.1)
+
+    for w in workers:
+        w.join()
+
+    print(progress_bar(counter.value, TOTAL_TASKS))
+    print(f"\nDone! Processed {counter.value} tasks.")</code></pre>
+        </details>
+      </div>
+
+    </div><!-- /exercise-section -->
+
+    <div id="lesson-nav-footer"></div>
+  </div><!-- /content -->
+
+</div><!-- /main -->
+
+<script src="../assets/nav-data.js"></script>
+<script src="../assets/nav.js"></script>
+<script src="../assets/quiz.js"></script>
+<script src="../assets/highlight.js"></script>
+
+<script>
+buildLessonFooter();
+
+QuizWidget.render("quiz-section", [
+  {
+    question: "Why does multiprocessing bypass the GIL while threading does not?",
+    options: [
+      "Multiprocessing uses a different Python interpreter that has no GIL",
+      "Each process has its own independent Python interpreter and memory space, so there is no shared GIL to contend with",
+      "Multiprocessing automatically disables the GIL for CPU-bound code",
+      "The GIL is only present in Python 2, not Python 3"
+    ],
+    correct: 1,
+    explanation: "Threads share a single process — and a single GIL — so only one thread runs Python bytecode at a time. Processes are fully independent: each has its own Python interpreter, memory space, and GIL. They can truly run in parallel on multiple CPU cores."
+  },
+  {
+    question: "Why must you guard multiprocessing code with 'if __name__ == \"__main__\"' on Windows?",
+    options: [
+      "It is required on all platforms, not just Windows",
+      "Windows uses the 'spawn' start method — new processes re-import the module, and without the guard they spawn more processes recursively",
+      "It prevents the parent process from being affected by child process crashes",
+      "It is only a style convention, not functionally required"
+    ],
+    correct: 1,
+    explanation: "On Windows (and macOS with Python 3.8+), the default start method is 'spawn' — new worker processes start a fresh Python interpreter and import the script. Without the __name__ guard, this import triggers the process-creation code again, spawning infinite processes until the OS is exhausted."
+  },
+  {
+    question: "What is the main limitation of multiprocessing.Value and Array for sharing data?",
+    options: [
+      "They can only store strings",
+      "They require explicit synchronisation with a Lock — concurrent access without a lock causes race conditions",
+      "They are not available on Windows",
+      "They are slower than Manager objects for all use cases"
+    ],
+    correct: 1,
+    explanation: "Value and Array provide shared typed memory, but individual operations on them are NOT automatically atomic. Multiple processes reading and modifying the same Value without a Lock can produce race conditions — the same problem as with threading. Always pair them with a multiprocessing.Lock."
+  },
+  {
+    question: "Why can lambdas generally not be passed to Pool.map()?",
+    options: [
+      "Pool.map() only accepts built-in functions",
+      "Lambdas run too slowly in separate processes",
+      "Arguments to worker processes must be pickled — lambdas are not picklable by Python's default pickle",
+      "Pool.map() requires functions defined in C extensions"
+    ],
+    correct: 2,
+    explanation: "Pool.map() serialises (pickles) the function and its arguments to send them to worker processes. Python's default pickle cannot serialise lambdas or nested functions. The fix is to define the function at module level with def — module-level functions are picklable by name."
+  },
+  {
+    question: "When is 'chunking' tasks important for multiprocessing performance?",
+    options: [
+      "Always — chunking always improves performance",
+      "When tasks are very large and need to be split across processes",
+      "When there are many small tasks — pickling overhead per task dominates; batching reduces serialisation round-trips",
+      "Only when using Pool.starmap()"
+    ],
+    correct: 2,
+    explanation: "Every task sent to a worker process must be pickled and unpickled (serialised). For millions of tiny tasks, this overhead can exceed the computation time. Chunking groups many small items into fewer batches, dramatically reducing the number of pickle/unpickle operations."
+  }
+]);
+</script>
+</body>
+</html>
