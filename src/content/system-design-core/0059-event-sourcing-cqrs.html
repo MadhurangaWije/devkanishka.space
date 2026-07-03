@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lesson 059 — Event Sourcing & CQRS</title>
+    <link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+    <h1>Event Sourcing &amp; CQRS</h1>
+    <div class="lesson-meta">
+        <span>📘 Chapter 14: Data Pipelines &amp; Stream Processing</span>
+        <span>⏱️ 9 min read</span>
+        <span>🏗️ Lesson 059</span>
+    </div>
+
+    <p>Traditional databases store <em>current state</em> — when you update a row, the previous value is gone. <strong>Event sourcing</strong> flips this: store every change as an immutable event, and derive current state by replaying events. Combined with <strong>CQRS</strong>, this creates powerful architectures for audit-heavy, complex domains.</p>
+
+    <h2>Traditional vs Event-Sourced</h2>
+
+    <figure class="diagram">
+        <svg viewBox="0 0 720 280" xmlns="http://www.w3.org/2000/svg">
+            <defs>
+                <marker id="arrow59" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+                    <polygon points="0 0, 8 3, 0 6" fill="#666"/>
+                </marker>
+            </defs>
+            <text x="360" y="20" text-anchor="middle" font-family="system-ui" font-size="13" font-weight="bold" fill="#333">Traditional State vs Event Sourcing</text>
+
+            <!-- Traditional side -->
+            <text x="180" y="48" text-anchor="middle" font-family="system-ui" font-size="11" font-weight="bold" fill="#e63946">Traditional: Mutable State</text>
+            <rect x="60" y="60" width="240" height="35" rx="4" fill="#e63946" opacity="0.08" stroke="#e63946" stroke-width="1"/>
+            <text x="80" y="82" font-family="monospace" font-size="8" fill="#333">UPDATE orders SET status='shipped' WHERE id=42</text>
+            <text x="180" y="110" text-anchor="middle" font-family="system-ui" font-size="8" fill="#666">Previous state is LOST forever</text>
+
+            <rect x="100" y="120" width="160" height="45" rx="6" fill="#e63946" opacity="0.1" stroke="#e63946" stroke-width="1.5"/>
+            <text x="180" y="138" text-anchor="middle" font-family="monospace" font-size="8" fill="#333">orders table</text>
+            <text x="180" y="152" text-anchor="middle" font-family="monospace" font-size="7" fill="#666">id=42, status="shipped" ← only latest</text>
+
+            <!-- Event-sourced side -->
+            <text x="540" y="48" text-anchor="middle" font-family="system-ui" font-size="11" font-weight="bold" fill="#2a9d8f">Event Sourcing: Append-Only Log</text>
+
+            <rect x="420" y="62" width="240" height="18" rx="3" fill="#2a9d8f" opacity="0.1" stroke="#2a9d8f" stroke-width="1"/>
+            <text x="440" y="74" font-family="monospace" font-size="7" fill="#333">OrderCreated {id:42, items:[...], total:99}</text>
+
+            <rect x="420" y="84" width="240" height="18" rx="3" fill="#2a9d8f" opacity="0.15" stroke="#2a9d8f" stroke-width="1"/>
+            <text x="440" y="96" font-family="monospace" font-size="7" fill="#333">PaymentReceived {id:42, amount:99}</text>
+
+            <rect x="420" y="106" width="240" height="18" rx="3" fill="#2a9d8f" opacity="0.2" stroke="#2a9d8f" stroke-width="1"/>
+            <text x="440" y="118" font-family="monospace" font-size="7" fill="#333">OrderShipped {id:42, tracking:"XY123"}</text>
+
+            <rect x="420" y="128" width="240" height="18" rx="3" fill="#2a9d8f" opacity="0.25" stroke="#2a9d8f" stroke-width="1"/>
+            <text x="440" y="140" font-family="monospace" font-size="7" fill="#333">DeliveryConfirmed {id:42, signed:"J.Doe"}</text>
+
+            <text x="540" y="165" text-anchor="middle" font-family="system-ui" font-size="8" fill="#2a9d8f">Every state change preserved as a fact</text>
+
+            <path d="M540 170 L540 190" stroke="#666" stroke-width="1.5" marker-end="url(#arrow59)"/>
+            <text x="570" y="185" font-family="system-ui" font-size="7" fill="#666">replay</text>
+
+            <rect x="470" y="195" width="140" height="35" rx="6" fill="#457b9d" opacity="0.12" stroke="#457b9d" stroke-width="1.5"/>
+            <text x="540" y="212" text-anchor="middle" font-family="system-ui" font-size="8" fill="#457b9d">Current State (derived)</text>
+            <text x="540" y="224" text-anchor="middle" font-family="monospace" font-size="7" fill="#666">status="delivered"</text>
+
+            <!-- Bottom comparison -->
+            <rect x="60" y="245" width="240" height="25" rx="4" fill="#e63946" opacity="0.06"/>
+            <text x="180" y="262" text-anchor="middle" font-family="system-ui" font-size="8" fill="#e63946">❌ Can't answer: "When was it shipped?"</text>
+
+            <rect x="420" y="245" width="240" height="25" rx="4" fill="#2a9d8f" opacity="0.06"/>
+            <text x="540" y="262" text-anchor="middle" font-family="system-ui" font-size="8" fill="#2a9d8f">✓ Full history: who, what, when, why</text>
+        </svg>
+        <figcaption>Figure 1: Traditional databases overwrite state; event sourcing keeps every change as an immutable event.</figcaption>
+    </figure>
+
+    <h2>Benefits of Event Sourcing</h2>
+
+    <div class="card info">
+        <ul>
+            <li><strong>Complete audit trail:</strong> Every change is recorded — who did what, when</li>
+            <li><strong>Temporal queries:</strong> "What was the account balance at 3pm yesterday?"</li>
+            <li><strong>Replay for debugging:</strong> Reproduce any bug by replaying events up to that point</li>
+            <li><strong>Event-driven integration:</strong> Other services subscribe to events naturally</li>
+            <li><strong>Undo/redo:</strong> Apply compensating events instead of destructive rollbacks</li>
+        </ul>
+    </div>
+
+    <h2>Challenges</h2>
+
+    <div class="card">
+        <ul>
+            <li><strong>Event schema evolution:</strong> What happens when event format changes? Need versioning strategy</li>
+            <li><strong>Eventual consistency:</strong> Read models may lag behind write model</li>
+            <li><strong>Storage growth:</strong> Events accumulate forever — need snapshotting for performance</li>
+            <li><strong>Complexity:</strong> Simple CRUD becomes much more involved</li>
+            <li><strong>Querying:</strong> Can't easily query current state without projections</li>
+        </ul>
+    </div>
+
+    <h2>CQRS: Command Query Responsibility Segregation</h2>
+
+    <p>CQRS separates <strong>writes</strong> (commands) from <strong>reads</strong> (queries) into different models, optimized for their distinct access patterns.</p>
+
+    <figure class="diagram">
+        <svg viewBox="0 0 720 250" xmlns="http://www.w3.org/2000/svg">
+            <text x="360" y="20" text-anchor="middle" font-family="system-ui" font-size="13" font-weight="bold" fill="#333">CQRS Architecture</text>
+
+            <!-- Commands -->
+            <rect x="30" y="90" width="90" height="40" rx="6" fill="#e63946" opacity="0.12" stroke="#e63946" stroke-width="1.5"/>
+            <text x="75" y="108" text-anchor="middle" font-family="system-ui" font-size="9" font-weight="bold" fill="#e63946">Commands</text>
+            <text x="75" y="122" text-anchor="middle" font-family="system-ui" font-size="7" fill="#666">Create, Update</text>
+
+            <path d="M125 110 L165 110" stroke="#666" stroke-width="1.5" marker-end="url(#arrow59)"/>
+
+            <!-- Write Model -->
+            <rect x="170" y="80" width="100" height="60" rx="6" fill="#457b9d" opacity="0.12" stroke="#457b9d" stroke-width="1.5"/>
+            <text x="220" y="100" text-anchor="middle" font-family="system-ui" font-size="9" font-weight="bold" fill="#457b9d">Write Model</text>
+            <text x="220" y="114" text-anchor="middle" font-family="system-ui" font-size="7" fill="#666">Domain logic</text>
+            <text x="220" y="126" text-anchor="middle" font-family="system-ui" font-size="7" fill="#666">Validation</text>
+
+            <path d="M275 110 L315 110" stroke="#666" stroke-width="1.5" marker-end="url(#arrow59)"/>
+
+            <!-- Event Store -->
+            <rect x="320" y="80" width="100" height="60" rx="6" fill="#2a9d8f" opacity="0.12" stroke="#2a9d8f" stroke-width="1.5"/>
+            <text x="370" y="100" text-anchor="middle" font-family="system-ui" font-size="9" font-weight="bold" fill="#2a9d8f">Event Store</text>
+            <text x="370" y="114" text-anchor="middle" font-family="system-ui" font-size="7" fill="#666">Append-only</text>
+            <text x="370" y="126" text-anchor="middle" font-family="system-ui" font-size="7" fill="#666">Source of truth</text>
+
+            <!-- Events flow down -->
+            <path d="M370 145 L370 165" stroke="#666" stroke-width="1.5" marker-end="url(#arrow59)"/>
+            <text x="395" y="160" font-family="system-ui" font-size="7" fill="#666">publish</text>
+
+            <!-- Projections -->
+            <rect x="320" y="170" width="100" height="40" rx="6" fill="#e9c46a" opacity="0.15" stroke="#e9c46a" stroke-width="1.5"/>
+            <text x="370" y="188" text-anchor="middle" font-family="system-ui" font-size="9" font-weight="bold" fill="#e9c46a">Projections</text>
+            <text x="370" y="202" text-anchor="middle" font-family="system-ui" font-size="7" fill="#666">Transform events</text>
+
+            <path d="M425 190 L465 190" stroke="#666" stroke-width="1.5" marker-end="url(#arrow59)"/>
+
+            <!-- Read Store -->
+            <rect x="470" y="170" width="100" height="40" rx="6" fill="#6c5ce7" opacity="0.12" stroke="#6c5ce7" stroke-width="1.5"/>
+            <text x="520" y="188" text-anchor="middle" font-family="system-ui" font-size="9" font-weight="bold" fill="#6c5ce7">Read Store</text>
+            <text x="520" y="202" text-anchor="middle" font-family="system-ui" font-size="7" fill="#666">Denormalized</text>
+
+            <path d="M575 190 L615 190" stroke="#666" stroke-width="1.5" marker-end="url(#arrow59)"/>
+
+            <!-- Queries -->
+            <rect x="620" y="170" width="80" height="40" rx="6" fill="#2a9d8f" opacity="0.12" stroke="#2a9d8f" stroke-width="1.5"/>
+            <text x="660" y="188" text-anchor="middle" font-family="system-ui" font-size="9" font-weight="bold" fill="#2a9d8f">Queries</text>
+            <text x="660" y="202" text-anchor="middle" font-family="system-ui" font-size="7" fill="#666">Fast reads</text>
+
+            <!-- Labels -->
+            <text x="360" y="240" text-anchor="middle" font-family="system-ui" font-size="8" fill="#666">Write path optimized for consistency | Read path optimized for speed</text>
+        </svg>
+        <figcaption>Figure 2: CQRS separates writes (commands → events) from reads (projections → optimized views).</figcaption>
+    </figure>
+
+    <h2>When to Use ES + CQRS</h2>
+
+    <div class="card">
+        <table style="width:100%; border-collapse:collapse; font-size:0.9em;">
+            <tr style="border-bottom:2px solid #ddd;">
+                <th style="text-align:left; padding:6px;">Good Fit</th>
+                <th style="text-align:left; padding:6px;">Overkill</th>
+            </tr>
+            <tr style="border-bottom:1px solid #eee;">
+                <td style="padding:6px;">Finance — full transaction audit trail</td>
+                <td style="padding:6px;">Simple CRUD blog or CMS</td>
+            </tr>
+            <tr style="border-bottom:1px solid #eee;">
+                <td style="padding:6px;">Healthcare — regulatory compliance</td>
+                <td style="padding:6px;">Low-traffic internal tools</td>
+            </tr>
+            <tr style="border-bottom:1px solid #eee;">
+                <td style="padding:6px;">E-commerce — complex order workflows</td>
+                <td style="padding:6px;">Prototypes and MVPs</td>
+            </tr>
+            <tr style="border-bottom:1px solid #eee;">
+                <td style="padding:6px;">Gaming — replay systems</td>
+                <td style="padding:6px;">Read-heavy, rarely-changing data</td>
+            </tr>
+            <tr>
+                <td style="padding:6px;">Collaborative editing — conflict resolution</td>
+                <td style="padding:6px;">Systems where history doesn't matter</td>
+            </tr>
+        </table>
+    </div>
+
+    <h2>Real-World Examples</h2>
+
+    <div class="real-world">
+        <h3>Banking: Complete Transaction History</h3>
+        <p>A bank's ledger is inherently event-sourced. Every transaction is an immutable fact:</p>
+        <ul>
+            <li><code>Deposited $500</code> → <code>Withdrew $200</code> → <code>Transferred $100 to savings</code></li>
+            <li>Balance is <em>derived</em> by replaying all events: $500 - $200 - $100 = $200</li>
+            <li>Regulators can audit every cent that ever moved — nothing is overwritten</li>
+            <li>If a bug miscalculated interest, replay events with the fix to correct all balances</li>
+        </ul>
+        <p>Banks never "UPDATE balance = 200" — they append a new event and derive state. This is event sourcing by regulation.</p>
+    </div>
+
+    <div class="real-world">
+        <h3>Gaming: Player Action Replays</h3>
+        <p>Multiplayer games like StarCraft and Fortnite store every player action as an event:</p>
+        <ul>
+            <li>Move, attack, build, resource-gather — all timestamped events</li>
+            <li>Replays work by replaying the event stream through the game engine</li>
+            <li>Anti-cheat systems replay suspicious matches to verify legitimacy</li>
+            <li>Balance patches can be tested by replaying old matches with new rules</li>
+        </ul>
+    </div>
+
+    <h2>Interactive: Traditional vs Event-Sourced</h2>
+
+    <div class="interactive">
+        <h3>Order Lifecycle Comparison</h3>
+        <p>Watch how a traditional DB and an event-sourced system handle the same order flow.</p>
+        <div style="display:flex; gap:20px; flex-wrap:wrap;">
+            <div style="flex:1; min-width:250px;">
+                <h4 style="color:#e63946;">Traditional DB</h4>
+                <div id="trad-state" style="font-family:monospace; font-size:11px; background:#f8f9fa; padding:10px; border-radius:6px; min-height:120px; border:1px solid #ddd;"></div>
+            </div>
+            <div style="flex:1; min-width:250px;">
+                <h4 style="color:#2a9d8f;">Event Store</h4>
+                <div id="es-state" style="font-family:monospace; font-size:11px; background:#f8f9fa; padding:10px; border-radius:6px; min-height:120px; border:1px solid #ddd;"></div>
+            </div>
+        </div>
+        <div style="margin-top:12px;">
+            <button onclick="advanceOrder()">Next Step →</button>
+            <button onclick="resetOrder()">Reset</button>
+            <span id="step-label" style="margin-left:10px; font-size:0.85em; color:#666;"></span>
+        </div>
+    </div>
+
+    <script>
+    (function() {
+        var steps = [
+            { label: "Order Created", trad: "INSERT orders (id=1, status='created', total=59.99)", es: "OrderCreated {id:1, items:['Widget'], total:59.99, ts:'10:00'}" },
+            { label: "Payment Processed", trad: "UPDATE orders SET status='paid' WHERE id=1", es: "PaymentProcessed {id:1, amount:59.99, method:'card', ts:'10:01'}" },
+            { label: "Item Shipped", trad: "UPDATE orders SET status='shipped', tracking='AB12' WHERE id=1", es: "OrderShipped {id:1, tracking:'AB12', carrier:'FedEx', ts:'14:30'}" },
+            { label: "Customer Requests Refund", trad: "UPDATE orders SET status='refunded', total=0 WHERE id=1", es: "RefundRequested {id:1, reason:'damaged', ts:'16:00'}\nRefundApproved {id:1, amount:59.99, ts:'16:05'}" }
+        ];
+        var current = -1;
+        var tradRows = [];
+        var esEvents = [];
+
+        function renderTrad() {
+            if (tradRows.length === 0) {
+                document.getElementById('trad-state').innerHTML = '<span style="color:#888">No data yet...</span>';
+                return;
+            }
+            var html = '<div style="color:#e63946; margin-bottom:6px;">Current row (only latest):</div>';
+            html += tradRows[tradRows.length - 1] + '<br><br>';
+            html += '<span style="color:#888;">Previous states: GONE ❌</span>';
+            document.getElementById('trad-state').innerHTML = html;
+        }
+
+        function renderES() {
+            if (esEvents.length === 0) {
+                document.getElementById('es-state').innerHTML = '<span style="color:#888">No events yet...</span>';
+                return;
+            }
+            var html = '<div style="color:#2a9d8f; margin-bottom:6px;">All events (complete history):</div>';
+            esEvents.forEach(function(e, i) {
+                html += '<div style="margin:2px 0; padding:2px 4px; background:rgba(42,157,143,0.' + (1 + i) + '); border-radius:3px;">' + e + '</div>';
+            });
+            html += '<br><span style="color:#2a9d8f;">✓ Can rebuild state at any point in time</span>';
+            document.getElementById('es-state').innerHTML = html;
+        }
+
+        window.advanceOrder = function() {
+            current++;
+            if (current >= steps.length) {
+                document.getElementById('step-label').textContent = 'All steps complete!';
+                return;
+            }
+            var step = steps[current];
+            tradRows.push(step.trad);
+            esEvents.push(step.es);
+            document.getElementById('step-label').textContent = 'Step ' + (current + 1) + ': ' + step.label;
+            renderTrad();
+            renderES();
+        };
+
+        window.resetOrder = function() {
+            current = -1;
+            tradRows = [];
+            esEvents = [];
+            document.getElementById('step-label').textContent = '';
+            renderTrad();
+            renderES();
+        };
+
+        renderTrad();
+        renderES();
+    })();
+    </script>
+
+    <div class="takeaway">
+        <h3>Key Takeaway</h3>
+        <p>Event sourcing gives you a <strong>complete, immutable history</strong> and powerful capabilities: audit trails, temporal queries, replay-based debugging, and natural event-driven integration. CQRS complements it by letting you optimize reads and writes independently. But both add significant complexity — use them when <strong>audit trail and temporal queries are core requirements</strong> (finance, healthcare, gaming), not for simple CRUD applications.</p>
+    </div>
+
+    <div class="footnote">
+        <p><strong>Previous:</strong> <a href="0058-batch-vs-stream-processing.html">Batch vs Stream Processing</a> | <strong>Next:</strong> <a href="0060-data-lakes-warehouses.html">Data Lakes &amp; Warehouses</a></p>
+    </div>
+</body>
+</html>

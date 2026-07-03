@@ -1,0 +1,357 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lesson 052 — Circuit Breakers & Graceful Degradation</title>
+    <link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+    <h1>Circuit Breakers &amp; Graceful Degradation</h1>
+    <div class="lesson-meta">
+        <span>📘 Chapter 12: Observability &amp; Reliability</span>
+        <span>⏱️ 9 min read</span>
+        <span>🏗️ Lesson 052</span>
+    </div>
+
+    <p>Your recommendation service goes down. Without protection, every request to your product page now waits 30 seconds for a timeout, backing up threads, exhausting connection pools, and eventually bringing down your <em>entire</em> website — even though the product page could work fine without recommendations. This is a <strong>cascading failure</strong>, and the circuit breaker pattern prevents it.</p>
+
+    <h2>The Problem: Cascading Failures</h2>
+
+    <div class="card">
+        <p>In microservices, Service A depends on Service B which depends on Service C. When C becomes slow (not down, just slow):</p>
+        <ul>
+            <li>B's threads are all blocked waiting for C → B becomes slow</li>
+            <li>A's threads are all blocked waiting for B → A becomes slow</li>
+            <li>Users' requests queue up → everything times out → <strong>total system failure</strong></li>
+        </ul>
+        <p>The irony: a single slow service causes more damage than a completely dead one (dead services fail fast; slow services consume resources while failing).</p>
+    </div>
+
+    <h2>Circuit Breaker Pattern</h2>
+
+    <p>Inspired by electrical circuit breakers: when too much current flows, the breaker <strong>trips</strong> to prevent a fire. In software, when a dependency fails too often, the circuit breaker <strong>opens</strong> to prevent cascading failures.</p>
+
+    <figure class="diagram">
+        <svg viewBox="0 0 720 320" xmlns="http://www.w3.org/2000/svg">
+            <text x="360" y="22" text-anchor="middle" font-family="system-ui" font-size="13" font-weight="bold" fill="#333">Circuit Breaker State Machine</text>
+
+            <!-- CLOSED state -->
+            <circle cx="150" cy="150" r="65" fill="#2a9d8f" opacity="0.12" stroke="#2a9d8f" stroke-width="2.5"/>
+            <text x="150" y="140" text-anchor="middle" font-family="system-ui" font-size="12" font-weight="bold" fill="#2a9d8f">CLOSED</text>
+            <text x="150" y="158" text-anchor="middle" font-family="system-ui" font-size="8" fill="#333">(Normal operation)</text>
+            <text x="150" y="173" text-anchor="middle" font-family="system-ui" font-size="7" fill="#666">All requests pass through</text>
+            <text x="150" y="186" text-anchor="middle" font-family="system-ui" font-size="7" fill="#666">Counting failures...</text>
+
+            <!-- OPEN state -->
+            <circle cx="550" cy="150" r="65" fill="#e63946" opacity="0.12" stroke="#e63946" stroke-width="2.5"/>
+            <text x="550" y="140" text-anchor="middle" font-family="system-ui" font-size="12" font-weight="bold" fill="#e63946">OPEN</text>
+            <text x="550" y="158" text-anchor="middle" font-family="system-ui" font-size="8" fill="#333">(Failing — don't call)</text>
+            <text x="550" y="173" text-anchor="middle" font-family="system-ui" font-size="7" fill="#666">Requests fail immediately</text>
+            <text x="550" y="186" text-anchor="middle" font-family="system-ui" font-size="7" fill="#666">Return fallback response</text>
+
+            <!-- HALF-OPEN state -->
+            <circle cx="350" cy="270" r="55" fill="#e9c46a" opacity="0.15" stroke="#e9c46a" stroke-width="2.5"/>
+            <text x="350" y="262" text-anchor="middle" font-family="system-ui" font-size="11" font-weight="bold" fill="#e9c46a">HALF-OPEN</text>
+            <text x="350" y="278" text-anchor="middle" font-family="system-ui" font-size="8" fill="#333">(Testing recovery)</text>
+            <text x="350" y="293" text-anchor="middle" font-family="system-ui" font-size="7" fill="#666">Allow 1 test request</text>
+
+            <!-- Arrows -->
+            <!-- Closed → Open -->
+            <path d="M215 135 C300 100 400 100 485 135" stroke="#e63946" stroke-width="2" fill="none" marker-end="url(#arrowhead52)"/>
+            <text x="350" y="95" text-anchor="middle" font-family="system-ui" font-size="8" fill="#e63946">Failures exceed threshold</text>
+            <text x="350" y="108" text-anchor="middle" font-family="system-ui" font-size="7" fill="#e63946">(e.g., 5 failures in 10s)</text>
+
+            <!-- Open → Half-Open -->
+            <path d="M510 200 C480 240 430 265 405 270" stroke="#e9c46a" stroke-width="2" fill="none" marker-end="url(#arrowhead52)"/>
+            <text x="490" y="240" text-anchor="middle" font-family="system-ui" font-size="8" fill="#e9c46a">Timeout expires</text>
+            <text x="490" y="253" text-anchor="middle" font-family="system-ui" font-size="7" fill="#e9c46a">(e.g., after 30s)</text>
+
+            <!-- Half-Open → Closed (success) -->
+            <path d="M300 250 C250 230 200 200 160 215" stroke="#2a9d8f" stroke-width="2" fill="none" marker-end="url(#arrowhead52)"/>
+            <text x="200" y="240" text-anchor="middle" font-family="system-ui" font-size="8" fill="#2a9d8f">Test succeeds ✅</text>
+
+            <!-- Half-Open → Open (failure) -->
+            <path d="M400 255 C450 240 500 220 535 210" stroke="#e63946" stroke-width="2" fill="none" marker-end="url(#arrowhead52)"/>
+            <text x="500" y="255" text-anchor="middle" font-family="system-ui" font-size="8" fill="#e63946">Test fails ❌</text>
+
+            <defs>
+                <marker id="arrowhead52" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+                    <polygon points="0 0, 8 3, 0 6" fill="#666"/>
+                </marker>
+            </defs>
+        </svg>
+        <figcaption>Figure 1: Circuit breaker state machine — Closed (normal), Open (stop calling), Half-Open (tentatively test if recovered).</figcaption>
+    </figure>
+
+    <div class="card">
+        <h3>Configuration Parameters</h3>
+        <ul>
+            <li><strong>Failure threshold:</strong> How many failures (or what % failure rate) triggers the circuit to open (e.g., 5 failures in 10 seconds, or 50% failure rate)</li>
+            <li><strong>Timeout (reset timer):</strong> How long to wait in Open state before trying Half-Open (e.g., 30 seconds)</li>
+            <li><strong>Half-open retry count:</strong> How many test requests to allow in Half-Open (e.g., 3 successes → close)</li>
+            <li><strong>Monitoring window:</strong> Time window for counting failures (sliding window or count-based)</li>
+        </ul>
+    </div>
+
+    <h2>Fallback Strategies</h2>
+
+    <div class="card info">
+        <h3>When the Circuit is Open, Return...</h3>
+        <ul>
+            <li><strong>Cached response:</strong> Return the last known good value (stale data is often better than no data)</li>
+            <li><strong>Default value:</strong> Generic recommendations, empty list, placeholder content</li>
+            <li><strong>Degraded feature:</strong> Show the page without personalization rather than breaking entirely</li>
+            <li><strong>Queue for later:</strong> Accept the request but process it when the dependency recovers</li>
+            <li><strong>Clear error message:</strong> "Recommendations temporarily unavailable" (honest, not a crash)</li>
+        </ul>
+        <p>The key principle: <strong>partial functionality is always better than total failure</strong>.</p>
+    </div>
+
+    <h2>Bulkhead Pattern</h2>
+
+    <p>Named after ship compartments: if one compartment floods, watertight doors prevent the <em>entire</em> ship from sinking. In software, isolate dependencies so one failing dependency can't consume all your resources.</p>
+
+    <figure class="diagram">
+        <svg viewBox="0 0 720 220" xmlns="http://www.w3.org/2000/svg">
+            <text x="360" y="20" text-anchor="middle" font-family="system-ui" font-size="13" font-weight="bold" fill="#333">Bulkhead Pattern — Resource Isolation</text>
+
+            <!-- Ship outline -->
+            <rect x="50" y="50" width="620" height="140" rx="10" fill="none" stroke="#333" stroke-width="2"/>
+            <text x="360" y="45" text-anchor="middle" font-family="system-ui" font-size="9" fill="#666">Your Service (total: 100 threads)</text>
+
+            <!-- Compartment 1: Payment (healthy) -->
+            <rect x="60" y="60" width="180" height="120" rx="5" fill="#2a9d8f" opacity="0.1" stroke="#2a9d8f" stroke-width="2"/>
+            <text x="150" y="80" text-anchor="middle" font-family="system-ui" font-size="9" font-weight="bold" fill="#2a9d8f">Payment Pool</text>
+            <text x="150" y="95" text-anchor="middle" font-family="system-ui" font-size="8" fill="#333">30 threads allocated</text>
+            <text x="150" y="115" text-anchor="middle" font-family="system-ui" font-size="8" fill="#2a9d8f">✅ Healthy</text>
+            <text x="150" y="132" text-anchor="middle" font-family="system-ui" font-size="8" fill="#666">12/30 in use</text>
+            <rect x="80" y="145" width="140" height="12" rx="3" fill="#eee"/>
+            <rect x="80" y="145" width="56" height="12" rx="3" fill="#2a9d8f" opacity="0.6"/>
+
+            <!-- Compartment 2: Inventory (failing!) -->
+            <rect x="255" y="60" width="180" height="120" rx="5" fill="#e63946" opacity="0.1" stroke="#e63946" stroke-width="2"/>
+            <text x="345" y="80" text-anchor="middle" font-family="system-ui" font-size="9" font-weight="bold" fill="#e63946">Inventory Pool</text>
+            <text x="345" y="95" text-anchor="middle" font-family="system-ui" font-size="8" fill="#333">30 threads allocated</text>
+            <text x="345" y="115" text-anchor="middle" font-family="system-ui" font-size="8" fill="#e63946">❌ SATURATED</text>
+            <text x="345" y="132" text-anchor="middle" font-family="system-ui" font-size="8" fill="#e63946">30/30 blocked!</text>
+            <rect x="275" y="145" width="140" height="12" rx="3" fill="#eee"/>
+            <rect x="275" y="145" width="140" height="12" rx="3" fill="#e63946" opacity="0.6"/>
+
+            <!-- Compartment 3: Notifications (healthy) -->
+            <rect x="450" y="60" width="180" height="120" rx="5" fill="#2a9d8f" opacity="0.1" stroke="#2a9d8f" stroke-width="2"/>
+            <text x="540" y="80" text-anchor="middle" font-family="system-ui" font-size="9" font-weight="bold" fill="#2a9d8f">Notification Pool</text>
+            <text x="540" y="95" text-anchor="middle" font-family="system-ui" font-size="8" fill="#333">20 threads allocated</text>
+            <text x="540" y="115" text-anchor="middle" font-family="system-ui" font-size="8" fill="#2a9d8f">✅ Healthy</text>
+            <text x="540" y="132" text-anchor="middle" font-family="system-ui" font-size="8" fill="#666">5/20 in use</text>
+            <rect x="470" y="145" width="140" height="12" rx="3" fill="#eee"/>
+            <rect x="470" y="145" width="35" height="12" rx="3" fill="#2a9d8f" opacity="0.6"/>
+
+            <!-- Annotation -->
+            <text x="360" y="205" text-anchor="middle" font-family="system-ui" font-size="9" fill="#333">Inventory is broken, but payments and notifications are <strong>completely unaffected</strong></text>
+        </svg>
+        <figcaption>Figure 2: Bulkhead pattern — each dependency gets its own thread pool. One failing dependency can't exhaust shared resources.</figcaption>
+    </figure>
+
+    <h2>Timeout Budgets</h2>
+
+    <div class="card">
+        <h3>Cascading Timeouts</h3>
+        <p>If your API has a 3-second SLO, and it calls 3 services sequentially, you can't give each service 3 seconds — they'd stack to 9 seconds. Instead, allocate a <strong>timeout budget</strong>:</p>
+        <ul>
+            <li>Total budget: 3000ms</li>
+            <li>Auth service: 200ms timeout (fast, critical)</li>
+            <li>Inventory service: 500ms timeout</li>
+            <li>Payment service: 2000ms timeout (complex, needs more time)</li>
+            <li>Reserve: 300ms for overhead and retries</li>
+        </ul>
+        <p><strong>Rule:</strong> Each downstream timeout must be <em>less than</em> the caller's remaining budget. Otherwise you'll timeout at the edge before getting a response.</p>
+    </div>
+
+    <h2>Real-World Examples</h2>
+
+    <div class="real-world">
+        <h3>🏢 Netflix: Hystrix & Resilience4j</h3>
+        <p>Netflix pioneered the circuit breaker pattern with <strong>Hystrix</strong> (now succeeded by resilience4j). Every one of Netflix's hundreds of microservices wraps external calls in circuit breakers. When a dependency degrades, the circuit opens and a fallback is served. Netflix's principle: <strong>"Everything fails, all the time."</strong> Their architecture assumes every dependency will fail and pre-plans the degraded experience. The result: even when AWS regions go down, Netflix keeps streaming.</p>
+    </div>
+
+    <div class="real-world">
+        <h3>🏢 Amazon.com: Graceful Degradation</h3>
+        <p>Amazon's product page calls 200-300 services. When the recommendations engine fails:</p>
+        <ul>
+            <li>❌ <strong>Bad:</strong> Show an error page (lost sale)</li>
+            <li>✅ <strong>Good:</strong> Show generic popular items instead of personalized recommendations</li>
+        </ul>
+        <p>When the reviews service fails: show product without reviews. When pricing fails: show "temporarily unavailable" price but let users add to wishlist. Every non-critical feature has a fallback. The product page <em>never</em> fully breaks because of a non-critical dependency.</p>
+    </div>
+
+    <h2>Interactive: Circuit Breaker Simulation</h2>
+
+    <div class="interactive">
+        <h3>⚡ Watch a Circuit Breaker in Action</h3>
+        <p>Click "Send Request" to call a flaky downstream service. Watch the circuit breaker respond to failures.</p>
+        <div style="display:flex; gap:20px; flex-wrap:wrap; margin:10px 0;">
+            <div>
+                <button onclick="sendRequest()">Send Request</button>
+                <button onclick="sendBurst()">Send 10 Requests</button>
+                <button onclick="recoverService()">🔧 Fix Downstream Service</button>
+                <button onclick="resetCircuit()">Reset All</button>
+            </div>
+            <div>
+                <label>Downstream failure rate: </label>
+                <input type="range" id="failure-rate" min="0" max="100" value="70" style="width:100px; vertical-align:middle;">
+                <span id="failure-rate-display">70%</span>
+            </div>
+        </div>
+        <div style="display:flex; gap:15px; margin:10px 0; flex-wrap:wrap;">
+            <div style="padding:10px; border-radius:6px; border:2px solid #ddd; min-width:120px; text-align:center;" id="cb-state-display">
+                <div style="font-size:0.8em; color:#666;">Circuit State</div>
+                <div id="cb-state" style="font-weight:bold; font-size:1.2em;">CLOSED</div>
+            </div>
+            <div style="padding:10px; border-radius:6px; border:1px solid #ddd; min-width:100px; text-align:center;">
+                <div style="font-size:0.8em; color:#666;">Failures</div>
+                <div id="cb-failures" style="font-weight:bold;">0 / 5</div>
+            </div>
+            <div style="padding:10px; border-radius:6px; border:1px solid #ddd; min-width:100px; text-align:center;">
+                <div style="font-size:0.8em; color:#666;">Successes</div>
+                <div id="cb-successes" style="font-weight:bold; color:#2a9d8f;">0</div>
+            </div>
+            <div style="padding:10px; border-radius:6px; border:1px solid #ddd; min-width:100px; text-align:center;">
+                <div style="font-size:0.8em; color:#666;">Fallbacks</div>
+                <div id="cb-fallbacks" style="font-weight:bold; color:#e9c46a;">0</div>
+            </div>
+        </div>
+        <div id="cb-log" style="background:#1a1a2e; color:#eee; padding:12px; border-radius:6px; font-family:monospace; font-size:11px; min-height:120px; max-height:250px; overflow-y:auto;"></div>
+    </div>
+
+    <script>
+    (function() {
+        var state = 'CLOSED'; // CLOSED, OPEN, HALF_OPEN
+        var failures = 0;
+        var successes = 0;
+        var fallbacks = 0;
+        var failureThreshold = 5;
+        var halfOpenTimer = null;
+        var logEl = document.getElementById('cb-log');
+        var frInput = document.getElementById('failure-rate');
+        var frDisplay = document.getElementById('failure-rate-display');
+
+        frInput.addEventListener('input', function() { frDisplay.textContent = frInput.value + '%'; });
+
+        function log(msg) {
+            var time = new Date().toLocaleTimeString();
+            logEl.innerHTML += '<span style="color:#666">[' + time + ']</span> ' + msg + '\n';
+            logEl.scrollTop = logEl.scrollHeight;
+        }
+
+        function updateDisplay() {
+            document.getElementById('cb-state').textContent = state;
+            document.getElementById('cb-failures').textContent = failures + ' / ' + failureThreshold;
+            document.getElementById('cb-successes').textContent = successes;
+            document.getElementById('cb-fallbacks').textContent = fallbacks;
+            var stateEl = document.getElementById('cb-state-display');
+            if (state === 'CLOSED') stateEl.style.borderColor = '#2a9d8f';
+            else if (state === 'OPEN') stateEl.style.borderColor = '#e63946';
+            else stateEl.style.borderColor = '#e9c46a';
+            document.getElementById('cb-state').style.color = stateEl.style.borderColor;
+        }
+
+        function callDownstream() {
+            var failRate = parseInt(frInput.value);
+            return Math.random() * 100 > failRate;
+        }
+
+        window.sendRequest = function() {
+            if (state === 'OPEN') {
+                fallbacks++;
+                log('<span style="color:#e9c46a">⚡ Circuit OPEN — returning fallback immediately (no call made)</span>');
+                updateDisplay();
+                return;
+            }
+
+            var success = callDownstream();
+
+            if (state === 'HALF_OPEN') {
+                if (success) {
+                    log('<span style="color:#2a9d8f">✅ Half-open test succeeded! Closing circuit.</span>');
+                    state = 'CLOSED';
+                    failures = 0;
+                    successes++;
+                } else {
+                    log('<span style="color:#e63946">❌ Half-open test failed! Re-opening circuit.</span>');
+                    state = 'OPEN';
+                    failures++;
+                    fallbacks++;
+                    scheduleHalfOpen();
+                }
+            } else { // CLOSED
+                if (success) {
+                    successes++;
+                    log('<span style="color:#2a9d8f">✅ Request succeeded (downstream responded 200 OK)</span>');
+                    if (failures > 0) failures = Math.max(0, failures - 1); // decay
+                } else {
+                    failures++;
+                    log('<span style="color:#e63946">❌ Request FAILED (downstream timeout/error) — failures: ' + failures + '/' + failureThreshold + '</span>');
+                    if (failures >= failureThreshold) {
+                        state = 'OPEN';
+                        log('<span style="color:#e63946; font-weight:bold">🔴 CIRCUIT OPENED! Too many failures. All requests will get fallback.</span>');
+                        scheduleHalfOpen();
+                    }
+                }
+            }
+            updateDisplay();
+        };
+
+        function scheduleHalfOpen() {
+            if (halfOpenTimer) clearTimeout(halfOpenTimer);
+            halfOpenTimer = setTimeout(function() {
+                state = 'HALF_OPEN';
+                log('<span style="color:#e9c46a">🟡 Timeout expired — circuit now HALF-OPEN. Next request will test the service...</span>');
+                updateDisplay();
+            }, 5000);
+            log('<span style="color:#888">   (Will try half-open in 5 seconds...)</span>');
+        }
+
+        window.sendBurst = function() {
+            var i = 0;
+            var interval = setInterval(function() {
+                if (i >= 10) { clearInterval(interval); return; }
+                window.sendRequest();
+                i++;
+            }, 300);
+        };
+
+        window.recoverService = function() {
+            frInput.value = '10';
+            frDisplay.textContent = '10%';
+            log('<span style="color:#2a9d8f">🔧 Downstream service fixed! Failure rate set to 10%.</span>');
+        };
+
+        window.resetCircuit = function() {
+            state = 'CLOSED';
+            failures = 0;
+            successes = 0;
+            fallbacks = 0;
+            if (halfOpenTimer) clearTimeout(halfOpenTimer);
+            logEl.innerHTML = '';
+            frInput.value = '70';
+            frDisplay.textContent = '70%';
+            log('<span style="color:#888">Circuit breaker reset. Send requests to see it in action.</span>');
+            updateDisplay();
+        };
+
+        updateDisplay();
+        log('<span style="color:#888">Ready. Downstream failure rate is 70% — send requests to see the circuit breaker trip.</span>');
+    })();
+    </script>
+
+    <div class="takeaway">
+        <h3>🎯 Key Takeaway</h3>
+        <p>Circuit breakers prevent cascading failures — they <strong>fail fast</strong> instead of failing slow. Design every external call with a fallback, because every dependency <em>will</em> eventually fail. The combination of circuit breakers (stop calling) + bulkheads (isolate resources) + fallbacks (serve something useful) means your system degrades gracefully instead of catastrophically. The goal isn't to prevent all failures — it's to prevent one failure from becoming a total outage.</p>
+    </div>
+
+    <div class="footnote">
+        <p><strong>Previous:</strong> <a href="0051-distributed-tracing.html">Distributed Tracing</a> | <strong>Next:</strong> <a href="0053-chaos-engineering.html">Chaos Engineering Principles</a></p>
+    </div>
+</body>
+</html>

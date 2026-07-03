@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lesson 017 — Sharding: Splitting Data Across Machines</title>
+    <link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+    <h1>Sharding: Splitting Data Across Machines</h1>
+    <div class="lesson-meta">
+        <span>📘 Chapter 4: Databases &amp; Storage</span>
+        <span>⏱️ 10 min read</span>
+        <span>🏗️ Lesson 017</span>
+    </div>
+
+    <p>Replication helps with read scalability — but every replica still holds <em>all</em> the data and every write still goes to one leader. When you have more data than fits on one machine, or more writes than one machine can handle, you need to <strong>shard</strong>: split the data horizontally across multiple databases.</p>
+
+    <h2>When Replication Isn't Enough</h2>
+
+    <div class="card warning">
+        <h3>Replication's Limits</h3>
+        <ul>
+            <li><strong>Write bottleneck</strong> — All writes still go to one leader node. You can't scale writes with more replicas.</li>
+            <li><strong>Dataset size</strong> — 10TB of data means every replica needs 10TB of storage. Adding replicas doesn't reduce per-node storage.</li>
+            <li><strong>Memory pressure</strong> — If your working set exceeds one machine's RAM, you get constant disk I/O regardless of replica count.</li>
+        </ul>
+    </div>
+
+    <h2>What Is Sharding?</h2>
+
+    <p>Sharding (also called <strong>partitioning</strong>) splits your table's rows across multiple databases. Each shard holds a subset of the data. Together, all shards hold the complete dataset.</p>
+
+    <figure class="diagram">
+        <svg viewBox="0 0 700 320" xmlns="http://www.w3.org/2000/svg">
+            <text x="350" y="22" text-anchor="middle" font-family="system-ui" font-size="13" font-weight="bold" fill="#333">Sharding by user_id % 4</text>
+
+            <!-- Original table -->
+            <rect x="20" y="45" width="180" height="220" rx="5" fill="#fff" stroke="#333" stroke-width="1.5"/>
+            <rect x="20" y="45" width="180" height="25" rx="5" fill="#333"/>
+            <rect x="20" y="65" width="180" height="5" fill="#333"/>
+            <text x="110" y="62" text-anchor="middle" font-family="system-ui" font-size="10" font-weight="bold" fill="#fff">users (all data)</text>
+
+            <text x="35" y="88" font-family="monospace" font-size="8" fill="#457b9d">user_id=1, Alice</text>
+            <text x="35" y="104" font-family="monospace" font-size="8" fill="#2a9d8f">user_id=2, Bob</text>
+            <text x="35" y="120" font-family="monospace" font-size="8" fill="#f4a261">user_id=3, Carol</text>
+            <text x="35" y="136" font-family="monospace" font-size="8" fill="#6c5ce7">user_id=4, Dave</text>
+            <text x="35" y="152" font-family="monospace" font-size="8" fill="#457b9d">user_id=5, Eve</text>
+            <text x="35" y="168" font-family="monospace" font-size="8" fill="#2a9d8f">user_id=6, Frank</text>
+            <text x="35" y="184" font-family="monospace" font-size="8" fill="#f4a261">user_id=7, Grace</text>
+            <text x="35" y="200" font-family="monospace" font-size="8" fill="#6c5ce7">user_id=8, Hank</text>
+            <text x="35" y="216" font-family="monospace" font-size="8" fill="#457b9d">user_id=9, Ivy</text>
+            <text x="35" y="232" font-family="monospace" font-size="8" fill="#2a9d8f">user_id=10, Jack</text>
+            <text x="35" y="248" font-family="monospace" font-size="8" fill="#999">...</text>
+
+            <!-- Arrow -->
+            <text x="240" y="155" font-family="system-ui" font-size="20" fill="#666">→</text>
+            <text x="240" y="175" font-family="system-ui" font-size="8" fill="#666">shard key:</text>
+            <text x="240" y="185" font-family="system-ui" font-size="8" fill="#666">user_id % 4</text>
+
+            <!-- Shard 0 -->
+            <rect x="290" y="40" width="95" height="90" rx="4" fill="#fff" stroke="#6c5ce7" stroke-width="2"/>
+            <rect x="290" y="40" width="95" height="20" rx="4" fill="#6c5ce7"/>
+            <rect x="290" y="56" width="95" height="4" fill="#6c5ce7"/>
+            <text x="337" y="55" text-anchor="middle" font-family="system-ui" font-size="8" font-weight="bold" fill="#fff">Shard 0 (mod=0)</text>
+            <text x="298" y="78" font-family="monospace" font-size="7" fill="#6c5ce7">4: Dave</text>
+            <text x="298" y="92" font-family="monospace" font-size="7" fill="#6c5ce7">8: Hank</text>
+            <text x="298" y="106" font-family="monospace" font-size="7" fill="#6c5ce7">12: ...</text>
+
+            <!-- Shard 1 -->
+            <rect x="400" y="40" width="95" height="90" rx="4" fill="#fff" stroke="#457b9d" stroke-width="2"/>
+            <rect x="400" y="40" width="95" height="20" rx="4" fill="#457b9d"/>
+            <rect x="400" y="56" width="95" height="4" fill="#457b9d"/>
+            <text x="447" y="55" text-anchor="middle" font-family="system-ui" font-size="8" font-weight="bold" fill="#fff">Shard 1 (mod=1)</text>
+            <text x="408" y="78" font-family="monospace" font-size="7" fill="#457b9d">1: Alice</text>
+            <text x="408" y="92" font-family="monospace" font-size="7" fill="#457b9d">5: Eve</text>
+            <text x="408" y="106" font-family="monospace" font-size="7" fill="#457b9d">9: Ivy</text>
+
+            <!-- Shard 2 -->
+            <rect x="510" y="40" width="95" height="90" rx="4" fill="#fff" stroke="#2a9d8f" stroke-width="2"/>
+            <rect x="510" y="40" width="95" height="20" rx="4" fill="#2a9d8f"/>
+            <rect x="510" y="56" width="95" height="4" fill="#2a9d8f"/>
+            <text x="557" y="55" text-anchor="middle" font-family="system-ui" font-size="8" font-weight="bold" fill="#fff">Shard 2 (mod=2)</text>
+            <text x="518" y="78" font-family="monospace" font-size="7" fill="#2a9d8f">2: Bob</text>
+            <text x="518" y="92" font-family="monospace" font-size="7" fill="#2a9d8f">6: Frank</text>
+            <text x="518" y="106" font-family="monospace" font-size="7" fill="#2a9d8f">10: Jack</text>
+
+            <!-- Shard 3 -->
+            <rect x="620" y="40" width="95" height="90" rx="4" fill="#fff" stroke="#f4a261" stroke-width="2"/>
+            <rect x="620" y="40" width="95" height="20" rx="4" fill="#f4a261"/>
+            <rect x="620" y="56" width="95" height="4" fill="#f4a261"/>
+            <text x="667" y="55" text-anchor="middle" font-family="system-ui" font-size="8" font-weight="bold" fill="#fff">Shard 3 (mod=3)</text>
+            <text x="628" y="78" font-family="monospace" font-size="7" fill="#f4a261">3: Carol</text>
+            <text x="628" y="92" font-family="monospace" font-size="7" fill="#f4a261">7: Grace</text>
+            <text x="628" y="106" font-family="monospace" font-size="7" fill="#f4a261">11: ...</text>
+
+            <!-- Benefits -->
+            <rect x="290" y="150" width="400" height="50" rx="4" fill="#f5f5f0" stroke="#ddd"/>
+            <text x="490" y="172" text-anchor="middle" font-family="system-ui" font-size="9" fill="#333">✅ Each shard handles ~25% of writes • ✅ Each shard stores ~25% of data</text>
+            <text x="490" y="188" text-anchor="middle" font-family="system-ui" font-size="9" fill="#333">✅ Queries for one user hit only one shard • ✅ Add more shards = more capacity</text>
+
+            <!-- Challenge -->
+            <rect x="290" y="215" width="400" height="75" rx="4" fill="rgba(230,57,70,0.05)" stroke="#e63946" stroke-width="1"/>
+            <text x="490" y="237" text-anchor="middle" font-family="system-ui" font-size="9" font-weight="bold" fill="#e63946">Challenges:</text>
+            <text x="310" y="255" font-family="system-ui" font-size="9" fill="#555">❌ "Find all users named Alice" → must query ALL shards (scatter-gather)</text>
+            <text x="310" y="272" font-family="system-ui" font-size="9" fill="#555">❌ JOINs across shards are impossible or very expensive</text>
+            <text x="310" y="289" font-family="system-ui" font-size="9" fill="#555">❌ Adding a 5th shard means redistributing ~80% of data (resharding)</text>
+        </svg>
+        <figcaption>Hash-based sharding distributes rows evenly but makes cross-shard queries expensive.</figcaption>
+    </figure>
+
+    <h2>Shard Key Selection</h2>
+
+    <p>The <strong>shard key</strong> is the most critical decision. It determines which shard a row lives on, and therefore what queries are efficient.</p>
+
+    <div class="card info">
+        <h3>Good Shard Key Properties</h3>
+        <ul>
+            <li><strong>Even distribution</strong> — All shards get roughly equal data and traffic. No hotspots.</li>
+            <li><strong>Matches query patterns</strong> — If you always query by user_id, shard by user_id. Queries stay on one shard.</li>
+            <li><strong>High cardinality</strong> — Many distinct values (user_id ✅, country ❌ — 200 values isn't enough).</li>
+            <li><strong>Immutable</strong> — If the shard key changes, the row must move between shards. Use IDs, not mutable fields.</li>
+        </ul>
+    </div>
+
+    <h2>Sharding Strategies</h2>
+
+    <table>
+        <thead>
+            <tr>
+                <th>Strategy</th>
+                <th>How It Works</th>
+                <th>Pros</th>
+                <th>Cons</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr>
+                <td><strong>Hash-based</strong></td>
+                <td><code>hash(key) % N</code></td>
+                <td>Even distribution</td>
+                <td>Range queries scatter, resharding is expensive</td>
+            </tr>
+            <tr>
+                <td><strong>Range-based</strong></td>
+                <td>A-M on shard 1, N-Z on shard 2</td>
+                <td>Range queries stay on one shard</td>
+                <td>Hotspots if data isn't uniform (most names start with S)</td>
+            </tr>
+            <tr>
+                <td><strong>Directory-based</strong></td>
+                <td>Lookup table maps key → shard</td>
+                <td>Flexible, easy to rebalance</td>
+                <td>Lookup table is a bottleneck/SPOF</td>
+            </tr>
+        </tbody>
+    </table>
+
+    <h2>Consistent Hashing</h2>
+
+    <p>A better approach for hash-based sharding: <strong>consistent hashing</strong>. Instead of <code>hash % N</code> (which breaks when N changes), place both nodes and keys on a ring.</p>
+
+    <figure class="diagram">
+        <svg viewBox="0 0 500 400" xmlns="http://www.w3.org/2000/svg">
+            <text x="250" y="20" text-anchor="middle" font-family="system-ui" font-size="12" font-weight="bold" fill="#333">Consistent Hashing Ring</text>
+
+            <!-- Ring -->
+            <circle cx="250" cy="220" r="140" fill="none" stroke="#ddd" stroke-width="3"/>
+
+            <!-- Nodes on ring -->
+            <circle cx="250" cy="80" r="14" fill="#457b9d" opacity="0.8"/>
+            <text x="250" y="84" text-anchor="middle" font-family="system-ui" font-size="8" fill="#fff" font-weight="bold">N1</text>
+            <text x="250" y="62" text-anchor="middle" font-family="system-ui" font-size="8" fill="#457b9d">Node 1</text>
+
+            <circle cx="378" cy="290" r="14" fill="#2a9d8f" opacity="0.8"/>
+            <text x="378" y="294" text-anchor="middle" font-family="system-ui" font-size="8" fill="#fff" font-weight="bold">N2</text>
+            <text x="405" y="280" font-family="system-ui" font-size="8" fill="#2a9d8f">Node 2</text>
+
+            <circle cx="122" cy="290" r="14" fill="#f4a261" opacity="0.8"/>
+            <text x="122" y="294" text-anchor="middle" font-family="system-ui" font-size="8" fill="#fff" font-weight="bold">N3</text>
+            <text x="90" y="280" font-family="system-ui" font-size="8" fill="#f4a261">Node 3</text>
+
+            <!-- Data keys on ring -->
+            <circle cx="310" cy="95" r="6" fill="#e63946"/>
+            <text x="330" y="92" font-family="monospace" font-size="7" fill="#e63946">key_A → N1</text>
+
+            <circle cx="370" cy="165" r="6" fill="#e63946"/>
+            <text x="393" y="162" font-family="monospace" font-size="7" fill="#e63946">key_B → N2</text>
+
+            <circle cx="185" cy="340" r="6" fill="#e63946"/>
+            <text x="165" y="360" font-family="monospace" font-size="7" fill="#e63946">key_C → N3</text>
+
+            <circle cx="320" cy="340" r="6" fill="#e63946"/>
+            <text x="340" y="358" font-family="monospace" font-size="7" fill="#e63946">key_D → N2</text>
+
+            <!-- Direction arrow -->
+            <text x="388" cy="120" y="120" font-family="system-ui" font-size="9" fill="#666">clockwise →</text>
+
+            <!-- Explanation -->
+            <text x="250" y="390" text-anchor="middle" font-family="system-ui" font-size="9" fill="#555">Each key goes to the next node clockwise. Adding/removing a node only moves ~1/N of keys.</text>
+        </svg>
+        <figcaption>Consistent hashing: keys walk clockwise to find their node. Adding Node 4 only moves keys between N4's neighbors — not all keys.</figcaption>
+    </figure>
+
+    <h2>The Challenges of Sharding</h2>
+
+    <div class="card highlight">
+        <h3>What Gets Hard</h3>
+        <ul>
+            <li><strong>Cross-shard queries</strong> — "SELECT * FROM users ORDER BY created_at" now requires querying all shards, merging, and sorting results.</li>
+            <li><strong>Resharding</strong> — When you need to add shards (growth) or remove them (cost), data must move. This can take hours/days.</li>
+            <li><strong>Hotspots</strong> — A celebrity's data shard gets 1000x more traffic than others. Even good hash functions can't prevent temporal hotspots.</li>
+            <li><strong>Referential integrity</strong> — Foreign keys can't span shards. Application must enforce data consistency.</li>
+            <li><strong>Transactions</strong> — ACID across shards requires distributed transactions (2PC), which are slow and complex.</li>
+        </ul>
+    </div>
+
+    <div class="real-world">
+        <h3>Instagram: Sharding by User ID</h3>
+        <p>Instagram shards their PostgreSQL databases by user_id. This works brilliantly for individual user feeds (all a user's photos are on one shard). But when they needed to build "Explore" — which queries across all users — they had to:</p>
+        <ul>
+            <li>Build a separate aggregation pipeline that reads from all shards</li>
+            <li>Maintain denormalized data in a search index (Elasticsearch)</li>
+            <li>Accept that cross-shard features have higher latency</li>
+        </ul>
+        <p><strong>Lesson:</strong> Your shard key optimizes for one access pattern. Every other pattern gets harder.</p>
+    </div>
+
+    <div class="real-world">
+        <h3>Discord: Sharding by Guild ID</h3>
+        <p>Discord shards messages by <code>guild_id</code> (server ID). This means:</p>
+        <ul>
+            <li>✅ All messages in a server are on one shard — channel history is fast</li>
+            <li>✅ Each shard handles a subset of servers — even load distribution</li>
+            <li>❌ DMs (direct messages) span guilds — they need a separate sharding strategy</li>
+            <li>❌ Large servers (millions of members) become hot shards — Discord handles this with further sub-sharding</li>
+        </ul>
+        <p>They use Cassandra for messages — which has built-in hash-based partitioning — and ScyllaDB for improved tail latencies.</p>
+    </div>
+
+    <h2>Interactive: Shard Key Analyzer</h2>
+
+    <div class="interactive">
+        <p>Try different shard keys on sample data. See how evenly (or unevenly) data distributes across 4 shards. Watch for hotspots!</p>
+
+        <div style="margin: 1rem 0;">
+            <strong>Shard key:</strong>
+            <select id="shard-key-select" onchange="analyzeSharding()" style="font-family:var(--font-mono);font-size:0.85rem;padding:0.3rem 0.6rem;border:2px solid var(--accent-blue);border-radius:4px;">
+                <option value="user_id">user_id (hash)</option>
+                <option value="country">country</option>
+                <option value="first_letter">username first letter</option>
+                <option value="created_month">signup month</option>
+            </select>
+        </div>
+
+        <div id="shard-viz" style="display:flex;gap:0.5rem;margin:1rem 0;flex-wrap:wrap;"></div>
+        <div id="shard-analysis" style="font-family:var(--font-heading);font-size:0.85rem;margin-top:0.5rem;"></div>
+    </div>
+
+    <script>
+    (function() {
+        const users = [
+            {user_id:1,name:"alice",country:"US",created:"2024-01"},{user_id:2,name:"bob",country:"US",created:"2024-01"},
+            {user_id:3,name:"carol",country:"UK",created:"2024-02"},{user_id:4,name:"dave",country:"US",created:"2024-01"},
+            {user_id:5,name:"eve",country:"DE",created:"2024-03"},{user_id:6,name:"frank",country:"US",created:"2024-01"},
+            {user_id:7,name:"grace",country:"US",created:"2024-02"},{user_id:8,name:"hank",country:"JP",created:"2024-04"},
+            {user_id:9,name:"ivy",country:"US",created:"2024-01"},{user_id:10,name:"jack",country:"US",created:"2024-01"},
+            {user_id:11,name:"kate",country:"UK",created:"2024-02"},{user_id:12,name:"leo",country:"US",created:"2024-01"},
+            {user_id:13,name:"mia",country:"US",created:"2024-03"},{user_id:14,name:"nick",country:"DE",created:"2024-01"},
+            {user_id:15,name:"olivia",country:"US",created:"2024-01"},{user_id:16,name:"pete",country:"US",created:"2024-02"},
+            {user_id:17,name:"quinn",country:"US",created:"2024-01"},{user_id:18,name:"rose",country:"JP",created:"2024-03"},
+            {user_id:19,name:"sam",country:"US",created:"2024-01"},{user_id:20,name:"tina",country:"US",created:"2024-01"},
+        ];
+
+        function hashSimple(val) { return Math.abs(String(val).split('').reduce((a,c)=>((a<<5)-a)+c.charCodeAt(0),0)) % 4; }
+
+        function getShard(user, key) {
+            switch(key) {
+                case 'user_id': return user.user_id % 4;
+                case 'country': return hashSimple(user.country);
+                case 'first_letter': return hashSimple(user.name[0]);
+                case 'created_month': return hashSimple(user.created);
+            }
+        }
+
+        window.analyzeSharding = function() {
+            const key = document.getElementById('shard-key-select').value;
+            const shards = [[], [], [], []];
+            users.forEach(u => shards[getShard(u, key)].push(u));
+
+            const viz = document.getElementById('shard-viz');
+            const colors = ['#6c5ce7', '#457b9d', '#2a9d8f', '#f4a261'];
+            viz.innerHTML = shards.map((s, i) => `
+                <div style="flex:1;min-width:120px;border:2px solid ${colors[i]};border-radius:6px;padding:0.5rem;">
+                    <div style="font-family:var(--font-heading);font-size:0.8rem;font-weight:bold;color:${colors[i]};margin-bottom:0.3rem;">Shard ${i} (${s.length} rows)</div>
+                    <div style="background:${colors[i]};height:${s.length * 8}px;border-radius:3px;margin-bottom:0.3rem;opacity:0.3;"></div>
+                    <div style="font-family:var(--font-mono);font-size:0.7rem;color:#555;">${s.map(u=>u.name).join(', ')}</div>
+                </div>
+            `).join('');
+
+            const counts = shards.map(s => s.length);
+            const max = Math.max(...counts);
+            const min = Math.min(...counts);
+            const ratio = max / Math.max(min, 1);
+            const analysis = document.getElementById('shard-analysis');
+
+            if (ratio <= 1.5) {
+                analysis.innerHTML = `<span style="color:var(--accent-green);">✅ Good distribution!</span> Max/min ratio: ${ratio.toFixed(1)}x. No significant hotspots.`;
+            } else if (ratio <= 3) {
+                analysis.innerHTML = `<span style="color:var(--accent-orange);">⚠️ Uneven distribution.</span> Max/min ratio: ${ratio.toFixed(1)}x. Some shards are overloaded.`;
+            } else {
+                analysis.innerHTML = `<span style="color:var(--accent);">🔥 HOTSPOT!</span> Max/min ratio: ${ratio.toFixed(1)}x. This shard key creates severe imbalance. One shard handles ${max}/${users.length} rows!`;
+            }
+        };
+
+        analyzeSharding();
+    })();
+    </script>
+
+    <div class="takeaway">
+        <h3>🎯 Key Takeaway</h3>
+        <p>Sharding gives you write scalability and lets you exceed single-machine limits — but it makes your system significantly more complex. Cross-shard queries, resharding, and hotspots are real operational challenges. Exhaust simpler approaches first (vertical scaling, read replicas, caching). When you must shard, choose your shard key based on your primary access pattern and accept that other patterns will be harder.</p>
+    </div>
+
+    <div class="footnote">
+        <p>📚 Next lesson: Choosing the Right Database — a decision framework for matching databases to workloads.</p>
+    </div>
+</body>
+</html>

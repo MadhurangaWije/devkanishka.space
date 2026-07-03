@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Chapter 15 Interview — Putting It All Together</title>
+  <link rel="stylesheet" href="../assets/styles.css">
+  <style>
+    .question-block{margin:2rem 0;padding:1.5rem;background:var(--card-bg);border:1px solid var(--border);border-radius:8px}
+    .question-block h3{margin-top:0;color:var(--accent-blue);font-size:1.1rem}
+    .answer{display:none;margin-top:1rem;padding:1rem;background:var(--code-bg);border-radius:6px;font-size:0.95rem;line-height:1.7}
+    .answer p{margin-bottom:0.8rem}
+    .answer.visible{display:block}
+    .key-points{margin:1rem 0;padding-left:1.2rem}
+    .key-points li{margin-bottom:0.4rem;font-size:0.9rem}
+    .follow-ups{margin-top:0.75rem;font-size:0.85rem;color:var(--text-muted);border-top:1px solid var(--border);padding-top:0.75rem}
+    .follow-ups strong{color:var(--text)}
+    .btn-show{padding:0.4rem 1rem;border-radius:5px;background:var(--accent-blue);color:#fff;border:none;cursor:pointer;font-size:0.85rem}
+    .btn-show:hover{opacity:0.85}
+    .nav-row{display:flex;justify-content:space-between;margin-top:2rem;flex-wrap:wrap;gap:0.5rem}
+    .btn{padding:0.5rem 1rem;border-radius:6px;background:#4299e1;color:#fff;text-decoration:none;font-size:0.9rem}
+    .btn.secondary{background:#718096}
+  </style>
+</head>
+<body>
+  <h1>Chapter 15 Interview: Putting It All Together</h1>
+  <p class="lesson-meta">🎙️ Practice answering these out loud — aim for 2–3 minute responses.</p>
+
+  <div class="question-block">
+    <h3>1. Design a URL shortener (full walkthrough).</h3>
+    <button class="btn-show" onclick="toggle(this)">Show Answer</button>
+    <div class="answer">
+      <p>Classic interview question. Let me walk through my thought process the way I'd do it live.</p>
+      <p>First, requirements. Write path: user submits a long URL, gets back something like short.ly/abc123. Read path: user hits that short URL, gets 301 redirected to the original. Read-heavy — maybe 100:1 read-to-write ratio. Let's say 100M new URLs/month, so ~1B redirects/month. That's roughly 400 reads/sec and 40 writes/sec — not insane.</p>
+      <p>The key design decision is how to generate the short code. I'd use a base62 encoding (a-z, A-Z, 0-9) of a unique ID. A 7-character code gives 62^7 = 3.5 trillion combinations — plenty. For ID generation, either a distributed ID generator (Snowflake-style) or a pre-generated pool of IDs. Avoid hash collisions by using IDs rather than hashing the URL.</p>
+      <p>Storage: a simple key-value store works — short code → long URL. I'd use something like DynamoDB or Cassandra for horizontal scaling. Add a cache layer (Redis) in front since reads are repetitive — popular links get hit millions of times.</p>
+      <p>For the redirect service, it's stateless — look up the code in cache (or DB on miss), return a 301. Horizontally scalable behind a load balancer. Analytics? Log redirect events to Kafka asynchronously, process them in a pipeline for click tracking.</p>
+      <ul class="key-points">
+        <li><strong>Encoding:</strong> base62 of unique ID, 7 chars = 3.5T possibilities</li>
+        <li><strong>Storage:</strong> KV store (DynamoDB/Cassandra) + Redis cache layer</li>
+        <li><strong>Read path:</strong> cache lookup → DB fallback → 301 redirect</li>
+        <li><strong>Scale:</strong> stateless redirect service, horizontally scaled</li>
+      </ul>
+      <div class="follow-ups"><strong>Follow-ups:</strong> How do you handle custom aliases? • What about link expiration? • How do you prevent abuse (spam links)?</div>
+    </div>
+  </div>
+
+  <div class="question-block">
+    <h3>2. Design a real-time chat system.</h3>
+    <button class="btn-show" onclick="toggle(this)">Show Answer</button>
+    <div class="answer">
+      <p>Real-time chat is a fun one because it touches so many system design concepts. Let me structure this.</p>
+      <p>The real-time delivery layer uses WebSockets. Each user maintains a persistent connection to a chat server. When Alice sends a message to Bob, it hits Alice's connected server, gets persisted, then needs to reach Bob's server. If they're on different servers — which they likely are at scale — you need a pub/sub layer between servers. Redis Pub/Sub or Kafka can fan out messages to the right server.</p>
+      <p>Message storage: I'd use Cassandra or a similar wide-column store. Partition by conversation ID, sort by timestamp. This gives you efficient "load last 50 messages for this chat" queries. For group chats, same model — one partition per group, all messages appended.</p>
+      <p>Presence (online/offline status) is its own challenge. Heartbeats from WebSocket connections update a presence service. When a connection drops, mark offline after a grace period. Store in Redis with TTL-based expiry.</p>
+      <p>Offline delivery: if Bob isn't connected, queue his messages. When he reconnects, pull undelivered messages. A simple approach: store a "last seen message ID" per user per conversation and fetch everything after that on reconnect.</p>
+      <p>At scale — millions of concurrent connections — you shard WebSocket servers by user ID, use consistent hashing to route, and the pub/sub layer handles cross-server message delivery.</p>
+      <ul class="key-points">
+        <li><strong>Transport:</strong> WebSockets for bidirectional real-time delivery</li>
+        <li><strong>Cross-server routing:</strong> pub/sub (Redis/Kafka) between chat servers</li>
+        <li><strong>Storage:</strong> Cassandra partitioned by conversation, sorted by time</li>
+        <li><strong>Offline:</strong> queue messages, deliver on reconnect via last-seen pointer</li>
+      </ul>
+      <div class="follow-ups"><strong>Follow-ups:</strong> How do you handle read receipts at scale? • What about end-to-end encryption? • How do you support message editing/deletion?</div>
+    </div>
+  </div>
+
+  <div class="question-block">
+    <h3>3. Design a social media news feed.</h3>
+    <button class="btn-show" onclick="toggle(this)">Show Answer</button>
+    <div class="answer">
+      <p>The news feed problem is essentially: when a user opens the app, show them a personalized, ranked list of recent posts from people they follow. The challenge is doing this at scale with low latency.</p>
+      <p>Two fundamental approaches. Fan-out on write: when a user posts, immediately push that post into all their followers' feed caches. Pre-computed feeds — reads are instant, just fetch from cache. Fan-out on read: when a user opens their feed, pull posts from everyone they follow and merge/rank in real-time. Saves write amplification but reads are expensive.</p>
+      <p>The hybrid approach is what works at scale — it's what Twitter described. For normal users (say, under 10K followers), fan-out on write. Their posts get pushed to follower feeds instantly. For celebrities with millions of followers, fan-out on read — you can't write to 50 million feed caches every time they post. When rendering a feed, merge the pre-computed timeline with fresh pulls from celebrity accounts.</p>
+      <p>Storage-wise: each user's feed is a sorted list (by timestamp or rank score) in Redis. Posts themselves live in a separate store (Cassandra or similar). The feed cache just stores post IDs — you hydrate with full content on read.</p>
+      <p>Ranking adds another layer. Instead of pure chronological, a ranking service scores posts by engagement signals, recency, relationship strength. This can run as a lightweight ML model at read time over the candidate posts.</p>
+      <ul class="key-points">
+        <li><strong>Fan-out on write:</strong> push to follower caches — fast reads, expensive writes</li>
+        <li><strong>Fan-out on read:</strong> pull and merge at read time — cheaper writes, slower reads</li>
+        <li><strong>Hybrid:</strong> write-fanout for normal users, read-fanout for celebrities</li>
+        <li><strong>Storage:</strong> Redis for feed caches (post IDs), Cassandra for post content</li>
+      </ul>
+      <div class="follow-ups"><strong>Follow-ups:</strong> How do you handle feed pagination? • What about new followers — do they see old posts? • How does the ranking model get trained?</div>
+    </div>
+  </div>
+
+  <div class="question-block">
+    <h3>4. How do you structure your thinking in a system design interview?</h3>
+    <button class="btn-show" onclick="toggle(this)">Show Answer</button>
+    <div class="answer">
+      <p>I have a framework I follow that keeps me organized and shows the interviewer I'm methodical. Takes about 35-40 minutes total.</p>
+      <p>First 5 minutes: clarify requirements. Functional (what does it do?) and non-functional (scale, latency, availability, consistency). Ask about the expected scale — number of users, requests per second, data volume. This scopes the problem and shows you don't jump to solutions.</p>
+      <p>Next, back-of-envelope estimation. Quick math: if 10M daily active users each make 20 requests, that's ~2,300 QPS average, maybe 10K peak. Storage: 10M users × 1KB profile = 10GB. This tells you whether you need distributed systems or a single box handles it.</p>
+      <p>Then high-level design — boxes and arrows. Major components: clients, API gateway, core services, databases, caches. Draw the data flow for the primary use cases. Get alignment from the interviewer here before diving deep.</p>
+      <p>Deep dive into 2-3 critical components. The interviewer usually steers you, or you pick the hardest parts. This is where you discuss trade-offs: SQL vs NoSQL, caching strategies, consistency models. Show you understand WHY you're choosing something, not just WHAT.</p>
+      <p>End with operational concerns: monitoring, failure modes, scaling bottlenecks. This shows senior-level thinking.</p>
+      <ul class="key-points">
+        <li><strong>Step 1:</strong> Clarify requirements — functional + non-functional + scale</li>
+        <li><strong>Step 2:</strong> Back-of-envelope math — QPS, storage, bandwidth</li>
+        <li><strong>Step 3:</strong> High-level architecture — main components and data flow</li>
+        <li><strong>Step 4:</strong> Deep dive — trade-offs on 2-3 critical decisions</li>
+        <li><strong>Step 5:</strong> Operational concerns — monitoring, failures, scaling</li>
+      </ul>
+      <div class="follow-ups"><strong>Follow-ups:</strong> How do you handle it when you don't know a technology the interviewer mentions? • What if you realize mid-way your design has a flaw? • How much detail is too much?</div>
+    </div>
+  </div>
+
+  <div class="question-block">
+    <h3>5. Walk me through approaching an unfamiliar design problem.</h3>
+    <button class="btn-show" onclick="toggle(this)">Show Answer</button>
+    <div class="answer">
+      <p>This happens all the time in interviews — you get asked to design something you've never built. The key is not to panic. The fundamentals apply everywhere; you just need to figure out which ones.</p>
+      <p>First, I'd decompose the problem into things I DO understand. "Design a ride-sharing system" — okay, I know how to do location-based queries, real-time matching is a variant of the assignment problem, payments are a separate service. Break the unfamiliar into familiar sub-problems.</p>
+      <p>Second, identify the core challenge. Every design problem has 1-2 things that make it hard. For ride-sharing, it's real-time geospatial matching under time pressure. For a search engine, it's building and querying an inverted index at scale. Name that hard thing explicitly — "I think the crux here is X" — and spend most of your time on it.</p>
+      <p>Third, reason from first principles about data flow. What data comes in? What transformations happen? What goes out? Even for an unfamiliar system, if you can trace data from input to output, you'll discover the natural component boundaries.</p>
+      <p>And honestly? Be transparent. Say "I haven't built one of these before, but here's how I'd reason about it." Interviewers respect that more than someone bullshitting. They're evaluating your thinking process, not your memorization of architectures.</p>
+      <ul class="key-points">
+        <li><strong>Decompose:</strong> break unfamiliar into familiar sub-problems</li>
+        <li><strong>Find the crux:</strong> identify the 1-2 genuinely hard parts and focus there</li>
+        <li><strong>Trace data flow:</strong> input → transform → output reveals component boundaries</li>
+        <li><strong>Be transparent:</strong> show your reasoning process, not memorized solutions</li>
+      </ul>
+      <div class="follow-ups"><strong>Follow-ups:</strong> How do you handle it when the interviewer keeps pushing deeper? • What if you make a wrong assumption early? • How do you decide what to simplify vs what to detail?</div>
+    </div>
+  </div>
+
+  <div class="nav-row">
+    <a href="ch14-interview.html" class="btn secondary">← Chapter 14 Interview</a>
+    <a href="ch13-interview.html" class="btn">Back to Chapter 13 →</a>
+  </div>
+
+  <script>
+    function toggle(btn) {
+      const answer = btn.nextElementSibling;
+      const visible = answer.classList.toggle('visible');
+      btn.textContent = visible ? 'Hide Answer' : 'Show Answer';
+    }
+  </script>
+</body>
+</html>

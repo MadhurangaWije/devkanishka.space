@@ -1,0 +1,330 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lesson 061 — Real-Time Analytics Architecture</title>
+    <link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+    <h1>Real-Time Analytics Architecture</h1>
+    <div class="lesson-meta">
+        <span>📘 Chapter 14: Data Pipelines &amp; Stream Processing</span>
+        <span>⏱️ 9 min read</span>
+        <span>🏗️ Lesson 061</span>
+    </div>
+
+    <p>How do you aggregate and query <strong>millions of events per second</strong> with sub-second latency? You can't simply run SQL on a traditional database — you need a specialized architecture that pre-computes results and serves them from optimized storage.</p>
+
+    <h2>The Real-Time Analytics Pipeline</h2>
+
+    <figure class="diagram">
+        <svg viewBox="0 0 720 200" xmlns="http://www.w3.org/2000/svg">
+            <defs>
+                <marker id="arrow61" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+                    <polygon points="0 0, 8 3, 0 6" fill="#666"/>
+                </marker>
+            </defs>
+            <text x="360" y="20" text-anchor="middle" font-family="system-ui" font-size="13" font-weight="bold" fill="#333">Real-Time Analytics Pipeline</text>
+
+            <!-- Events -->
+            <rect x="20" y="60" width="90" height="50" rx="6" fill="#e63946" opacity="0.12" stroke="#e63946" stroke-width="1.5"/>
+            <text x="65" y="80" text-anchor="middle" font-family="system-ui" font-size="8" font-weight="bold" fill="#e63946">Events</text>
+            <text x="65" y="93" text-anchor="middle" font-family="system-ui" font-size="7" fill="#666">Clicks, txns,</text>
+            <text x="65" y="103" text-anchor="middle" font-family="system-ui" font-size="7" fill="#666">IoT, logs</text>
+            <path d="M115 85 L145 85" stroke="#666" stroke-width="1.5" marker-end="url(#arrow61)"/>
+
+            <!-- Stream Processor -->
+            <rect x="150" y="55" width="110" height="60" rx="6" fill="#e9c46a" opacity="0.15" stroke="#e9c46a" stroke-width="1.5"/>
+            <text x="205" y="75" text-anchor="middle" font-family="system-ui" font-size="8" font-weight="bold" fill="#e9c46a">Stream Processor</text>
+            <text x="205" y="88" text-anchor="middle" font-family="system-ui" font-size="7" fill="#666">Filter, aggregate,</text>
+            <text x="205" y="98" text-anchor="middle" font-family="system-ui" font-size="7" fill="#666">window, enrich</text>
+            <text x="205" y="110" text-anchor="middle" font-family="system-ui" font-size="6" fill="#999">Flink / Kafka Streams</text>
+            <path d="M265 85 L295 85" stroke="#666" stroke-width="1.5" marker-end="url(#arrow61)"/>
+
+            <!-- Materialized Views -->
+            <rect x="300" y="55" width="120" height="60" rx="6" fill="#2a9d8f" opacity="0.12" stroke="#2a9d8f" stroke-width="1.5"/>
+            <text x="360" y="75" text-anchor="middle" font-family="system-ui" font-size="8" font-weight="bold" fill="#2a9d8f">Materialized Views</text>
+            <text x="360" y="88" text-anchor="middle" font-family="system-ui" font-size="7" fill="#666">Pre-aggregated</text>
+            <text x="360" y="98" text-anchor="middle" font-family="system-ui" font-size="7" fill="#666">metrics &amp; counters</text>
+            <text x="360" y="110" text-anchor="middle" font-family="system-ui" font-size="6" fill="#999">Druid / Pinot / ClickHouse</text>
+            <path d="M425 85 L455 85" stroke="#666" stroke-width="1.5" marker-end="url(#arrow61)"/>
+
+            <!-- Serving Layer -->
+            <rect x="460" y="55" width="100" height="60" rx="6" fill="#457b9d" opacity="0.12" stroke="#457b9d" stroke-width="1.5"/>
+            <text x="510" y="75" text-anchor="middle" font-family="system-ui" font-size="8" font-weight="bold" fill="#457b9d">Serving Layer</text>
+            <text x="510" y="88" text-anchor="middle" font-family="system-ui" font-size="7" fill="#666">API / Query</text>
+            <text x="510" y="98" text-anchor="middle" font-family="system-ui" font-size="7" fill="#666">engine</text>
+            <path d="M565 85 L595 85" stroke="#666" stroke-width="1.5" marker-end="url(#arrow61)"/>
+
+            <!-- Dashboard -->
+            <rect x="600" y="60" width="95" height="50" rx="6" fill="#6c5ce7" opacity="0.12" stroke="#6c5ce7" stroke-width="1.5"/>
+            <text x="647" y="80" text-anchor="middle" font-family="system-ui" font-size="8" font-weight="bold" fill="#6c5ce7">Dashboard</text>
+            <text x="647" y="93" text-anchor="middle" font-family="system-ui" font-size="7" fill="#666">Sub-second</text>
+            <text x="647" y="103" text-anchor="middle" font-family="system-ui" font-size="7" fill="#666">refresh</text>
+
+            <!-- Latency annotations -->
+            <text x="130" y="145" text-anchor="middle" font-family="system-ui" font-size="7" fill="#e63946">~ms</text>
+            <text x="280" y="145" text-anchor="middle" font-family="system-ui" font-size="7" fill="#e9c46a">~seconds</text>
+            <text x="440" y="145" text-anchor="middle" font-family="system-ui" font-size="7" fill="#2a9d8f">pre-computed</text>
+            <text x="580" y="145" text-anchor="middle" font-family="system-ui" font-size="7" fill="#457b9d">~ms query</text>
+
+            <text x="360" y="170" text-anchor="middle" font-family="system-ui" font-size="8" fill="#666">End-to-end: event occurs → visible on dashboard in &lt;5 seconds</text>
+            <text x="360" y="188" text-anchor="middle" font-family="system-ui" font-size="8" fill="#333" font-weight="bold">Key insight: compute BEFORE query time, not during</text>
+        </svg>
+        <figcaption>Figure 1: Real-time analytics pre-computes aggregations so queries are fast lookups, not expensive scans.</figcaption>
+    </figure>
+
+    <h2>Pre-Aggregation: The Core Trick</h2>
+
+    <div class="card info">
+        <p>Traditional analytics: user asks a question → scan billions of rows → return answer (slow).</p>
+        <p><strong>Real-time analytics:</strong> continuously compute answers as data arrives → user asks → return pre-computed answer (fast).</p>
+        <p>You're trading <strong>storage and compute upfront</strong> for <strong>query speed at read time</strong>.</p>
+        <ul>
+            <li>"Total orders in last 5 minutes" → maintained as a rolling counter</li>
+            <li>"Revenue by city today" → updated with each new order event</li>
+            <li>"p99 latency last hour" → computed from a streaming histogram</li>
+        </ul>
+    </div>
+
+    <h2>OLAP Engines</h2>
+
+    <div class="card">
+        <h3>Columnar Storage for Fast Aggregation</h3>
+        <table style="width:100%; border-collapse:collapse; font-size:0.9em;">
+            <tr style="border-bottom:2px solid #ddd;">
+                <th style="text-align:left; padding:6px;">Engine</th>
+                <th style="text-align:left; padding:6px;">Strength</th>
+                <th style="text-align:left; padding:6px;">Use Case</th>
+            </tr>
+            <tr style="border-bottom:1px solid #eee;">
+                <td style="padding:6px;"><strong>ClickHouse</strong></td>
+                <td style="padding:6px;">Fastest for ad-hoc analytical queries</td>
+                <td style="padding:6px;">Log analytics, product analytics</td>
+            </tr>
+            <tr style="border-bottom:1px solid #eee;">
+                <td style="padding:6px;"><strong>Apache Druid</strong></td>
+                <td style="padding:6px;">Real-time ingestion + fast slice-and-dice</td>
+                <td style="padding:6px;">Network monitoring, user-facing analytics</td>
+            </tr>
+            <tr style="border-bottom:1px solid #eee;">
+                <td style="padding:6px;"><strong>Apache Pinot</strong></td>
+                <td style="padding:6px;">Ultra-low latency on fresh data</td>
+                <td style="padding:6px;">User-facing real-time dashboards at scale</td>
+            </tr>
+            <tr>
+                <td style="padding:6px;"><strong>StarRocks</strong></td>
+                <td style="padding:6px;">Unified batch + real-time analytics</td>
+                <td style="padding:6px;">Replacing multiple engines with one</td>
+            </tr>
+        </table>
+        <p style="margin-top:8px; font-size:0.85em; color:#666;">All use columnar storage — reading only needed columns makes aggregations 10–100x faster than row-based DBs.</p>
+    </div>
+
+    <h2>Time-Series Databases</h2>
+
+    <div class="card">
+        <h3>Optimized for Time-Indexed Data</h3>
+        <p>When your primary query pattern is "show me metric X over time range Y":</p>
+        <ul>
+            <li><strong>InfluxDB:</strong> Purpose-built for metrics and IoT data</li>
+            <li><strong>TimescaleDB:</strong> PostgreSQL extension — familiar SQL, time-series performance</li>
+            <li><strong>Prometheus:</strong> Pull-based metrics for infrastructure monitoring</li>
+        </ul>
+        <p>Optimizations: time-based partitioning, automatic downsampling (1-second → 1-minute → 1-hour), efficient compression of sequential timestamps.</p>
+    </div>
+
+    <h2>Windowing Strategies</h2>
+
+    <div class="card">
+        <p>Stream aggregations need <strong>windows</strong> to bound the computation:</p>
+        <table style="width:100%; border-collapse:collapse; font-size:0.9em;">
+            <tr style="border-bottom:2px solid #ddd;">
+                <th style="text-align:left; padding:6px;">Window Type</th>
+                <th style="text-align:left; padding:6px;">How It Works</th>
+                <th style="text-align:left; padding:6px;">Example</th>
+            </tr>
+            <tr style="border-bottom:1px solid #eee;">
+                <td style="padding:6px;"><strong>Tumbling</strong></td>
+                <td style="padding:6px;">Fixed-size, non-overlapping</td>
+                <td style="padding:6px;">Count orders every 5 minutes (0:00–0:05, 0:05–0:10…)</td>
+            </tr>
+            <tr style="border-bottom:1px solid #eee;">
+                <td style="padding:6px;"><strong>Sliding</strong></td>
+                <td style="padding:6px;">Fixed-size, overlapping</td>
+                <td style="padding:6px;">Average latency over last 5 min, updated every 1 min</td>
+            </tr>
+            <tr>
+                <td style="padding:6px;"><strong>Session</strong></td>
+                <td style="padding:6px;">Gap-based, variable size</td>
+                <td style="padding:6px;">Group user clicks until 30 min of inactivity</td>
+            </tr>
+        </table>
+    </div>
+
+    <h2>Real-World Examples</h2>
+
+    <div class="real-world">
+        <h3>Uber: Apache Pinot for Surge Pricing</h3>
+        <p>Uber uses Apache Pinot to power <strong>city-level real-time dashboards</strong>:</p>
+        <ul>
+            <li>Ingests millions of trip events per second from riders and drivers</li>
+            <li>Computes supply/demand ratios per geo-cell in real time</li>
+            <li>Surge pricing decisions made on data that's &lt;10 seconds old</li>
+            <li>Dashboards refresh every 2 seconds showing city-wide metrics</li>
+            <li>Handles 100,000+ queries per second with p99 latency &lt;100ms</li>
+        </ul>
+        <p>Without pre-aggregation, each dashboard refresh would scan billions of rows — impossible at this speed.</p>
+    </div>
+
+    <div class="real-world">
+        <h3>LinkedIn: "Who Viewed Your Profile"</h3>
+        <p>LinkedIn's profile view feature processes <strong>billions of events daily</strong>:</p>
+        <ul>
+            <li>Every profile view generates an event (viewer, viewed, timestamp, context)</li>
+            <li>Stream processor enriches with viewer's company, title, and connection degree</li>
+            <li>Pre-aggregates: "3 people from Google viewed you this week"</li>
+            <li>Results visible to users within seconds of the view happening</li>
+            <li>Historical trends ("your views are up 40% this month") computed via windowed aggregations</li>
+        </ul>
+    </div>
+
+    <h2>Interactive: Build a Real-Time Metrics Pipeline</h2>
+
+    <div class="interactive">
+        <h3>Design Your Pipeline</h3>
+        <p>Choose components for each layer and see the resulting latency and throughput characteristics.</p>
+
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:10px; margin:12px 0;">
+            <div>
+                <label><strong>Ingestion:</strong></label><br>
+                <select id="pick-ingest" onchange="updatePipeline()" style="width:100%; padding:5px; margin-top:4px;">
+                    <option value="kafka">Apache Kafka</option>
+                    <option value="kinesis">AWS Kinesis</option>
+                    <option value="pubsub">Google Pub/Sub</option>
+                </select>
+            </div>
+            <div>
+                <label><strong>Stream Processor:</strong></label><br>
+                <select id="pick-processor" onchange="updatePipeline()" style="width:100%; padding:5px; margin-top:4px;">
+                    <option value="flink">Apache Flink</option>
+                    <option value="kstreams">Kafka Streams</option>
+                    <option value="spark">Spark Structured Streaming</option>
+                </select>
+            </div>
+            <div>
+                <label><strong>Storage/OLAP:</strong></label><br>
+                <select id="pick-storage" onchange="updatePipeline()" style="width:100%; padding:5px; margin-top:4px;">
+                    <option value="pinot">Apache Pinot</option>
+                    <option value="druid">Apache Druid</option>
+                    <option value="clickhouse">ClickHouse</option>
+                    <option value="timescale">TimescaleDB</option>
+                </select>
+            </div>
+            <div>
+                <label><strong>Query Pattern:</strong></label><br>
+                <select id="pick-query" onchange="updatePipeline()" style="width:100%; padding:5px; margin-top:4px;">
+                    <option value="dashboard">Live dashboard (many users)</option>
+                    <option value="adhoc">Ad-hoc exploration (analysts)</option>
+                    <option value="alerting">Automated alerting</option>
+                </select>
+            </div>
+        </div>
+
+        <div id="pipeline-result" style="padding:15px; background:#f8f9fa; border-radius:8px; border:1px solid #ddd; font-size:0.9em;"></div>
+    </div>
+
+    <script>
+    (function() {
+        var configs = {
+            ingest: {
+                kafka: { name: "Apache Kafka", latency: "2-10ms", throughput: "millions/sec", note: "Industry standard, highest throughput, requires ops" },
+                kinesis: { name: "AWS Kinesis", latency: "70-200ms", throughput: "1MB/sec/shard", note: "Managed, easy setup, AWS-native" },
+                pubsub: { name: "Google Pub/Sub", latency: "50-100ms", throughput: "auto-scales", note: "Serverless, no capacity planning needed" }
+            },
+            processor: {
+                flink: { name: "Apache Flink", latency: "~10ms", throughput: "very high", note: "Best for complex event processing, exactly-once semantics" },
+                kstreams: { name: "Kafka Streams", latency: "~5ms", throughput: "high", note: "Library (not cluster), simple deployment, Kafka-only" },
+                spark: { name: "Spark Structured Streaming", latency: "~100ms (micro-batch)", throughput: "very high", note: "Good if you already use Spark for batch" }
+            },
+            storage: {
+                pinot: { name: "Apache Pinot", latency: "<50ms p99", throughput: "100K+ QPS", note: "Best for user-facing dashboards at massive scale" },
+                druid: { name: "Apache Druid", latency: "<100ms p99", throughput: "10K+ QPS", note: "Great for slice-and-dice exploration on real-time data" },
+                clickhouse: { name: "ClickHouse", latency: "<200ms p99", throughput: "1K+ complex QPS", note: "Best for ad-hoc analytical queries, fastest single-node" },
+                timescale: { name: "TimescaleDB", latency: "<50ms simple", throughput: "moderate", note: "Best for time-series with PostgreSQL compatibility" }
+            },
+            query: {
+                dashboard: { note: "Needs: low latency, high concurrency, pre-defined queries" },
+                adhoc: { note: "Needs: flexible queries, moderate latency OK, lower concurrency" },
+                alerting: { note: "Needs: consistent low latency, simple threshold checks" }
+            }
+        };
+
+        var recommendations = {
+            "pinot-dashboard": "Excellent match! Pinot is purpose-built for high-concurrency user-facing dashboards.",
+            "pinot-adhoc": "Pinot works but ClickHouse may be better for ad-hoc exploration flexibility.",
+            "pinot-alerting": "Works, but consider a simpler time-series DB for threshold-based alerting.",
+            "druid-dashboard": "Good fit — Druid handles real-time dashboards well with pre-aggregation.",
+            "druid-adhoc": "Great match! Druid excels at slice-and-dice exploration.",
+            "druid-alerting": "Possible, but overkill for simple alerting. Consider Prometheus.",
+            "clickhouse-dashboard": "Works for internal dashboards. For user-facing (100K+ QPS), consider Pinot.",
+            "clickhouse-adhoc": "Perfect match! ClickHouse is the fastest engine for ad-hoc analytical queries.",
+            "clickhouse-alerting": "Can work, but a time-series DB is more natural for alerting.",
+            "timescale-dashboard": "Good for time-series dashboards. Limited for complex dimensional queries.",
+            "timescale-adhoc": "Good if queries are time-based. Limited for multi-dimensional analysis.",
+            "timescale-alerting": "Excellent match! Time-series DB + SQL = natural alerting queries."
+        };
+
+        window.updatePipeline = function() {
+            var ingest = document.getElementById('pick-ingest').value;
+            var processor = document.getElementById('pick-processor').value;
+            var storage = document.getElementById('pick-storage').value;
+            var query = document.getElementById('pick-query').value;
+
+            var i = configs.ingest[ingest];
+            var p = configs.processor[processor];
+            var s = configs.storage[storage];
+            var q = configs.query[query];
+            var rec = recommendations[storage + '-' + query] || "";
+
+            var totalLatency = "Event → Dashboard: ~" +
+                (ingest === 'kafka' ? '2' : ingest === 'kinesis' ? '70' : '50') + "ms ingestion + " +
+                (processor === 'flink' ? '10' : processor === 'kstreams' ? '5' : '100') + "ms processing + " +
+                "storage write";
+
+            var html = '<div style="margin-bottom:10px;"><strong>Your Pipeline:</strong></div>';
+            html += '<div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:12px;">';
+            html += '<span style="padding:4px 8px; background:#e63946; color:#fff; border-radius:4px; font-size:0.8em;">' + i.name + '</span> → ';
+            html += '<span style="padding:4px 8px; background:#e9c46a; color:#333; border-radius:4px; font-size:0.8em;">' + p.name + '</span> → ';
+            html += '<span style="padding:4px 8px; background:#2a9d8f; color:#fff; border-radius:4px; font-size:0.8em;">' + s.name + '</span> → ';
+            html += '<span style="padding:4px 8px; background:#6c5ce7; color:#fff; border-radius:4px; font-size:0.8em;">' + q.note.split(':')[0] + '</span>';
+            html += '</div>';
+
+            html += '<table style="width:100%; border-collapse:collapse; font-size:0.85em;">';
+            html += '<tr><td style="padding:4px; color:#666;">Ingestion latency:</td><td style="padding:4px;">' + i.latency + ' — ' + i.note + '</td></tr>';
+            html += '<tr><td style="padding:4px; color:#666;">Processing latency:</td><td style="padding:4px;">' + p.latency + ' — ' + p.note + '</td></tr>';
+            html += '<tr><td style="padding:4px; color:#666;">Query latency:</td><td style="padding:4px;">' + s.latency + ' @ ' + s.throughput + '</td></tr>';
+            html += '</table>';
+
+            html += '<div style="margin-top:10px; padding:8px; background:#2a9d8f; color:#fff; border-radius:4px; font-size:0.85em;">';
+            html += '<strong>Assessment:</strong> ' + rec;
+            html += '</div>';
+
+            document.getElementById('pipeline-result').innerHTML = html;
+        };
+
+        updatePipeline();
+    })();
+    </script>
+
+    <div class="takeaway">
+        <h3>Key Takeaway</h3>
+        <p>Real-time analytics requires <strong>pre-computation and specialized storage</strong>. The pattern: ingest events → process and aggregate in a stream → store in columnar/OLAP engines → serve pre-computed results. You're trading storage and upfront compute complexity for sub-second query speed. Choose your OLAP engine based on query pattern: Pinot for user-facing dashboards, ClickHouse for ad-hoc analytics, time-series DBs for metric monitoring.</p>
+    </div>
+
+    <div class="footnote">
+        <p><strong>Previous:</strong> <a href="0060-data-lakes-warehouses.html">Data Lakes &amp; Warehouses</a> | <strong>Next chapter:</strong> Security &amp; Identity (coming soon)</p>
+    </div>
+</body>
+</html>

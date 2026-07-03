@@ -1,0 +1,349 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lesson 038 — Consensus Algorithms (Raft Simplified)</title>
+    <link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+    <h1>Consensus Algorithms (Raft Simplified)</h1>
+    <div class="lesson-meta">
+        <span>📘 Chapter 9: Consistency &amp; Distributed Consensus</span>
+        <span>⏱️ 10 min read</span>
+        <span>🏗️ Lesson 038</span>
+    </div>
+
+    <p>How do distributed nodes <strong>agree on a value</strong> when some may fail or become unreachable? This is the <strong>consensus problem</strong> — and it's the foundation of leader election, distributed locks, configuration management, and replicated state machines. Raft was designed in 2014 specifically to be <em>understandable</em>, unlike its predecessor Paxos.</p>
+
+    <h2>Why Consensus Matters</h2>
+
+    <div class="card info">
+        <h3>You Need Consensus For:</h3>
+        <ul>
+            <li><strong>Leader election:</strong> Which node is the primary? All must agree.</li>
+            <li><strong>Configuration management:</strong> What's the current cluster membership?</li>
+            <li><strong>Distributed locks:</strong> Who holds the lock right now?</li>
+            <li><strong>Replicated state machines:</strong> Ensuring all replicas apply the same operations in the same order.</li>
+        </ul>
+        <p>Without consensus, you get split-brain: two nodes both think they're the leader, accept conflicting writes, and corrupt your data.</p>
+    </div>
+
+    <h2>Raft's Three Roles</h2>
+
+    <div class="card">
+        <ul>
+            <li><strong>Leader:</strong> Handles all client requests. Replicates log entries to followers. Only one leader per term.</li>
+            <li><strong>Follower:</strong> Passive — responds to RPCs from leader and candidates. If it doesn't hear from a leader, it becomes a candidate.</li>
+            <li><strong>Candidate:</strong> Transitional state during an election. Requests votes from other nodes.</li>
+        </ul>
+    </div>
+
+    <figure class="diagram">
+        <svg viewBox="0 0 650 280" xmlns="http://www.w3.org/2000/svg">
+            <text x="325" y="20" text-anchor="middle" font-family="system-ui" font-size="13" font-weight="bold" fill="#333">Raft State Machine — Role Transitions</text>
+
+            <!-- Follower -->
+            <circle cx="150" cy="150" r="55" fill="#457b9d" opacity="0.15" stroke="#457b9d" stroke-width="2.5"/>
+            <text x="150" y="145" text-anchor="middle" font-family="system-ui" font-size="12" font-weight="bold" fill="#457b9d">Follower</text>
+            <text x="150" y="165" text-anchor="middle" font-family="system-ui" font-size="8" fill="#666">Passive, listens</text>
+
+            <!-- Candidate -->
+            <circle cx="380" cy="90" r="55" fill="#f4a261" opacity="0.15" stroke="#f4a261" stroke-width="2.5"/>
+            <text x="380" y="85" text-anchor="middle" font-family="system-ui" font-size="12" font-weight="bold" fill="#e76f51">Candidate</text>
+            <text x="380" y="105" text-anchor="middle" font-family="system-ui" font-size="8" fill="#666">Requests votes</text>
+
+            <!-- Leader -->
+            <circle cx="550" cy="200" r="55" fill="#2a9d8f" opacity="0.15" stroke="#2a9d8f" stroke-width="2.5"/>
+            <text x="550" y="195" text-anchor="middle" font-family="system-ui" font-size="12" font-weight="bold" fill="#2a9d8f">Leader</text>
+            <text x="550" y="215" text-anchor="middle" font-family="system-ui" font-size="8" fill="#666">Handles requests</text>
+
+            <!-- Follower → Candidate (timeout) -->
+            <path d="M200,120 Q280,70 330,80" fill="none" stroke="#e76f51" stroke-width="2" marker-end="url(#arrowO)"/>
+            <text x="250" y="75" font-family="system-ui" font-size="8" fill="#e76f51">election timeout</text>
+
+            <!-- Candidate → Leader (wins election) -->
+            <path d="M430,110 Q490,140 510,160" fill="none" stroke="#2a9d8f" stroke-width="2" marker-end="url(#arrowGr)"/>
+            <text x="490" y="125" font-family="system-ui" font-size="8" fill="#2a9d8f">wins majority</text>
+
+            <!-- Candidate → Follower (discovers leader or higher term) -->
+            <path d="M330,105 Q260,130 205,145" fill="none" stroke="#457b9d" stroke-width="2" marker-end="url(#arrowBl)"/>
+            <text x="240" y="140" font-family="system-ui" font-size="7" fill="#457b9d">discovers leader</text>
+
+            <!-- Leader → Follower (discovers higher term) -->
+            <path d="M500,220 Q350,250 200,175" fill="none" stroke="#457b9d" stroke-width="2" marker-end="url(#arrowBl)"/>
+            <text x="350" y="235" font-family="system-ui" font-size="7" fill="#457b9d">higher term discovered</text>
+
+            <!-- Candidate → Candidate (split vote, new election) -->
+            <path d="M420,50 C450,30 460,30 435,55" fill="none" stroke="#f4a261" stroke-width="1.5" marker-end="url(#arrowO)"/>
+            <text x="460" y="35" font-family="system-ui" font-size="7" fill="#e76f51">split vote → new term</text>
+
+            <!-- Start -->
+            <text x="150" y="225" text-anchor="middle" font-family="system-ui" font-size="8" fill="#999">← all nodes start here</text>
+
+            <defs>
+                <marker id="arrowO" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#e76f51"/></marker>
+                <marker id="arrowGr" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#2a9d8f"/></marker>
+                <marker id="arrowBl" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#457b9d"/></marker>
+            </defs>
+        </svg>
+        <figcaption>Figure 1: Raft state machine. Nodes transition between Follower, Candidate, and Leader roles based on timeouts and vote outcomes.</figcaption>
+    </figure>
+
+    <h2>Leader Election</h2>
+
+    <div class="card">
+        <h3>The Election Process</h3>
+        <ol>
+            <li>Each follower has a randomized <strong>election timeout</strong> (150-300ms). If no heartbeat from leader → timeout fires.</li>
+            <li>Follower increments its <strong>term</strong> number and becomes a <strong>Candidate</strong>.</li>
+            <li>Candidate votes for itself and sends <strong>RequestVote</strong> RPCs to all other nodes.</li>
+            <li>Other nodes vote YES if they haven't voted in this term and the candidate's log is at least as up-to-date.</li>
+            <li>If candidate gets votes from a <strong>majority</strong> (⌈N/2⌉ + 1) → becomes Leader.</li>
+            <li>Leader immediately sends heartbeats to prevent new elections.</li>
+        </ol>
+        <p><strong>Randomized timeouts prevent split votes:</strong> nodes wake up at different times, so usually one starts the election first and wins quickly.</p>
+    </div>
+
+    <h2>Log Replication</h2>
+
+    <p>Once elected, the leader handles all writes. It appends entries to its log, replicates them to followers, and commits once a majority acknowledges.</p>
+
+    <figure class="diagram">
+        <svg viewBox="0 0 700 300" xmlns="http://www.w3.org/2000/svg">
+            <text x="350" y="20" text-anchor="middle" font-family="system-ui" font-size="13" font-weight="bold" fill="#333">Log Replication in a 5-Node Cluster</text>
+
+            <!-- Leader -->
+            <rect x="50" y="50" width="600" height="40" rx="5" fill="#2a9d8f" opacity="0.08" stroke="#2a9d8f" stroke-width="1.5"/>
+            <text x="80" y="74" font-family="system-ui" font-size="10" font-weight="bold" fill="#2a9d8f">Leader</text>
+            <rect x="160" y="58" width="50" height="24" rx="3" fill="#2a9d8f" opacity="0.3" stroke="#2a9d8f"/>
+            <text x="185" y="74" text-anchor="middle" font-family="system-ui" font-size="8" fill="#333">x=1</text>
+            <rect x="215" y="58" width="50" height="24" rx="3" fill="#2a9d8f" opacity="0.3" stroke="#2a9d8f"/>
+            <text x="240" y="74" text-anchor="middle" font-family="system-ui" font-size="8" fill="#333">y=5</text>
+            <rect x="270" y="58" width="50" height="24" rx="3" fill="#f4a261" opacity="0.4" stroke="#f4a261" stroke-width="2"/>
+            <text x="295" y="74" text-anchor="middle" font-family="system-ui" font-size="8" font-weight="bold" fill="#e76f51">z=3</text>
+            <text x="350" y="74" font-family="system-ui" font-size="8" fill="#e76f51">← new entry (uncommitted)</text>
+
+            <!-- Followers -->
+            <rect x="50" y="110" width="600" height="35" rx="5" fill="#457b9d" opacity="0.05" stroke="#457b9d" stroke-width="1"/>
+            <text x="80" y="131" font-family="system-ui" font-size="9" fill="#457b9d">Node 2</text>
+            <rect x="160" y="117" width="50" height="20" rx="3" fill="#457b9d" opacity="0.2"/>
+            <text x="185" y="131" text-anchor="middle" font-family="system-ui" font-size="7" fill="#333">x=1</text>
+            <rect x="215" y="117" width="50" height="20" rx="3" fill="#457b9d" opacity="0.2"/>
+            <text x="240" y="131" text-anchor="middle" font-family="system-ui" font-size="7" fill="#333">y=5</text>
+            <rect x="270" y="117" width="50" height="20" rx="3" fill="#2a9d8f" opacity="0.3" stroke="#2a9d8f"/>
+            <text x="295" y="131" text-anchor="middle" font-family="system-ui" font-size="7" fill="#333">z=3 ✓</text>
+
+            <rect x="50" y="150" width="600" height="35" rx="5" fill="#457b9d" opacity="0.05" stroke="#457b9d" stroke-width="1"/>
+            <text x="80" y="171" font-family="system-ui" font-size="9" fill="#457b9d">Node 3</text>
+            <rect x="160" y="157" width="50" height="20" rx="3" fill="#457b9d" opacity="0.2"/>
+            <text x="185" y="171" text-anchor="middle" font-family="system-ui" font-size="7" fill="#333">x=1</text>
+            <rect x="215" y="157" width="50" height="20" rx="3" fill="#457b9d" opacity="0.2"/>
+            <text x="240" y="171" text-anchor="middle" font-family="system-ui" font-size="7" fill="#333">y=5</text>
+            <rect x="270" y="157" width="50" height="20" rx="3" fill="#2a9d8f" opacity="0.3" stroke="#2a9d8f"/>
+            <text x="295" y="171" text-anchor="middle" font-family="system-ui" font-size="7" fill="#333">z=3 ✓</text>
+
+            <rect x="50" y="190" width="600" height="35" rx="5" fill="#457b9d" opacity="0.05" stroke="#457b9d" stroke-width="1"/>
+            <text x="80" y="211" font-family="system-ui" font-size="9" fill="#457b9d">Node 4</text>
+            <rect x="160" y="197" width="50" height="20" rx="3" fill="#457b9d" opacity="0.2"/>
+            <text x="185" y="211" text-anchor="middle" font-family="system-ui" font-size="7" fill="#333">x=1</text>
+            <rect x="215" y="197" width="50" height="20" rx="3" fill="#457b9d" opacity="0.2"/>
+            <text x="240" y="211" text-anchor="middle" font-family="system-ui" font-size="7" fill="#333">y=5</text>
+            <rect x="270" y="197" width="50" height="20" rx="3" fill="#f4a261" opacity="0.2"/>
+            <text x="295" y="211" text-anchor="middle" font-family="system-ui" font-size="7" fill="#999">pending...</text>
+
+            <rect x="50" y="230" width="600" height="35" rx="5" fill="#e63946" opacity="0.05" stroke="#e63946" stroke-width="1"/>
+            <text x="80" y="251" font-family="system-ui" font-size="9" fill="#e63946">Node 5</text>
+            <rect x="160" y="237" width="50" height="20" rx="3" fill="#457b9d" opacity="0.2"/>
+            <text x="185" y="251" text-anchor="middle" font-family="system-ui" font-size="7" fill="#333">x=1</text>
+            <rect x="215" y="237" width="50" height="20" rx="3" fill="#457b9d" opacity="0.2"/>
+            <text x="240" y="251" text-anchor="middle" font-family="system-ui" font-size="7" fill="#333">y=5</text>
+            <text x="295" y="251" text-anchor="middle" font-family="system-ui" font-size="7" fill="#e63946">✗ unreachable</text>
+
+            <!-- Majority indicator -->
+            <rect x="420" y="100" width="220" height="55" rx="6" fill="#2a9d8f" opacity="0.08" stroke="#2a9d8f" stroke-width="1"/>
+            <text x="530" y="118" text-anchor="middle" font-family="system-ui" font-size="9" font-weight="bold" fill="#2a9d8f">Majority reached! (3/5)</text>
+            <text x="530" y="135" text-anchor="middle" font-family="system-ui" font-size="8" fill="#555">Leader + Node 2 + Node 3 = 3 ACKs</text>
+            <text x="530" y="148" text-anchor="middle" font-family="system-ui" font-size="8" fill="#2a9d8f">→ Entry "z=3" is now COMMITTED</text>
+
+            <!-- Bottom note -->
+            <text x="350" y="285" text-anchor="middle" font-family="system-ui" font-size="9" fill="#555">Committed entries are durable — even if the leader crashes, a new leader will have this entry.</text>
+        </svg>
+        <figcaption>Figure 2: The leader replicates entry "z=3" to followers. Once 3 of 5 nodes have it (majority), the entry is committed.</figcaption>
+    </figure>
+
+    <h2>Safety Guarantees</h2>
+
+    <div class="card info">
+        <h3>What Raft Guarantees</h3>
+        <ul>
+            <li><strong>Election Safety:</strong> At most one leader per term.</li>
+            <li><strong>Leader Append-Only:</strong> A leader never overwrites or deletes entries in its log.</li>
+            <li><strong>Log Matching:</strong> If two logs contain an entry with the same index and term, all preceding entries are identical.</li>
+            <li><strong>Leader Completeness:</strong> If an entry is committed, it will be present in the log of all future leaders.</li>
+            <li><strong>State Machine Safety:</strong> If a node applies an entry at a given index, no other node will apply a different entry at that index.</li>
+        </ul>
+        <p>These guarantees together ensure that <strong>committed entries are never lost</strong>, even through leader failures.</p>
+    </div>
+
+    <h2>Real-World Systems Using Raft</h2>
+
+    <div class="real-world">
+        <h3>🏢 etcd — Kubernetes' Brain</h3>
+        <p>etcd is the key-value store that holds <strong>all Kubernetes cluster state</strong>: pod definitions, service configs, secrets, node membership.</p>
+        <ul>
+            <li>Uses Raft for consensus across typically 3 or 5 etcd nodes</li>
+            <li>Every kubectl apply ultimately writes to etcd through Raft</li>
+            <li>If the etcd leader dies, a new election happens in ~150-300ms</li>
+            <li>Writes require majority acknowledgment → consistent cluster state</li>
+        </ul>
+    </div>
+
+    <div class="real-world">
+        <h3>🏢 CockroachDB — Multi-Region Consistency</h3>
+        <p>CockroachDB uses Raft at the <strong>range level</strong> (each range of data has its own Raft group):</p>
+        <ul>
+            <li>Data is split into ranges (~64MB each), each replicated via its own Raft group</li>
+            <li>Thousands of concurrent Raft groups per node</li>
+            <li>Enables strong consistency within each range while distributing load across the cluster</li>
+            <li>Leader leases optimize reads (leader can serve reads locally without consensus round-trip)</li>
+        </ul>
+    </div>
+
+    <h2 class="interactive">Interactive: Raft Cluster Simulation</h2>
+
+    <div class="interactive" id="raft-sim">
+        <p><strong>A 5-node Raft cluster. Kill the leader and watch an election happen:</strong></p>
+
+        <div id="raft-nodes" style="display: flex; gap: 0.8rem; margin: 1rem 0; flex-wrap: wrap; justify-content: center;"></div>
+
+        <div style="display: flex; gap: 0.5rem; flex-wrap: wrap; margin: 1rem 0;">
+            <button onclick="raftWrite()" style="padding: 0.4rem 1rem; border: 1px solid #2a9d8f; background: #f8f9fa; border-radius: 4px; cursor: pointer; color: #2a9d8f;">✏️ Write Entry</button>
+            <button onclick="raftKillLeader()" style="padding: 0.4rem 1rem; border: 1px solid #e63946; background: #f8f9fa; border-radius: 4px; cursor: pointer; color: #e63946;">💀 Kill Leader</button>
+            <button onclick="raftReset()" style="padding: 0.4rem 1rem; border: 1px solid #ddd; background: #f8f9fa; border-radius: 4px; cursor: pointer;">Reset</button>
+        </div>
+
+        <div id="raft-log" style="background: #f8f9fa; border-radius: 8px; padding: 0.8rem; font-family: monospace; font-size: 0.8rem; max-height: 160px; overflow-y: auto;"></div>
+    </div>
+
+    <script>
+    (function() {
+        let nodes = [];
+        let leader = 0;
+        let term = 1;
+        let logIndex = 0;
+        const logEl = document.getElementById('raft-log');
+        const nodesEl = document.getElementById('raft-nodes');
+
+        function log(msg) {
+            logEl.innerHTML += '<div>' + msg + '</div>';
+            logEl.scrollTop = logEl.scrollHeight;
+        }
+
+        function initNodes() {
+            nodes = [];
+            for (let i = 0; i < 5; i++) {
+                nodes.push({ id: i, alive: true, role: i === 0 ? 'Leader' : 'Follower', entries: 0 });
+            }
+            leader = 0;
+            term = 1;
+            logIndex = 0;
+        }
+
+        function renderNodes() {
+            nodesEl.innerHTML = nodes.map(function(n) {
+                var color = !n.alive ? '#999' : n.role === 'Leader' ? '#2a9d8f' : n.role === 'Candidate' ? '#f4a261' : '#457b9d';
+                var bg = !n.alive ? '#f0f0f0' : n.role === 'Leader' ? '#2a9d8f11' : 'white';
+                var border = !n.alive ? '#ccc' : color;
+                var icon = !n.alive ? '💀' : n.role === 'Leader' ? '👑' : n.role === 'Candidate' ? '🗳️' : '📋';
+                return '<div style="border:2px solid ' + border + ';border-radius:8px;padding:0.8rem;text-align:center;min-width:90px;background:' + bg + ';">' +
+                    '<div style="font-size:1.2rem;">' + icon + '</div>' +
+                    '<div style="font-weight:bold;font-size:0.85rem;color:' + color + ';">Node ' + (n.id+1) + '</div>' +
+                    '<div style="font-size:0.75rem;color:' + color + ';">' + n.role + '</div>' +
+                    '<div style="font-size:0.7rem;color:#999;">log: ' + n.entries + ' entries</div>' +
+                    '</div>';
+            }).join('');
+        }
+
+        window.raftWrite = function() {
+            if (leader === -1) { log('❌ No leader! Cannot accept writes. Wait for election.'); return; }
+            if (!nodes[leader].alive) { log('❌ Leader is dead! Cannot accept writes.'); return; }
+            logIndex++;
+            nodes[leader].entries = logIndex;
+            log('✏️ Client write #' + logIndex + ' → Leader (Node ' + (leader+1) + ')');
+
+            // Replicate to alive followers
+            var acks = 1; // leader counts
+            var total = '';
+            nodes.forEach(function(n) {
+                if (n.id !== leader && n.alive) {
+                    n.entries = logIndex;
+                    acks++;
+                    total += ' Node' + (n.id+1);
+                }
+            });
+            log('📡 Replicated to' + total + ' (' + acks + '/5 ACKs) → <span style="color:#2a9d8f">COMMITTED</span>');
+            renderNodes();
+        };
+
+        window.raftKillLeader = function() {
+            if (leader === -1) { log('⚠️ Already no leader.'); return; }
+            var oldLeader = leader;
+            nodes[oldLeader].alive = false;
+            nodes[oldLeader].role = 'Dead';
+            log('💀 Node ' + (oldLeader+1) + ' (Leader) killed!');
+            leader = -1;
+            renderNodes();
+
+            // Election after timeout
+            setTimeout(function() {
+                term++;
+                // Pick a random alive node as candidate
+                var alive = nodes.filter(function(n) { return n.alive; });
+                if (alive.length === 0) { log('🚨 All nodes dead! Cluster unavailable.'); return; }
+                var candidate = alive[Math.floor(Math.random() * alive.length)];
+                candidate.role = 'Candidate';
+                log('🗳️ Election timeout! Node ' + (candidate.id+1) + ' becomes Candidate (term ' + term + ')');
+                renderNodes();
+
+                setTimeout(function() {
+                    // Count votes
+                    var votes = alive.length; // all alive nodes vote yes (simplified)
+                    var majority = Math.floor(5/2) + 1;
+                    if (votes >= majority) {
+                        candidate.role = 'Leader';
+                        leader = candidate.id;
+                        alive.forEach(function(n) { if (n.id !== candidate.id) n.role = 'Follower'; });
+                        log('✅ Node ' + (candidate.id+1) + ' wins election with ' + votes + '/' + 5 + ' votes (majority=' + majority + '). New Leader!');
+                    } else {
+                        log('⚠️ Not enough votes (' + votes + '/' + majority + ' needed). Cluster cannot elect leader.');
+                        candidate.role = 'Follower';
+                    }
+                    renderNodes();
+                }, 800);
+            }, 1000);
+        };
+
+        window.raftReset = function() {
+            initNodes();
+            logEl.innerHTML = '';
+            log('🔄 Cluster reset. 5 nodes, Node 1 is Leader, term 1.');
+            renderNodes();
+        };
+
+        initNodes();
+        renderNodes();
+        log('🟢 Cluster ready. Node 1 is Leader (term 1). Try writing or killing the leader.');
+    })();
+    </script>
+
+    <div class="takeaway">
+        <h3>🎯 Key Takeaway</h3>
+        <p>Consensus algorithms are the foundation of any distributed system that needs agreement — leader election, replicated logs, distributed locks. You don't implement Raft yourself, but understanding it explains <em>why</em> systems like etcd, Consul, and CockroachDB behave the way they do: why they need odd numbers of nodes, why they become unavailable without a quorum, and why leader failover takes a few hundred milliseconds.</p>
+    </div>
+
+    <div class="footnote">
+        <p><strong>Previous:</strong> <a href="0037-distributed-transactions-saga-pattern.html">Distributed Transactions &amp; Saga Pattern</a> | <strong>Next:</strong> <a href="0039-conflict-resolution-strategies.html">Conflict Resolution Strategies</a></p>
+    </div>
+</body>
+</html>

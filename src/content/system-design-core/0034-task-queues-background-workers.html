@@ -1,0 +1,393 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lesson 034 — Task Queues &amp; Background Workers</title>
+    <link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+    <h1>Task Queues &amp; Background Workers</h1>
+    <div class="lesson-meta">
+        <span>📘 Chapter 8: Asynchronous Processing</span>
+        <span>⏱️ 9 min read</span>
+        <span>🏗️ Lesson 034</span>
+    </div>
+
+    <p>Task queues are a specialized form of message queues designed for <strong>deferred work execution</strong>. Instead of processing a request synchronously and making the user wait, you enqueue a task, return immediately, and let a background worker handle the heavy lifting. The user gets a fast response; the work happens behind the scenes.</p>
+
+    <h2>How It Differs from Message Queues</h2>
+
+    <div class="card">
+        <h3>Task Queues = Message Queues + Execution</h3>
+        <p>A message queue is a generic transport — it moves data between services. A task queue is specifically about <strong>scheduling and executing work</strong>:</p>
+        <ul>
+            <li><strong>Message queue:</strong> "Here's some data, do whatever you want with it"</li>
+            <li><strong>Task queue:</strong> "Here's a function to call with these arguments — execute it later"</li>
+        </ul>
+        <p>Task queues typically include: retry logic, priority levels, scheduling, result storage, and worker management — all built in.</p>
+    </div>
+
+    <h2>Common Use Cases</h2>
+
+    <div class="card info">
+        <h3>Perfect Tasks for Background Processing</h3>
+        <ul>
+            <li><strong>Email/SMS sending:</strong> Don't make the user wait for SMTP delivery</li>
+            <li><strong>Image/video processing:</strong> Resize, compress, transcode — CPU-heavy, takes seconds to minutes</li>
+            <li><strong>Report generation:</strong> Aggregate data, generate PDF — user gets notified when ready</li>
+            <li><strong>Data aggregation:</strong> Recalculate dashboards, update search indexes</li>
+            <li><strong>Webhook delivery:</strong> POST to external URLs with retry on failure</li>
+            <li><strong>Batch imports:</strong> Process uploaded CSV with 100K rows</li>
+        </ul>
+    </div>
+
+    <h2>The Flow: Request → Queue → Worker</h2>
+
+    <figure class="diagram">
+        <svg viewBox="0 0 750 240" xmlns="http://www.w3.org/2000/svg">
+            <text x="375" y="20" text-anchor="middle" font-family="system-ui" font-size="13" font-weight="bold" fill="#333">Task Queue: Async Processing Flow</text>
+
+            <!-- User -->
+            <circle cx="50" cy="100" r="20" fill="#457b9d" opacity="0.2" stroke="#457b9d" stroke-width="2"/>
+            <text x="50" y="104" text-anchor="middle" font-family="system-ui" font-size="8" fill="#457b9d">User</text>
+
+            <!-- Web Server -->
+            <rect x="110" y="75" width="90" height="50" rx="6" fill="#2a9d8f" opacity="0.2" stroke="#2a9d8f" stroke-width="2"/>
+            <text x="155" y="95" text-anchor="middle" font-family="system-ui" font-size="8" font-weight="bold" fill="#2a9d8f">Web Server</text>
+            <text x="155" y="110" text-anchor="middle" font-family="system-ui" font-size="7" fill="#666">API endpoint</text>
+
+            <!-- Arrow: User to Web -->
+            <line x1="70" y1="100" x2="110" y2="100" stroke="#457b9d" stroke-width="1.5" marker-end="url(#tw1)"/>
+            <text x="90" y="93" text-anchor="middle" font-family="system-ui" font-size="6" fill="#457b9d">POST</text>
+
+            <!-- Task Queue -->
+            <rect x="250" y="75" width="120" height="50" rx="6" fill="#f4a261" opacity="0.2" stroke="#e76f51" stroke-width="2"/>
+            <text x="310" y="95" text-anchor="middle" font-family="system-ui" font-size="8" font-weight="bold" fill="#e76f51">Task Queue</text>
+            <text x="310" y="110" text-anchor="middle" font-family="system-ui" font-size="7" fill="#666">enqueued tasks</text>
+
+            <!-- Arrow: Web to Queue -->
+            <line x1="200" y1="100" x2="250" y2="100" stroke="#e76f51" stroke-width="1.5" marker-end="url(#tw1)"/>
+            <text x="225" y="93" text-anchor="middle" font-family="system-ui" font-size="6" fill="#e76f51">enqueue</text>
+
+            <!-- 202 Response back to user -->
+            <path d="M155,125 Q90,155 60,120" stroke="#2a9d8f" stroke-width="1.5" fill="none" stroke-dasharray="4,2" marker-end="url(#tw2)"/>
+            <text x="100" y="148" text-anchor="middle" font-family="system-ui" font-size="7" font-weight="bold" fill="#2a9d8f">202 Accepted ⚡</text>
+            <text x="100" y="160" text-anchor="middle" font-family="system-ui" font-size="6" fill="#666">(instant response)</text>
+
+            <!-- Worker -->
+            <rect x="430" y="75" width="90" height="50" rx="6" fill="#457b9d" opacity="0.2" stroke="#457b9d" stroke-width="2"/>
+            <text x="475" y="95" text-anchor="middle" font-family="system-ui" font-size="8" font-weight="bold" fill="#457b9d">Worker</text>
+            <text x="475" y="110" text-anchor="middle" font-family="system-ui" font-size="7" fill="#666">processes task</text>
+
+            <!-- Arrow: Queue to Worker -->
+            <line x1="370" y1="100" x2="430" y2="100" stroke="#457b9d" stroke-width="1.5" marker-end="url(#tw1)"/>
+            <text x="400" y="93" text-anchor="middle" font-family="system-ui" font-size="6" fill="#457b9d">dequeue</text>
+
+            <!-- Result Store -->
+            <rect x="570" y="75" width="90" height="50" rx="6" fill="#6a4c93" opacity="0.2" stroke="#6a4c93" stroke-width="2"/>
+            <text x="615" y="95" text-anchor="middle" font-family="system-ui" font-size="8" font-weight="bold" fill="#6a4c93">Result Store</text>
+            <text x="615" y="110" text-anchor="middle" font-family="system-ui" font-size="7" fill="#666">DB / S3 / cache</text>
+
+            <!-- Arrow: Worker to Store -->
+            <line x1="520" y1="100" x2="570" y2="100" stroke="#6a4c93" stroke-width="1.5" marker-end="url(#tw3)"/>
+            <text x="545" y="93" text-anchor="middle" font-family="system-ui" font-size="6" fill="#6a4c93">save</text>
+
+            <!-- Timeline note -->
+            <rect x="150" y="185" width="450" height="35" rx="6" fill="#e8f4f8" stroke="#457b9d" stroke-width="1"/>
+            <text x="375" y="202" text-anchor="middle" font-family="system-ui" font-size="8" fill="#457b9d">User gets response in ~50ms • Worker processes in background (seconds to minutes)</text>
+            <text x="375" y="214" text-anchor="middle" font-family="system-ui" font-size="7" fill="#666">User can poll for status, or get notified (email/push/websocket) when done</text>
+
+            <defs>
+                <marker id="tw1" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto">
+                    <path d="M0,0 L6,3 L0,6 Z" fill="#666"/>
+                </marker>
+                <marker id="tw2" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto">
+                    <path d="M0,0 L6,3 L0,6 Z" fill="#2a9d8f"/>
+                </marker>
+                <marker id="tw3" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto">
+                    <path d="M0,0 L6,3 L0,6 Z" fill="#6a4c93"/>
+                </marker>
+            </defs>
+        </svg>
+        <figcaption>Figure 1: The web server enqueues a task and immediately returns 202 Accepted. The worker picks it up later and stores the result.</figcaption>
+    </figure>
+
+    <h2>Worker Patterns</h2>
+
+    <div class="card">
+        <h3>How Workers Consume Tasks</h3>
+        <ul>
+            <li><strong>Single consumer:</strong> One worker processes tasks sequentially. Simple but slow — limited throughput.</li>
+            <li><strong>Competing consumers:</strong> Multiple workers pull from the same queue. Each task goes to exactly one worker. Scale horizontally by adding more workers.</li>
+            <li><strong>Fan-out:</strong> One task spawns multiple sub-tasks processed in parallel (e.g., "resize image to 5 different dimensions").</li>
+        </ul>
+        <p><strong>Key principle:</strong> With competing consumers, if you have 10 workers and the queue has 1000 tasks, each worker processes ~100 tasks. Need to go faster? Add more workers. <em>This is horizontal scaling for background work.</em></p>
+    </div>
+
+    <h2>Priority Queues</h2>
+
+    <div class="card info">
+        <h3>Not All Tasks Are Equal</h3>
+        <p>A priority queue ensures urgent tasks are processed before less important ones:</p>
+        <ul>
+            <li><strong>Critical:</strong> Password reset emails — user is waiting right now</li>
+            <li><strong>High:</strong> Order confirmation emails — user expects within seconds</li>
+            <li><strong>Normal:</strong> Report generation — user will check back later</li>
+            <li><strong>Low:</strong> Data aggregation, cleanup jobs — run whenever there's capacity</li>
+        </ul>
+        <p><strong>Implementation:</strong> Separate physical queues per priority level. Workers check the critical queue first, then high, then normal, etc. This prevents a flood of low-priority batch work from blocking urgent tasks.</p>
+    </div>
+
+    <h2>Scheduling: Delayed &amp; Recurring Tasks</h2>
+
+    <div class="card">
+        <ul>
+            <li><strong>Delayed tasks:</strong> "Send this reminder email in 24 hours" — the task sits in the queue with a visibility delay</li>
+            <li><strong>Recurring tasks (cron-like):</strong> "Generate the daily report every day at 6 AM" — a scheduler enqueues the task on a schedule</li>
+            <li><strong>Rate-limited tasks:</strong> "Send max 100 API calls per minute to this external service" — workers respect rate limits</li>
+        </ul>
+    </div>
+
+    <h2>Monitoring: Queue Depth Is Your Health Signal</h2>
+
+    <div class="card info">
+        <h3>What to Monitor</h3>
+        <ul>
+            <li><strong>Queue depth:</strong> How many tasks are waiting? If this grows unbounded, you need more workers.</li>
+            <li><strong>Worker lag:</strong> Time between a task being enqueued and being picked up. If lag grows, users wait longer.</li>
+            <li><strong>Processing time (p50, p95, p99):</strong> How long does each task take? Helps identify slow tasks.</li>
+            <li><strong>Failure rate:</strong> What percentage of tasks fail? Rising failures = bug or downstream issue.</li>
+            <li><strong>DLQ depth:</strong> Messages that failed all retries. Should be zero in normal operation.</li>
+        </ul>
+        <p><strong>Auto-scaling rule:</strong> "If queue depth > 1000 for 5 minutes, add 2 more workers. If queue depth < 10 for 30 minutes, remove a worker." Queue depth is the most reliable signal for scaling background workers.</p>
+    </div>
+
+    <h2>Popular Task Queue Systems</h2>
+
+    <div class="card">
+        <ul>
+            <li><strong>Celery (Python):</strong> Most popular Python task queue. Uses Redis or RabbitMQ as broker. Powers Instagram, Mozilla.</li>
+            <li><strong>Sidekiq (Ruby):</strong> Redis-backed, multi-threaded. The standard for Ruby on Rails background jobs. Simple API.</li>
+            <li><strong>Bull / BullMQ (Node.js):</strong> Redis-backed queue for Node. Supports priorities, scheduling, rate limiting.</li>
+            <li><strong>Temporal (language-agnostic):</strong> Durable workflow engine for complex multi-step tasks. Handles long-running processes (hours/days) with built-in state management.</li>
+        </ul>
+    </div>
+
+    <h2>Failure Handling</h2>
+
+    <div class="card info">
+        <h3>Retries with Exponential Backoff</h3>
+        <p>When a task fails, don't retry immediately — the downstream service might still be down. Use <strong>exponential backoff</strong>:</p>
+        <ul>
+            <li>Attempt 1: fails → retry in 1 second</li>
+            <li>Attempt 2: fails → retry in 4 seconds</li>
+            <li>Attempt 3: fails → retry in 16 seconds</li>
+            <li>Attempt 4: fails → retry in 64 seconds</li>
+            <li>Attempt 5: fails → move to Dead Letter Queue, alert on-call engineer</li>
+        </ul>
+        <p>Add <strong>jitter</strong> (random variation) to prevent all retries from hitting the downstream service at the same time (thundering herd).</p>
+    </div>
+
+    <div class="real-world">
+        <h3>🏢 Real-World: GitHub Webhook Delivery</h3>
+        <p>When you push code to GitHub, webhooks notify external services (CI/CD, Slack, etc.). This is a massive task queue operation:</p>
+        <ul>
+            <li>Each push triggers dozens of webhook deliveries to different URLs</li>
+            <li>Each delivery is an independent task in a queue</li>
+            <li>Workers POST to each webhook URL with the event payload</li>
+            <li>If a webhook endpoint is down: retry with exponential backoff (10s, 60s, 5min, 1hr...)</li>
+            <li>After multiple failures: mark webhook as failing, back off to hourly retries</li>
+            <li>GitHub shows delivery status in the UI: "delivered," "failed (retrying)," "failed (disabled)"</li>
+        </ul>
+        <p>Without task queues, a single slow webhook endpoint would block all other deliveries and slow down the entire push experience.</p>
+    </div>
+
+    <div class="real-world">
+        <h3>🏢 Real-World: Instagram Image Processing</h3>
+        <p>When you upload a photo to Instagram:</p>
+        <ul>
+            <li><strong>Synchronous:</strong> Upload the raw image → return success to the user (fast)</li>
+            <li><strong>Async tasks enqueued:</strong></li>
+            <li>Apply selected filter (GPU-intensive)</li>
+            <li>Generate multiple resolutions (thumbnail, feed, full-size)</li>
+            <li>Run content moderation (ML model)</li>
+            <li>Update follower feeds</li>
+            <li>Send push notifications to tagged users</li>
+        </ul>
+        <p>The user sees "uploaded!" in under a second. The heavy processing happens in the background over the next few seconds. Instagram uses Celery with RabbitMQ for this, processing millions of tasks per minute.</p>
+    </div>
+
+    <h2 class="interactive">Interactive: Task Queue Manager</h2>
+
+    <div class="interactive" id="task-queue-sim">
+        <p><strong>Add tasks with different priorities and watch workers process them.</strong> Trigger failures to see retry behavior:</p>
+
+        <div style="display: flex; gap: 0.5rem; flex-wrap: wrap; margin: 1rem 0;">
+            <button onclick="addTask('critical')" style="padding: 0.4rem 0.8rem; background: #e63946; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 0.8rem;">+ Critical Task</button>
+            <button onclick="addTask('high')" style="padding: 0.4rem 0.8rem; background: #f4a261; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 0.8rem;">+ High Priority</button>
+            <button onclick="addTask('normal')" style="padding: 0.4rem 0.8rem; background: #457b9d; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 0.8rem;">+ Normal Task</button>
+            <button onclick="addTask('low')" style="padding: 0.4rem 0.8rem; background: #999; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 0.8rem;">+ Low Priority</button>
+            <button onclick="addBurst()" style="padding: 0.4rem 0.8rem; background: #6a4c93; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 0.8rem;">🔥 Add Burst (10 tasks)</button>
+        </div>
+
+        <div style="display: flex; gap: 0.5rem; margin-bottom: 1rem; flex-wrap: wrap;">
+            <label style="font-size: 0.85rem; display: flex; align-items: center; gap: 0.3rem;">
+                Workers: <input type="number" id="worker-count" value="2" min="1" max="8" style="width: 50px; padding: 0.2rem; border: 1px solid #ddd; border-radius: 3px;" onchange="updateWorkers()">
+            </label>
+            <label style="font-size: 0.85rem; display: flex; align-items: center; gap: 0.3rem;">
+                <input type="checkbox" id="fail-mode" onchange="updateFailMode()"> Simulate 30% failure rate
+            </label>
+        </div>
+
+        <!-- Stats -->
+        <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 0.5rem; margin: 0.5rem 0;">
+            <div style="text-align: center; padding: 0.5rem; background: #f8f9fa; border-radius: 6px;">
+                <div style="font-size: 0.7rem; color: #666;">Queue Depth</div>
+                <div id="tq-depth" style="font-size: 1.5rem; font-weight: bold; color: #457b9d;">0</div>
+            </div>
+            <div style="text-align: center; padding: 0.5rem; background: #f8f9fa; border-radius: 6px;">
+                <div style="font-size: 0.7rem; color: #666;">Processing</div>
+                <div id="tq-processing" style="font-size: 1.5rem; font-weight: bold; color: #2a9d8f;">0</div>
+            </div>
+            <div style="text-align: center; padding: 0.5rem; background: #f8f9fa; border-radius: 6px;">
+                <div style="font-size: 0.7rem; color: #666;">Completed</div>
+                <div id="tq-completed" style="font-size: 1.5rem; font-weight: bold; color: #2a9d8f;">0</div>
+            </div>
+            <div style="text-align: center; padding: 0.5rem; background: #f8f9fa; border-radius: 6px;">
+                <div style="font-size: 0.7rem; color: #666;">Failed (DLQ)</div>
+                <div id="tq-failed" style="font-size: 1.5rem; font-weight: bold; color: #e63946;">0</div>
+            </div>
+        </div>
+
+        <!-- Task list -->
+        <div id="tq-tasks" style="max-height: 200px; overflow-y: auto; border: 1px solid #eee; border-radius: 6px; padding: 0.5rem; font-family: monospace; font-size: 0.75rem; background: #fafafa; margin-top: 0.5rem;"></div>
+    </div>
+
+    <script>
+    (function() {
+        let taskId = 0;
+        let queue = [];
+        let processing = [];
+        let completed = 0;
+        let failed = 0;
+        let workerCount = 2;
+        let failMode = false;
+        let interval = null;
+
+        const priorities = { critical: 0, high: 1, normal: 2, low: 3 };
+        const colors = { critical: '#e63946', high: '#f4a261', normal: '#457b9d', low: '#999' };
+
+        function addTask(priority) {
+            taskId++;
+            queue.push({ id: taskId, priority: priority, retries: 0, status: 'queued', addedAt: Date.now() });
+            queue.sort(function(a, b) { return priorities[a.priority] - priorities[b.priority]; });
+            updateDisplay();
+            startProcessing();
+        }
+
+        function addBurst() {
+            var types = ['critical', 'high', 'normal', 'normal', 'normal', 'low', 'low', 'normal', 'high', 'low'];
+            types.forEach(function(t) { addTask(t); });
+        }
+
+        function updateWorkers() {
+            workerCount = parseInt(document.getElementById('worker-count').value) || 2;
+        }
+
+        function updateFailMode() {
+            failMode = document.getElementById('fail-mode').checked;
+        }
+
+        function startProcessing() {
+            if (interval) return;
+            interval = setInterval(processTick, 800);
+        }
+
+        function processTick() {
+            // Move tasks from queue to processing (up to workerCount)
+            while (processing.length < workerCount && queue.length > 0) {
+                var task = queue.shift();
+                task.status = 'processing';
+                processing.push(task);
+            }
+
+            // Process tasks
+            var done = [];
+            processing.forEach(function(task, i) {
+                if (failMode && Math.random() < 0.3) {
+                    task.retries++;
+                    if (task.retries >= 3) {
+                        task.status = 'dead-letter';
+                        failed++;
+                        done.push(i);
+                    } else {
+                        task.status = 'retrying';
+                        done.push(i);
+                        queue.push(task);
+                        queue.sort(function(a, b) { return priorities[a.priority] - priorities[b.priority]; });
+                    }
+                } else {
+                    task.status = 'completed';
+                    completed++;
+                    done.push(i);
+                }
+            });
+
+            // Remove finished from processing (reverse to not mess up indices)
+            done.sort(function(a, b) { return b - a; });
+            done.forEach(function(i) { processing.splice(i, 1); });
+
+            updateDisplay();
+
+            if (queue.length === 0 && processing.length === 0) {
+                clearInterval(interval);
+                interval = null;
+            }
+        }
+
+        function updateDisplay() {
+            document.getElementById('tq-depth').textContent = queue.length;
+            document.getElementById('tq-processing').textContent = processing.length;
+            document.getElementById('tq-completed').textContent = completed;
+            document.getElementById('tq-failed').textContent = failed;
+
+            // Color depth
+            var depthEl = document.getElementById('tq-depth');
+            depthEl.style.color = queue.length > 20 ? '#e63946' : queue.length > 10 ? '#f4a261' : '#457b9d';
+
+            // Task list
+            var tasksEl = document.getElementById('tq-tasks');
+            var lines = [];
+
+            processing.forEach(function(t) {
+                lines.push('<span style="color:#2a9d8f;">⚙️ Processing</span> Task #' + t.id + ' <span style="color:' + colors[t.priority] + ';">[' + t.priority + ']</span>' + (t.retries > 0 ? ' (retry ' + t.retries + ')' : ''));
+            });
+            queue.slice(0, 15).forEach(function(t) {
+                lines.push('<span style="color:#999;">⏳ Queued</span>     Task #' + t.id + ' <span style="color:' + colors[t.priority] + ';">[' + t.priority + ']</span>' + (t.retries > 0 ? ' (retry ' + t.retries + ')' : ''));
+            });
+            if (queue.length > 15) {
+                lines.push('<span style="color:#999;">... and ' + (queue.length - 15) + ' more</span>');
+            }
+
+            tasksEl.innerHTML = lines.length > 0 ? lines.map(function(l) { return '<div>' + l + '</div>'; }).join('') : '<div style="color:#999;">No tasks in queue. Add some!</div>';
+        }
+
+        window.addTask = addTask;
+        window.addBurst = addBurst;
+        window.updateWorkers = updateWorkers;
+        window.updateFailMode = updateFailMode;
+        updateDisplay();
+    })();
+    </script>
+
+    <div class="takeaway">
+        <h3>🎯 Key Takeaway</h3>
+        <p>Background workers let you <strong>return fast responses to users</strong> while doing heavy lifting asynchronously. The pattern is simple: accept the request, enqueue the task, return 202 Accepted, process later. Monitor <strong>queue depth</strong> as your primary scaling signal — when it grows, add workers. When it's consistently zero, remove workers. Use priority queues to ensure urgent tasks (password resets) aren't blocked by batch work (report generation), and always implement <strong>retries with exponential backoff</strong> for resilience.</p>
+    </div>
+
+    <div class="footnote">
+        <p><strong>Previous:</strong> <a href="0033-event-driven-architecture.html">Event-Driven Architecture</a> | <strong>Next chapter:</strong> Microservices &amp; Communication (coming soon)</p>
+    </div>
+</body>
+</html>

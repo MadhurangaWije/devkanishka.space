@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lesson 050 — SLOs, SLIs, and Error Budgets</title>
+    <link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+    <h1>SLOs, SLIs, and Error Budgets</h1>
+    <div class="lesson-meta">
+        <span>📘 Chapter 12: Observability &amp; Reliability</span>
+        <span>⏱️ 8 min read</span>
+        <span>🏗️ Lesson 050</span>
+    </div>
+
+    <p>"We need to be more reliable" is vague. <strong>How</strong> reliable? Measured how? And what happens when we're not? SLOs, SLIs, and error budgets turn reliability from a feeling into a <strong>measurable engineering practice</strong> with clear tradeoffs between reliability and feature velocity.</p>
+
+    <h2>The Hierarchy: SLI → SLO → SLA</h2>
+
+    <figure class="diagram">
+        <svg viewBox="0 0 700 300" xmlns="http://www.w3.org/2000/svg">
+            <text x="350" y="22" text-anchor="middle" font-family="system-ui" font-size="13" font-weight="bold" fill="#333">SLI → SLO → SLA Pyramid</text>
+
+            <!-- SLA (top, narrowest) -->
+            <polygon points="350,45 450,120 250,120" fill="#e63946" opacity="0.15" stroke="#e63946" stroke-width="2"/>
+            <text x="350" y="80" text-anchor="middle" font-family="system-ui" font-size="11" font-weight="bold" fill="#e63946">SLA</text>
+            <text x="350" y="95" text-anchor="middle" font-family="system-ui" font-size="8" fill="#e63946">Service Level Agreement</text>
+            <text x="350" y="112" text-anchor="middle" font-family="system-ui" font-size="7" fill="#666">Contract with consequences ($$$)</text>
+
+            <!-- SLO (middle) -->
+            <polygon points="350,120 500,195 200,195" fill="#457b9d" opacity="0.15" stroke="#457b9d" stroke-width="2"/>
+            <text x="350" y="152" text-anchor="middle" font-family="system-ui" font-size="11" font-weight="bold" fill="#457b9d">SLO</text>
+            <text x="350" y="167" text-anchor="middle" font-family="system-ui" font-size="8" fill="#457b9d">Service Level Objective</text>
+            <text x="350" y="184" text-anchor="middle" font-family="system-ui" font-size="7" fill="#666">Internal target (stricter than SLA)</text>
+
+            <!-- SLI (bottom, widest) -->
+            <polygon points="350,195 560,270 140,270" fill="#2a9d8f" opacity="0.15" stroke="#2a9d8f" stroke-width="2"/>
+            <text x="350" y="225" text-anchor="middle" font-family="system-ui" font-size="11" font-weight="bold" fill="#2a9d8f">SLI</text>
+            <text x="350" y="240" text-anchor="middle" font-family="system-ui" font-size="8" fill="#2a9d8f">Service Level Indicator</text>
+            <text x="350" y="257" text-anchor="middle" font-family="system-ui" font-size="7" fill="#666">The actual measurement (metrics)</text>
+
+            <!-- Examples on the right -->
+            <text x="520" y="85" font-family="system-ui" font-size="8" fill="#e63946">e.g., "99.9% uptime or customer gets credit"</text>
+            <text x="520" y="160" font-family="system-ui" font-size="8" fill="#457b9d">e.g., "99.95% of requests succeed within 200ms"</text>
+            <text x="520" y="235" font-family="system-ui" font-size="8" fill="#2a9d8f">e.g., "% of requests with latency &lt; 200ms"</text>
+
+            <text x="350" y="292" text-anchor="middle" font-family="system-ui" font-size="9" fill="#666">SLOs are always stricter than SLAs — you want internal alerts before breaking your contract</text>
+        </svg>
+        <figcaption>Figure 1: SLIs are what you measure, SLOs are your targets, SLAs are contractual promises with financial consequences.</figcaption>
+    </figure>
+
+    <div class="card">
+        <h3>SLI — Service Level Indicator</h3>
+        <p>A carefully defined <strong>quantitative measure</strong> of some aspect of your service. Good SLIs:</p>
+        <ul>
+            <li><strong>Availability:</strong> % of successful requests (HTTP 2xx/3xx out of total)</li>
+            <li><strong>Latency:</strong> % of requests faster than a threshold (p99 &lt; 200ms)</li>
+            <li><strong>Correctness:</strong> % of requests returning the right answer</li>
+            <li><strong>Freshness:</strong> % of data updated within X seconds</li>
+        </ul>
+        <p>⚠️ Use <strong>percentiles</strong> for latency, not averages! A p50 of 50ms and p99 of 5000ms means 1% of users wait 100× longer — an average of 100ms hides this completely.</p>
+    </div>
+
+    <div class="card">
+        <h3>SLO — Service Level Objective</h3>
+        <p>A <strong>target value</strong> for your SLI over a time window:</p>
+        <ul>
+            <li>"99.9% of requests complete successfully in a rolling 30-day window"</li>
+            <li>"99th percentile latency &lt; 200ms over each calendar month"</li>
+            <li>"Data freshness: 99.5% of records updated within 60 seconds"</li>
+        </ul>
+        <p>Choose SLOs based on <strong>user expectations</strong>, not engineering pride. A batch job doesn't need 99.99%.</p>
+    </div>
+
+    <div class="card">
+        <h3>SLA — Service Level Agreement</h3>
+        <p>A <strong>contract</strong> between provider and customer. If you violate it, there are consequences: service credits, refunds, or contract termination. SLAs are always <em>looser</em> than internal SLOs — you want to catch problems before they become contractual violations.</p>
+    </div>
+
+    <h2>The Math of Nines</h2>
+
+    <div class="card info">
+        <table style="width:100%; border-collapse:collapse; font-size:0.9em;">
+            <tr style="border-bottom:2px solid #ddd;">
+                <th style="text-align:left; padding:6px;">Availability</th>
+                <th style="text-align:left; padding:6px;">Downtime/Year</th>
+                <th style="text-align:left; padding:6px;">Downtime/Month</th>
+                <th style="text-align:left; padding:6px;">Typical For</th>
+            </tr>
+            <tr style="border-bottom:1px solid #eee;">
+                <td style="padding:6px;">99% ("two nines")</td>
+                <td style="padding:6px;">3.65 days</td>
+                <td style="padding:6px;">7.3 hours</td>
+                <td style="padding:6px;">Internal tools</td>
+            </tr>
+            <tr style="border-bottom:1px solid #eee;">
+                <td style="padding:6px;">99.9% ("three nines")</td>
+                <td style="padding:6px;">8.7 hours</td>
+                <td style="padding:6px;">43.8 min</td>
+                <td style="padding:6px;">Most SaaS products</td>
+            </tr>
+            <tr style="border-bottom:1px solid #eee;">
+                <td style="padding:6px;">99.95%</td>
+                <td style="padding:6px;">4.4 hours</td>
+                <td style="padding:6px;">21.9 min</td>
+                <td style="padding:6px;">Cloud providers</td>
+            </tr>
+            <tr style="border-bottom:1px solid #eee;">
+                <td style="padding:6px;">99.99% ("four nines")</td>
+                <td style="padding:6px;">52.6 min</td>
+                <td style="padding:6px;">4.4 min</td>
+                <td style="padding:6px;">Payment systems</td>
+            </tr>
+            <tr>
+                <td style="padding:6px;">99.999% ("five nines")</td>
+                <td style="padding:6px;">5.3 min</td>
+                <td style="padding:6px;">26 sec</td>
+                <td style="padding:6px;">911 systems, pacemakers</td>
+            </tr>
+        </table>
+        <p style="margin-top:10px">Each additional nine is <strong>10× harder and more expensive</strong>. Going from 99.9% → 99.99% doesn't sound like much, but it means 10× less allowed downtime.</p>
+    </div>
+
+    <h2>Error Budgets</h2>
+
+    <p>Your error budget is the gap between 100% and your SLO. If your SLO is 99.9% availability over 30 days, your error budget is <strong>0.1% = 43.8 minutes of allowed downtime per month</strong>.</p>
+
+    <div class="card info">
+        <h3>What Error Budgets Enable</h3>
+        <ul>
+            <li><strong>Permission to take risks:</strong> As long as budget remains, ship features, experiment, deploy often</li>
+            <li><strong>Objective decision-making:</strong> "We've used 30% of our budget — we can still do the risky migration"</li>
+            <li><strong>Alignment between teams:</strong> Product wants features, SRE wants reliability — error budgets give both a shared framework</li>
+            <li><strong>Clear consequences:</strong> When budget is exhausted, freeze features and focus on reliability</li>
+        </ul>
+    </div>
+
+    <figure class="diagram">
+        <svg viewBox="0 0 700 280" xmlns="http://www.w3.org/2000/svg">
+            <text x="350" y="22" text-anchor="middle" font-family="system-ui" font-size="13" font-weight="bold" fill="#333">Error Budget Burn-Down (30-Day Window)</text>
+
+            <!-- Axes -->
+            <line x1="80" y1="240" x2="650" y2="240" stroke="#333" stroke-width="1.5"/>
+            <line x1="80" y1="50" x2="80" y2="240" stroke="#333" stroke-width="1.5"/>
+
+            <!-- Y-axis labels -->
+            <text x="75" y="55" text-anchor="end" font-family="system-ui" font-size="8" fill="#666">100%</text>
+            <text x="75" y="98" text-anchor="end" font-family="system-ui" font-size="8" fill="#666">75%</text>
+            <text x="75" y="145" text-anchor="end" font-family="system-ui" font-size="8" fill="#666">50%</text>
+            <text x="75" y="192" text-anchor="end" font-family="system-ui" font-size="8" fill="#666">25%</text>
+            <text x="75" y="240" text-anchor="end" font-family="system-ui" font-size="8" fill="#666">0%</text>
+            <text x="30" y="145" text-anchor="middle" font-family="system-ui" font-size="9" fill="#333" transform="rotate(-90,30,145)">Budget Remaining</text>
+
+            <!-- X-axis labels -->
+            <text x="80" y="255" text-anchor="middle" font-family="system-ui" font-size="8" fill="#666">Day 1</text>
+            <text x="270" y="255" text-anchor="middle" font-family="system-ui" font-size="8" fill="#666">Day 10</text>
+            <text x="460" y="255" text-anchor="middle" font-family="system-ui" font-size="8" fill="#666">Day 20</text>
+            <text x="650" y="255" text-anchor="middle" font-family="system-ui" font-size="8" fill="#666">Day 30</text>
+
+            <!-- Expected burn line (dashed) -->
+            <line x1="80" y1="50" x2="650" y2="240" stroke="#999" stroke-width="1" stroke-dasharray="5,5"/>
+            <text x="400" y="170" font-family="system-ui" font-size="8" fill="#999" transform="rotate(19,400,170)">Expected uniform burn</text>
+
+            <!-- Actual burn line (incidents!) -->
+            <polyline points="80,50 150,55 200,58 230,60 250,62 270,100 290,102 350,108 400,112 430,170 440,172 500,178 560,182 600,185 650,190" fill="none" stroke="#457b9d" stroke-width="2.5"/>
+
+            <!-- Incident annotations -->
+            <circle cx="270" cy="100" r="4" fill="#e63946"/>
+            <text x="275" y="88" font-family="system-ui" font-size="7" fill="#e63946">Deployment incident</text>
+            <text x="275" y="97" font-family="system-ui" font-size="7" fill="#e63946">(-15% budget)</text>
+
+            <circle cx="430" cy="170" r="4" fill="#e63946"/>
+            <text x="435" y="158" font-family="system-ui" font-size="7" fill="#e63946">DB failover</text>
+            <text x="435" y="167" font-family="system-ui" font-size="7" fill="#e63946">(-25% budget)</text>
+
+            <!-- Danger zone -->
+            <rect x="80" y="210" width="570" height="30" fill="#e63946" opacity="0.06"/>
+            <text x="360" y="228" text-anchor="middle" font-family="system-ui" font-size="8" fill="#e63946">⚠️ Danger zone — freeze deployments, focus on reliability</text>
+
+            <!-- Legend -->
+            <line x1="500" y1="45" x2="530" y2="45" stroke="#457b9d" stroke-width="2.5"/>
+            <text x="535" y="48" font-family="system-ui" font-size="8" fill="#333">Actual budget remaining</text>
+            <text x="500" y="62" font-family="system-ui" font-size="8" fill="#2a9d8f">End of month: 10% budget left ✅ (healthy)</text>
+        </svg>
+        <figcaption>Figure 2: Error budget burn-down chart. Incidents consume budget; if you hit zero, stop risky changes.</figcaption>
+    </figure>
+
+    <h2>When Error Budget is Exhausted</h2>
+
+    <div class="card">
+        <h3>Budget Policies (agree on these in advance!)</h3>
+        <ul>
+            <li><strong>Freeze feature deployments</strong> — only reliability improvements and bug fixes</li>
+            <li><strong>Conduct post-mortems</strong> on incidents that consumed budget</li>
+            <li><strong>Invest in automation</strong> — better testing, canary deployments, rollback speed</li>
+            <li><strong>Re-evaluate SLOs</strong> — maybe your target is unrealistically tight for your architecture</li>
+        </ul>
+        <p>The freeze isn't punishment — it's the <strong>natural consequence</strong> of spending your reliability budget. Just like a financial budget.</p>
+    </div>
+
+    <h2>Choosing Good SLIs</h2>
+
+    <div class="card info">
+        <h3>SLI Best Practices</h3>
+        <ul>
+            <li><strong>Measure from the user's perspective:</strong> Client-side latency, not server-side. Include network time.</li>
+            <li><strong>Use percentiles, not averages:</strong> p50 (median experience), p99 (worst 1% of users)</li>
+            <li><strong>Separate success from failure latency:</strong> A fast error (10ms 500) shouldn't improve your latency SLI</li>
+            <li><strong>Choose indicators users actually care about:</strong> Playback start time matters more than API response time for a streaming service</li>
+            <li><strong>Keep it simple:</strong> 3-5 SLIs per service maximum. More creates confusion.</li>
+        </ul>
+    </div>
+
+    <h2>Real-World Examples</h2>
+
+    <div class="real-world">
+        <h3>🏢 Google: Error Budgets in Practice</h3>
+        <p>Google's SRE teams and product teams <strong>share ownership</strong> of the error budget. If a product team's feature breaks reliability enough to exhaust the budget, their next sprint pivots to reliability work. This creates a natural feedback loop: teams that ship carefully get to ship <em>more often</em>, while reckless teams get slowed down. The result is that Google's services maintain high reliability while still shipping features rapidly.</p>
+    </div>
+
+    <div class="real-world">
+        <h3>🏢 Spotify: Differentiated SLOs</h3>
+        <p>Not all features deserve the same SLO. Spotify sets <strong>different targets</strong> for different user journeys:</p>
+        <ul>
+            <li><strong>Music playback:</strong> 99.99% availability (core value proposition — must never fail)</li>
+            <li><strong>Search:</strong> 99.9% availability (important but brief degradation is tolerable)</li>
+            <li><strong>Recommendations:</strong> 99% availability (nice-to-have — fallback to popular tracks)</li>
+            <li><strong>Account settings:</strong> 99.5% (rarely used, can be briefly unavailable)</li>
+        </ul>
+        <p>This lets engineering invest reliability budget where it matters most to users.</p>
+    </div>
+
+    <h2>Interactive: SLO Calculator</h2>
+
+    <div class="interactive">
+        <h3>📊 SLO & Error Budget Calculator</h3>
+        <p>Set your availability target and see your error budget:</p>
+        <div style="margin:10px 0;">
+            <label for="slo-input"><strong>SLO Target (%):</strong></label>
+            <input type="range" id="slo-input" min="99" max="99.999" step="0.001" value="99.9" style="width:200px; vertical-align:middle;">
+            <span id="slo-display" style="font-weight:bold; font-family:monospace;">99.9%</span>
+        </div>
+        <div id="budget-output" style="background:#f8f9fa; padding:15px; border-radius:8px; border:1px solid #ddd; font-size:0.9em;"></div>
+        <div style="margin-top:15px;">
+            <h4>Simulate an Incident</h4>
+            <label>Incident duration (minutes): </label>
+            <input type="number" id="incident-minutes" value="30" min="1" max="5000" style="width:70px;">
+            <button onclick="simulateIncident()">Simulate</button>
+            <button onclick="resetSimulation()">Reset</button>
+            <div id="simulation-output" style="margin-top:10px; font-family:monospace; font-size:12px;"></div>
+        </div>
+    </div>
+
+    <script>
+    (function() {
+        var sloInput = document.getElementById('slo-input');
+        var sloDisplay = document.getElementById('slo-display');
+        var budgetOutput = document.getElementById('budget-output');
+        var simOutput = document.getElementById('simulation-output');
+        var totalBudgetMin = 0;
+        var usedBudgetMin = 0;
+
+        function update() {
+            var slo = parseFloat(sloInput.value);
+            sloDisplay.textContent = slo + '%';
+            var errorPct = 100 - slo;
+            var minPerYear = 525600;
+            var minPerMonth = 43800;
+            var yearBudget = (errorPct / 100) * minPerYear;
+            var monthBudget = (errorPct / 100) * minPerMonth;
+            totalBudgetMin = monthBudget;
+
+            var html = '<strong>Error Budget (' + errorPct.toFixed(4) + '% of time):</strong><br><br>';
+            html += '📅 <strong>Per year:</strong> ' + formatDuration(yearBudget) + ' of allowed downtime<br>';
+            html += '📅 <strong>Per month:</strong> ' + formatDuration(monthBudget) + ' of allowed downtime<br>';
+            html += '📅 <strong>Per week:</strong> ' + formatDuration((errorPct / 100) * 10080) + ' of allowed downtime<br><br>';
+
+            if (slo >= 99.99) {
+                html += '⚠️ <span style="color:#e63946">Very tight budget!</span> Requires: automated rollbacks, redundancy, zero-downtime deploys.';
+            } else if (slo >= 99.9) {
+                html += '✅ Standard for most production services. Allows ~1 moderate incident per month.';
+            } else {
+                html += '💡 Generous budget — appropriate for non-critical services or early-stage products.';
+            }
+            budgetOutput.innerHTML = html;
+            usedBudgetMin = 0;
+            simOutput.innerHTML = '';
+        }
+
+        function formatDuration(minutes) {
+            if (minutes >= 1440) return (minutes / 1440).toFixed(1) + ' days (' + Math.round(minutes) + ' min)';
+            if (minutes >= 60) return (minutes / 60).toFixed(1) + ' hours (' + Math.round(minutes) + ' min)';
+            return minutes.toFixed(1) + ' minutes';
+        }
+
+        window.simulateIncident = function() {
+            var incMin = parseInt(document.getElementById('incident-minutes').value) || 0;
+            usedBudgetMin += incMin;
+            var remaining = totalBudgetMin - usedBudgetMin;
+            var pctUsed = (usedBudgetMin / totalBudgetMin * 100).toFixed(1);
+
+            var html = simOutput.innerHTML;
+            html += '🚨 Incident: ' + incMin + ' min downtime. ';
+            html += 'Budget used: ' + pctUsed + '% (' + usedBudgetMin.toFixed(1) + '/' + totalBudgetMin.toFixed(1) + ' min)';
+            if (remaining <= 0) {
+                html += ' <span style="color:#e63946">❌ BUDGET EXHAUSTED! Freeze deployments!</span>';
+            } else if (remaining < totalBudgetMin * 0.25) {
+                html += ' <span style="color:#e76f51">⚠️ Budget critically low (' + remaining.toFixed(1) + ' min left)</span>';
+            } else {
+                html += ' <span style="color:#2a9d8f">✅ ' + remaining.toFixed(1) + ' min remaining</span>';
+            }
+            html += '<br>';
+            simOutput.innerHTML = html;
+        };
+
+        window.resetSimulation = function() {
+            usedBudgetMin = 0;
+            simOutput.innerHTML = '';
+        };
+
+        sloInput.addEventListener('input', update);
+        update();
+    })();
+    </script>
+
+    <div class="takeaway">
+        <h3>🎯 Key Takeaway</h3>
+        <p>SLOs turn reliability from a vague goal into a <strong>measurable target</strong>. Error budgets give engineering teams <strong>permission to take calculated risks</strong> — ship fast while budget remains, freeze when it's spent. The key insight: 100% reliability is the wrong target. Your users don't need perfection; they need <em>good enough</em>, consistently. The error budget formalizes "good enough" and funds innovation with the surplus.</p>
+    </div>
+
+    <div class="footnote">
+        <p><strong>Previous:</strong> <a href="0049-monitoring-metrics-logs-traces.html">Monitoring: Metrics, Logs, Traces</a> | <strong>Next:</strong> <a href="0051-distributed-tracing.html">Distributed Tracing</a></p>
+    </div>
+</body>
+</html>

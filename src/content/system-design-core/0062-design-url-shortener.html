@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lesson 062 — Design a URL Shortener (End-to-End)</title>
+    <link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+    <h1>Design a URL Shortener (End-to-End)</h1>
+    <div class="lesson-meta">
+        <span>📘 Chapter 15: Putting It All Together</span>
+        <span>⏱️ 9 min read</span>
+        <span>🏗️ Lesson 062</span>
+    </div>
+
+    <p>The URL shortener is the "Hello World" of system design interviews. It looks simple — map short codes to long URLs — but it exercises <strong>ID generation, caching, database selection, and read-heavy optimization</strong> at scale.</p>
+
+    <h2>Requirements Gathering</h2>
+
+    <div class="card">
+        <h3>Functional Requirements</h3>
+        <ul>
+            <li>Given a long URL, generate a short unique link</li>
+            <li>Redirect short link to the original URL</li>
+            <li>Support custom aliases (e.g., <code>short.ly/my-brand</code>)</li>
+            <li>Optional: analytics (click counts, geo, referrer)</li>
+            <li>Links expire after configurable TTL</li>
+        </ul>
+        <h3>Non-Functional Requirements</h3>
+        <ul>
+            <li><strong>Scale:</strong> 100M new URLs/day, 10B redirects/day (100:1 read/write)</li>
+            <li><strong>Latency:</strong> &lt;100ms redirect</li>
+            <li><strong>Availability:</strong> 99.99% — redirects must never fail</li>
+            <li><strong>Durability:</strong> links persist for 5 years minimum</li>
+        </ul>
+    </div>
+
+    <h2>Back-of-Envelope Estimation</h2>
+
+    <div class="card info">
+        <table style="width:100%; border-collapse:collapse; font-size:0.9em;">
+            <tr style="border-bottom:2px solid #ddd;"><th style="text-align:left; padding:6px;">Metric</th><th style="text-align:left; padding:6px;">Calculation</th><th style="text-align:left; padding:6px;">Result</th></tr>
+            <tr style="border-bottom:1px solid #eee;"><td style="padding:6px;">Total URLs (5 years)</td><td style="padding:6px;">100M × 365 × 5</td><td style="padding:6px;">~180 billion</td></tr>
+            <tr style="border-bottom:1px solid #eee;"><td style="padding:6px;">Storage</td><td style="padding:6px;">180B × 500 bytes avg</td><td style="padding:6px;">~90 TB</td></tr>
+            <tr style="border-bottom:1px solid #eee;"><td style="padding:6px;">Write QPS</td><td style="padding:6px;">100M / 86400</td><td style="padding:6px;">~1,200/sec</td></tr>
+            <tr style="border-bottom:1px solid #eee;"><td style="padding:6px;">Read QPS</td><td style="padding:6px;">1,200 × 100</td><td style="padding:6px;">~120,000/sec</td></tr>
+            <tr><td style="padding:6px;">Short code length</td><td style="padding:6px;">62⁷ = 3.5 trillion</td><td style="padding:6px;">7 chars (base62) suffices</td></tr>
+        </table>
+    </div>
+
+    <h2>System Architecture</h2>
+
+    <figure class="diagram">
+        <svg viewBox="0 0 720 320" xmlns="http://www.w3.org/2000/svg">
+            <defs>
+                <marker id="arr62" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+                    <polygon points="0 0, 8 3, 0 6" fill="#666"/>
+                </marker>
+            </defs>
+            <text x="360" y="18" text-anchor="middle" font-family="system-ui" font-size="13" font-weight="bold" fill="#333">URL Shortener Architecture</text>
+
+            <!-- Client -->
+            <rect x="20" y="130" width="80" height="50" rx="6" fill="#6c5ce7" opacity="0.12" stroke="#6c5ce7" stroke-width="1.5"/>
+            <text x="60" y="155" text-anchor="middle" font-family="system-ui" font-size="9" font-weight="bold" fill="#6c5ce7">Client</text>
+            <text x="60" y="168" text-anchor="middle" font-family="system-ui" font-size="7" fill="#666">Browser/App</text>
+
+            <!-- LB -->
+            <rect x="140" y="130" width="70" height="50" rx="6" fill="#457b9d" opacity="0.12" stroke="#457b9d" stroke-width="1.5"/>
+            <text x="175" y="155" text-anchor="middle" font-family="system-ui" font-size="9" font-weight="bold" fill="#457b9d">Load</text>
+            <text x="175" y="168" text-anchor="middle" font-family="system-ui" font-size="9" font-weight="bold" fill="#457b9d">Balancer</text>
+            <path d="M100 155 L138 155" stroke="#666" stroke-width="1.5" marker-end="url(#arr62)"/>
+
+            <!-- Write Path -->
+            <rect x="260" y="50" width="100" height="50" rx="6" fill="#e63946" opacity="0.12" stroke="#e63946" stroke-width="1.5"/>
+            <text x="310" y="70" text-anchor="middle" font-family="system-ui" font-size="9" font-weight="bold" fill="#e63946">Write API</text>
+            <text x="310" y="83" text-anchor="middle" font-family="system-ui" font-size="7" fill="#666">Shorten URL</text>
+            <text x="310" y="94" text-anchor="middle" font-family="system-ui" font-size="7" fill="#666">+ ID Generator</text>
+
+            <!-- Read Path -->
+            <rect x="260" y="210" width="100" height="50" rx="6" fill="#2a9d8f" opacity="0.12" stroke="#2a9d8f" stroke-width="1.5"/>
+            <text x="310" y="230" text-anchor="middle" font-family="system-ui" font-size="9" font-weight="bold" fill="#2a9d8f">Read API</text>
+            <text x="310" y="243" text-anchor="middle" font-family="system-ui" font-size="7" fill="#666">Redirect</text>
+            <text x="310" y="254" text-anchor="middle" font-family="system-ui" font-size="7" fill="#666">(301/302)</text>
+
+            <!-- Arrows from LB -->
+            <path d="M210 145 L258 85" stroke="#e63946" stroke-width="1.2" marker-end="url(#arr62)"/>
+            <path d="M210 165 L258 225" stroke="#2a9d8f" stroke-width="1.2" marker-end="url(#arr62)"/>
+            <text x="220" y="100" font-family="system-ui" font-size="7" fill="#e63946">POST /shorten</text>
+            <text x="220" y="210" font-family="system-ui" font-size="7" fill="#2a9d8f">GET /:code</text>
+
+            <!-- Cache -->
+            <rect x="430" y="180" width="90" height="50" rx="6" fill="#e9c46a" opacity="0.15" stroke="#e9c46a" stroke-width="1.5"/>
+            <text x="475" y="200" text-anchor="middle" font-family="system-ui" font-size="9" font-weight="bold" fill="#e9c46a">Cache</text>
+            <text x="475" y="213" text-anchor="middle" font-family="system-ui" font-size="7" fill="#666">Redis Cluster</text>
+            <text x="475" y="224" text-anchor="middle" font-family="system-ui" font-size="7" fill="#666">(hot URLs)</text>
+            <path d="M360 230 L428 210" stroke="#666" stroke-width="1.2" marker-end="url(#arr62)"/>
+
+            <!-- Database -->
+            <rect x="580" y="110" width="110" height="60" rx="6" fill="#457b9d" opacity="0.12" stroke="#457b9d" stroke-width="1.5"/>
+            <text x="635" y="132" text-anchor="middle" font-family="system-ui" font-size="9" font-weight="bold" fill="#457b9d">Database</text>
+            <text x="635" y="145" text-anchor="middle" font-family="system-ui" font-size="7" fill="#666">NoSQL (DynamoDB /</text>
+            <text x="635" y="156" text-anchor="middle" font-family="system-ui" font-size="7" fill="#666">Cassandra)</text>
+            <text x="635" y="167" text-anchor="middle" font-family="system-ui" font-size="6" fill="#999">short_code → long_url</text>
+            <path d="M360 75 L578 135" stroke="#e63946" stroke-width="1.2" marker-end="url(#arr62)"/>
+            <path d="M520 200 L578 155" stroke="#666" stroke-width="1.2" stroke-dasharray="4" marker-end="url(#arr62)"/>
+            <text x="540" y="185" font-family="system-ui" font-size="6" fill="#999">cache miss</text>
+
+            <!-- Analytics -->
+            <rect x="430" y="280" width="100" height="35" rx="6" fill="#6c5ce7" opacity="0.1" stroke="#6c5ce7" stroke-width="1"/>
+            <text x="480" y="300" text-anchor="middle" font-family="system-ui" font-size="8" font-weight="bold" fill="#6c5ce7">Analytics Queue</text>
+            <path d="M340 260 L428 290" stroke="#6c5ce7" stroke-width="1" stroke-dasharray="3" marker-end="url(#arr62)"/>
+            <text x="370" y="285" font-family="system-ui" font-size="6" fill="#6c5ce7">async log</text>
+        </svg>
+        <figcaption>Figure 1: Separate read and write paths. Reads (redirects) dominate 100:1, so caching hot URLs is critical.</figcaption>
+    </figure>
+
+    <h2>Key Design Decisions</h2>
+
+    <div class="card">
+        <h3>ID Generation: Base62 Encoding</h3>
+        <p>Characters: <code>a-z A-Z 0-9</code> = 62 chars. A 7-character code gives 62⁷ ≈ 3.5 trillion unique URLs.</p>
+        <table style="width:100%; border-collapse:collapse; font-size:0.9em; margin-top:8px;">
+            <tr style="border-bottom:2px solid #ddd;"><th style="text-align:left; padding:6px;">Approach</th><th style="text-align:left; padding:6px;">Pros</th><th style="text-align:left; padding:6px;">Cons</th></tr>
+            <tr style="border-bottom:1px solid #eee;"><td style="padding:6px;">Counter + base62</td><td style="padding:6px;">No collisions, short codes</td><td style="padding:6px;">Single point of failure, predictable</td></tr>
+            <tr style="border-bottom:1px solid #eee;"><td style="padding:6px;">Hash (MD5/SHA) + truncate</td><td style="padding:6px;">Stateless, distributed</td><td style="padding:6px;">Collision handling needed</td></tr>
+            <tr><td style="padding:6px;">Pre-generated key ranges</td><td style="padding:6px;">Fast, no coordination</td><td style="padding:6px;">Wasted keys, extra service</td></tr>
+        </table>
+    </div>
+
+    <h2>Deep Dive: Caching &amp; Redirects</h2>
+
+    <div class="card">
+        <h3>301 vs 302 Redirects</h3>
+        <ul>
+            <li><strong>301 (Permanent):</strong> Browser caches it — fewer requests to your servers, but you lose analytics visibility</li>
+            <li><strong>302 (Temporary):</strong> Browser always hits your server — full analytics, but higher load</li>
+        </ul>
+        <p><strong>Decision:</strong> Use 302 if analytics matter; 301 if minimizing infra cost is priority.</p>
+
+        <h3>Consistent Hashing for Cache</h3>
+        <p>With 120K reads/sec, a single Redis node won't suffice. Distribute across a cluster using consistent hashing — adding/removing nodes only remaps ~1/N of keys, preventing cache stampedes.</p>
+    </div>
+
+    <div class="real-world">
+        <h3>How Bit.ly Works at Scale</h3>
+        <ul>
+            <li>Processes <strong>billions of link clicks monthly</strong></li>
+            <li>Uses a distributed ID generator (similar to Twitter Snowflake)</li>
+            <li>Heavy caching layer — top 20% of links serve 80% of traffic</li>
+            <li>Separate analytics pipeline: click events → Kafka → real-time counters</li>
+            <li>Multi-region deployment with DNS-based routing for low-latency redirects</li>
+        </ul>
+    </div>
+
+    <h2>Interactive: Design Step by Step</h2>
+
+    <div class="interactive">
+        <h3>Build Your URL Shortener</h3>
+        <p>Make design choices at each stage and see the architecture evolve.</p>
+        <div id="design-steps"></div>
+        <div id="design-result" style="margin-top:12px; padding:12px; background:#f8f9fa; border-radius:8px; border:1px solid #ddd; font-size:0.9em;"></div>
+    </div>
+
+    <script>
+    (function() {
+        var steps = [
+            { q: "ID Generation Strategy?", opts: ["Counter + base62", "Hash + truncate", "Pre-generated keys"], explanations: ["Sequential, no collisions but needs coordination.", "Stateless & distributed but must handle collisions.", "Batch pre-generation, fast writes, extra service."] },
+            { q: "Database Choice?", opts: ["DynamoDB (NoSQL)", "PostgreSQL (SQL)", "Cassandra (Wide-column)"], explanations: ["Key-value lookup, auto-scaling, managed.", "ACID, joins for analytics, vertical scaling limits.", "Write-optimized, multi-region, eventual consistency."] },
+            { q: "Caching Strategy?", opts: ["Cache-aside (lazy)", "Write-through", "No cache"], explanations: ["Only cache on read miss — best for power-law distribution.", "Write to cache + DB together — consistent but more write load.", "Simple but 120K QPS hits DB directly — risky."] },
+            { q: "Redirect Type?", opts: ["302 (Temporary)", "301 (Permanent)"], explanations: ["Full analytics, every click hits your server.", "Browser caches — less load but lose click tracking."] }
+        ];
+        var choices = [];
+        var container = document.getElementById('design-steps');
+
+        function render() {
+            var html = '';
+            steps.forEach(function(step, i) {
+                html += '<div style="margin:8px 0; padding:8px; border-left:3px solid ' + (choices[i] !== undefined ? '#2a9d8f' : '#ddd') + '; padding-left:12px;">';
+                html += '<strong>' + step.q + '</strong><br>';
+                step.opts.forEach(function(opt, j) {
+                    var sel = choices[i] === j;
+                    html += '<label style="display:inline-block; margin:4px 8px 4px 0; padding:4px 10px; border-radius:4px; cursor:pointer; font-size:0.85em; border:1px solid ' + (sel ? '#2a9d8f' : '#ccc') + '; background:' + (sel ? '#2a9d8f' : '#fff') + '; color:' + (sel ? '#fff' : '#333') + ';">';
+                    html += '<input type="radio" name="step' + i + '" style="display:none;" onchange="pickChoice(' + i + ',' + j + ')"' + (sel ? ' checked' : '') + '> ' + opt + '</label>';
+                });
+                if (choices[i] !== undefined) {
+                    html += '<div style="font-size:0.8em; color:#555; margin-top:4px;">→ ' + step.explanations[choices[i]] + '</div>';
+                }
+                html += '</div>';
+            });
+            container.innerHTML = html;
+            updateResult();
+        }
+
+        window.pickChoice = function(step, opt) {
+            choices[step] = opt;
+            render();
+        };
+
+        function updateResult() {
+            if (choices.length < 4 || choices.some(function(c) { return c === undefined; })) {
+                document.getElementById('design-result').innerHTML = '<em>Make all 4 choices to see your architecture summary.</em>';
+                return;
+            }
+            var scores = { scalability: 0, simplicity: 0, analytics: 0 };
+            if (choices[0] === 2) scores.scalability += 2;
+            if (choices[0] === 0) scores.simplicity += 2;
+            if (choices[1] === 0) scores.scalability += 2;
+            if (choices[1] === 1) scores.simplicity += 2;
+            if (choices[2] === 0) { scores.scalability += 2; scores.simplicity += 1; }
+            if (choices[3] === 0) scores.analytics += 2;
+            if (choices[3] === 1) scores.scalability += 1;
+
+            var arch = '<strong>Your Architecture:</strong> ' + steps[0].opts[choices[0]] + ' → ' + steps[1].opts[choices[1]] + ' → ' + steps[2].opts[choices[2]] + ' → ' + steps[3].opts[choices[3]];
+            arch += '<div style="margin-top:8px; display:flex; gap:12px; flex-wrap:wrap;">';
+            arch += '<span style="padding:3px 8px; background:#2a9d8f; color:#fff; border-radius:4px; font-size:0.8em;">Scalability: ' + (scores.scalability > 3 ? '★★★' : scores.scalability > 1 ? '★★' : '★') + '</span>';
+            arch += '<span style="padding:3px 8px; background:#457b9d; color:#fff; border-radius:4px; font-size:0.8em;">Simplicity: ' + (scores.simplicity > 3 ? '★★★' : scores.simplicity > 1 ? '★★' : '★') + '</span>';
+            arch += '<span style="padding:3px 8px; background:#6c5ce7; color:#fff; border-radius:4px; font-size:0.8em;">Analytics: ' + (scores.analytics > 1 ? '★★★' : scores.analytics > 0 ? '★★' : '★') + '</span>';
+            arch += '</div>';
+            document.getElementById('design-result').innerHTML = arch;
+        }
+
+        choices = [undefined, undefined, undefined, undefined];
+        render();
+    })();
+    </script>
+
+    <div class="takeaway">
+        <h3>Key Takeaway</h3>
+        <p>A URL shortener demonstrates core system design patterns: <strong>ID generation</strong> (base62, counters, hashing), <strong>caching</strong> (power-law access means cache-aside is very effective), <strong>read-heavy optimization</strong> (100:1 ratio drives architecture), and <strong>horizontal scaling</strong> (stateless API + sharded DB + distributed cache). Master this design and you've internalized patterns that appear in every large-scale system.</p>
+    </div>
+
+    <div class="footnote">
+        <p><strong>Previous:</strong> <a href="0061-real-time-analytics-architecture.html">Real-Time Analytics Architecture</a> | <strong>Next:</strong> <a href="0063-design-chat-system.html">Design a Chat System</a></p>
+    </div>
+</body>
+</html>

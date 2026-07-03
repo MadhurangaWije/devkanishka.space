@@ -1,0 +1,452 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lesson 015 — Database Indexing: Making Queries Fast</title>
+    <link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+    <h1>Database Indexing: Making Queries Fast</h1>
+    <div class="lesson-meta">
+        <span>📘 Chapter 4: Databases &amp; Storage</span>
+        <span>⏱️ 10 min read</span>
+        <span>🏗️ Lesson 015</span>
+    </div>
+
+    <p>Your database has 50 million rows. Without an index, finding one row means scanning all 50 million. With the right index, it takes about 26 steps. That's the difference between 3 seconds and 5 milliseconds. Indexing is the single highest-leverage performance optimization in most systems.</p>
+
+    <h2>What Is an Index?</h2>
+
+    <p>An index is a <strong>separate data structure</strong> that maintains a sorted reference to your data. Think of it like the index at the back of a textbook — instead of reading every page to find "B-tree," you look up "B" in the alphabetical index, get page 142, and go directly there.</p>
+
+    <div class="card info">
+        <h3>The Core Trade-off</h3>
+        <p><strong>Reads get faster</strong> — lookups go from O(n) to O(log n).</p>
+        <p><strong>Writes get slower</strong> — every INSERT/UPDATE must also update the index.</p>
+        <p><strong>Storage increases</strong> — the index itself takes disk space.</p>
+    </div>
+
+    <h2>Without Index vs With Index</h2>
+
+    <figure class="diagram">
+        <svg viewBox="0 0 700 320" xmlns="http://www.w3.org/2000/svg">
+            <text x="350" y="20" text-anchor="middle" font-family="system-ui" font-size="13" font-weight="bold" fill="#333">Finding "user_id = 42" in 1 Million Rows</text>
+
+            <!-- Without Index: Full Table Scan -->
+            <text x="175" y="50" text-anchor="middle" font-family="system-ui" font-size="11" font-weight="bold" fill="#e63946">Without Index: Full Table Scan</text>
+
+            <!-- Table rows -->
+            <rect x="40" y="65" width="270" height="18" rx="2" fill="#f5f5f0" stroke="#ddd"/>
+            <text x="50" y="78" font-family="monospace" font-size="8" fill="#999">row 1: user_id=7, name="..." ✗</text>
+            <rect x="40" y="85" width="270" height="18" rx="2" fill="#f5f5f0" stroke="#ddd"/>
+            <text x="50" y="98" font-family="monospace" font-size="8" fill="#999">row 2: user_id=91, name="..." ✗</text>
+            <rect x="40" y="105" width="270" height="18" rx="2" fill="#f5f5f0" stroke="#ddd"/>
+            <text x="50" y="118" font-family="monospace" font-size="8" fill="#999">row 3: user_id=23, name="..." ✗</text>
+            <rect x="40" y="125" width="270" height="18" rx="2" fill="#f5f5f0" stroke="#ddd"/>
+            <text x="50" y="138" font-family="monospace" font-size="8" fill="#999">row 4: user_id=55, name="..." ✗</text>
+
+            <!-- Dots -->
+            <text x="175" y="160" text-anchor="middle" font-family="system-ui" font-size="12" fill="#999">⋮ scan 999,996 more rows ⋮</text>
+
+            <rect x="40" y="170" width="270" height="18" rx="2" fill="#ffe0e0" stroke="#e63946"/>
+            <text x="50" y="183" font-family="monospace" font-size="8" fill="#e63946">row 999999: user_id=42 ✓ FOUND!</text>
+
+            <text x="175" y="215" text-anchor="middle" font-family="system-ui" font-size="10" fill="#e63946">~1,000,000 comparisons</text>
+            <text x="175" y="230" text-anchor="middle" font-family="system-ui" font-size="10" fill="#e63946">⏱️ ~3 seconds</text>
+
+            <!-- With Index: B-tree Traversal -->
+            <text x="525" y="50" text-anchor="middle" font-family="system-ui" font-size="11" font-weight="bold" fill="#2a9d8f">With Index: B-tree Lookup</text>
+
+            <!-- Tree levels -->
+            <rect x="480" y="65" width="90" height="22" rx="4" fill="#2a9d8f" opacity="0.15" stroke="#2a9d8f" stroke-width="1.5"/>
+            <text x="525" y="80" text-anchor="middle" font-family="monospace" font-size="8" fill="#333">[1-500K|500K-1M]</text>
+            <text x="600" y="80" font-family="system-ui" font-size="8" fill="#2a9d8f">← step 1</text>
+
+            <!-- Level 2 -->
+            <line x1="505" y1="87" x2="475" y2="100" stroke="#2a9d8f" stroke-width="1"/>
+            <rect x="430" y="100" width="90" height="22" rx="4" fill="#2a9d8f" opacity="0.15" stroke="#2a9d8f" stroke-width="1.5"/>
+            <text x="475" y="115" text-anchor="middle" font-family="monospace" font-size="8" fill="#333">[1-250K|250K-500K]</text>
+            <text x="550" y="115" font-family="system-ui" font-size="8" fill="#2a9d8f">← step 2</text>
+
+            <!-- Level 3 -->
+            <line x1="455" y1="122" x2="445" y2="135" stroke="#2a9d8f" stroke-width="1"/>
+            <rect x="400" y="135" width="90" height="22" rx="4" fill="#2a9d8f" opacity="0.15" stroke="#2a9d8f" stroke-width="1.5"/>
+            <text x="445" y="150" text-anchor="middle" font-family="monospace" font-size="8" fill="#333">[1-1K|1K-2K|...]</text>
+            <text x="520" y="150" font-family="system-ui" font-size="8" fill="#2a9d8f">← step 3</text>
+
+            <!-- More steps indicator -->
+            <text x="445" y="175" text-anchor="middle" font-family="system-ui" font-size="9" fill="#999">⋮ (steps 4-19)</text>
+
+            <!-- Final -->
+            <rect x="410" y="185" width="70" height="22" rx="4" fill="#d4edda" stroke="#2a9d8f" stroke-width="2"/>
+            <text x="445" y="200" text-anchor="middle" font-family="monospace" font-size="8" fill="#2a9d8f">id=42 → row ptr</text>
+            <text x="520" y="200" font-family="system-ui" font-size="8" fill="#2a9d8f">← step 20</text>
+
+            <text x="525" y="240" text-anchor="middle" font-family="system-ui" font-size="10" fill="#2a9d8f">~20 comparisons (log₂ 1M)</text>
+            <text x="525" y="255" text-anchor="middle" font-family="system-ui" font-size="10" fill="#2a9d8f">⏱️ ~5 milliseconds</text>
+
+            <!-- Comparison bar -->
+            <rect x="100" y="275" width="500" height="30" rx="4" fill="#f5f5f0" stroke="#ddd"/>
+            <rect x="100" y="275" width="500" height="30" rx="4" fill="#e63946" opacity="0.15"/>
+            <rect x="100" y="275" width="1" height="30" rx="4" fill="#2a9d8f" opacity="0.8"/>
+            <text x="350" y="295" text-anchor="middle" font-family="system-ui" font-size="10" font-weight="bold" fill="#333">Index makes this query 600x faster</text>
+        </svg>
+        <figcaption>Full table scan checks every row. B-tree index eliminates half the remaining candidates at each step.</figcaption>
+    </figure>
+
+    <h2>B-Tree Structure</h2>
+
+    <p>The most common index structure is the <strong>B-tree</strong> (balanced tree). Every database you'll use (PostgreSQL, MySQL, SQLite) defaults to B-tree indexes.</p>
+
+    <figure class="diagram">
+        <svg viewBox="0 0 700 300" xmlns="http://www.w3.org/2000/svg">
+            <text x="350" y="20" text-anchor="middle" font-family="system-ui" font-size="13" font-weight="bold" fill="#333">B-Tree Index Structure</text>
+
+            <!-- Root node -->
+            <rect x="270" y="40" width="160" height="35" rx="5" fill="#457b9d" opacity="0.15" stroke="#457b9d" stroke-width="2"/>
+            <text x="350" y="62" text-anchor="middle" font-family="monospace" font-size="10" fill="#333">| 25 | 50 | 75 |</text>
+            <text x="350" y="38" text-anchor="middle" font-family="system-ui" font-size="8" fill="#457b9d">Root</text>
+
+            <!-- Level 2 nodes -->
+            <rect x="60" y="120" width="130" height="30" rx="4" fill="#2a9d8f" opacity="0.12" stroke="#2a9d8f" stroke-width="1.5"/>
+            <text x="125" y="140" text-anchor="middle" font-family="monospace" font-size="9" fill="#333">| 5 | 10 | 18 |</text>
+
+            <rect x="220" y="120" width="130" height="30" rx="4" fill="#2a9d8f" opacity="0.12" stroke="#2a9d8f" stroke-width="1.5"/>
+            <text x="285" y="140" text-anchor="middle" font-family="monospace" font-size="9" fill="#333">| 30 | 38 | 42 |</text>
+
+            <rect x="380" y="120" width="130" height="30" rx="4" fill="#2a9d8f" opacity="0.12" stroke="#2a9d8f" stroke-width="1.5"/>
+            <text x="445" y="140" text-anchor="middle" font-family="monospace" font-size="9" fill="#333">| 55 | 62 | 70 |</text>
+
+            <rect x="540" y="120" width="130" height="30" rx="4" fill="#2a9d8f" opacity="0.12" stroke="#2a9d8f" stroke-width="1.5"/>
+            <text x="605" y="140" text-anchor="middle" font-family="monospace" font-size="9" fill="#333">| 80 | 88 | 95 |</text>
+
+            <!-- Connecting lines root to level 2 -->
+            <line x1="295" y1="75" x2="125" y2="120" stroke="#457b9d" stroke-width="1.2"/>
+            <line x1="330" y1="75" x2="285" y2="120" stroke="#457b9d" stroke-width="1.2"/>
+            <line x1="370" y1="75" x2="445" y2="120" stroke="#457b9d" stroke-width="1.2"/>
+            <line x1="405" y1="75" x2="605" y2="120" stroke="#457b9d" stroke-width="1.2"/>
+
+            <!-- Leaf nodes (simplified) -->
+            <rect x="180" y="200" width="160" height="35" rx="4" fill="#f4a261" opacity="0.12" stroke="#f4a261" stroke-width="1.5"/>
+            <text x="260" y="215" text-anchor="middle" font-family="monospace" font-size="8" fill="#333">30→row | 38→row | 42→row</text>
+            <text x="260" y="228" text-anchor="middle" font-family="system-ui" font-size="7" fill="#f4a261">leaf node (has row pointers)</text>
+
+            <!-- Highlight search path -->
+            <line x1="330" y1="75" x2="285" y2="120" stroke="#e63946" stroke-width="2.5" opacity="0.6"/>
+            <line x1="285" y1="150" x2="260" y2="200" stroke="#e63946" stroke-width="2.5" opacity="0.6"/>
+
+            <text x="350" y="265" text-anchor="middle" font-family="system-ui" font-size="10" fill="#e63946">Search path for key=42: Root → Internal → Leaf (3 disk reads)</text>
+
+            <!-- Properties -->
+            <text x="350" y="290" text-anchor="middle" font-family="system-ui" font-size="9" fill="#555">B-trees stay balanced: all leaves are at the same depth. Lookup is always O(log n).</text>
+        </svg>
+        <figcaption>B-tree: sorted keys in nodes, with pointers to child nodes. Each level narrows the search space.</figcaption>
+    </figure>
+
+    <h2>Types of Indexes</h2>
+
+    <table>
+        <thead>
+            <tr>
+                <th>Index Type</th>
+                <th>What It Does</th>
+                <th>Example</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr>
+                <td><strong>Primary Key</strong></td>
+                <td>Unique identifier, auto-created. Clustered (data sorted by PK).</td>
+                <td><code>id</code> column</td>
+            </tr>
+            <tr>
+                <td><strong>Secondary</strong></td>
+                <td>Index on a non-PK column for faster lookups.</td>
+                <td><code>CREATE INDEX idx_email ON users(email)</code></td>
+            </tr>
+            <tr>
+                <td><strong>Composite</strong></td>
+                <td>Index on multiple columns (order matters!).</td>
+                <td><code>CREATE INDEX idx ON orders(user_id, created_at)</code></td>
+            </tr>
+            <tr>
+                <td><strong>Covering</strong></td>
+                <td>Index contains all columns needed by a query — no table lookup needed.</td>
+                <td><code>CREATE INDEX idx ON orders(user_id, status) INCLUDE (total)</code></td>
+            </tr>
+        </tbody>
+    </table>
+
+    <div class="card highlight">
+        <h3>Composite Index: Order Matters!</h3>
+        <p>An index on <code>(user_id, created_at)</code> helps queries that filter by:</p>
+        <ul>
+            <li>✅ <code>WHERE user_id = 5</code> (uses leftmost prefix)</li>
+            <li>✅ <code>WHERE user_id = 5 AND created_at > '2024-01-01'</code> (uses both)</li>
+            <li>❌ <code>WHERE created_at > '2024-01-01'</code> (can't skip the leftmost column)</li>
+        </ul>
+        <p>Think of it like a phone book sorted by last name, then first name. You can find all "Smiths" easily, but finding all "Johns" across all last names still requires scanning.</p>
+    </div>
+
+    <h2>The Write Penalty</h2>
+
+    <p>Indexes aren't free. Every index adds cost to writes:</p>
+
+    <pre><code>INSERT INTO orders (user_id, product_id, total, status, created_at)
+VALUES (42, 7, 99.99, 'pending', NOW());
+
+-- Behind the scenes, the database must also:
+-- 1. Update the primary key index
+-- 2. Update idx_user_id index
+-- 3. Update idx_status index
+-- 4. Update idx_created_at index
+-- 5. Update idx_user_status composite index
+-- That's 5 index updates per INSERT!</code></pre>
+
+    <p><strong>Rule of thumb:</strong> A table with 5+ indexes will have noticeably slower writes. Only index columns you actually query on.</p>
+
+    <h2>What to Index</h2>
+
+    <div class="card info">
+        <h3>Look at Your Queries</h3>
+        <ul>
+            <li><strong>WHERE clauses</strong> — <code>WHERE status = 'active'</code> → index <code>status</code></li>
+            <li><strong>JOIN conditions</strong> — <code>JOIN orders ON users.id = orders.user_id</code> → index <code>orders.user_id</code></li>
+            <li><strong>ORDER BY</strong> — <code>ORDER BY created_at DESC</code> → index <code>created_at</code></li>
+            <li><strong>High cardinality</strong> — Indexing a boolean (2 values) helps less than indexing email (millions of values)</li>
+        </ul>
+    </div>
+
+    <div class="real-world">
+        <h3>E-Commerce Query: 3 Seconds → 5ms</h3>
+        <p>An e-commerce app had this slow query on a 20M-row orders table:</p>
+        <pre><code>SELECT * FROM orders
+WHERE user_id = 12345
+  AND status = 'completed'
+ORDER BY created_at DESC
+LIMIT 10;</code></pre>
+        <p><strong>Before:</strong> Full table scan, 3.2 seconds. The database checked all 20M rows.</p>
+        <p><strong>Fix:</strong> <code>CREATE INDEX idx_user_status_date ON orders(user_id, status, created_at DESC);</code></p>
+        <p><strong>After:</strong> 4.7ms. The composite index lets the database jump directly to user 12345's completed orders, already sorted by date. It reads exactly 10 rows.</p>
+    </div>
+
+    <h2>Reading EXPLAIN Plans</h2>
+
+    <p>Use <code>EXPLAIN</code> to see how the database executes your query:</p>
+
+    <pre><code>EXPLAIN SELECT * FROM orders WHERE user_id = 42;
+
+-- Key things to look for:
+-- ✅ "Index Scan" or "Index Only Scan" — using an index (good!)
+-- ❌ "Seq Scan" — full table scan (bad on large tables)
+-- ⚠️ "Bitmap Index Scan" — using index but reading many rows
+-- 📊 "rows" estimate — how many rows the DB thinks it'll process</code></pre>
+
+    <h2>Interactive: B-Tree Insert Visualization</h2>
+
+    <div class="interactive">
+        <p>Insert values into the B-tree and watch it maintain balance. Each node holds at most 3 keys — when full, it splits.</p>
+
+        <div id="btree-viz" style="min-height: 280px; border: 1px solid var(--border); border-radius: 6px; background: #fafaf5; margin: 1rem 0; position: relative; overflow: hidden;">
+            <svg id="btree-svg" viewBox="0 0 600 260" xmlns="http://www.w3.org/2000/svg" style="width:100%;height:260px;"></svg>
+        </div>
+
+        <div style="display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap;">
+            <input type="number" id="btree-input" min="1" max="99" value="" placeholder="Value (1-99)" style="font-family:var(--font-mono);font-size:0.85rem;padding:0.4rem 0.8rem;border:2px solid var(--accent-blue);border-radius:4px;width:130px;">
+            <button onclick="insertBTreeValue()">Insert</button>
+            <button onclick="insertRandomBTree()">Random Insert</button>
+            <button onclick="resetBTree()">Reset</button>
+            <span id="btree-status" style="font-size:0.85rem;color:var(--text-muted);margin-left:0.5rem;"></span>
+        </div>
+    </div>
+
+    <script>
+    (function() {
+        // Simplified B-tree with order 3 (max 3 keys per node)
+        const MAX_KEYS = 3;
+        let root = null;
+
+        function createNode() {
+            return { keys: [], children: [], isLeaf: true };
+        }
+
+        function splitChild(parent, i) {
+            const full = parent.children[i];
+            const mid = Math.floor(MAX_KEYS / 2);
+            const newNode = createNode();
+            newNode.isLeaf = full.isLeaf;
+            newNode.keys = full.keys.splice(mid + 1);
+            const midKey = full.keys.splice(mid)[0];
+            if (!full.isLeaf) {
+                newNode.children = full.children.splice(mid + 1);
+            }
+            parent.children.splice(i + 1, 0, newNode);
+            parent.keys.splice(i, 0, midKey);
+        }
+
+        function insertNonFull(node, key) {
+            if (node.isLeaf) {
+                let i = node.keys.length - 1;
+                while (i >= 0 && key < node.keys[i]) i--;
+                node.keys.splice(i + 1, 0, key);
+            } else {
+                let i = node.keys.length - 1;
+                while (i >= 0 && key < node.keys[i]) i--;
+                i++;
+                if (node.children[i].keys.length === MAX_KEYS) {
+                    splitChild(node, i);
+                    if (key > node.keys[i]) i++;
+                }
+                insertNonFull(node.children[i], key);
+            }
+        }
+
+        function insert(key) {
+            if (!root) { root = createNode(); root.keys.push(key); return; }
+            if (root.keys.length === MAX_KEYS) {
+                const newRoot = createNode();
+                newRoot.isLeaf = false;
+                newRoot.children.push(root);
+                splitChild(newRoot, 0);
+                root = newRoot;
+                insertNonFull(root, key);
+            } else {
+                insertNonFull(root, key);
+            }
+        }
+
+        function getAllKeys(node) {
+            if (!node) return [];
+            let keys = [...node.keys];
+            for (const c of node.children) keys = keys.concat(getAllKeys(c));
+            return keys;
+        }
+
+        function renderTree() {
+            const svg = document.getElementById('btree-svg');
+            svg.innerHTML = '';
+            if (!root) return;
+
+            const levels = [];
+            function traverse(node, level) {
+                if (!levels[level]) levels[level] = [];
+                levels[level].push(node);
+                if (!node.isLeaf) {
+                    for (const c of node.children) traverse(c, level + 1);
+                }
+            }
+            traverse(root, 0);
+
+            const levelHeight = 65;
+            const startY = 30;
+
+            levels.forEach((nodes, level) => {
+                const y = startY + level * levelHeight;
+                const totalWidth = 580;
+                const spacing = totalWidth / (nodes.length + 1);
+
+                nodes.forEach((node, i) => {
+                    const x = spacing * (i + 1);
+                    const w = Math.max(60, node.keys.length * 28 + 20);
+
+                    // Store position for line drawing
+                    node._x = x;
+                    node._y = y;
+
+                    // Node rect
+                    const rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+                    rect.setAttribute('x', x - w/2);
+                    rect.setAttribute('y', y);
+                    rect.setAttribute('width', w);
+                    rect.setAttribute('height', 28);
+                    rect.setAttribute('rx', '4');
+                    rect.setAttribute('fill', level === 0 ? 'rgba(69,123,157,0.15)' : node.isLeaf ? 'rgba(244,162,97,0.12)' : 'rgba(42,157,143,0.12)');
+                    rect.setAttribute('stroke', level === 0 ? '#457b9d' : node.isLeaf ? '#f4a261' : '#2a9d8f');
+                    rect.setAttribute('stroke-width', '1.5');
+                    svg.appendChild(rect);
+
+                    // Keys text
+                    const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+                    text.setAttribute('x', x);
+                    text.setAttribute('y', y + 18);
+                    text.setAttribute('text-anchor', 'middle');
+                    text.setAttribute('font-family', 'monospace');
+                    text.setAttribute('font-size', '11');
+                    text.setAttribute('fill', '#333');
+                    text.textContent = node.keys.join(' | ');
+                    svg.appendChild(text);
+                });
+            });
+
+            // Draw edges
+            function drawEdges(node) {
+                if (!node.isLeaf) {
+                    for (const child of node.children) {
+                        const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+                        line.setAttribute('x1', node._x);
+                        line.setAttribute('y1', node._y + 28);
+                        line.setAttribute('x2', child._x);
+                        line.setAttribute('y2', child._y);
+                        line.setAttribute('stroke', '#999');
+                        line.setAttribute('stroke-width', '1');
+                        svg.insertBefore(line, svg.firstChild);
+                        drawEdges(child);
+                    }
+                }
+            }
+            drawEdges(root);
+        }
+
+        window.insertBTreeValue = function() {
+            const input = document.getElementById('btree-input');
+            const val = parseInt(input.value);
+            if (isNaN(val) || val < 1 || val > 99) {
+                document.getElementById('btree-status').textContent = 'Enter a number 1-99';
+                return;
+            }
+            if (getAllKeys(root).includes(val)) {
+                document.getElementById('btree-status').textContent = val + ' already exists!';
+                return;
+            }
+            insert(val);
+            renderTree();
+            input.value = '';
+            document.getElementById('btree-status').textContent = 'Inserted ' + val + ' (total: ' + getAllKeys(root).length + ' keys)';
+        };
+
+        window.insertRandomBTree = function() {
+            const existing = getAllKeys(root);
+            if (existing.length >= 30) {
+                document.getElementById('btree-status').textContent = 'Tree is full enough! Reset to start over.';
+                return;
+            }
+            let val;
+            do { val = Math.floor(Math.random() * 99) + 1; } while (existing.includes(val));
+            insert(val);
+            renderTree();
+            document.getElementById('btree-status').textContent = 'Inserted ' + val + ' (total: ' + getAllKeys(root).length + ' keys)';
+        };
+
+        window.resetBTree = function() {
+            root = null;
+            renderTree();
+            document.getElementById('btree-status').textContent = 'Tree cleared.';
+        };
+
+        // Start with a few values
+        [40, 20, 60, 10, 30, 50, 70].forEach(v => insert(v));
+        renderTree();
+    })();
+    </script>
+
+    <div class="takeaway">
+        <h3>🎯 Key Takeaway</h3>
+        <p>Indexing is the single highest-leverage performance optimization for most systems. A well-chosen index can make a query thousands of times faster. But over-indexing kills write performance — every index is a write amplification. Index what you query, and use <code>EXPLAIN</code> to verify your indexes are actually being used.</p>
+    </div>
+
+    <div class="footnote">
+        <p>📚 Next lesson: Replication — keeping your data safe and available across multiple machines.</p>
+    </div>
+</body>
+</html>

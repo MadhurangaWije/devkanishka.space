@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Chapter 5 Interview — Caching</title>
+  <link rel="stylesheet" href="../assets/styles.css">
+  <style>
+    .question-block{margin:2rem 0;padding:1.5rem;background:var(--card-bg);border:1px solid var(--border);border-radius:8px}
+    .question-block h3{margin-top:0;color:var(--accent-blue);font-size:1.1rem}
+    .answer{display:none;margin-top:1rem;padding:1rem;background:var(--code-bg);border-radius:6px;font-size:0.95rem;line-height:1.7}
+    .answer p{margin-bottom:0.8rem}
+    .answer.visible{display:block}
+    .key-points{margin:1rem 0;padding-left:1.2rem}
+    .key-points li{margin-bottom:0.4rem;font-size:0.9rem}
+    .follow-ups{margin-top:0.75rem;font-size:0.85rem;color:var(--text-muted);border-top:1px solid var(--border);padding-top:0.75rem}
+    .follow-ups strong{color:var(--text)}
+    .btn-show{padding:0.4rem 1rem;border-radius:5px;background:var(--accent-blue);color:#fff;border:none;cursor:pointer;font-size:0.85rem}
+    .btn-show:hover{opacity:0.85}
+    .nav-row{display:flex;justify-content:space-between;margin-top:2rem;flex-wrap:wrap;gap:0.5rem}
+    .btn{padding:0.5rem 1rem;border-radius:6px;background:#4299e1;color:#fff;text-decoration:none;font-size:0.9rem}
+    .btn.secondary{background:#718096}
+  </style>
+</head>
+<body>
+  <h1>Chapter 5 Interview: Caching</h1>
+  <p class="lesson-meta">🎙️ Practice answering these out loud — aim for 2–3 minute responses.</p>
+
+  <div class="question-block">
+    <h3>1. Where would you add caching in this system?</h3>
+    <button class="btn-show" onclick="toggle(this)">Show Answer</button>
+    <div class="answer">
+      <p>Okay so I'd think about this layer by layer. The first question is: where are the repeated, expensive reads? That's where caching gives you the biggest bang.</p>
+      <p>At the client layer — browser caching with proper Cache-Control headers. If you've got static assets or API responses that don't change frequently, let the browser hold onto them. This is free performance and reduces load on your servers entirely.</p>
+      <p>Then at the CDN level — for anything that's the same for many users. Product images, marketing pages, even API responses for popular endpoints. A CDN cache hit means the request never reaches your origin.</p>
+      <p>At the application layer — this is your Redis or Memcached. I'd cache database query results, computed values, session data. Things like user profiles that get fetched on every request, or a product catalog that changes maybe once a day but gets read thousands of times per second.</p>
+      <p>And honestly, don't forget the database's own query cache and buffer pool. Sometimes the answer isn't adding a new caching layer — it's giving your DB more memory so its internal cache is effective.</p>
+      <ul class="key-points">
+        <li><strong>Client:</strong> HTTP cache headers, browser storage for static assets</li>
+        <li><strong>CDN:</strong> edge caching for geographically distributed users</li>
+        <li><strong>Application:</strong> Redis/Memcached for hot database results and computed values</li>
+        <li><strong>Database:</strong> query cache, buffer pool sizing, materialized views</li>
+      </ul>
+      <div class="follow-ups"><strong>Follow-ups:</strong> How do you decide the TTL for each layer? • What's the cold-start problem? • How do you monitor cache hit rates?</div>
+    </div>
+  </div>
+
+  <div class="question-block">
+    <h3>2. How do you handle cache invalidation?</h3>
+    <button class="btn-show" onclick="toggle(this)">Show Answer</button>
+    <div class="answer">
+      <p>Yeah so there's that famous quote — "there are only two hard things in computer science: cache invalidation and naming things." And honestly it's true, this is genuinely hard.</p>
+      <p>The simplest approach is TTL-based expiration. You set a timeout and accept that data might be stale for up to that duration. For a lot of use cases — product recommendations, trending lists, dashboards — a 5-minute staleness window is totally fine.</p>
+      <p>For stricter needs, I'd use write-through or write-behind. Write-through updates the cache synchronously when you write to the database — consistency is strong but writes are slower. Write-behind queues the cache update asynchronously — faster writes but you risk a brief inconsistency window.</p>
+      <p>The pattern I use most is event-driven invalidation. When data changes, publish an event. Cache subscribers listen and either invalidate or update the relevant keys. This decouples the write path from cache management and works well in distributed systems.</p>
+      <p>The gotcha is always: what if invalidation fails? You need TTL as a safety net even with active invalidation. Belt and suspenders.</p>
+      <ul class="key-points">
+        <li><strong>TTL:</strong> simple time-based expiry — good safety net, accepts bounded staleness</li>
+        <li><strong>Write-through:</strong> update cache on every write — strong consistency, slower writes</li>
+        <li><strong>Event-driven:</strong> publish change events, subscribers invalidate — decoupled, scalable</li>
+        <li><strong>Safety net:</strong> always have TTL even with active invalidation</li>
+      </ul>
+      <div class="follow-ups"><strong>Follow-ups:</strong> How do you handle partial invalidation in a complex object? • What's cache-aside vs write-through? • How do you test invalidation correctness?</div>
+    </div>
+  </div>
+
+  <div class="question-block">
+    <h3>3. What's the thundering herd problem and how do you solve it?</h3>
+    <button class="btn-show" onclick="toggle(this)">Show Answer</button>
+    <div class="answer">
+      <p>So imagine you've got a super popular cache key — like a celebrity's profile on a social platform. Millions of requests per second hitting that cached value. Now the TTL expires. Suddenly a million requests simultaneously see a cache miss and ALL of them try to rebuild the cache by hitting the database. Your DB gets crushed. That's the thundering herd.</p>
+      <p>The classic fix is a cache lock — when there's a miss, only ONE request gets a lock to rebuild the cache. Everyone else either waits briefly or gets the stale value. This is sometimes called "request coalescing" or "single-flight."</p>
+      <p>Another approach I like is stale-while-revalidate. You serve the slightly expired value to current requests while one background process refreshes the cache. Users get fast (slightly stale) responses and the DB sees exactly one query instead of a million.</p>
+      <p>You can also stagger TTLs with some jitter — instead of everything expiring at exactly 5 minutes, expire at 5 minutes plus a random 0-30 seconds. This prevents synchronized cache expiry across many keys.</p>
+      <ul class="key-points">
+        <li><strong>Problem:</strong> mass cache miss → simultaneous DB flood on popular keys</li>
+        <li><strong>Lock/single-flight:</strong> one request rebuilds, others wait or get stale data</li>
+        <li><strong>Stale-while-revalidate:</strong> serve expired data while refreshing in background</li>
+        <li><strong>TTL jitter:</strong> randomize expiry to prevent synchronized invalidation</li>
+      </ul>
+      <div class="follow-ups"><strong>Follow-ups:</strong> How would you implement a distributed lock for this? • What's cache warming? • How does this differ from cache stampede?</div>
+    </div>
+  </div>
+
+  <div class="question-block">
+    <h3>4. When does caching actually hurt?</h3>
+    <button class="btn-show" onclick="toggle(this)">Show Answer</button>
+    <div class="answer">
+      <p>This is a great question to show you're not just a "cache everything" person. Caching can genuinely make things worse in several scenarios.</p>
+      <p>First — low hit rates. If your data is highly unique per user or per request, most cache lookups are misses. Now you're paying the cost of a cache check PLUS the database query. You've added latency and infrastructure cost for nothing.</p>
+      <p>Second — write-heavy workloads. If data changes more often than it's read, you're constantly invalidating and rebuilding the cache. The overhead of cache maintenance exceeds the benefit of cache hits.</p>
+      <p>Third — consistency requirements. In financial systems or inventory management during flash sales, serving stale data isn't just annoying — it's a correctness bug. You oversell inventory because the cache said there were 5 items left when there are actually 0.</p>
+      <p>Fourth — the complexity tax. Every caching layer is code you maintain, bugs you debug, infrastructure you monitor. I've seen teams spend weeks debugging stale cache issues that wouldn't exist if they'd just optimized their database queries instead.</p>
+      <ul class="key-points">
+        <li><strong>Low hit rate:</strong> unique/random access patterns make caching overhead without benefit</li>
+        <li><strong>Write-heavy:</strong> constant invalidation negates read performance gains</li>
+        <li><strong>Consistency-critical:</strong> stale data causes correctness bugs, not just UX issues</li>
+        <li><strong>Complexity cost:</strong> debugging cache bugs and maintaining infrastructure</li>
+      </ul>
+      <div class="follow-ups"><strong>Follow-ups:</strong> How do you measure whether caching is helping? • What's cache pollution? • When would you remove an existing cache?</div>
+    </div>
+  </div>
+
+  <div class="question-block">
+    <h3>5. Design a caching strategy for a social media feed</h3>
+    <button class="btn-show" onclick="toggle(this)">Show Answer</button>
+    <div class="answer">
+      <p>Okay so a social media feed is interesting because it's personalized, frequently updated, and read WAY more than written. Every time someone opens the app, they fetch their feed — but new posts come in maybe every few minutes.</p>
+      <p>I'd probably go with a fan-out-on-write approach for most users. When someone posts, you precompute and push that post into the cached feeds of all their followers. So when a user opens the app, their feed is already assembled in cache — it's just a Redis list read. Super fast.</p>
+      <p>But here's the catch — for users with millions of followers (celebrities), fan-out-on-write is insane. You'd update millions of cached feeds for every tweet. So you do a hybrid: fan-out-on-write for regular users, fan-out-on-read for celebrity accounts. When rendering a feed, you merge the precomputed feed with fresh queries for celebrity posts.</p>
+      <p>For the cache itself, I'd use sorted sets in Redis — score by timestamp, trim to the latest N posts. TTL of maybe 24 hours as a safety net, but actively update on new posts. And I'd cache individual post objects separately so they're shared across feeds and you're not duplicating content everywhere.</p>
+      <ul class="key-points">
+        <li><strong>Fan-out-on-write:</strong> precompute feeds in cache at post time — fast reads</li>
+        <li><strong>Hybrid approach:</strong> fan-out-on-read for high-follower accounts to avoid write amplification</li>
+        <li><strong>Redis sorted sets:</strong> score by time, ZRANGEBYSCORE for pagination</li>
+        <li><strong>Separate post cache:</strong> cache post content independently, reference by ID in feeds</li>
+      </ul>
+      <div class="follow-ups"><strong>Follow-ups:</strong> How do you handle deletes in precomputed feeds? • What about ranking/algorithm changes? • How do you warm a new user's cache?</div>
+    </div>
+  </div>
+
+  <div class="nav-row">
+    <a href="ch04-interview.html" class="btn secondary">← Chapter 4 Interview</a>
+    <a href="ch06-interview.html" class="btn">Chapter 6 Interview →</a>
+  </div>
+
+  <script>
+    function toggle(btn) {
+      const answer = btn.nextElementSibling;
+      const visible = answer.classList.toggle('visible');
+      btn.textContent = visible ? 'Hide Answer' : 'Show Answer';
+    }
+  </script>
+</body>
+</html>

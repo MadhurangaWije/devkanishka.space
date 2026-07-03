@@ -1,0 +1,372 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lesson 037 — Distributed Transactions &amp; Saga Pattern</title>
+    <link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+    <h1>Distributed Transactions &amp; Saga Pattern</h1>
+    <div class="lesson-meta">
+        <span>📘 Chapter 9: Consistency &amp; Distributed Consensus</span>
+        <span>⏱️ 10 min read</span>
+        <span>🏗️ Lesson 037</span>
+    </div>
+
+    <p>A single database transaction is straightforward — ACID guarantees handle it. But what happens when a business operation spans <strong>multiple services or databases</strong>? You can't just wrap everything in one transaction. This lesson covers two approaches: the classic <strong>Two-Phase Commit</strong> and the modern <strong>Saga pattern</strong>.</p>
+
+    <h2>The Problem</h2>
+
+    <div class="card info">
+        <h3>Why Distributed Transactions Are Hard</h3>
+        <p>Consider an e-commerce order:</p>
+        <ol>
+            <li><strong>Order Service:</strong> Create order record</li>
+            <li><strong>Payment Service:</strong> Charge credit card</li>
+            <li><strong>Inventory Service:</strong> Reserve items</li>
+            <li><strong>Shipping Service:</strong> Schedule delivery</li>
+        </ol>
+        <p>If payment succeeds but inventory is out of stock, you need to <em>undo</em> the payment. Each service has its own database — there's no single transaction that spans all of them.</p>
+    </div>
+
+    <h2>Two-Phase Commit (2PC)</h2>
+
+    <p>The classic approach: a <strong>coordinator</strong> orchestrates all participants through two phases.</p>
+
+    <div class="card">
+        <h3>How 2PC Works</h3>
+        <ol>
+            <li><strong>Phase 1 — Prepare:</strong> Coordinator asks each participant "Can you commit?" Each participant acquires locks, writes to a transaction log, and votes YES or NO.</li>
+            <li><strong>Phase 2 — Commit/Abort:</strong> If ALL vote YES → coordinator sends COMMIT to all. If ANY votes NO → coordinator sends ABORT to all.</li>
+        </ol>
+    </div>
+
+    <figure class="diagram">
+        <svg viewBox="0 0 700 300" xmlns="http://www.w3.org/2000/svg">
+            <text x="350" y="20" text-anchor="middle" font-family="system-ui" font-size="13" font-weight="bold" fill="#333">Two-Phase Commit (2PC) Sequence</text>
+
+            <!-- Participants -->
+            <rect x="60" y="40" width="100" height="30" rx="5" fill="#f4a261" opacity="0.3" stroke="#e76f51" stroke-width="2"/>
+            <text x="110" y="59" text-anchor="middle" font-family="system-ui" font-size="9" font-weight="bold" fill="#e76f51">Coordinator</text>
+            <rect x="270" y="40" width="100" height="30" rx="5" fill="#457b9d" opacity="0.15" stroke="#457b9d" stroke-width="2"/>
+            <text x="320" y="59" text-anchor="middle" font-family="system-ui" font-size="9" fill="#457b9d">Participant A</text>
+            <rect x="480" y="40" width="100" height="30" rx="5" fill="#457b9d" opacity="0.15" stroke="#457b9d" stroke-width="2"/>
+            <text x="530" y="59" text-anchor="middle" font-family="system-ui" font-size="9" fill="#457b9d">Participant B</text>
+
+            <!-- Lifelines -->
+            <line x1="110" y1="70" x2="110" y2="280" stroke="#e76f51" stroke-width="1.5" stroke-dasharray="4,3"/>
+            <line x1="320" y1="70" x2="320" y2="280" stroke="#457b9d" stroke-width="1.5" stroke-dasharray="4,3"/>
+            <line x1="530" y1="70" x2="530" y2="280" stroke="#457b9d" stroke-width="1.5" stroke-dasharray="4,3"/>
+
+            <!-- Phase 1 label -->
+            <rect x="5" y="85" width="45" height="70" rx="3" fill="#2a9d8f" opacity="0.1" stroke="#2a9d8f" stroke-width="1"/>
+            <text x="27" y="120" text-anchor="middle" font-family="system-ui" font-size="7" fill="#2a9d8f" transform="rotate(-90,27,120)">PREPARE</text>
+
+            <!-- Prepare messages -->
+            <line x1="115" y1="95" x2="315" y2="105" stroke="#333" stroke-width="1.5" marker-end="url(#arrowB)"/>
+            <text x="215" y="93" text-anchor="middle" font-family="system-ui" font-size="8" fill="#333">Prepare?</text>
+            <line x1="115" y1="100" x2="525" y2="110" stroke="#333" stroke-width="1.5" marker-end="url(#arrowB)"/>
+
+            <!-- Vote YES -->
+            <line x1="315" y1="130" x2="115" y2="140" stroke="#2a9d8f" stroke-width="1.5" marker-end="url(#arrowB)"/>
+            <text x="215" y="128" text-anchor="middle" font-family="system-ui" font-size="8" fill="#2a9d8f">Vote: YES ✓</text>
+            <line x1="525" y1="135" x2="115" y2="145" stroke="#2a9d8f" stroke-width="1.5" marker-end="url(#arrowB)"/>
+            <text x="420" y="128" text-anchor="middle" font-family="system-ui" font-size="8" fill="#2a9d8f">Vote: YES ✓</text>
+
+            <!-- Phase 2 label -->
+            <rect x="5" y="165" width="45" height="70" rx="3" fill="#e76f51" opacity="0.1" stroke="#e76f51" stroke-width="1"/>
+            <text x="27" y="200" text-anchor="middle" font-family="system-ui" font-size="7" fill="#e76f51" transform="rotate(-90,27,200)">COMMIT</text>
+
+            <!-- Decision -->
+            <rect x="80" y="155" width="60" height="18" rx="3" fill="#2a9d8f" opacity="0.2"/>
+            <text x="110" y="167" text-anchor="middle" font-family="system-ui" font-size="7" fill="#2a9d8f">All YES!</text>
+
+            <!-- Commit messages -->
+            <line x1="115" y1="185" x2="315" y2="195" stroke="#2a9d8f" stroke-width="1.5" marker-end="url(#arrowB)"/>
+            <text x="215" y="183" text-anchor="middle" font-family="system-ui" font-size="8" fill="#2a9d8f">COMMIT</text>
+            <line x1="115" y1="190" x2="525" y2="200" stroke="#2a9d8f" stroke-width="1.5" marker-end="url(#arrowB)"/>
+
+            <!-- ACKs -->
+            <line x1="315" y1="220" x2="115" y2="230" stroke="#999" stroke-width="1" marker-end="url(#arrowB)"/>
+            <text x="215" y="218" text-anchor="middle" font-family="system-ui" font-size="7" fill="#999">ACK</text>
+            <line x1="525" y1="225" x2="115" y2="235" stroke="#999" stroke-width="1" marker-end="url(#arrowB)"/>
+            <text x="420" y="218" text-anchor="middle" font-family="system-ui" font-size="7" fill="#999">ACK</text>
+
+            <!-- Note -->
+            <text x="350" y="270" text-anchor="middle" font-family="system-ui" font-size="8" fill="#e63946">⚠️ If coordinator crashes between Phase 1 &amp; 2 → participants stuck holding locks!</text>
+
+            <defs><marker id="arrowB" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#333"/></marker></defs>
+        </svg>
+        <figcaption>Figure 1: 2PC — coordinator collects votes, then broadcasts commit or abort. Simple but blocking.</figcaption>
+    </figure>
+
+    <div class="card info">
+        <h3>2PC Problems</h3>
+        <ul>
+            <li><strong>Blocking:</strong> Participants hold locks while waiting for the coordinator's decision. If the coordinator dies, they're stuck.</li>
+            <li><strong>Single Point of Failure:</strong> If the coordinator crashes after Phase 1 but before Phase 2, participants can't decide on their own.</li>
+            <li><strong>Performance:</strong> Synchronous — all participants must be available and responsive. Latency = slowest participant.</li>
+            <li><strong>Not partition-tolerant:</strong> If a network partition splits coordinator from participants, the system blocks.</li>
+        </ul>
+    </div>
+
+    <h2>The Saga Pattern</h2>
+
+    <p>Instead of one distributed transaction, break it into a <strong>sequence of local transactions</strong>. Each step has a <strong>compensating action</strong> — an "undo" that runs if a later step fails.</p>
+
+    <figure class="diagram">
+        <svg viewBox="0 0 720 280" xmlns="http://www.w3.org/2000/svg">
+            <text x="360" y="20" text-anchor="middle" font-family="system-ui" font-size="13" font-weight="bold" fill="#333">Saga Pattern — Forward &amp; Compensating Actions</text>
+
+            <!-- Forward flow -->
+            <text x="50" y="60" font-family="system-ui" font-size="9" font-weight="bold" fill="#2a9d8f">Forward →</text>
+            <rect x="100" y="45" width="120" height="35" rx="5" fill="#2a9d8f" opacity="0.15" stroke="#2a9d8f" stroke-width="1.5"/>
+            <text x="160" y="66" text-anchor="middle" font-family="system-ui" font-size="8" fill="#2a9d8f">T1: Create Order</text>
+            <line x1="220" y1="62" x2="250" y2="62" stroke="#2a9d8f" stroke-width="1.5" marker-end="url(#arrowG)"/>
+
+            <rect x="250" y="45" width="120" height="35" rx="5" fill="#2a9d8f" opacity="0.15" stroke="#2a9d8f" stroke-width="1.5"/>
+            <text x="310" y="66" text-anchor="middle" font-family="system-ui" font-size="8" fill="#2a9d8f">T2: Charge Card</text>
+            <line x1="370" y1="62" x2="400" y2="62" stroke="#2a9d8f" stroke-width="1.5" marker-end="url(#arrowG)"/>
+
+            <rect x="400" y="45" width="130" height="35" rx="5" fill="#2a9d8f" opacity="0.15" stroke="#2a9d8f" stroke-width="1.5"/>
+            <text x="465" y="66" text-anchor="middle" font-family="system-ui" font-size="8" fill="#2a9d8f">T3: Reserve Inventory</text>
+            <line x1="530" y1="62" x2="560" y2="62" stroke="#e63946" stroke-width="1.5"/>
+
+            <!-- Failure -->
+            <rect x="560" y="45" width="100" height="35" rx="5" fill="#e63946" opacity="0.15" stroke="#e63946" stroke-width="2"/>
+            <text x="610" y="60" text-anchor="middle" font-family="system-ui" font-size="8" fill="#e63946">T4: Ship</text>
+            <text x="610" y="73" text-anchor="middle" font-family="system-ui" font-size="8" font-weight="bold" fill="#e63946">FAILS! ✗</text>
+
+            <!-- Compensation flow -->
+            <text x="50" y="160" font-family="system-ui" font-size="9" font-weight="bold" fill="#e76f51">← Compensate</text>
+            <line x1="560" y1="90" x2="560" y2="140" stroke="#e63946" stroke-width="1.5" stroke-dasharray="4,3"/>
+            <text x="580" y="120" font-family="system-ui" font-size="7" fill="#e63946">trigger</text>
+
+            <rect x="400" y="145" width="130" height="35" rx="5" fill="#e76f51" opacity="0.15" stroke="#e76f51" stroke-width="1.5"/>
+            <text x="465" y="166" text-anchor="middle" font-family="system-ui" font-size="8" fill="#e76f51">C3: Restock Items</text>
+            <line x1="400" y1="162" x2="370" y2="162" stroke="#e76f51" stroke-width="1.5" marker-end="url(#arrowR)"/>
+
+            <rect x="250" y="145" width="120" height="35" rx="5" fill="#e76f51" opacity="0.15" stroke="#e76f51" stroke-width="1.5"/>
+            <text x="310" y="166" text-anchor="middle" font-family="system-ui" font-size="8" fill="#e76f51">C2: Refund Card</text>
+            <line x1="250" y1="162" x2="220" y2="162" stroke="#e76f51" stroke-width="1.5" marker-end="url(#arrowR)"/>
+
+            <rect x="100" y="145" width="120" height="35" rx="5" fill="#e76f51" opacity="0.15" stroke="#e76f51" stroke-width="1.5"/>
+            <text x="160" y="166" text-anchor="middle" font-family="system-ui" font-size="8" fill="#e76f51">C1: Cancel Order</text>
+
+            <!-- Result -->
+            <rect x="100" y="200" width="560" height="30" rx="5" fill="#f8f9fa" stroke="#ddd" stroke-width="1"/>
+            <text x="380" y="219" text-anchor="middle" font-family="system-ui" font-size="9" fill="#555">Result: System back to consistent state — no partial execution persists</text>
+
+            <!-- Key -->
+            <text x="200" y="260" font-family="system-ui" font-size="8" fill="#2a9d8f">● Tn = Local transaction (forward)</text>
+            <text x="430" y="260" font-family="system-ui" font-size="8" fill="#e76f51">● Cn = Compensating transaction (undo)</text>
+
+            <defs>
+                <marker id="arrowG" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#2a9d8f"/></marker>
+                <marker id="arrowR" markerWidth="8" markerHeight="6" refX="0" refY="3" orient="auto"><path d="M8,0 L0,3 L8,6" fill="#e76f51"/></marker>
+            </defs>
+        </svg>
+        <figcaption>Figure 2: When step 4 fails, compensating actions undo steps 3, 2, and 1 in reverse order.</figcaption>
+    </figure>
+
+    <h2>Choreography vs Orchestration</h2>
+
+    <div class="card">
+        <h3>Choreography-Based Sagas</h3>
+        <p>Each service <strong>listens for events</strong> and decides what to do next. No central coordinator.</p>
+        <ul>
+            <li>Order Service publishes "OrderCreated" → Payment Service hears it, charges card, publishes "PaymentCharged"</li>
+            <li>Inventory Service hears "PaymentCharged" → reserves items, publishes "InventoryReserved"</li>
+            <li>If Payment fails → publishes "PaymentFailed" → Order Service hears it and cancels</li>
+        </ul>
+        <p><strong>Pros:</strong> Simple, loosely coupled, no SPOF. <strong>Cons:</strong> Hard to understand the full flow, difficult to debug, risk of cyclic dependencies.</p>
+    </div>
+
+    <div class="card">
+        <h3>Orchestration-Based Sagas</h3>
+        <p>A <strong>central orchestrator</strong> (saga coordinator) tells each service what to do and handles the flow logic.</p>
+        <ul>
+            <li>Orchestrator: "Payment Service, charge the card" → waits for response</li>
+            <li>Orchestrator: "Inventory Service, reserve items" → waits for response</li>
+            <li>If any step fails → orchestrator triggers compensations in reverse</li>
+        </ul>
+        <p><strong>Pros:</strong> Easy to understand, centralized flow logic, simpler testing. <strong>Cons:</strong> Orchestrator can be a bottleneck/SPOF, tighter coupling to coordinator.</p>
+    </div>
+
+    <h2>Compensating Transactions</h2>
+
+    <div class="card info">
+        <h3>The "Undo" for Each Step</h3>
+        <p>Compensations aren't simple rollbacks — they're <strong>new forward actions</strong> that semantically reverse the original:</p>
+        <ul>
+            <li><strong>Charged card →</strong> Compensation: Issue refund (not "undo the charge" — that's impossible once processed)</li>
+            <li><strong>Reserved inventory →</strong> Compensation: Release reservation</li>
+            <li><strong>Sent email →</strong> Compensation: Send cancellation email</li>
+            <li><strong>Shipped package →</strong> Compensation: Initiate return process</li>
+        </ul>
+        <p>Some actions are <strong>non-compensable</strong> (you can't un-send a physical package that's already delivered). Design sagas to put non-compensable steps last.</p>
+    </div>
+
+    <h2>Real-World Examples</h2>
+
+    <div class="real-world">
+        <h3>🏢 Airline Booking as a Saga</h3>
+        <ol>
+            <li><strong>Reserve seat</strong> (hold for 15 minutes) — Compensation: Release seat</li>
+            <li><strong>Charge credit card</strong> — Compensation: Refund payment</li>
+            <li><strong>Issue ticket</strong> — Compensation: Void ticket</li>
+            <li><strong>Send confirmation email</strong> — Compensation: Send cancellation email</li>
+        </ol>
+        <p>If the credit card is declined at step 2, the system releases the seat (compensation for step 1). The customer's experience: "Sorry, payment failed. Please try again." No orphaned reservations.</p>
+    </div>
+
+    <div class="real-world">
+        <h3>🏢 Uber's Trip Lifecycle as a Saga</h3>
+        <ul>
+            <li><strong>Match rider → driver</strong> — Compensation: Release driver back to pool</li>
+            <li><strong>Start trip</strong> — Compensation: Cancel trip, no charge</li>
+            <li><strong>Navigate &amp; drive</strong> — (in progress, no compensation needed yet)</li>
+            <li><strong>End trip &amp; calculate fare</strong> — Compensation: Adjust fare</li>
+            <li><strong>Charge payment</strong> — Compensation: If payment fails → flag for resolution, don't block the driver</li>
+        </ul>
+        <p>Uber can't "undo" a completed ride, so the saga handles payment failures by flagging for later resolution rather than reversing the physical trip.</p>
+    </div>
+
+    <h2 class="interactive">Interactive: Build a Saga</h2>
+
+    <div class="interactive" id="saga-sim">
+        <p><strong>An e-commerce order saga is running. Click "Fail" on any step to trigger compensations:</strong></p>
+
+        <div id="saga-steps" style="margin: 1rem 0;"></div>
+
+        <div style="display: flex; gap: 0.5rem; flex-wrap: wrap; margin-top: 1rem;">
+            <button onclick="runSaga()" id="btn-run-saga" style="padding: 0.5rem 1rem; border: 2px solid #2a9d8f; background: #2a9d8f; color: white; border-radius: 6px; cursor: pointer; font-weight: bold;">▶ Run Saga</button>
+            <button onclick="resetSaga()" style="padding: 0.5rem 1rem; border: 1px solid #ddd; background: #f8f9fa; border-radius: 4px; cursor: pointer;">Reset</button>
+        </div>
+
+        <div id="saga-log" style="background: #f8f9fa; border-radius: 8px; padding: 0.8rem; font-family: monospace; font-size: 0.8rem; max-height: 150px; overflow-y: auto; margin-top: 0.8rem;"></div>
+    </div>
+
+    <script>
+    (function() {
+        const steps = [
+            { name: 'Create Order', compensation: 'Cancel Order' },
+            { name: 'Charge Payment', compensation: 'Refund Payment' },
+            { name: 'Reserve Inventory', compensation: 'Restock Items' },
+            { name: 'Schedule Shipping', compensation: 'Cancel Shipment' }
+        ];
+        let running = false;
+        let failAt = -1;
+        const logEl = document.getElementById('saga-log');
+        const stepsEl = document.getElementById('saga-steps');
+
+        function log(msg) {
+            logEl.innerHTML += '<div>' + msg + '</div>';
+            logEl.scrollTop = logEl.scrollHeight;
+        }
+
+        function renderSteps() {
+            stepsEl.innerHTML = steps.map(function(s, i) {
+                return '<div id="saga-step-' + i + '" style="display:flex;align-items:center;gap:0.8rem;padding:0.5rem;margin:0.3rem 0;border:1px solid #ddd;border-radius:6px;background:white;">' +
+                    '<span style="font-weight:bold;color:#457b9d;min-width:20px;">' + (i+1) + '.</span>' +
+                    '<span style="flex:1;">' + s.name + '</span>' +
+                    '<span style="font-size:0.75rem;color:#999;">Undo: ' + s.compensation + '</span>' +
+                    '<button onclick="failStep(' + i + ')" style="padding:0.2rem 0.6rem;border:1px solid #e63946;background:white;color:#e63946;border-radius:4px;cursor:pointer;font-size:0.75rem;">Fail here</button>' +
+                    '</div>';
+            }).join('');
+        }
+
+        function setStepState(idx, state) {
+            var el = document.getElementById('saga-step-' + idx);
+            if (!el) return;
+            if (state === 'success') {
+                el.style.borderColor = '#2a9d8f';
+                el.style.background = '#2a9d8f11';
+            } else if (state === 'failed') {
+                el.style.borderColor = '#e63946';
+                el.style.background = '#e6394611';
+            } else if (state === 'compensated') {
+                el.style.borderColor = '#e76f51';
+                el.style.background = '#e76f5111';
+            } else {
+                el.style.borderColor = '#ddd';
+                el.style.background = 'white';
+            }
+        }
+
+        window.failStep = function(idx) {
+            failAt = idx;
+            log('⚙️ Failure point set at step ' + (idx+1) + ': <strong>' + steps[idx].name + '</strong>');
+        };
+
+        window.runSaga = function() {
+            if (running) return;
+            running = true;
+            document.getElementById('btn-run-saga').disabled = true;
+            logEl.innerHTML = '';
+            renderSteps();
+
+            if (failAt === -1) failAt = -1; // no failure, full success
+
+            let i = 0;
+            function nextStep() {
+                if (i >= steps.length) {
+                    log('✅ <strong>Saga completed successfully!</strong> All steps committed.');
+                    running = false;
+                    document.getElementById('btn-run-saga').disabled = false;
+                    return;
+                }
+                if (i === failAt) {
+                    setStepState(i, 'failed');
+                    log('❌ Step ' + (i+1) + ' <strong>FAILED</strong>: ' + steps[i].name);
+                    log('🔄 <strong>Starting compensations...</strong>');
+                    compensate(i - 1);
+                    return;
+                }
+                setStepState(i, 'success');
+                log('✓ Step ' + (i+1) + ': ' + steps[i].name + ' — committed');
+                i++;
+                setTimeout(nextStep, 600);
+            }
+
+            function compensate(j) {
+                if (j < 0) {
+                    log('🔙 <strong>All compensations complete.</strong> System returned to consistent state.');
+                    running = false;
+                    document.getElementById('btn-run-saga').disabled = false;
+                    return;
+                }
+                setTimeout(function() {
+                    setStepState(j, 'compensated');
+                    log('↩️ Compensating step ' + (j+1) + ': ' + steps[j].compensation);
+                    compensate(j - 1);
+                }, 700);
+            }
+
+            setTimeout(nextStep, 400);
+        };
+
+        window.resetSaga = function() {
+            running = false;
+            failAt = -1;
+            logEl.innerHTML = '';
+            document.getElementById('btn-run-saga').disabled = false;
+            renderSteps();
+            log('🔄 Saga reset. Set a failure point, then click Run.');
+        };
+
+        renderSteps();
+    })();
+    </script>
+
+    <div class="takeaway">
+        <h3>🎯 Key Takeaway</h3>
+        <p>Distributed transactions (2PC) are expensive and fragile — they block, have a single point of failure, and don't tolerate partitions well. For most cross-service operations, prefer <strong>sagas with compensating actions</strong>. Design each step to be idempotent and each compensation to semantically reverse its step. Put non-compensable actions (like sending physical goods) at the end of the saga.</p>
+    </div>
+
+    <div class="footnote">
+        <p><strong>Previous:</strong> <a href="0036-consistency-models.html">Consistency Models (Strong, Eventual, Causal)</a> | <strong>Next:</strong> <a href="0038-consensus-algorithms-raft.html">Consensus Algorithms (Raft Simplified)</a></p>
+    </div>
+</body>
+</html>

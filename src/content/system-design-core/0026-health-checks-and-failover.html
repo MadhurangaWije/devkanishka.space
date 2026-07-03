@@ -1,0 +1,360 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lesson 026 — Health Checks &amp; Failover</title>
+    <link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+    <h1>Health Checks &amp; Failover</h1>
+    <div class="lesson-meta">
+        <span>📘 Chapter 6: Load Balancing &amp; Reverse Proxies</span>
+        <span>⏱️ 9 min read</span>
+        <span>🏗️ Lesson 026</span>
+    </div>
+
+    <p>A load balancer is only useful if it knows which servers are alive. <strong>Health checks</strong> are the mechanism — the LB periodically probes each backend to determine if it can handle traffic. When a server fails, <strong>failover</strong> kicks in to route around the damage automatically.</p>
+
+    <h2>Why Health Checks Matter</h2>
+
+    <p>Without health checks, a load balancer blindly sends requests to dead servers. Users get connection timeouts, 502 errors, and a terrible experience. Health checks detect problems <em>before</em> users hit them.</p>
+
+    <h2>Active vs Passive Health Checks</h2>
+
+    <div class="card info">
+        <h3>Active Health Checks</h3>
+        <p>The LB <strong>periodically sends probe requests</strong> (every 5-30 seconds) to each backend:</p>
+        <ul>
+            <li><strong>TCP check:</strong> Can I open a connection to port 8080?</li>
+            <li><strong>HTTP check:</strong> Does <code>GET /health</code> return status 200?</li>
+            <li><strong>Custom check:</strong> Does the response include <code>{"db": "ok", "cache": "ok"}</code>?</li>
+        </ul>
+        <p>If a server fails N consecutive checks (e.g., 3), it's marked unhealthy and removed from the pool.</p>
+    </div>
+
+    <div class="card info">
+        <h3>Passive Health Checks</h3>
+        <p>The LB <strong>observes real traffic responses</strong> — no extra probe requests needed:</p>
+        <ul>
+            <li>Count 5xx errors: if a server returns 5 errors in 30 seconds → mark unhealthy</li>
+            <li>Track timeouts: if responses take &gt;10s consistently → mark degraded</li>
+            <li>Monitor connection resets: TCP RST from backend → something is wrong</li>
+        </ul>
+        <p>Passive checks are faster to detect issues (no waiting for next probe interval) but only work if the server is receiving traffic.</p>
+    </div>
+
+    <figure class="diagram">
+        <svg viewBox="0 0 650 260" xmlns="http://www.w3.org/2000/svg">
+            <text x="325" y="20" text-anchor="middle" font-family="system-ui" font-size="13" font-weight="bold" fill="#333">Health Check States &amp; LB Routing</text>
+
+            <!-- Load Balancer -->
+            <polygon points="150,100 180,130 150,160 120,130" fill="#f4a261" stroke="#e76f51" stroke-width="2"/>
+            <text x="150" y="133" text-anchor="middle" font-family="system-ui" font-size="8" fill="#333">LB</text>
+
+            <!-- Healthy server -->
+            <rect x="280" y="50" width="100" height="40" rx="5" fill="#2a9d8f" opacity="0.15" stroke="#2a9d8f" stroke-width="2"/>
+            <text x="330" y="73" text-anchor="middle" font-family="system-ui" font-size="9" fill="#2a9d8f">Server A ✓</text>
+            <circle cx="270" cy="70" r="6" fill="#2a9d8f"/>
+            <text x="270" y="73" text-anchor="middle" font-family="system-ui" font-size="7" fill="white">✓</text>
+            <line x1="180" y1="120" x2="270" y2="75" stroke="#2a9d8f" stroke-width="2"/>
+
+            <!-- Degraded server -->
+            <rect x="280" y="110" width="100" height="40" rx="5" fill="#f4a261" opacity="0.2" stroke="#f4a261" stroke-width="2"/>
+            <text x="330" y="133" text-anchor="middle" font-family="system-ui" font-size="9" fill="#e76f51">Server B ⚠️</text>
+            <circle cx="270" cy="130" r="6" fill="#f4a261"/>
+            <text x="270" y="133" text-anchor="middle" font-family="system-ui" font-size="7" fill="white">!</text>
+            <line x1="180" y1="130" x2="264" y2="130" stroke="#f4a261" stroke-width="1.5" stroke-dasharray="4,3"/>
+
+            <!-- Failed server -->
+            <rect x="280" y="170" width="100" height="40" rx="5" fill="#e63946" opacity="0.15" stroke="#e63946" stroke-width="2"/>
+            <text x="330" y="193" text-anchor="middle" font-family="system-ui" font-size="9" fill="#e63946">Server C ✗</text>
+            <circle cx="270" cy="190" r="6" fill="#e63946"/>
+            <text x="270" y="193" text-anchor="middle" font-family="system-ui" font-size="7" fill="white">✗</text>
+            <line x1="180" y1="140" x2="264" y2="185" stroke="#e63946" stroke-width="1.5" stroke-dasharray="2,4"/>
+            <text x="220" y="175" font-family="system-ui" font-size="7" fill="#e63946">no traffic</text>
+
+            <!-- Legend -->
+            <rect x="430" y="60" width="180" height="110" rx="6" fill="#f8f9fa" stroke="#ddd" stroke-width="1"/>
+            <text x="520" y="80" text-anchor="middle" font-family="system-ui" font-size="9" font-weight="bold" fill="#333">Health States</text>
+            <circle cx="450" cy="97" r="5" fill="#2a9d8f"/>
+            <text x="465" y="100" font-family="system-ui" font-size="8" fill="#333">Healthy — receives full traffic</text>
+            <circle cx="450" cy="120" r="5" fill="#f4a261"/>
+            <text x="465" y="123" font-family="system-ui" font-size="8" fill="#333">Degraded — reduced traffic</text>
+            <circle cx="450" cy="143" r="5" fill="#e63946"/>
+            <text x="465" y="146" font-family="system-ui" font-size="8" fill="#333">Failed — removed from pool</text>
+            <text x="520" y="163" text-anchor="middle" font-family="system-ui" font-size="7" fill="#999">Recovery: pass 2+ checks → back in pool</text>
+
+            <!-- Timeline -->
+            <text x="325" y="240" text-anchor="middle" font-family="system-ui" font-size="9" fill="#555">Active probes every 10s • 3 consecutive failures = unhealthy • 2 passes = healthy again</text>
+        </svg>
+        <figcaption>Figure 1: The LB routes traffic only to healthy servers. Failed servers receive no traffic until they recover.</figcaption>
+    </figure>
+
+    <h2>Liveness vs Readiness Probes</h2>
+
+    <div class="card">
+        <h3>Kubernetes Concepts That Apply Broadly</h3>
+        <ul>
+            <li><strong>Liveness probe:</strong> "Is this process alive?" If it fails, restart the container. Detects deadlocks, infinite loops, corrupted state.</li>
+            <li><strong>Readiness probe:</strong> "Can this instance handle traffic right now?" If it fails, remove from the LB pool but don't restart. Detects startup in progress, dependency unavailable, overloaded.</li>
+        </ul>
+        <p>The distinction matters: a server starting up is <em>alive</em> (don't restart it) but not <em>ready</em> (don't send it traffic yet).</p>
+    </div>
+
+    <h2>What to Check</h2>
+
+    <div class="card info">
+        <h3>Health Endpoint Design</h3>
+        <p>A good <code>/health</code> endpoint checks what matters:</p>
+        <ul>
+            <li><strong>Shallow check:</strong> <code>GET /health</code> → 200 OK (process is up and listening)</li>
+            <li><strong>Deep check:</strong> <code>GET /health/ready</code> → verifies DB connectivity, cache reachable, disk space OK</li>
+        </ul>
+        <p><strong>Caution:</strong> Deep checks can backfire. If your DB has a momentary hiccup, all servers might simultaneously fail their health check, causing a total outage. Consider: should a DB issue mark the <em>server</em> unhealthy, or should the server return degraded responses?</p>
+    </div>
+
+    <h2>Failover Strategies</h2>
+
+    <figure class="diagram">
+        <svg viewBox="0 0 700 250" xmlns="http://www.w3.org/2000/svg">
+            <text x="350" y="20" text-anchor="middle" font-family="system-ui" font-size="13" font-weight="bold" fill="#333">Active-Passive Failover Sequence</text>
+
+            <!-- Step 1: Normal -->
+            <text x="90" y="50" text-anchor="middle" font-family="system-ui" font-size="9" font-weight="bold" fill="#333">1. Normal</text>
+            <rect x="50" y="60" width="70" height="30" rx="4" fill="#2a9d8f" opacity="0.3" stroke="#2a9d8f" stroke-width="2"/>
+            <text x="85" y="79" text-anchor="middle" font-family="system-ui" font-size="8" fill="#2a9d8f">Primary ✓</text>
+            <rect x="50" y="100" width="70" height="30" rx="4" fill="#ddd" stroke="#999" stroke-width="1"/>
+            <text x="85" y="119" text-anchor="middle" font-family="system-ui" font-size="8" fill="#999">Standby 💤</text>
+            <text x="85" y="148" text-anchor="middle" font-family="system-ui" font-size="7" fill="#666">All traffic → Primary</text>
+
+            <!-- Arrow -->
+            <text x="155" y="90" font-family="system-ui" font-size="16" fill="#666">→</text>
+
+            <!-- Step 2: Failure detected -->
+            <text x="240" y="50" text-anchor="middle" font-family="system-ui" font-size="9" font-weight="bold" fill="#333">2. Failure</text>
+            <rect x="200" y="60" width="70" height="30" rx="4" fill="#e63946" opacity="0.2" stroke="#e63946" stroke-width="2"/>
+            <text x="235" y="79" text-anchor="middle" font-family="system-ui" font-size="8" fill="#e63946">Primary ✗</text>
+            <rect x="200" y="100" width="70" height="30" rx="4" fill="#f4a261" opacity="0.3" stroke="#f4a261" stroke-width="2"/>
+            <text x="235" y="119" text-anchor="middle" font-family="system-ui" font-size="8" fill="#e76f51">Standby ⚡</text>
+            <text x="235" y="148" text-anchor="middle" font-family="system-ui" font-size="7" fill="#e63946">Health check fails!</text>
+
+            <!-- Arrow -->
+            <text x="305" y="90" font-family="system-ui" font-size="16" fill="#666">→</text>
+
+            <!-- Step 3: Promote -->
+            <text x="390" y="50" text-anchor="middle" font-family="system-ui" font-size="9" font-weight="bold" fill="#333">3. Promote</text>
+            <rect x="350" y="60" width="70" height="30" rx="4" fill="#e63946" opacity="0.1" stroke="#e63946" stroke-width="1" stroke-dasharray="3,3"/>
+            <text x="385" y="79" text-anchor="middle" font-family="system-ui" font-size="8" fill="#999">Primary (dead)</text>
+            <rect x="350" y="100" width="70" height="30" rx="4" fill="#2a9d8f" opacity="0.3" stroke="#2a9d8f" stroke-width="2"/>
+            <text x="385" y="119" text-anchor="middle" font-family="system-ui" font-size="8" fill="#2a9d8f">New Primary ✓</text>
+            <text x="385" y="148" text-anchor="middle" font-family="system-ui" font-size="7" fill="#2a9d8f">Traffic → Standby</text>
+
+            <!-- Arrow -->
+            <text x="455" y="90" font-family="system-ui" font-size="16" fill="#666">→</text>
+
+            <!-- Step 4: DNS update -->
+            <text x="550" y="50" text-anchor="middle" font-family="system-ui" font-size="9" font-weight="bold" fill="#333">4. Recovered</text>
+            <rect x="510" y="60" width="70" height="30" rx="4" fill="#ddd" stroke="#999" stroke-width="1"/>
+            <text x="545" y="79" text-anchor="middle" font-family="system-ui" font-size="8" fill="#999">Old Primary 🔧</text>
+            <rect x="510" y="100" width="70" height="30" rx="4" fill="#2a9d8f" opacity="0.3" stroke="#2a9d8f" stroke-width="2"/>
+            <text x="545" y="119" text-anchor="middle" font-family="system-ui" font-size="8" fill="#2a9d8f">Serving ✓</text>
+            <text x="545" y="148" text-anchor="middle" font-family="system-ui" font-size="7" fill="#666">Old primary repairs/becomes standby</text>
+
+            <!-- Timeline -->
+            <line x1="50" y1="180" x2="620" y2="180" stroke="#ddd" stroke-width="2"/>
+            <circle cx="85" cy="180" r="4" fill="#2a9d8f"/>
+            <circle cx="235" cy="180" r="4" fill="#e63946"/>
+            <circle cx="385" cy="180" r="4" fill="#f4a261"/>
+            <circle cx="545" cy="180" r="4" fill="#2a9d8f"/>
+            <text x="85" y="198" text-anchor="middle" font-family="system-ui" font-size="7" fill="#666">t=0</text>
+            <text x="235" y="198" text-anchor="middle" font-family="system-ui" font-size="7" fill="#666">t=30s (detected)</text>
+            <text x="385" y="198" text-anchor="middle" font-family="system-ui" font-size="7" fill="#666">t=31s (failover)</text>
+            <text x="545" y="198" text-anchor="middle" font-family="system-ui" font-size="7" fill="#666">t=5min (repaired)</text>
+
+            <!-- Active-Active note -->
+            <rect x="100" y="210" width="470" height="30" rx="5" fill="#e8f4f8" stroke="#457b9d" stroke-width="1"/>
+            <text x="335" y="229" text-anchor="middle" font-family="system-ui" font-size="9" fill="#457b9d"><tspan font-weight="bold">Active-Active alternative:</tspan> Both servers handle traffic simultaneously. If one dies, the other absorbs 100% — no promotion needed, but each must handle 2x load.</text>
+        </svg>
+        <figcaption>Figure 2: Active-passive failover: standby promotes when primary fails. Active-active: both serve, survivor takes full load.</figcaption>
+    </figure>
+
+    <h2>DNS-Based vs LB-Based Failover</h2>
+
+    <div class="card">
+        <ul>
+            <li><strong>LB-based:</strong> Instant. LB detects failure in seconds and stops routing. No client changes needed. Best for services behind a load balancer.</li>
+            <li><strong>DNS-based:</strong> Slow (minutes). Change DNS record to point to standby. Clients cache old DNS (TTL). Used for region-level failover or when LB itself fails.</li>
+        </ul>
+        <p><strong>Lesson:</strong> Use LB-based failover for individual servers. Reserve DNS failover for catastrophic (entire datacenter) failures.</p>
+    </div>
+
+    <h2>Cascading Failures: When Health Checks Go Wrong</h2>
+
+    <div class="card info">
+        <h3>The Thundering Herd Problem</h3>
+        <p>Scenario: 5 servers behind a LB. Server A goes down. The LB redistributes A's traffic across B, C, D, E. But now each handles 25% more load. If they were at 80% capacity, they're now at 100%. Server B buckles, fails its health check. Now C, D, E handle even more... <strong>cascade failure</strong>.</p>
+        <p><strong>Mitigations:</strong></p>
+        <ul>
+            <li>Keep servers at &lt;60% capacity (headroom for failover absorption)</li>
+            <li>Use gradual ramp-up (don't send full traffic to a recovering server instantly)</li>
+            <li>Circuit breakers: stop retrying a failing dependency</li>
+            <li>Shed load intentionally (return 503) rather than collapsing entirely</li>
+        </ul>
+    </div>
+
+    <div class="real-world">
+        <h3>🏢 Real-World: GitHub's Graceful Deploy Failover</h3>
+        <p>When GitHub deploys new code, they use health checks as a coordination mechanism:</p>
+        <ol>
+            <li><strong>Drain:</strong> Server signals "not ready" → LB stops sending new requests</li>
+            <li><strong>Wait:</strong> Existing requests finish (graceful shutdown period)</li>
+            <li><strong>Deploy:</strong> New code is deployed and server starts up</li>
+            <li><strong>Warm:</strong> Server initializes caches, loads config</li>
+            <li><strong>Ready:</strong> Health check passes → LB routes traffic back</li>
+        </ol>
+        <p>Users never see errors because the LB routes around servers being deployed. This "rolling deploy" pattern enables GitHub to deploy <strong>dozens of times per day</strong> with zero downtime.</p>
+    </div>
+
+    <h2 class="interactive">Interactive: Kill Servers and Watch Failover</h2>
+
+    <div class="interactive" id="failover-sim">
+        <p><strong>Click servers to "kill" them</strong> and watch the LB detect failure and reroute traffic:</p>
+
+        <div style="display: flex; align-items: center; gap: 2rem; margin: 1rem 0; flex-wrap: wrap;">
+            <div style="text-align: center;">
+                <div style="font-weight: bold; color: #e76f51; margin-bottom: 0.5rem;">Load Balancer</div>
+                <div style="width: 50px; height: 50px; background: #f4a261; border-radius: 50%; display: flex; align-items: center; justify-content: center; margin: 0 auto; font-size: 1.2rem;">⚖️</div>
+            </div>
+            <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 0.5rem;" id="server-grid">
+                <div class="srv-box" id="srv-1" onclick="toggleServer(1)" style="padding: 0.8rem; border: 2px solid #2a9d8f; border-radius: 8px; cursor: pointer; text-align: center; min-width: 100px; transition: all 0.3s;">
+                    <div style="font-weight: bold;">Server 1</div>
+                    <div class="srv-status" style="font-size: 0.8rem; color: #2a9d8f;">● Healthy</div>
+                    <div class="srv-load" style="font-size: 0.75rem; color: #666;">Load: 25%</div>
+                </div>
+                <div class="srv-box" id="srv-2" onclick="toggleServer(2)" style="padding: 0.8rem; border: 2px solid #2a9d8f; border-radius: 8px; cursor: pointer; text-align: center; min-width: 100px; transition: all 0.3s;">
+                    <div style="font-weight: bold;">Server 2</div>
+                    <div class="srv-status" style="font-size: 0.8rem; color: #2a9d8f;">● Healthy</div>
+                    <div class="srv-load" style="font-size: 0.75rem; color: #666;">Load: 25%</div>
+                </div>
+                <div class="srv-box" id="srv-3" onclick="toggleServer(3)" style="padding: 0.8rem; border: 2px solid #2a9d8f; border-radius: 8px; cursor: pointer; text-align: center; min-width: 100px; transition: all 0.3s;">
+                    <div style="font-weight: bold;">Server 3</div>
+                    <div class="srv-status" style="font-size: 0.8rem; color: #2a9d8f;">● Healthy</div>
+                    <div class="srv-load" style="font-size: 0.75rem; color: #666;">Load: 25%</div>
+                </div>
+                <div class="srv-box" id="srv-4" onclick="toggleServer(4)" style="padding: 0.8rem; border: 2px solid #2a9d8f; border-radius: 8px; cursor: pointer; text-align: center; min-width: 100px; transition: all 0.3s;">
+                    <div style="font-weight: bold;">Server 4</div>
+                    <div class="srv-status" style="font-size: 0.8rem; color: #2a9d8f;">● Healthy</div>
+                    <div class="srv-load" style="font-size: 0.75rem; color: #666;">Load: 25%</div>
+                </div>
+            </div>
+        </div>
+
+        <div id="failover-log" style="background: #f8f9fa; border-radius: 8px; padding: 0.8rem; font-family: monospace; font-size: 0.8rem; max-height: 120px; overflow-y: auto; margin-top: 0.5rem;"></div>
+
+        <div id="failover-warning" style="margin-top: 0.8rem; padding: 0.6rem; border-radius: 6px; background: #e8f4f8; font-size: 0.9rem;">
+            💡 Click any server to simulate a failure. Click again to bring it back online.
+        </div>
+
+        <button onclick="resetServers()" style="margin-top: 0.5rem; padding: 0.4rem 1rem; border: 1px solid #ddd; background: #f8f9fa; border-radius: 4px; cursor: pointer; font-size: 0.85rem;">Reset All Servers</button>
+    </div>
+
+    <script>
+    (function() {
+        const serverState = {1: true, 2: true, 3: true, 4: true};
+        const logEl = document.getElementById('failover-log');
+        const warningEl = document.getElementById('failover-warning');
+
+        function log(msg) {
+            const time = new Date().toLocaleTimeString();
+            logEl.innerHTML += '<div>[' + time + '] ' + msg + '</div>';
+            logEl.scrollTop = logEl.scrollHeight;
+        }
+
+        function updateDisplay() {
+            const alive = Object.values(serverState).filter(v => v).length;
+            const loadPerServer = alive > 0 ? Math.round(100 / alive) : 0;
+
+            for (let i = 1; i <= 4; i++) {
+                const box = document.getElementById('srv-' + i);
+                const status = box.querySelector('.srv-status');
+                const load = box.querySelector('.srv-load');
+
+                if (serverState[i]) {
+                    box.style.borderColor = '#2a9d8f';
+                    box.style.background = '';
+                    box.style.opacity = '1';
+                    status.innerHTML = '● Healthy';
+                    status.style.color = '#2a9d8f';
+                    load.textContent = 'Load: ' + loadPerServer + '%';
+                    load.style.color = loadPerServer > 70 ? '#e63946' : '#666';
+                } else {
+                    box.style.borderColor = '#e63946';
+                    box.style.background = '#e63946' + '11';
+                    box.style.opacity = '0.6';
+                    status.innerHTML = '✗ Failed';
+                    status.style.color = '#e63946';
+                    load.textContent = 'Load: 0%';
+                    load.style.color = '#999';
+                }
+            }
+
+            // Warning
+            if (alive === 0) {
+                warningEl.innerHTML = '🚨 <strong>TOTAL OUTAGE!</strong> All servers are down. No requests can be served. This is why you need minimum 2 servers in each availability zone.';
+                warningEl.style.background = '#fde8e8';
+                warningEl.style.borderLeft = '4px solid #e63946';
+            } else if (alive === 1) {
+                warningEl.innerHTML = '⚠️ <strong>Critical:</strong> Only 1 server remaining at ' + loadPerServer + '% load. One more failure = total outage. Auto-scaling should be triggered.';
+                warningEl.style.background = '#fef3e8';
+                warningEl.style.borderLeft = '4px solid #f4a261';
+            } else if (alive < 4 && loadPerServer > 50) {
+                warningEl.innerHTML = '⚡ <strong>Degraded:</strong> ' + alive + ' servers handling ' + loadPerServer + '% load each. Performance may be impacted. Remaining servers absorb the failed servers\' traffic.';
+                warningEl.style.background = '#fef3e8';
+                warningEl.style.borderLeft = '4px solid #f4a261';
+            } else {
+                warningEl.innerHTML = '✅ All systems healthy. Load is evenly distributed at ' + loadPerServer + '% per server.';
+                warningEl.style.background = '#e8f4f8';
+                warningEl.style.borderLeft = '4px solid #2a9d8f';
+            }
+        }
+
+        function toggleServer(id) {
+            serverState[id] = !serverState[id];
+            if (!serverState[id]) {
+                log('🔴 Server ' + id + ' FAILED — health check timeout after 30s');
+                setTimeout(function() {
+                    log('⚡ LB removed Server ' + id + ' from pool — redistributing traffic');
+                }, 300);
+            } else {
+                log('🟡 Server ' + id + ' recovering — passing health checks...');
+                setTimeout(function() {
+                    log('🟢 Server ' + id + ' marked HEALTHY — added back to pool');
+                }, 500);
+            }
+            updateDisplay();
+        }
+
+        function resetServers() {
+            for (let i = 1; i <= 4; i++) serverState[i] = true;
+            logEl.innerHTML = '';
+            log('🔄 All servers reset to healthy state');
+            updateDisplay();
+        }
+
+        window.toggleServer = toggleServer;
+        window.resetServers = resetServers;
+        updateDisplay();
+    })();
+    </script>
+
+    <div class="takeaway">
+        <h3>🎯 Key Takeaway</h3>
+        <p>Health checks are the immune system of your architecture — they detect real problems and route around failures automatically. Design them carefully: too sensitive and you'll get false alarms (flapping); too lenient and users hit errors before the LB reacts. Use <strong>active checks</strong> for baseline monitoring, <strong>passive checks</strong> for fast detection, and always plan for <strong>cascading failures</strong> — ensure surviving servers have headroom to absorb extra load without collapsing themselves.</p>
+    </div>
+
+    <div class="footnote">
+        <p><strong>Previous:</strong> <a href="0025-reverse-proxies.html">Reverse Proxies: The Gatekeeper</a> | <strong>Next chapter:</strong> Databases &amp; Storage (coming soon)</p>
+    </div>
+</body>
+</html>

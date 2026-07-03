@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lesson 055 — Network Security (TLS, Firewalls, VPCs)</title>
+    <link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+    <h1>Network Security (TLS, Firewalls, VPCs)</h1>
+    <div class="lesson-meta">
+        <span>📘 Chapter 13: Security Architecture</span>
+        <span>⏱️ 9 min read</span>
+        <span>🏗️ Lesson 055</span>
+    </div>
+
+    <p>The network is hostile. Whether it's the public internet or your internal network, you must assume attackers can see and modify traffic. <strong>Defense in depth</strong> means multiple overlapping layers of security — if one fails, others still protect you.</p>
+
+    <h2>Network Architecture: Defense in Depth</h2>
+
+    <figure class="diagram">
+        <svg viewBox="0 0 720 320" xmlns="http://www.w3.org/2000/svg">
+            <defs>
+                <marker id="arr55" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+                    <polygon points="0 0, 8 3, 0 6" fill="#555"/>
+                </marker>
+            </defs>
+            <text x="360" y="20" text-anchor="middle" font-family="system-ui" font-size="13" font-weight="bold" fill="#333">VPC Network Architecture</text>
+
+            <!-- Internet -->
+            <text x="360" y="48" text-anchor="middle" font-family="system-ui" font-size="9" fill="#666">☁️ Internet</text>
+
+            <!-- DMZ / Public Subnet -->
+            <rect x="60" y="65" width="600" height="70" rx="8" fill="#e63946" opacity="0.06" stroke="#e63946" stroke-width="1.5" stroke-dasharray="4,2"/>
+            <text x="80" y="80" font-family="system-ui" font-size="8" font-weight="bold" fill="#e63946">Public Subnet (DMZ)</text>
+            <rect x="120" y="88" width="100" height="35" rx="6" fill="#e63946" opacity="0.12" stroke="#e63946" stroke-width="1.5"/>
+            <text x="170" y="110" text-anchor="middle" font-family="system-ui" font-size="8" fill="#e63946">Load Balancer</text>
+            <rect x="280" y="88" width="100" height="35" rx="6" fill="#e63946" opacity="0.12" stroke="#e63946" stroke-width="1.5"/>
+            <text x="330" y="110" text-anchor="middle" font-family="system-ui" font-size="8" fill="#e63946">NAT Gateway</text>
+            <rect x="440" y="88" width="100" height="35" rx="6" fill="#e63946" opacity="0.12" stroke="#e63946" stroke-width="1.5"/>
+            <text x="490" y="110" text-anchor="middle" font-family="system-ui" font-size="8" fill="#e63946">Bastion Host</text>
+
+            <!-- Private Subnet - App -->
+            <rect x="60" y="150" width="600" height="70" rx="8" fill="#2a9d8f" opacity="0.06" stroke="#2a9d8f" stroke-width="1.5" stroke-dasharray="4,2"/>
+            <text x="80" y="165" font-family="system-ui" font-size="8" font-weight="bold" fill="#2a9d8f">Private Subnet (Application)</text>
+            <rect x="120" y="173" width="100" height="35" rx="6" fill="#2a9d8f" opacity="0.12" stroke="#2a9d8f" stroke-width="1.5"/>
+            <text x="170" y="195" text-anchor="middle" font-family="system-ui" font-size="8" fill="#2a9d8f">App Server A</text>
+            <rect x="280" y="173" width="100" height="35" rx="6" fill="#2a9d8f" opacity="0.12" stroke="#2a9d8f" stroke-width="1.5"/>
+            <text x="330" y="195" text-anchor="middle" font-family="system-ui" font-size="8" fill="#2a9d8f">App Server B</text>
+            <rect x="440" y="173" width="100" height="35" rx="6" fill="#2a9d8f" opacity="0.12" stroke="#2a9d8f" stroke-width="1.5"/>
+            <text x="490" y="195" text-anchor="middle" font-family="system-ui" font-size="8" fill="#2a9d8f">Cache</text>
+
+            <!-- Private Subnet - Data -->
+            <rect x="60" y="235" width="600" height="70" rx="8" fill="#6c5ce7" opacity="0.06" stroke="#6c5ce7" stroke-width="1.5" stroke-dasharray="4,2"/>
+            <text x="80" y="250" font-family="system-ui" font-size="8" font-weight="bold" fill="#6c5ce7">Private Subnet (Data Layer)</text>
+            <rect x="180" y="258" width="110" height="35" rx="6" fill="#6c5ce7" opacity="0.12" stroke="#6c5ce7" stroke-width="1.5"/>
+            <text x="235" y="280" text-anchor="middle" font-family="system-ui" font-size="8" fill="#6c5ce7">Primary DB</text>
+            <rect x="350" y="258" width="110" height="35" rx="6" fill="#6c5ce7" opacity="0.12" stroke="#6c5ce7" stroke-width="1.5"/>
+            <text x="405" y="280" text-anchor="middle" font-family="system-ui" font-size="8" fill="#6c5ce7">Replica DB</text>
+
+            <!-- Arrows -->
+            <path d="M170 123 L170 170" stroke="#555" stroke-width="1.2" fill="none" marker-end="url(#arr55)"/>
+            <path d="M235 208 L235 255" stroke="#555" stroke-width="1.2" fill="none" marker-end="url(#arr55)"/>
+
+            <!-- Security Group Labels -->
+            <text x="660" y="105" font-family="system-ui" font-size="7" fill="#e63946">SG: 443 in</text>
+            <text x="660" y="190" font-family="system-ui" font-size="7" fill="#2a9d8f">SG: LB only</text>
+            <text x="660" y="275" font-family="system-ui" font-size="7" fill="#6c5ce7">SG: App only</text>
+        </svg>
+        <figcaption>Figure 1: Three-tier VPC architecture — each layer only accepts traffic from the layer above it.</figcaption>
+    </figure>
+
+    <h2>TLS: Protecting Data in Transit</h2>
+
+    <div class="card info">
+        <h3>Simplified TLS Handshake</h3>
+        <ol>
+            <li><strong>Client Hello:</strong> Client sends supported cipher suites and a random number</li>
+            <li><strong>Server Hello:</strong> Server picks a cipher suite, sends its certificate</li>
+            <li><strong>Certificate Verification:</strong> Client verifies cert against trusted CAs</li>
+            <li><strong>Key Exchange:</strong> Both sides derive a shared session key (Diffie-Hellman)</li>
+            <li><strong>Encrypted Communication:</strong> All data encrypted with session key</li>
+        </ol>
+        <p><strong>Result:</strong> Confidentiality (can't read), integrity (can't modify), authenticity (talking to who you think).</p>
+    </div>
+
+    <h2>mTLS: Mutual Authentication</h2>
+
+    <div class="card">
+        <p>Standard TLS: only the server proves its identity. <strong>Mutual TLS (mTLS)</strong>: both sides present certificates.</p>
+        <ul>
+            <li>Server verifies client's certificate (is this a legitimate service?)</li>
+            <li>Client verifies server's certificate (am I talking to the real service?)</li>
+            <li><strong>Use case:</strong> Service-to-service communication in microservices</li>
+            <li><strong>Implementation:</strong> Service meshes (Istio, Linkerd) handle mTLS automatically</li>
+        </ul>
+        <p>mTLS eliminates the need for API keys between internal services — identity is cryptographic.</p>
+    </div>
+
+    <h2>VPCs and Network Segmentation</h2>
+
+    <div class="card">
+        <table style="width:100%;border-collapse:collapse;font-size:0.9em;">
+            <tr style="border-bottom:2px solid #ddd;">
+                <th style="text-align:left;padding:6px;">Component</th>
+                <th style="text-align:left;padding:6px;">Purpose</th>
+                <th style="text-align:left;padding:6px;">Accessible From</th>
+            </tr>
+            <tr style="border-bottom:1px solid #eee;">
+                <td style="padding:6px;"><strong>Public subnet</strong></td>
+                <td style="padding:6px;">Internet-facing resources (LB, NAT, bastion)</td>
+                <td style="padding:6px;">Internet (specific ports only)</td>
+            </tr>
+            <tr style="border-bottom:1px solid #eee;">
+                <td style="padding:6px;"><strong>Private subnet</strong></td>
+                <td style="padding:6px;">App servers, caches, workers</td>
+                <td style="padding:6px;">Public subnet only (via LB)</td>
+            </tr>
+            <tr style="border-bottom:1px solid #eee;">
+                <td style="padding:6px;"><strong>Data subnet</strong></td>
+                <td style="padding:6px;">Databases, storage</td>
+                <td style="padding:6px;">Private subnet only</td>
+            </tr>
+            <tr style="border-bottom:1px solid #eee;">
+                <td style="padding:6px;"><strong>NAT Gateway</strong></td>
+                <td style="padding:6px;">Outbound internet for private instances</td>
+                <td style="padding:6px;">N/A (outbound only)</td>
+            </tr>
+            <tr>
+                <td style="padding:6px;"><strong>Security Groups</strong></td>
+                <td style="padding:6px;">Instance-level firewall (allowlist rules)</td>
+                <td style="padding:6px;">Defined per resource</td>
+            </tr>
+        </table>
+    </div>
+
+    <h2>Firewalls &amp; Security Groups</h2>
+
+    <div class="card">
+        <h3>Allowlist vs Blocklist</h3>
+        <ul>
+            <li><strong>Allowlist (default-deny):</strong> Block everything, explicitly permit what's needed → <em>more secure, preferred</em></li>
+            <li><strong>Blocklist (default-allow):</strong> Allow everything, explicitly block known threats → <em>easy to miss something</em></li>
+        </ul>
+        <h3>Layers of Firewalling</h3>
+        <ul>
+            <li><strong>Network ACLs:</strong> Subnet-level, stateless, processed in order</li>
+            <li><strong>Security Groups:</strong> Instance-level, stateful, all rules evaluated</li>
+            <li><strong>WAF (Web Application Firewall):</strong> Layer 7, inspects HTTP content</li>
+        </ul>
+    </div>
+
+    <h2>Real-World Examples</h2>
+
+    <div class="real-world">
+        <h3>AWS VPC: Isolating Production from Staging</h3>
+        <p>Best practice: production and staging live in <strong>separate VPCs</strong> (or even separate AWS accounts). VPC peering connects them only where needed (e.g., shared monitoring). This prevents a staging misconfiguration from leaking production data. Security groups ensure databases only accept connections from app servers in the same VPC — not from the internet, not from staging.</p>
+    </div>
+
+    <div class="real-world">
+        <h3>Google BeyondCorp: Zero-Trust Networking</h3>
+        <p>Traditional model: everything inside the corporate network is trusted. Google's BeyondCorp flips this — <strong>no network is trusted</strong>. Every request is authenticated and authorized regardless of network location. Access depends on device state, user identity, and context — not which WiFi you're on. This eliminated the VPN for 100,000+ Google employees.</p>
+    </div>
+
+    <h2>Interactive: Design a Network Topology</h2>
+
+    <div class="interactive">
+        <h3>Place Services in the Correct Subnet</h3>
+        <p>For each service, decide where it belongs:</p>
+        <div id="network-quiz">
+            <div style="margin:8px 0;" class="nq-item">
+                <label>PostgreSQL database:</label>
+                <select class="nq-select" data-answer="data">
+                    <option value="">-- select --</option>
+                    <option value="public">Public Subnet</option>
+                    <option value="private">Private Subnet (App)</option>
+                    <option value="data">Private Subnet (Data)</option>
+                </select>
+                <span class="nq-feedback"></span>
+            </div>
+            <div style="margin:8px 0;" class="nq-item">
+                <label>NGINX load balancer:</label>
+                <select class="nq-select" data-answer="public">
+                    <option value="">-- select --</option>
+                    <option value="public">Public Subnet</option>
+                    <option value="private">Private Subnet (App)</option>
+                    <option value="data">Private Subnet (Data)</option>
+                </select>
+                <span class="nq-feedback"></span>
+            </div>
+            <div style="margin:8px 0;" class="nq-item">
+                <label>Node.js API server:</label>
+                <select class="nq-select" data-answer="private">
+                    <option value="">-- select --</option>
+                    <option value="public">Public Subnet</option>
+                    <option value="private">Private Subnet (App)</option>
+                    <option value="data">Private Subnet (Data)</option>
+                </select>
+                <span class="nq-feedback"></span>
+            </div>
+            <div style="margin:8px 0;" class="nq-item">
+                <label>Redis cache:</label>
+                <select class="nq-select" data-answer="private">
+                    <option value="">-- select --</option>
+                    <option value="public">Public Subnet</option>
+                    <option value="private">Private Subnet (App)</option>
+                    <option value="data">Private Subnet (Data)</option>
+                </select>
+                <span class="nq-feedback"></span>
+            </div>
+            <div style="margin:8px 0;" class="nq-item">
+                <label>Bastion / jump host:</label>
+                <select class="nq-select" data-answer="public">
+                    <option value="">-- select --</option>
+                    <option value="public">Public Subnet</option>
+                    <option value="private">Private Subnet (App)</option>
+                    <option value="data">Private Subnet (Data)</option>
+                </select>
+                <span class="nq-feedback"></span>
+            </div>
+        </div>
+        <button onclick="checkNetwork()">Check Answers</button>
+        <div id="network-result" style="margin-top:10px;font-size:0.9em;"></div>
+    </div>
+
+    <script>
+    (function() {
+        window.checkNetwork = function() {
+            var items = document.querySelectorAll('.nq-item');
+            var correct = 0;
+            items.forEach(function(item) {
+                var sel = item.querySelector('.nq-select');
+                var fb = item.querySelector('.nq-feedback');
+                var answer = sel.getAttribute('data-answer');
+                if (sel.value === answer) {
+                    fb.textContent = ' ✓';
+                    fb.style.color = '#2a9d8f';
+                    correct++;
+                } else if (sel.value === '') {
+                    fb.textContent = ' ⚠ select one';
+                    fb.style.color = '#e9c46a';
+                } else {
+                    fb.textContent = ' ✗ (should be: ' + answer + ')';
+                    fb.style.color = '#e63946';
+                }
+            });
+            var res = document.getElementById('network-result');
+            if (correct === items.length) {
+                res.innerHTML = '<strong style="color:#2a9d8f">Perfect!</strong> You correctly placed all services. The principle: minimize exposure — only internet-facing components go in public subnets.';
+            } else {
+                res.innerHTML = '<strong>' + correct + '/' + items.length + '</strong> correct. Remember: databases in the data layer, apps in private subnets, only load balancers and bastions need public access.';
+            }
+        };
+    })();
+    </script>
+
+    <div class="takeaway">
+        <h3>Key Takeaway</h3>
+        <p>Assume the network is hostile — <strong>encrypt everything, segment everything, verify every connection</strong>. Use TLS for all traffic (including internal), mTLS for service-to-service auth, VPCs with strict security groups for isolation, and a zero-trust mindset where network location alone never grants access.</p>
+    </div>
+
+    <div class="footnote">
+        <p><strong>Previous:</strong> <a href="0054-authentication-authorization.html">Authentication &amp; Authorization</a> | <strong>Next:</strong> <a href="0056-data-security.html">Data Security (Encryption at Rest &amp; in Transit)</a></p>
+    </div>
+</body>
+</html>

@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Chapter 14 Interview — Data Pipelines</title>
+  <link rel="stylesheet" href="../assets/styles.css">
+  <style>
+    .question-block{margin:2rem 0;padding:1.5rem;background:var(--card-bg);border:1px solid var(--border);border-radius:8px}
+    .question-block h3{margin-top:0;color:var(--accent-blue);font-size:1.1rem}
+    .answer{display:none;margin-top:1rem;padding:1rem;background:var(--code-bg);border-radius:6px;font-size:0.95rem;line-height:1.7}
+    .answer p{margin-bottom:0.8rem}
+    .answer.visible{display:block}
+    .key-points{margin:1rem 0;padding-left:1.2rem}
+    .key-points li{margin-bottom:0.4rem;font-size:0.9rem}
+    .follow-ups{margin-top:0.75rem;font-size:0.85rem;color:var(--text-muted);border-top:1px solid var(--border);padding-top:0.75rem}
+    .follow-ups strong{color:var(--text)}
+    .btn-show{padding:0.4rem 1rem;border-radius:5px;background:var(--accent-blue);color:#fff;border:none;cursor:pointer;font-size:0.85rem}
+    .btn-show:hover{opacity:0.85}
+    .nav-row{display:flex;justify-content:space-between;margin-top:2rem;flex-wrap:wrap;gap:0.5rem}
+    .btn{padding:0.5rem 1rem;border-radius:6px;background:#4299e1;color:#fff;text-decoration:none;font-size:0.9rem}
+    .btn.secondary{background:#718096}
+  </style>
+</head>
+<body>
+  <h1>Chapter 14 Interview: Data Pipelines</h1>
+  <p class="lesson-meta">🎙️ Practice answering these out loud — aim for 2–3 minute responses.</p>
+
+  <div class="question-block">
+    <h3>1. When would you use stream processing vs batch processing?</h3>
+    <button class="btn-show" onclick="toggle(this)">Show Answer</button>
+    <div class="answer">
+      <p>It really comes down to latency requirements and the nature of the computation. Let me give you my mental model for choosing.</p>
+      <p>Batch is your workhorse when you need to process large volumes and the results don't need to be immediate. Think nightly reports, training ML models, rebuilding search indexes, generating invoices at end-of-month. You collect data over a period, then crunch it all at once. Tools like Spark, Hadoop MapReduce — they're optimized for throughput over latency.</p>
+      <p>Stream processing is for when you need to react in near-real-time. Fraud detection — you can't wait until tomorrow to flag a suspicious transaction. Monitoring and alerting, live dashboards, real-time recommendations. Tools like Kafka Streams, Flink, or Spark Structured Streaming process events as they arrive, typically within milliseconds to seconds.</p>
+      <p>Here's the nuance though — many systems use both. The Lambda architecture has a batch layer for correctness and a speed layer for low-latency approximations. More modern systems lean toward Kappa architecture — just stream everything, and if you need historical reprocessing, replay the event log. I'd default to streaming if latency matters and batch if it's purely analytical workloads where throughput and cost efficiency win.</p>
+      <ul class="key-points">
+        <li><strong>Batch:</strong> high throughput, hours-old data acceptable, complex aggregations</li>
+        <li><strong>Stream:</strong> low latency, event-at-a-time, real-time reactions needed</li>
+        <li><strong>Lambda:</strong> both layers — batch for accuracy, stream for speed</li>
+        <li><strong>Kappa:</strong> stream-only with replay capability for reprocessing</li>
+      </ul>
+      <div class="follow-ups"><strong>Follow-ups:</strong> How do you handle exactly-once semantics in streaming? • What's micro-batching vs true streaming? • When does streaming become more expensive than batch?</div>
+    </div>
+  </div>
+
+  <div class="question-block">
+    <h3>2. Explain event sourcing and when it makes sense.</h3>
+    <button class="btn-show" onclick="toggle(this)">Show Answer</button>
+    <div class="answer">
+      <p>So event sourcing flips the usual database model on its head. Instead of storing current state — like "account balance is $500" — you store the sequence of events that led to that state: "deposited $1000, withdrew $300, transferred $200." The current state is derived by replaying events.</p>
+      <p>Think of it like a git history vs just having the current files. You can always reconstruct any past state by replaying events up to that point. That's incredibly powerful for auditing — financial systems, healthcare, legal compliance — anywhere you need a complete, immutable history of what happened.</p>
+      <p>It also enables temporal queries — "what was this account's balance on March 3rd?" — and makes debugging easier because you can replay events to reproduce bugs. Plus you get natural event-driven integration: other services can subscribe to the event stream and build their own views.</p>
+      <p>When does it NOT make sense? Simple CRUD apps where you just need current state and history doesn't matter. The complexity cost is real — you need event stores, projection builders, snapshot strategies for performance. If your domain doesn't benefit from the audit trail or temporal queries, you're paying that cost for nothing.</p>
+      <ul class="key-points">
+        <li><strong>Core idea:</strong> store events (facts), derive state by replay</li>
+        <li><strong>Benefits:</strong> complete audit trail, temporal queries, event-driven integration</li>
+        <li><strong>Good fit:</strong> financial systems, compliance-heavy domains, collaborative editing</li>
+        <li><strong>Bad fit:</strong> simple CRUD, high-volume writes with no audit need</li>
+        <li><strong>Complexity:</strong> snapshots for performance, eventual consistency, schema evolution</li>
+      </ul>
+      <div class="follow-ups"><strong>Follow-ups:</strong> How do you handle event schema evolution? • What are snapshots and when do you take them? • How does CQRS relate to event sourcing?</div>
+    </div>
+  </div>
+
+  <div class="question-block">
+    <h3>3. How would you design a real-time analytics dashboard?</h3>
+    <button class="btn-show" onclick="toggle(this)">Show Answer</button>
+    <div class="answer">
+      <p>Okay so the key challenge is: dashboards need fast reads across potentially billions of events, updated in near-real-time. You can't just query your OLTP database — it'll melt. Here's how I'd architect it.</p>
+      <p>Events flow into Kafka as the central nervous system. From there, a stream processor — Flink or Kafka Streams — computes pre-aggregated metrics in real time. Things like "requests per minute by endpoint" or "revenue in the last hour by region." These aggregations get written to a fast read store — something like Apache Druid, ClickHouse, or even Redis for the hottest metrics.</p>
+      <p>The dashboard frontend polls or subscribes via WebSocket for updates. For real-time feel, I'd use WebSockets to push updated aggregations every few seconds rather than having the client poll. Server-Sent Events work too if it's one-directional.</p>
+      <p>Important design choice: pre-aggregate at write time, not query time. If you try to compute "average response time over the last hour" by scanning raw events on every dashboard load, you're dead at scale. The stream processor maintains running windows and emits results continuously.</p>
+      <p>For historical drill-down — "show me last month" — you'd have a separate batch-computed layer in something like a columnar data warehouse. The real-time layer handles the last few hours; the batch layer handles everything before that.</p>
+      <ul class="key-points">
+        <li><strong>Ingest:</strong> Kafka for durable, ordered event capture</li>
+        <li><strong>Process:</strong> Flink/Kafka Streams for windowed pre-aggregation</li>
+        <li><strong>Serve:</strong> Druid/ClickHouse/Redis for low-latency dashboard reads</li>
+        <li><strong>Deliver:</strong> WebSockets for push-based real-time updates to the UI</li>
+      </ul>
+      <div class="follow-ups"><strong>Follow-ups:</strong> How do you handle dashboard queries across time ranges that span real-time and historical? • What's windowing in stream processing? • How do you handle dashboard load spikes without affecting the pipeline?</div>
+    </div>
+  </div>
+
+  <div class="question-block">
+    <h3>4. Data lake vs data warehouse — how do you choose?</h3>
+    <button class="btn-show" onclick="toggle(this)">Show Answer</button>
+    <div class="answer">
+      <p>They solve different problems and honestly, most mature companies end up with both. But let me explain the trade-offs.</p>
+      <p>A data warehouse — Snowflake, BigQuery, Redshift — stores structured, processed data optimized for analytical queries. Schema-on-write: you define the schema upfront, transform data on the way in (ETL), and analysts get clean, fast SQL queries. Great for business intelligence, dashboards, known questions.</p>
+      <p>A data lake — S3/GCS with something like Delta Lake or Iceberg — stores raw data in any format: JSON, Parquet, images, logs, whatever. Schema-on-read: you dump everything in and figure out structure when you query it. Great for data science exploration, ML training data, archiving everything cheaply in case you need it later.</p>
+      <p>My decision framework: if I know the questions I'm asking and need fast, repeatable analytics — warehouse. If I'm exploring, doing ML, or need to store diverse data cheaply without knowing future use cases — lake. Cost is a factor too: lakes on object storage are 10-100x cheaper per TB than warehouses.</p>
+      <p>The modern trend is the "lakehouse" — Delta Lake, Iceberg — that adds warehouse-like features (ACID transactions, schema enforcement, fast queries) on top of lake storage. Best of both worlds, and what I'd default to for new greenfield systems.</p>
+      <ul class="key-points">
+        <li><strong>Warehouse:</strong> structured, schema-on-write, fast SQL, BI-focused</li>
+        <li><strong>Lake:</strong> raw, schema-on-read, cheap storage, ML/exploration</li>
+        <li><strong>Cost:</strong> lakes are dramatically cheaper per TB</li>
+        <li><strong>Lakehouse:</strong> modern hybrid — lake storage + warehouse query performance</li>
+      </ul>
+      <div class="follow-ups"><strong>Follow-ups:</strong> What's the difference between ETL and ELT? • How do you prevent a data lake from becoming a data swamp? • What are table formats like Iceberg and Delta Lake?</div>
+    </div>
+  </div>
+
+  <div class="question-block">
+    <h3>5. How do you handle late-arriving data?</h3>
+    <button class="btn-show" onclick="toggle(this)">Show Answer</button>
+    <div class="answer">
+      <p>Late data is inevitable in distributed systems. A mobile device goes offline, a network partition delays events, a batch upload arrives hours after the fact. You have to design for it, not pretend it won't happen.</p>
+      <p>The core concept is watermarks. A watermark is the system's estimate of "I believe I've seen all events up to time T." Events arriving after the watermark are considered late. In Flink, you configure how long to wait past the watermark before closing a window — that's your allowed lateness.</p>
+      <p>For windowed aggregations, you have options. You can hold windows open longer (higher latency but more complete). You can emit early results and then update them when late data arrives — this is what Flink's "allowed lateness" does, re-firing the window computation. Or you can route late data to a side output for separate handling.</p>
+      <p>At the storage layer, I'd design for upserts rather than append-only. If a daily aggregation gets a late event, you update that day's total. Idempotent processing helps here — reprocessing the same event shouldn't double-count it. Use event IDs for deduplication.</p>
+      <p>The business determines the acceptable trade-off. Real-time fraud detection can't wait — accept incompleteness. Monthly billing must be exact — hold the window open longer or do reconciliation passes.</p>
+      <ul class="key-points">
+        <li><strong>Watermarks:</strong> system's estimate of event-time completeness</li>
+        <li><strong>Allowed lateness:</strong> configure windows to accept and re-process late events</li>
+        <li><strong>Side outputs:</strong> route extremely late data for special handling</li>
+        <li><strong>Idempotent upserts:</strong> design aggregations to handle reprocessing safely</li>
+      </ul>
+      <div class="follow-ups"><strong>Follow-ups:</strong> What's event time vs processing time? • How do you handle out-of-order events? • What happens when late data invalidates already-served results?</div>
+    </div>
+  </div>
+
+  <div class="nav-row">
+    <a href="ch13-interview.html" class="btn secondary">← Chapter 13 Interview</a>
+    <a href="ch15-interview.html" class="btn">Chapter 15 Interview →</a>
+  </div>
+
+  <script>
+    function toggle(btn) {
+      const answer = btn.nextElementSibling;
+      const visible = answer.classList.toggle('visible');
+      btn.textContent = visible ? 'Hide Answer' : 'Show Answer';
+    }
+  </script>
+</body>
+</html>

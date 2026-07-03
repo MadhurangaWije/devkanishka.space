@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Chapter 6 Interview — Load Balancing</title>
+  <link rel="stylesheet" href="../assets/styles.css">
+  <style>
+    .question-block{margin:2rem 0;padding:1.5rem;background:var(--card-bg);border:1px solid var(--border);border-radius:8px}
+    .question-block h3{margin-top:0;color:var(--accent-blue);font-size:1.1rem}
+    .answer{display:none;margin-top:1rem;padding:1rem;background:var(--code-bg);border-radius:6px;font-size:0.95rem;line-height:1.7}
+    .answer p{margin-bottom:0.8rem}
+    .answer.visible{display:block}
+    .key-points{margin:1rem 0;padding-left:1.2rem}
+    .key-points li{margin-bottom:0.4rem;font-size:0.9rem}
+    .follow-ups{margin-top:0.75rem;font-size:0.85rem;color:var(--text-muted);border-top:1px solid var(--border);padding-top:0.75rem}
+    .follow-ups strong{color:var(--text)}
+    .btn-show{padding:0.4rem 1rem;border-radius:5px;background:var(--accent-blue);color:#fff;border:none;cursor:pointer;font-size:0.85rem}
+    .btn-show:hover{opacity:0.85}
+    .nav-row{display:flex;justify-content:space-between;margin-top:2rem;flex-wrap:wrap;gap:0.5rem}
+    .btn{padding:0.5rem 1rem;border-radius:6px;background:#4299e1;color:#fff;text-decoration:none;font-size:0.9rem}
+    .btn.secondary{background:#718096}
+  </style>
+</head>
+<body>
+  <h1>Chapter 6 Interview: Load Balancing</h1>
+  <p class="lesson-meta">🎙️ Practice answering these out loud — aim for 2–3 minute responses.</p>
+
+  <div class="question-block">
+    <h3>1. How would you set up load balancing for a high-traffic API?</h3>
+    <button class="btn-show" onclick="toggle(this)">Show Answer</button>
+    <div class="answer">
+      <p>Alright so for a high-traffic API, I'd think about this in tiers. You don't just slap one load balancer in front and call it a day — that becomes your single point of failure.</p>
+      <p>First, DNS-level load balancing to distribute across multiple data centers or availability zones. Then within each zone, an L4 load balancer — something like AWS NLB or HAProxy in TCP mode — that handles the raw connection routing with minimal overhead. Behind that, you might have L7 load balancers (like Nginx or Envoy) that can do content-based routing, like sending /api/v2 to a different backend pool than /api/v1.</p>
+      <p>For the algorithm, I'd start with least-connections for most API workloads. Round-robin works if all requests are roughly equal cost, but APIs often have endpoints that vary wildly in processing time. Least-connections naturally adapts to that.</p>
+      <p>Health checks are non-negotiable — both shallow (TCP port open?) and deep (can the service actually process a request?). Unhealthy backends get pulled from the pool within seconds. And I'd set up the LB pair in active-passive or active-active for redundancy.</p>
+      <ul class="key-points">
+        <li><strong>Multi-tier:</strong> DNS → L4 (connection) → L7 (content-aware) routing</li>
+        <li><strong>Algorithm:</strong> least-connections for variable-cost endpoints</li>
+        <li><strong>Health checks:</strong> shallow (port) + deep (functional) with fast failure detection</li>
+        <li><strong>Redundancy:</strong> LB itself must not be a SPOF — active-passive or active-active pair</li>
+      </ul>
+      <div class="follow-ups"><strong>Follow-ups:</strong> How do you handle WebSocket connections? • What about geographic routing? • How do you load test to find the right number of backends?</div>
+    </div>
+  </div>
+
+  <div class="question-block">
+    <h3>2. What's the difference between L4 and L7 load balancing?</h3>
+    <button class="btn-show" onclick="toggle(this)">Show Answer</button>
+    <div class="answer">
+      <p>So L4 and L7 refer to the OSI model layers — transport and application. The key difference is how much the load balancer understands about the traffic it's routing.</p>
+      <p>L4 operates at the TCP/UDP level. It sees source IP, destination IP, and port numbers. That's it. It makes routing decisions based on those — maybe simple round-robin or least-connections. It's fast because it doesn't need to inspect the payload. Think of it as a traffic cop directing cars without knowing what's inside them.</p>
+      <p>L7 actually terminates the HTTP connection and inspects the request — the URL path, headers, cookies, even the body sometimes. This lets you do smart routing: send mobile traffic to one pool, route by API version, do A/B testing by header, sticky sessions by cookie. Way more flexible but more compute overhead because it's parsing every request.</p>
+      <p>In practice I'd use L4 as the front door for raw throughput and connection distribution, then L7 behind it for intelligent routing decisions. L4 when you need speed and scale, L7 when you need smarts.</p>
+      <ul class="key-points">
+        <li><strong>L4:</strong> TCP/UDP level — IP + port only, fast, no content inspection</li>
+        <li><strong>L7:</strong> HTTP level — sees URLs, headers, cookies; enables content-based routing</li>
+        <li><strong>Performance:</strong> L4 handles more connections/sec due to less processing</li>
+        <li><strong>Use together:</strong> L4 at the edge for scale, L7 internally for routing logic</li>
+      </ul>
+      <div class="follow-ups"><strong>Follow-ups:</strong> How does TLS termination fit in? • Can L7 LBs modify requests? • What about gRPC load balancing challenges?</div>
+    </div>
+  </div>
+
+  <div class="question-block">
+    <h3>3. How do you handle server failures transparently?</h3>
+    <button class="btn-show" onclick="toggle(this)">Show Answer</button>
+    <div class="answer">
+      <p>The goal is that when a backend dies, users don't notice. Zero visible impact. Here's how I'd set that up.</p>
+      <p>First, active health checks running every few seconds. The load balancer pings each backend — if it fails N consecutive checks (usually 2-3), that server gets pulled from the rotation. No more traffic goes there. This handles gradual failures.</p>
+      <p>For sudden crashes — a server dies mid-request — you need connection-level detection. The LB sees the TCP connection drop or a 502/503 response and immediately retries that request on a different backend. The user sees maybe 50ms extra latency instead of an error. Key thing: only retry idempotent requests automatically. You don't want to retry a payment POST.</p>
+      <p>Then there's graceful shutdown — when you're deploying new code, the server signals it's draining. The LB stops sending new connections but lets existing ones finish. Connection draining with a timeout, then force-kill. Zero-downtime deployments.</p>
+      <p>And you need enough headroom — if you're running 4 servers at 80% capacity and one dies, the remaining 3 are now at 107% and you cascade. I'd keep utilization below 60-70% so you can absorb a failure.</p>
+      <ul class="key-points">
+        <li><strong>Health checks:</strong> periodic probes, remove after N failures, re-add after recovery</li>
+        <li><strong>Retry on failure:</strong> transparent reroute for idempotent requests</li>
+        <li><strong>Graceful drain:</strong> stop new connections, finish in-flight, then shutdown</li>
+        <li><strong>Capacity headroom:</strong> keep utilization low enough to absorb node loss</li>
+      </ul>
+      <div class="follow-ups"><strong>Follow-ups:</strong> How do you distinguish between a slow server and a dead one? • What's circuit breaking? • How do you handle partial failures (server responds but incorrectly)?</div>
+    </div>
+  </div>
+
+  <div class="question-block">
+    <h3>4. When would you use consistent hashing?</h3>
+    <button class="btn-show" onclick="toggle(this)">Show Answer</button>
+    <div class="answer">
+      <p>Consistent hashing solves a specific problem: what happens when you add or remove servers from a pool and you need requests for the same key to go to the same server?</p>
+      <p>With regular modulo hashing — hash(key) % N servers — if N changes, almost every key remaps to a different server. If those servers have local state or caches, you just blew up everything. Cache hit rate drops to nearly zero during a scaling event.</p>
+      <p>Consistent hashing arranges servers on a ring. When you add or remove a node, only the keys that were assigned to that specific node get redistributed — roughly 1/N of the keys move instead of almost all of them. Way less disruption.</p>
+      <p>I'd use it for: distributed caches (like Memcached clusters), sharded databases where you want to add nodes without massive data migration, session stores where you need sticky routing to survive pool changes, and any stateful routing where cache locality matters.</p>
+      <p>The virtual nodes trick is important too — each physical server gets multiple positions on the ring. This prevents uneven distribution that happens with just N points on a ring, especially with small cluster sizes.</p>
+      <ul class="key-points">
+        <li><strong>Problem solved:</strong> minimize key remapping when cluster size changes</li>
+        <li><strong>How:</strong> hash ring where only ~1/N keys move on node add/remove</li>
+        <li><strong>Use cases:</strong> distributed caches, shard routing, session affinity</li>
+        <li><strong>Virtual nodes:</strong> multiple ring positions per server for even distribution</li>
+      </ul>
+      <div class="follow-ups"><strong>Follow-ups:</strong> How do you handle hot keys on the ring? • What's the difference vs rendezvous hashing? • How does Redis Cluster use hash slots differently?</div>
+    </div>
+  </div>
+
+  <div class="question-block">
+    <h3>5. What does a reverse proxy give you beyond load balancing?</h3>
+    <button class="btn-show" onclick="toggle(this)">Show Answer</button>
+    <div class="answer">
+      <p>Oh there's a bunch. Load balancing is maybe 30% of why you'd run a reverse proxy. Let me walk through the other benefits.</p>
+      <p>TLS termination is huge — your backends don't need to handle SSL/TLS. The proxy handles encryption/decryption, certificate management, protocol negotiation. Your internal traffic can be plain HTTP (assuming a trusted network), which simplifies backend services and reduces their CPU load.</p>
+      <p>Caching at the proxy level — Nginx can cache responses and serve them without hitting the backend at all. For semi-static content, this is incredibly effective. One request builds the cache, thousands are served from it.</p>
+      <p>Request manipulation — adding headers, rewriting URLs, rate limiting, authentication checks before the request even reaches your application. You can enforce security policies at the edge. IP whitelisting, request size limits, blocking malicious patterns.</p>
+      <p>Compression — the proxy handles gzip/brotli so your application doesn't spend CPU on it. Plus connection pooling to the backend — clients might open many short-lived connections, but the proxy maintains a smaller pool of persistent connections to your servers. Way more efficient.</p>
+      <p>And abstraction — clients talk to one endpoint. Behind it you can swap, add, or restructure services without changing the public API. That's the real power for evolving your architecture.</p>
+      <ul class="key-points">
+        <li><strong>TLS termination:</strong> centralized certificate management, offload crypto from backends</li>
+        <li><strong>Edge caching:</strong> serve cached responses without backend round-trip</li>
+        <li><strong>Security:</strong> rate limiting, WAF rules, IP filtering, request validation</li>
+        <li><strong>Abstraction:</strong> hide internal topology, enable zero-downtime architecture changes</li>
+        <li><strong>Efficiency:</strong> compression, connection pooling, HTTP/2 multiplexing</li>
+      </ul>
+      <div class="follow-ups"><strong>Follow-ups:</strong> How does a reverse proxy differ from an API gateway? • When would you NOT want TLS termination at the proxy? • How do you handle WebSocket upgrades through a proxy?</div>
+    </div>
+  </div>
+
+  <div class="nav-row">
+    <a href="ch05-interview.html" class="btn secondary">← Chapter 5 Interview</a>
+    <a href="ch05-quiz.html" class="btn">Chapter 5 Quiz →</a>
+  </div>
+
+  <script>
+    function toggle(btn) {
+      const answer = btn.nextElementSibling;
+      const visible = answer.classList.toggle('visible');
+      btn.textContent = visible ? 'Hide Answer' : 'Show Answer';
+    }
+  </script>
+</body>
+</html>

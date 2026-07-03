@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lesson 051 — Distributed Tracing</title>
+    <link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+    <h1>Distributed Tracing</h1>
+    <div class="lesson-meta">
+        <span>📘 Chapter 12: Observability &amp; Reliability</span>
+        <span>⏱️ 9 min read</span>
+        <span>🏗️ Lesson 051</span>
+    </div>
+
+    <p>A user clicks "Place Order" and gets a timeout after 5 seconds. The request touched 10 services. <strong>Which one is slow? Where did it fail?</strong> Logs tell you something went wrong in each service independently. Metrics tell you which service has high latency. But only <strong>distributed tracing</strong> shows you the complete journey of that specific request — every service, every database call, every queue message — as a single connected story.</p>
+
+    <h2>What Is a Trace?</h2>
+
+    <div class="card">
+        <p>A <strong>trace</strong> represents the entire journey of a single request through your system. It's composed of <strong>spans</strong> — each span is one unit of work in one service.</p>
+        <ul>
+            <li><strong>Trace:</strong> A tree/DAG of spans sharing a single trace ID</li>
+            <li><strong>Span:</strong> One operation — has service name, operation name, start time, duration, status, tags</li>
+            <li><strong>Parent-child relationship:</strong> A span can spawn child spans (service A calls service B)</li>
+            <li><strong>Root span:</strong> The first span — typically the API gateway or edge service</li>
+        </ul>
+    </div>
+
+    <figure class="diagram">
+        <svg viewBox="0 0 720 300" xmlns="http://www.w3.org/2000/svg">
+            <text x="360" y="20" text-anchor="middle" font-family="system-ui" font-size="13" font-weight="bold" fill="#333">Trace Waterfall — Order Placement Request</text>
+
+            <!-- Header -->
+            <text x="50" y="50" font-family="system-ui" font-size="9" font-weight="bold" fill="#666">Service</text>
+            <text x="200" y="50" font-family="system-ui" font-size="9" font-weight="bold" fill="#666">0ms</text>
+            <text x="350" y="50" font-family="system-ui" font-size="9" font-weight="bold" fill="#666">500ms</text>
+            <text x="500" y="50" font-family="system-ui" font-size="9" font-weight="bold" fill="#666">1000ms</text>
+            <text x="640" y="50" font-family="system-ui" font-size="9" font-weight="bold" fill="#666">1500ms</text>
+
+            <!-- Time grid -->
+            <line x1="200" y1="55" x2="200" y2="270" stroke="#eee" stroke-width="1"/>
+            <line x1="350" y1="55" x2="350" y2="270" stroke="#eee" stroke-width="1"/>
+            <line x1="500" y1="55" x2="500" y2="270" stroke="#eee" stroke-width="1"/>
+            <line x1="640" y1="55" x2="640" y2="270" stroke="#eee" stroke-width="1"/>
+
+            <!-- API Gateway -->
+            <text x="50" y="80" font-family="system-ui" font-size="9" fill="#333">api-gateway</text>
+            <rect x="200" y="68" width="440" height="16" rx="3" fill="#457b9d" opacity="0.7"/>
+            <text x="420" y="80" text-anchor="middle" font-family="system-ui" font-size="8" fill="white">1450ms</text>
+
+            <!-- Order Service -->
+            <text x="50" y="115" font-family="system-ui" font-size="9" fill="#333">order-service</text>
+            <rect x="215" y="103" width="400" height="16" rx="3" fill="#2a9d8f" opacity="0.7"/>
+            <text x="415" y="115" text-anchor="middle" font-family="system-ui" font-size="8" fill="white">1320ms</text>
+
+            <!-- Auth check -->
+            <text x="50" y="150" font-family="system-ui" font-size="9" fill="#333">auth-service</text>
+            <rect x="220" y="138" width="40" height="16" rx="3" fill="#a8dadc" opacity="0.9"/>
+            <text x="240" y="150" text-anchor="middle" font-family="system-ui" font-size="7" fill="#333">35ms</text>
+
+            <!-- Inventory check -->
+            <text x="50" y="185" font-family="system-ui" font-size="9" fill="#333">inventory-service</text>
+            <rect x="270" y="173" width="80" height="16" rx="3" fill="#a8dadc" opacity="0.9"/>
+            <text x="310" y="185" text-anchor="middle" font-family="system-ui" font-size="7" fill="#333">85ms</text>
+
+            <!-- Payment - this is the slow one -->
+            <text x="50" y="220" font-family="system-ui" font-size="9" fill="#e63946" font-weight="bold">payment-service</text>
+            <rect x="360" y="208" width="240" height="16" rx="3" fill="#e63946" opacity="0.7"/>
+            <text x="480" y="220" text-anchor="middle" font-family="system-ui" font-size="8" fill="white">⚠️ 1050ms (SLOW!)</text>
+
+            <!-- Payment DB call -->
+            <text x="50" y="255" font-family="system-ui" font-size="9" fill="#e63946">  └─ postgres query</text>
+            <rect x="380" y="243" width="200" height="16" rx="3" fill="#e63946" opacity="0.4"/>
+            <text x="480" y="255" text-anchor="middle" font-family="system-ui" font-size="7" fill="#333">980ms — full table scan!</text>
+
+            <!-- Annotation -->
+            <text x="360" y="288" text-anchor="middle" font-family="system-ui" font-size="9" fill="#e63946">🔍 Root cause: payment-service's DB query does a full table scan (missing index)</text>
+        </svg>
+        <figcaption>Figure 1: A trace waterfall shows exactly where time is spent. The payment-service DB query is the bottleneck — impossible to see from metrics or logs alone.</figcaption>
+    </figure>
+
+    <h2>Trace Context Propagation</h2>
+
+    <div class="card">
+        <h3>How Trace IDs Flow Across Service Boundaries</h3>
+        <p>When service A calls service B, it passes the <strong>trace context</strong> in request headers:</p>
+        <pre>// W3C Trace Context standard header
+traceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01
+             ──  ────────────────────────────────  ────────────────  ──
+           version       trace-id                    parent-span-id  flags</pre>
+        <p>Propagation happens via:</p>
+        <ul>
+            <li><strong>HTTP headers:</strong> <code>traceparent</code>, <code>tracestate</code> (W3C standard)</li>
+            <li><strong>gRPC metadata:</strong> Same trace context in gRPC headers</li>
+            <li><strong>Message queues:</strong> Trace context in message attributes/headers</li>
+            <li><strong>Databases:</strong> SQL comments with trace context (for slow query correlation)</li>
+        </ul>
+        <p>Each service reads the incoming context, creates a <strong>child span</strong>, and passes the updated context to any downstream calls.</p>
+    </div>
+
+    <h2>Span Data</h2>
+
+    <div class="card">
+        <h3>What's in a Span?</h3>
+        <pre>{
+  "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+  "span_id": "00f067aa0ba902b7",
+  "parent_span_id": "a3ce929d0e0e4736",
+  "service": "payment-service",
+  "operation": "POST /charge",
+  "start_time": "2024-01-15T10:23:45.123Z",
+  "duration_ms": 1050,
+  "status": "error",
+  "tags": {
+    "http.method": "POST",
+    "http.status_code": 504,
+    "user.id": "user-12345",
+    "payment.amount": 49.99
+  },
+  "logs": [
+    {"time": "...", "message": "Connecting to postgres..."},
+    {"time": "...", "message": "Query timeout after 1000ms"}
+  ]
+}</pre>
+    </div>
+
+    <h2>Sampling Strategies</h2>
+
+    <div class="card info">
+        <p>Tracing every request is expensive at scale (storage, network, CPU). Sampling reduces this:</p>
+        <ul>
+            <li><strong>Head-based sampling:</strong> Decide at the start whether to trace this request (e.g., trace 1% randomly). Simple but you might miss rare errors.</li>
+            <li><strong>Tail-based sampling:</strong> Collect all spans, then decide <em>after</em> seeing the outcome — keep traces that are slow, errored, or interesting. More expensive but catches the important ones.</li>
+            <li><strong>Adaptive sampling:</strong> Increase sampling rate when error rates spike; reduce during quiet periods.</li>
+        </ul>
+        <p><strong>Rule of thumb:</strong> Always trace 100% of errors and slow requests. Sample normal requests at 1-10%.</p>
+    </div>
+
+    <h2>OpenTelemetry</h2>
+
+    <p><strong>OpenTelemetry (OTel)</strong> is the CNCF project that provides a single, vendor-neutral standard for instrumentation. Instrument once, send to any backend.</p>
+
+    <figure class="diagram">
+        <svg viewBox="0 0 720 220" xmlns="http://www.w3.org/2000/svg">
+            <text x="360" y="20" text-anchor="middle" font-family="system-ui" font-size="13" font-weight="bold" fill="#333">OpenTelemetry Architecture</text>
+
+            <!-- App with SDK -->
+            <rect x="30" y="50" width="150" height="130" rx="8" fill="#457b9d" opacity="0.1" stroke="#457b9d" stroke-width="2"/>
+            <text x="105" y="72" text-anchor="middle" font-family="system-ui" font-size="10" font-weight="bold" fill="#457b9d">Your Application</text>
+            <rect x="45" y="82" width="120" height="30" rx="4" fill="#457b9d" opacity="0.2" stroke="#457b9d" stroke-width="1"/>
+            <text x="105" y="101" text-anchor="middle" font-family="system-ui" font-size="8" fill="#457b9d">OTel SDK</text>
+            <text x="105" y="125" text-anchor="middle" font-family="system-ui" font-size="7" fill="#666">Auto-instrumentation</text>
+            <text x="105" y="138" text-anchor="middle" font-family="system-ui" font-size="7" fill="#666">+ Manual spans</text>
+            <text x="105" y="155" text-anchor="middle" font-family="system-ui" font-size="7" fill="#666">Metrics + Logs + Traces</text>
+
+            <!-- Arrow to collector -->
+            <path d="M180 115 L250 115" stroke="#666" stroke-width="1.5" fill="none" marker-end="url(#arrowhead51)"/>
+            <text x="215" y="108" text-anchor="middle" font-family="system-ui" font-size="7" fill="#666">OTLP</text>
+
+            <!-- Collector -->
+            <rect x="255" y="60" width="170" height="120" rx="8" fill="#2a9d8f" opacity="0.1" stroke="#2a9d8f" stroke-width="2"/>
+            <text x="340" y="80" text-anchor="middle" font-family="system-ui" font-size="10" font-weight="bold" fill="#2a9d8f">OTel Collector</text>
+            <text x="340" y="100" text-anchor="middle" font-family="system-ui" font-size="8" fill="#666">Receives → Processes → Exports</text>
+            <rect x="270" y="108" width="60" height="20" rx="3" fill="#2a9d8f" opacity="0.2"/>
+            <text x="300" y="122" text-anchor="middle" font-family="system-ui" font-size="7" fill="#2a9d8f">Filter</text>
+            <rect x="335" y="108" width="60" height="20" rx="3" fill="#2a9d8f" opacity="0.2"/>
+            <text x="365" y="122" text-anchor="middle" font-family="system-ui" font-size="7" fill="#2a9d8f">Sample</text>
+            <text x="340" y="150" text-anchor="middle" font-family="system-ui" font-size="7" fill="#666">Batch, enrich, route</text>
+            <text x="340" y="165" text-anchor="middle" font-family="system-ui" font-size="7" fill="#666">Vendor-neutral pipeline</text>
+
+            <!-- Arrows to backends -->
+            <path d="M425 90 L490 70" stroke="#666" stroke-width="1.5" fill="none" marker-end="url(#arrowhead51)"/>
+            <path d="M425 115 L490 115" stroke="#666" stroke-width="1.5" fill="none" marker-end="url(#arrowhead51)"/>
+            <path d="M425 140 L490 160" stroke="#666" stroke-width="1.5" fill="none" marker-end="url(#arrowhead51)"/>
+
+            <!-- Backends -->
+            <rect x="495" y="50" width="130" height="30" rx="5" fill="#e76f51" opacity="0.15" stroke="#e76f51" stroke-width="1.5"/>
+            <text x="560" y="69" text-anchor="middle" font-family="system-ui" font-size="8" fill="#e76f51">Jaeger / Tempo (Traces)</text>
+
+            <rect x="495" y="100" width="130" height="30" rx="5" fill="#457b9d" opacity="0.15" stroke="#457b9d" stroke-width="1.5"/>
+            <text x="560" y="119" text-anchor="middle" font-family="system-ui" font-size="8" fill="#457b9d">Prometheus (Metrics)</text>
+
+            <rect x="495" y="150" width="130" height="30" rx="5" fill="#2a9d8f" opacity="0.15" stroke="#2a9d8f" stroke-width="1.5"/>
+            <text x="560" y="169" text-anchor="middle" font-family="system-ui" font-size="8" fill="#2a9d8f">Loki (Logs)</text>
+
+            <!-- Or commercial -->
+            <text x="660" y="115" font-family="system-ui" font-size="8" fill="#999">or Datadog,</text>
+            <text x="660" y="128" font-family="system-ui" font-size="8" fill="#999">Honeycomb, etc.</text>
+
+            <text x="360" y="205" text-anchor="middle" font-family="system-ui" font-size="9" fill="#666">Instrument once with OpenTelemetry → switch backends without code changes</text>
+
+            <defs>
+                <marker id="arrowhead51" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+                    <polygon points="0 0, 8 3, 0 6" fill="#666"/>
+                </marker>
+            </defs>
+        </svg>
+        <figcaption>Figure 2: OpenTelemetry provides vendor-neutral instrumentation. The Collector processes and routes telemetry to any backend.</figcaption>
+    </figure>
+
+    <h2>Performance Overhead</h2>
+
+    <div class="card">
+        <h3>Is Tracing Worth the Cost?</h3>
+        <ul>
+            <li><strong>CPU overhead:</strong> ~1-3% for auto-instrumentation (context propagation, span creation)</li>
+            <li><strong>Memory:</strong> Buffering spans before export uses some memory (configurable)</li>
+            <li><strong>Network:</strong> Exporting span data to collector — batch to reduce overhead</li>
+            <li><strong>Storage:</strong> Traces are big (each request generates many spans) — sampling is essential at scale</li>
+        </ul>
+        <p><strong>When it's worth it:</strong> Microservices (3+ services), debugging latency issues, understanding dependencies, on-call incident response.</p>
+        <p><strong>When it's overkill:</strong> Simple monoliths, batch jobs, services with trivial call patterns.</p>
+    </div>
+
+    <h2>Real-World Examples</h2>
+
+    <div class="real-world">
+        <h3>🏢 Uber & Jaeger</h3>
+        <p>Uber built <strong>Jaeger</strong> (now a CNCF project) to trace ride requests across 4,000+ microservices. When a rider reports "my app is slow," engineers can pull up the exact trace for that request and see that the delay was in the pricing-service calling a geo-lookup service that had a cold cache. Without tracing across 4,000 services, finding this would take hours of log correlation. With Jaeger, it takes seconds.</p>
+    </div>
+
+    <div class="real-world">
+        <h3>🏢 Slow API Debugging</h3>
+        <p>A team notices their <code>/api/orders</code> endpoint has p99 latency of 2 seconds (SLO: 500ms). Metrics show the order-service itself is fast (50ms). A trace reveals the truth:</p>
+        <ul>
+            <li>order-service → inventory-service: 50ms ✅</li>
+            <li>order-service → payment-service: 80ms ✅</li>
+            <li>order-service → <strong>notification-service</strong>: 1800ms ❌</li>
+            <li>notification-service → email-provider-api: 1750ms (third-party timeout!)</li>
+        </ul>
+        <p>Fix: Make the notification call <strong>asynchronous</strong> (fire-and-forget via message queue). Latency drops to 150ms. Without the trace, the team would have optimized the wrong service.</p>
+    </div>
+
+    <h2>Interactive: Build a Trace</h2>
+
+    <div class="interactive">
+        <h3>🔗 Trace a Request Through Services</h3>
+        <p>Click services in order to build a trace. Each click adds a span to the waterfall.</p>
+        <div id="trace-services" style="display:flex; flex-wrap:wrap; gap:8px; margin:10px 0;">
+            <button class="trace-svc" onclick="addSpan('api-gateway', 20)">API Gateway (20ms)</button>
+            <button class="trace-svc" onclick="addSpan('auth-service', 35)">Auth Service (35ms)</button>
+            <button class="trace-svc" onclick="addSpan('order-service', 45)">Order Service (45ms)</button>
+            <button class="trace-svc" onclick="addSpan('inventory-service', 60)">Inventory (60ms)</button>
+            <button class="trace-svc" onclick="addSpan('payment-service', 200)">Payment (200ms)</button>
+            <button class="trace-svc" onclick="addSpan('notification-service', 150)">Notification (150ms)</button>
+            <button class="trace-svc" onclick="addSpan('database-query', 800)" style="border-color:#e63946; color:#e63946;">Slow DB Query (800ms!) 🐌</button>
+        </div>
+        <button onclick="resetTrace()">Reset Trace</button>
+        <div id="trace-waterfall" style="background:#1a1a2e; padding:15px; border-radius:8px; margin-top:10px; min-height:100px; font-family:monospace; font-size:11px; color:#eee;"></div>
+        <div id="trace-summary" style="margin-top:8px; font-size:0.9em;"></div>
+    </div>
+
+    <script>
+    (function() {
+        var spans = [];
+        var waterfallEl = document.getElementById('trace-waterfall');
+        var summaryEl = document.getElementById('trace-summary');
+        var colors = {
+            'api-gateway': '#457b9d',
+            'auth-service': '#a8dadc',
+            'order-service': '#2a9d8f',
+            'inventory-service': '#6db5a0',
+            'payment-service': '#e9c46a',
+            'notification-service': '#f4a261',
+            'database-query': '#e63946'
+        };
+
+        window.addSpan = function(name, duration) {
+            var startOffset = 0;
+            if (spans.length > 0) {
+                var lastSpan = spans[spans.length - 1];
+                startOffset = lastSpan.start + Math.round(lastSpan.duration * 0.3);
+            }
+            spans.push({ name: name, duration: duration, start: startOffset });
+            renderWaterfall();
+        };
+
+        window.resetTrace = function() {
+            spans = [];
+            waterfallEl.innerHTML = '<span style="color:#666">Click services above to build a trace waterfall...</span>';
+            summaryEl.innerHTML = '';
+        };
+
+        function renderWaterfall() {
+            if (spans.length === 0) { window.resetTrace(); return; }
+            var totalDuration = Math.max.apply(null, spans.map(function(s) { return s.start + s.duration; }));
+            var maxWidth = 400;
+            var html = '<div style="color:#888; margin-bottom:8px;">trace_id: ' + generateId() + '</div>';
+
+            for (var i = 0; i < spans.length; i++) {
+                var s = spans[i];
+                var left = (s.start / totalDuration) * maxWidth;
+                var width = Math.max((s.duration / totalDuration) * maxWidth, 30);
+                var color = colors[s.name] || '#999';
+                var indent = i === 0 ? '' : '  ' + '│ '.repeat(Math.min(i - 1, 3)) + '├─ ';
+                html += '<div style="margin:3px 0;">';
+                html += '<span style="color:#888">' + indent + '</span>';
+                html += '<span style="color:' + color + '">' + s.name + '</span>';
+                html += ' <span style="display:inline-block; background:' + color + '; height:10px; width:' + width + 'px; border-radius:2px; vertical-align:middle; margin-left:' + left + 'px; opacity:0.8"></span>';
+                html += ' <span style="color:#888">' + s.duration + 'ms</span>';
+                if (s.duration >= 500) html += ' <span style="color:#e63946">⚠️ SLOW</span>';
+                html += '</div>';
+            }
+
+            waterfallEl.innerHTML = html;
+
+            var total = Math.max.apply(null, spans.map(function(s) { return s.start + s.duration; }));
+            var critical = spans.reduce(function(max, s) { return s.duration > max.duration ? s : max; }, spans[0]);
+            summaryEl.innerHTML = '📊 <strong>Total trace duration:</strong> ~' + total + 'ms | <strong>Critical path:</strong> ' + critical.name + ' (' + critical.duration + 'ms = ' + Math.round(critical.duration / total * 100) + '% of total)';
+        }
+
+        function generateId() {
+            var chars = '0123456789abcdef';
+            var id = '';
+            for (var i = 0; i < 16; i++) id += chars[Math.floor(Math.random() * 16)];
+            return id;
+        }
+
+        window.resetTrace();
+    })();
+    </script>
+
+    <div class="takeaway">
+        <h3>🎯 Key Takeaway</h3>
+        <p>Distributed tracing is essential once you have more than a handful of services. It answers the question <strong>"where is the time going?"</strong> which logs and metrics alone cannot. With OpenTelemetry as the standard, you instrument once and can send traces to any backend. The key insight: most latency problems are in <em>dependencies</em>, not in the service that appears slow — traces reveal the true culprit.</p>
+    </div>
+
+    <div class="footnote">
+        <p><strong>Previous:</strong> <a href="0050-slos-slis-error-budgets.html">SLOs, SLIs, and Error Budgets</a> | <strong>Next:</strong> <a href="0052-circuit-breakers-graceful-degradation.html">Circuit Breakers &amp; Graceful Degradation</a></p>
+    </div>
+</body>
+</html>

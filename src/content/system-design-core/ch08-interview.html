@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Chapter 8 Interview — Async Processing</title>
+  <link rel="stylesheet" href="../assets/styles.css">
+  <style>
+    .question-block{margin:2rem 0;padding:1.5rem;background:var(--card-bg);border:1px solid var(--border);border-radius:8px}
+    .question-block h3{margin-top:0;color:var(--accent-blue);font-size:1.1rem}
+    .answer{display:none;margin-top:1rem;padding:1rem;background:var(--code-bg);border-radius:6px;font-size:0.95rem;line-height:1.7}
+    .answer p{margin-bottom:0.8rem}
+    .answer.visible{display:block}
+    .key-points{margin:1rem 0;padding-left:1.2rem}
+    .key-points li{margin-bottom:0.4rem;font-size:0.9rem}
+    .follow-ups{margin-top:0.75rem;font-size:0.85rem;color:var(--text-muted);border-top:1px solid var(--border);padding-top:0.75rem}
+    .follow-ups strong{color:var(--text)}
+    .btn-show{padding:0.4rem 1rem;border-radius:5px;background:var(--accent-blue);color:#fff;border:none;cursor:pointer;font-size:0.85rem}
+    .btn-show:hover{opacity:0.85}
+    .nav-row{display:flex;justify-content:space-between;margin-top:2rem;flex-wrap:wrap;gap:0.5rem}
+    .btn{padding:0.5rem 1rem;border-radius:6px;background:#4299e1;color:#fff;text-decoration:none;font-size:0.9rem}
+    .btn.secondary{background:#718096}
+  </style>
+</head>
+<body>
+  <h1>Chapter 8 Interview: Async Processing</h1>
+  <p class="lesson-meta">🎙️ Practice answering these out loud — aim for 2–3 minute responses.</p>
+
+  <div class="question-block">
+    <h3>1. When would you make something async vs sync?</h3>
+    <button class="btn-show" onclick="toggle(this)">Show Answer</button>
+    <div class="answer">
+      <p>So basically, my mental model is: does the user need the result RIGHT NOW to continue their workflow? If yes, sync. If they can move on and get notified later, async.</p>
+      <p>Sync makes sense for things like authentication checks, reading data they're about to display, validating a form submission — the user is literally waiting for that response to know what to do next.</p>
+      <p>Async is for everything that's downstream of the user's immediate need. They clicked "place order" — they need confirmation that the order was accepted (sync), but they don't need to wait for the warehouse notification, the receipt email, the analytics event, or the inventory update. All of that can happen in the background.</p>
+      <p>The other big signal is latency tolerance. If an operation takes more than a second or two — processing a video, generating a report, sending to a third-party API that might be slow — make it async. Return immediately with "we're working on it" and notify when done.</p>
+      <p>And reliability is a factor too. If a downstream service might be down, async with a queue gives you retry capability. Sync means you fail when they fail. Async decouples your availability from theirs.</p>
+      <ul class="key-points">
+        <li><strong>User waiting?</strong> If they need the result to continue → sync</li>
+        <li><strong>Downstream work:</strong> notifications, analytics, integrations → async</li>
+        <li><strong>Latency:</strong> anything > 1-2s should be async with status polling/webhooks</li>
+        <li><strong>Reliability:</strong> async decouples you from downstream failures</li>
+      </ul>
+      <div class="follow-ups"><strong>Follow-ups:</strong> How do you communicate async results back to the user? • What about operations that seem sync but have async parts? • How do you handle async failures the user needs to know about?</div>
+    </div>
+  </div>
+
+  <div class="question-block">
+    <h3>2. How would you design a reliable email sending system?</h3>
+    <button class="btn-show" onclick="toggle(this)">Show Answer</button>
+    <div class="answer">
+      <p>Alright, so the key word here is "reliable" — meaning every email that should go out actually goes out, even if things fail along the way.</p>
+      <p>I'd start with a queue-based architecture. When your application needs to send an email, it doesn't call the SMTP provider directly. It writes a message to a durable queue — something like SQS or RabbitMQ. That write is your commitment: "this email will be sent."</p>
+      <p>Then you have worker processes consuming from that queue. They pick up a message, call the email provider (SendGrid, SES, whatever), and only acknowledge the message after successful delivery. If the provider is down or returns an error, the message stays in the queue for retry.</p>
+      <p>For retry logic, I'd use exponential backoff — wait 1 minute, then 5, then 15, then 60. After some max attempts (maybe 5-6), move it to a dead letter queue for manual inspection. You don't want to retry forever — the email might be to an invalid address.</p>
+      <p>Idempotency is critical. What if your worker crashes after sending but before acknowledging? The message gets redelivered. So you need a deduplication check — maybe store a hash of (recipient + template + timestamp) and skip if already sent. Nobody wants duplicate emails.</p>
+      <p>And for observability — track every email through states: queued → processing → sent → delivered/bounced. Dashboard showing queue depth, send rate, failure rate. Alert if the queue grows faster than workers can drain it.</p>
+      <ul class="key-points">
+        <li><strong>Queue-based:</strong> write to durable queue, workers consume and send</li>
+        <li><strong>Retry with backoff:</strong> exponential delays, dead letter queue after max attempts</li>
+        <li><strong>Idempotency:</strong> dedup check to prevent duplicate sends on redelivery</li>
+        <li><strong>State tracking:</strong> queued → processing → sent → delivered/bounced</li>
+        <li><strong>Monitoring:</strong> queue depth, send rate, failure rate, alerts on backlog</li>
+      </ul>
+      <div class="follow-ups"><strong>Follow-ups:</strong> How do you handle email provider failover? • What about rate limits from the provider? • How do you prioritize transactional vs marketing emails?</div>
+    </div>
+  </div>
+
+  <div class="question-block">
+    <h3>3. What's the difference between a message queue and an event stream?</h3>
+    <button class="btn-show" onclick="toggle(this)">Show Answer</button>
+    <div class="answer">
+      <p>The way I see it, the fundamental difference is the consumption model. A message queue is like a to-do list — once a message is processed, it's gone. An event stream is like a log — events are appended and stay there, and multiple consumers can read them independently.</p>
+      <p>With a queue (RabbitMQ, SQS), you have competing consumers. If three workers are listening, each message goes to exactly ONE of them. Once acknowledged, it's removed. This is perfect for work distribution — "process this image," "send this email." You want it done once.</p>
+      <p>With a stream (Kafka, Kinesis), events are published to a topic and STAY there. Multiple consumer groups can each read all events independently, at their own pace. The notification service reads order events AND the analytics service reads the same events AND the billing service. They don't interfere with each other.</p>
+      <p>Streams also give you replay — if you deploy a buggy consumer that misprocessed events, you can reset its offset and reprocess from any point in time. With a queue, once consumed, it's gone forever. That replayability is incredibly valuable for debugging and recovery.</p>
+      <p>So basically: queue for task distribution (do this work once), stream for event broadcasting (multiple systems react to the same events). Different tools, different problems.</p>
+      <ul class="key-points">
+        <li><strong>Queue:</strong> competing consumers, message consumed once, then deleted</li>
+        <li><strong>Stream:</strong> append-only log, multiple independent consumers, messages persist</li>
+        <li><strong>Queue use case:</strong> work distribution — process once by any available worker</li>
+        <li><strong>Stream use case:</strong> event broadcasting — many systems react independently</li>
+        <li><strong>Replay:</strong> streams allow reprocessing from any point; queues don't</li>
+      </ul>
+      <div class="follow-ups"><strong>Follow-ups:</strong> When would you use both together? • How does Kafka's consumer group model blur this line? • What about ordering guarantees in each?</div>
+    </div>
+  </div>
+
+  <div class="question-block">
+    <h3>4. How do you handle failed messages?</h3>
+    <button class="btn-show" onclick="toggle(this)">Show Answer</button>
+    <div class="answer">
+      <p>So there's a spectrum of failure handling, and honestly the right approach depends on whether the failure is transient or permanent.</p>
+      <p>For transient failures — network blip, downstream service momentarily overloaded — you retry. But not immediately and not forever. Exponential backoff with jitter: first retry after 1s (plus random 0-500ms), then 4s, then 16s, up to some cap. The jitter prevents thundering herd when a service comes back and all retries fire simultaneously.</p>
+      <p>After N retries (I usually set 3-5 depending on the operation), the message goes to a dead letter queue (DLQ). This is your safety net. Failed messages sit there for inspection — you can look at them, figure out why they failed, fix the bug, and replay them. Never silently drop messages.</p>
+      <p>For permanent failures — invalid data, business logic violations — retrying won't help. You want to detect these fast (maybe on first attempt) and route them directly to the DLQ or an error handling path. Don't waste retry cycles on something that will never succeed.</p>
+      <p>I'd also add alerting on the DLQ size. If it's growing, something systemic is wrong. And implement a "replay" mechanism — a tool or script that can take DLQ messages and re-inject them into the main queue after you've fixed the underlying issue.</p>
+      <ul class="key-points">
+        <li><strong>Retry with backoff:</strong> exponential delays + jitter for transient failures</li>
+        <li><strong>Dead letter queue:</strong> catch-all for messages that exhaust retries</li>
+        <li><strong>Classify failures:</strong> transient (retry) vs permanent (DLQ immediately)</li>
+        <li><strong>Replay mechanism:</strong> tool to re-inject DLQ messages after fix</li>
+        <li><strong>Alerting:</strong> monitor DLQ depth, alert on growth</li>
+      </ul>
+      <div class="follow-ups"><strong>Follow-ups:</strong> How do you handle poison messages that crash consumers? • What's the difference between at-least-once and exactly-once? • How do you test failure scenarios?</div>
+    </div>
+  </div>
+
+  <div class="question-block">
+    <h3>5. Design a notification system.</h3>
+    <button class="btn-show" onclick="toggle(this)">Show Answer</button>
+    <div class="answer">
+      <p>Okay, so a notification system needs to handle multiple channels (push, email, SMS, in-app), user preferences, and high throughput without annoying users. Let me walk through how I'd structure this.</p>
+      <p>At the top, you have notification triggers — events from various services. "Order shipped," "friend request received," "payment failed." These publish to a central notification event stream. I'd use Kafka here because multiple downstream systems need to react.</p>
+      <p>Next, a notification orchestrator service consumes these events and decides: what channels should this go to? It checks user preferences (did they opt out of SMS?), suppression rules (don't send more than 3 push notifications per hour), and priority (payment failures always get through).</p>
+      <p>Then it fans out to channel-specific queues — one for push, one for email, one for SMS. Each channel has its own workers that handle the specifics: formatting templates, calling provider APIs (Firebase for push, SendGrid for email, Twilio for SMS).</p>
+      <p>For in-app notifications, I'd write directly to a notifications table/store and push via WebSocket if the user is online. Unread count, mark-as-read, that whole UX. Separate from the async external channels.</p>
+      <p>Rate limiting per-user is important — nobody wants 50 notifications in an hour. Batch similar notifications ("3 people liked your post" instead of 3 separate notifs). And always, always have a way for users to control their preferences granularly.</p>
+      <ul class="key-points">
+        <li><strong>Event-driven:</strong> services publish events, notification service reacts</li>
+        <li><strong>Orchestrator:</strong> checks preferences, suppression rules, priority</li>
+        <li><strong>Channel fanout:</strong> separate queues + workers per channel (push/email/SMS)</li>
+        <li><strong>In-app:</strong> persistent store + WebSocket for real-time delivery</li>
+        <li><strong>User control:</strong> per-channel preferences, rate limiting, batching</li>
+      </ul>
+      <div class="follow-ups"><strong>Follow-ups:</strong> How do you handle notification delivery confirmation? • What about time-zone-aware delivery? • How do you A/B test notification content?</div>
+    </div>
+  </div>
+
+  <div class="nav-row">
+    <a href="ch07-interview.html" class="btn secondary">← Chapter 7 Interview</a>
+    <a href="ch09-interview.html" class="btn">Chapter 9 Interview →</a>
+  </div>
+
+  <script>
+    function toggle(btn) {
+      const answer = btn.nextElementSibling;
+      const visible = answer.classList.toggle('visible');
+      btn.textContent = visible ? 'Hide Answer' : 'Show Answer';
+    }
+  </script>
+</body>
+</html>

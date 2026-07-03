@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lesson 064 — Design a News Feed (End-to-End)</title>
+    <link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+    <h1>Design a News Feed (End-to-End)</h1>
+    <div class="lesson-meta">
+        <span>📘 Chapter 15: Putting It All Together</span>
+        <span>⏱️ 9 min read</span>
+        <span>🏗️ Lesson 064</span>
+    </div>
+
+    <p>The news feed problem boils down to one fundamental trade-off: <strong>do you pay the cost at write time (push) or read time (pull)?</strong> This single decision shapes the entire architecture.</p>
+
+    <h2>Requirements</h2>
+
+    <div class="card">
+        <h3>Functional</h3>
+        <ul>
+            <li>Users see a personalized feed of posts from people they follow</li>
+            <li>Feed updates in near-real-time when someone posts</li>
+            <li>Support text, images, links, reactions</li>
+            <li>Ranked by relevance (not just chronological)</li>
+        </ul>
+        <h3>Non-Functional</h3>
+        <ul>
+            <li><strong>Scale:</strong> 500M users, 10M posts/day, avg 300 followers</li>
+            <li><strong>Latency:</strong> Feed loads in &lt;500ms</li>
+            <li><strong>Freshness:</strong> New posts appear within 5 seconds</li>
+            <li><strong>Availability:</strong> 99.99% — feed is the core product</li>
+        </ul>
+    </div>
+
+    <h2>The Fan-Out Problem</h2>
+
+    <figure class="diagram">
+        <svg viewBox="0 0 720 280" xmlns="http://www.w3.org/2000/svg">
+            <defs>
+                <marker id="arr64" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+                    <polygon points="0 0, 8 3, 0 6" fill="#666"/>
+                </marker>
+            </defs>
+            <text x="360" y="18" text-anchor="middle" font-family="system-ui" font-size="13" font-weight="bold" fill="#333">Push vs Pull Fan-Out</text>
+
+            <!-- Push Model (left) -->
+            <text x="180" y="45" text-anchor="middle" font-family="system-ui" font-size="11" font-weight="bold" fill="#e63946">Push Model (Write-time)</text>
+            <rect x="130" y="60" width="100" height="35" rx="5" fill="#e63946" opacity="0.12" stroke="#e63946" stroke-width="1.5"/>
+            <text x="180" y="80" text-anchor="middle" font-family="system-ui" font-size="8" font-weight="bold" fill="#e63946">User Posts</text>
+
+            <rect x="70" y="130" width="80" height="30" rx="5" fill="#e9c46a" opacity="0.15" stroke="#e9c46a" stroke-width="1.5"/>
+            <text x="110" y="148" text-anchor="middle" font-family="system-ui" font-size="7" fill="#666">Fan-out Service</text>
+            <path d="M180 95 L120 128" stroke="#e63946" stroke-width="1.2" marker-end="url(#arr64)"/>
+
+            <rect x="40" y="185" width="60" height="25" rx="4" fill="#457b9d" opacity="0.12" stroke="#457b9d" stroke-width="1"/>
+            <text x="70" y="201" text-anchor="middle" font-family="system-ui" font-size="7" fill="#457b9d">Feed A</text>
+            <rect x="110" y="185" width="60" height="25" rx="4" fill="#457b9d" opacity="0.12" stroke="#457b9d" stroke-width="1"/>
+            <text x="140" y="201" text-anchor="middle" font-family="system-ui" font-size="7" fill="#457b9d">Feed B</text>
+            <rect x="180" y="185" width="60" height="25" rx="4" fill="#457b9d" opacity="0.12" stroke="#457b9d" stroke-width="1"/>
+            <text x="210" y="201" text-anchor="middle" font-family="system-ui" font-size="7" fill="#457b9d">Feed C</text>
+            <rect x="250" y="185" width="60" height="25" rx="4" fill="#457b9d" opacity="0.12" stroke="#457b9d" stroke-width="1"/>
+            <text x="280" y="201" text-anchor="middle" font-family="system-ui" font-size="7" fill="#457b9d">Feed N…</text>
+
+            <path d="M100 160 L75 183" stroke="#666" stroke-width="1" marker-end="url(#arr64)"/>
+            <path d="M110 160 L135 183" stroke="#666" stroke-width="1" marker-end="url(#arr64)"/>
+            <path d="M120 160 L200 183" stroke="#666" stroke-width="1" marker-end="url(#arr64)"/>
+            <path d="M130 160 L270 183" stroke="#666" stroke-width="1" marker-end="url(#arr64)"/>
+
+            <text x="160" y="235" text-anchor="middle" font-family="system-ui" font-size="7" fill="#e63946">✓ Fast reads (pre-built)</text>
+            <text x="160" y="248" text-anchor="middle" font-family="system-ui" font-size="7" fill="#e63946">✗ Expensive writes (N copies)</text>
+            <text x="160" y="261" text-anchor="middle" font-family="system-ui" font-size="7" fill="#e63946">✗ Celebrity problem (10M followers)</text>
+
+            <!-- Divider -->
+            <line x1="360" y1="40" x2="360" y2="270" stroke="#ddd" stroke-width="1" stroke-dasharray="4"/>
+
+            <!-- Pull Model (right) -->
+            <text x="540" y="45" text-anchor="middle" font-family="system-ui" font-size="11" font-weight="bold" fill="#2a9d8f">Pull Model (Read-time)</text>
+
+            <rect x="400" y="130" width="60" height="25" rx="4" fill="#457b9d" opacity="0.12" stroke="#457b9d" stroke-width="1"/>
+            <text x="430" y="146" text-anchor="middle" font-family="system-ui" font-size="7" fill="#457b9d">Posts X</text>
+            <rect x="470" y="130" width="60" height="25" rx="4" fill="#457b9d" opacity="0.12" stroke="#457b9d" stroke-width="1"/>
+            <text x="500" y="146" text-anchor="middle" font-family="system-ui" font-size="7" fill="#457b9d">Posts Y</text>
+            <rect x="540" y="130" width="60" height="25" rx="4" fill="#457b9d" opacity="0.12" stroke="#457b9d" stroke-width="1"/>
+            <text x="570" y="146" text-anchor="middle" font-family="system-ui" font-size="7" fill="#457b9d">Posts Z</text>
+            <rect x="610" y="130" width="60" height="25" rx="4" fill="#457b9d" opacity="0.12" stroke="#457b9d" stroke-width="1"/>
+            <text x="640" y="146" text-anchor="middle" font-family="system-ui" font-size="7" fill="#457b9d">Posts N…</text>
+
+            <rect x="490" y="185" width="100" height="35" rx="5" fill="#2a9d8f" opacity="0.12" stroke="#2a9d8f" stroke-width="1.5"/>
+            <text x="540" y="200" text-anchor="middle" font-family="system-ui" font-size="8" font-weight="bold" fill="#2a9d8f">Merge + Rank</text>
+            <text x="540" y="212" text-anchor="middle" font-family="system-ui" font-size="7" fill="#666">at read time</text>
+
+            <path d="M430 155 L520 183" stroke="#666" stroke-width="1" marker-end="url(#arr64)"/>
+            <path d="M500 155 L535 183" stroke="#666" stroke-width="1" marker-end="url(#arr64)"/>
+            <path d="M570 155 L545 183" stroke="#666" stroke-width="1" marker-end="url(#arr64)"/>
+            <path d="M640 155 L560 183" stroke="#666" stroke-width="1" marker-end="url(#arr64)"/>
+
+            <rect x="500" y="240" width="80" height="25" rx="5" fill="#6c5ce7" opacity="0.12" stroke="#6c5ce7" stroke-width="1.5"/>
+            <text x="540" y="256" text-anchor="middle" font-family="system-ui" font-size="8" font-weight="bold" fill="#6c5ce7">User Feed</text>
+            <path d="M540 220 L540 238" stroke="#666" stroke-width="1.2" marker-end="url(#arr64)"/>
+
+            <text x="540" y="278" text-anchor="middle" font-family="system-ui" font-size="7" fill="#2a9d8f">✓ Simple writes (just store post)</text>
+        </svg>
+        <figcaption>Figure 1: Push pre-computes feeds at write time; Pull aggregates at read time. The celebrity problem makes pure push impractical.</figcaption>
+    </figure>
+
+    <h2>The Hybrid Approach</h2>
+
+    <div class="card info">
+        <p><strong>The solution used by Twitter and Facebook:</strong></p>
+        <ul>
+            <li><strong>Normal users</strong> (≤10K followers): Push — fan-out on write to followers' feed caches</li>
+            <li><strong>Celebrities</strong> (>10K followers): Pull — their posts are fetched at read time and merged</li>
+        </ul>
+        <p>When a user opens their feed: fetch pre-built feed (push results) + merge in celebrity posts (pull results) + rank everything.</p>
+        <p><strong>Why?</strong> A celebrity with 10M followers posting once = 10M writes. That's too expensive. Instead, merge their posts only when a follower actually reads their feed.</p>
+    </div>
+
+    <h2>Full Architecture</h2>
+
+    <figure class="diagram">
+        <svg viewBox="0 0 720 220" xmlns="http://www.w3.org/2000/svg">
+            <defs>
+                <marker id="arr64b" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+                    <polygon points="0 0, 8 3, 0 6" fill="#666"/>
+                </marker>
+            </defs>
+            <!-- Post flow -->
+            <rect x="20" y="80" width="80" height="40" rx="5" fill="#e63946" opacity="0.12" stroke="#e63946" stroke-width="1.5"/>
+            <text x="60" y="100" text-anchor="middle" font-family="system-ui" font-size="8" font-weight="bold" fill="#e63946">Post Service</text>
+            <text x="60" y="112" text-anchor="middle" font-family="system-ui" font-size="7" fill="#666">Create post</text>
+
+            <rect x="140" y="80" width="90" height="40" rx="5" fill="#e9c46a" opacity="0.15" stroke="#e9c46a" stroke-width="1.5"/>
+            <text x="185" y="100" text-anchor="middle" font-family="system-ui" font-size="8" font-weight="bold" fill="#e9c46a">Fan-out</text>
+            <text x="185" y="112" text-anchor="middle" font-family="system-ui" font-size="7" fill="#666">Workers (async)</text>
+            <path d="M100 100 L138 100" stroke="#666" stroke-width="1.2" marker-end="url(#arr64b)"/>
+
+            <rect x="270" y="80" width="90" height="40" rx="5" fill="#2a9d8f" opacity="0.12" stroke="#2a9d8f" stroke-width="1.5"/>
+            <text x="315" y="100" text-anchor="middle" font-family="system-ui" font-size="8" font-weight="bold" fill="#2a9d8f">Feed Cache</text>
+            <text x="315" y="112" text-anchor="middle" font-family="system-ui" font-size="7" fill="#666">Redis (per-user)</text>
+            <path d="M230 100 L268 100" stroke="#666" stroke-width="1.2" marker-end="url(#arr64b)"/>
+
+            <rect x="400" y="80" width="90" height="40" rx="5" fill="#457b9d" opacity="0.12" stroke="#457b9d" stroke-width="1.5"/>
+            <text x="445" y="100" text-anchor="middle" font-family="system-ui" font-size="8" font-weight="bold" fill="#457b9d">Feed Service</text>
+            <text x="445" y="112" text-anchor="middle" font-family="system-ui" font-size="7" fill="#666">Merge + Rank</text>
+            <path d="M360 100 L398 100" stroke="#666" stroke-width="1.2" marker-end="url(#arr64b)"/>
+
+            <rect x="530" y="80" width="80" height="40" rx="5" fill="#6c5ce7" opacity="0.12" stroke="#6c5ce7" stroke-width="1.5"/>
+            <text x="570" y="100" text-anchor="middle" font-family="system-ui" font-size="8" font-weight="bold" fill="#6c5ce7">Client</text>
+            <text x="570" y="112" text-anchor="middle" font-family="system-ui" font-size="7" fill="#666">Render feed</text>
+            <path d="M490 100 L528 100" stroke="#666" stroke-width="1.2" marker-end="url(#arr64b)"/>
+
+            <!-- Celebrity pull path -->
+            <rect x="400" y="155" width="90" height="35" rx="5" fill="#e63946" opacity="0.1" stroke="#e63946" stroke-width="1"/>
+            <text x="445" y="172" text-anchor="middle" font-family="system-ui" font-size="7" font-weight="bold" fill="#e63946">Celebrity Posts</text>
+            <text x="445" y="184" text-anchor="middle" font-family="system-ui" font-size="6" fill="#666">(pulled at read time)</text>
+            <path d="M445 155 L445 122" stroke="#e63946" stroke-width="1" stroke-dasharray="3" marker-end="url(#arr64b)"/>
+
+            <!-- Ranking -->
+            <rect x="630" y="65" width="75" height="50" rx="5" fill="#f4a261" opacity="0.12" stroke="#f4a261" stroke-width="1"/>
+            <text x="667" y="83" text-anchor="middle" font-family="system-ui" font-size="7" font-weight="bold" fill="#f4a261">Ranking</text>
+            <text x="667" y="95" text-anchor="middle" font-family="system-ui" font-size="6" fill="#666">ML model:</text>
+            <text x="667" y="106" text-anchor="middle" font-family="system-ui" font-size="6" fill="#666">engagement,</text>
+            <text x="667" y="116" text-anchor="middle" font-family="system-ui" font-size="6" fill="#666">recency, affinity</text>
+            <path d="M490 90 L628 85" stroke="#f4a261" stroke-width="1" stroke-dasharray="3" marker-end="url(#arr64b)"/>
+
+            <!-- Labels -->
+            <text x="60" y="55" text-anchor="middle" font-family="system-ui" font-size="7" fill="#e63946">WRITE PATH</text>
+            <text x="500" y="55" text-anchor="middle" font-family="system-ui" font-size="7" fill="#2a9d8f">READ PATH</text>
+            <line x1="380" y1="45" x2="380" y2="60" stroke="#ddd" stroke-width="1"/>
+        </svg>
+        <figcaption>Figure 2: Hybrid architecture — fan-out on write for normal users, pull at read time for celebrities, ML ranking on top.</figcaption>
+    </figure>
+
+    <h2>Feed Ranking</h2>
+
+    <div class="card">
+        <h3>From Chronological to ML-Based</h3>
+        <ul>
+            <li><strong>Simple:</strong> Reverse chronological — newest first (early Twitter)</li>
+            <li><strong>Engagement:</strong> Score = likes × 2 + comments × 3 + shares × 5 + recency_decay</li>
+            <li><strong>ML:</strong> Thousands of signals — relationship strength, content type preference, time-of-day patterns, interaction history</li>
+        </ul>
+        <p>Facebook's ranking considers <strong>10,000+ signals</strong> and runs inference on every feed load. The ranking model alone is a team of 100+ engineers.</p>
+    </div>
+
+    <div class="real-world">
+        <h3>Twitter: Pull → Push → Hybrid</h3>
+        <ul>
+            <li><strong>Early Twitter:</strong> Pure pull — query all followed users' tweets at read time. Slow at scale.</li>
+            <li><strong>2012 redesign:</strong> Moved to push (fan-out on write). Each tweet fanned out to all followers' timelines in Redis.</li>
+            <li><strong>Celebrity problem:</strong> Lady Gaga tweeting = 30M+ writes. Solution: hybrid — celebrities are pulled at read time.</li>
+            <li>Timeline cache: sorted set in Redis, capped at 800 tweets per user</li>
+        </ul>
+    </div>
+
+    <div class="real-world">
+        <h3>Facebook News Feed: ML at Extreme Scale</h3>
+        <ul>
+            <li>Average user has 1,500+ candidate stories per feed load</li>
+            <li>Multi-pass ranking: lightweight filter → candidate scoring → final ranking</li>
+            <li>Features include: post type, poster affinity, content freshness, predicted engagement</li>
+            <li>A/B tests ranking changes on millions of users before rolling out</li>
+        </ul>
+    </div>
+
+    <h2>Interactive: Fan-Out Cost Calculator</h2>
+
+    <div class="interactive">
+        <h3>Calculate Fan-Out Cost</h3>
+        <p>Adjust parameters to see how push vs pull costs compare.</p>
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:10px; margin:12px 0;">
+            <div>
+                <label><strong>Posts per day:</strong></label><br>
+                <input type="range" id="posts-per-day" min="1" max="50" value="10" oninput="calcFanout()" style="width:100%;">
+                <span id="posts-val">10M</span>
+            </div>
+            <div>
+                <label><strong>Avg followers:</strong></label><br>
+                <input type="range" id="avg-followers" min="50" max="5000" value="300" step="50" oninput="calcFanout()" style="width:100%;">
+                <span id="followers-val">300</span>
+            </div>
+            <div>
+                <label><strong>Celebrity threshold:</strong></label><br>
+                <input type="range" id="celeb-threshold" min="1000" max="100000" value="10000" step="1000" oninput="calcFanout()" style="width:100%;">
+                <span id="celeb-val">10K</span>
+            </div>
+            <div>
+                <label><strong>% celebrities:</strong></label><br>
+                <input type="range" id="celeb-pct" min="0" max="10" value="1" oninput="calcFanout()" style="width:100%;">
+                <span id="celeb-pct-val">1%</span>
+            </div>
+        </div>
+        <div id="fanout-result" style="padding:15px; background:#f8f9fa; border-radius:8px; border:1px solid #ddd; font-size:0.9em;"></div>
+    </div>
+
+    <script>
+    (function() {
+        window.calcFanout = function() {
+            var posts = parseInt(document.getElementById('posts-per-day').value);
+            var followers = parseInt(document.getElementById('avg-followers').value);
+            var threshold = parseInt(document.getElementById('celeb-threshold').value);
+            var celebPct = parseInt(document.getElementById('celeb-pct').value);
+
+            document.getElementById('posts-val').textContent = posts + 'M';
+            document.getElementById('followers-val').textContent = followers;
+            document.getElementById('celeb-val').textContent = (threshold/1000) + 'K';
+            document.getElementById('celeb-pct-val').textContent = celebPct + '%';
+
+            var totalPosts = posts * 1e6;
+            var normalPosts = totalPosts * (100 - celebPct) / 100;
+            var celebPosts = totalPosts * celebPct / 100;
+
+            // Push cost
+            var pushWrites = normalPosts * followers;
+            var pushWritesB = (pushWrites / 1e9).toFixed(1);
+
+            // Pure push cost (including celebs)
+            var purePushWrites = totalPosts * followers;
+            var purePushB = (purePushWrites / 1e9).toFixed(1);
+
+            // Pull cost (reads at feed time, assume 500M users read once/day, following 200 users)
+            var pullReads = 500e6 * 200;
+            var pullReadsB = (pullReads / 1e9).toFixed(0);
+
+            var html = '<div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:10px; text-align:center;">';
+            html += '<div style="padding:10px; background:#e63946; color:#fff; border-radius:6px;"><strong>Pure Push</strong><br>' + purePushB + 'B writes/day<br><span style="font-size:0.8em;">Every post → all followers</span></div>';
+            html += '<div style="padding:10px; background:#2a9d8f; color:#fff; border-radius:6px;"><strong>Hybrid</strong><br>' + pushWritesB + 'B writes/day<br><span style="font-size:0.8em;">Skip celebrity fan-out</span></div>';
+            html += '<div style="padding:10px; background:#457b9d; color:#fff; border-radius:6px;"><strong>Pure Pull</strong><br>' + pullReadsB + 'B reads/day<br><span style="font-size:0.8em;">Merge at read time</span></div>';
+            html += '</div>';
+
+            var savings = ((1 - pushWrites/purePushWrites) * 100).toFixed(0);
+            html += '<div style="margin-top:10px; padding:8px; background:#2a9d8f22; border-radius:4px; font-size:0.85em;">';
+            html += '<strong>Hybrid saves ' + savings + '% of write fan-out</strong> by pulling celebrity posts at read time instead of pushing to millions of feeds.';
+            html += '</div>';
+
+            document.getElementById('fanout-result').innerHTML = html;
+        };
+        calcFanout();
+    })();
+    </script>
+
+    <div class="takeaway">
+        <h3>Key Takeaway</h3>
+        <p>The fan-out trade-off is the central decision in news feed design: <strong>push for fast reads at write cost, pull for write simplicity at read cost</strong>. The hybrid approach handles the celebrity problem — push for normal users, pull for high-follower accounts. On top of this, ML-based ranking transforms a simple timeline into an engagement-optimized feed, but adds significant infrastructure complexity.</p>
+    </div>
+
+    <div class="footnote">
+        <p><strong>Previous:</strong> <a href="0063-design-chat-system.html">Design a Chat System</a> | <strong>Next:</strong> <a href="0065-presenting-system-design.html">How to Present a System Design</a></p>
+    </div>
+</body>
+</html>

@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lesson 054 — Authentication & Authorization (OAuth2, JWT)</title>
+    <link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+    <h1>Authentication &amp; Authorization (OAuth2, JWT)</h1>
+    <div class="lesson-meta">
+        <span>📘 Chapter 13: Security Architecture</span>
+        <span>⏱️ 9 min read</span>
+        <span>🏗️ Lesson 054</span>
+    </div>
+
+    <p><strong>Authentication</strong> answers "who are you?" while <strong>authorization</strong> answers "what can you do?" These are distinct concerns but tightly coupled in practice. Getting them wrong means either locking out legitimate users or letting attackers in.</p>
+
+    <h2>Auth Flow: Login → Token → Validated Request</h2>
+
+    <figure class="diagram">
+        <svg viewBox="0 0 720 220" xmlns="http://www.w3.org/2000/svg">
+            <defs>
+                <marker id="arr54" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+                    <polygon points="0 0, 8 3, 0 6" fill="#555"/>
+                </marker>
+            </defs>
+            <text x="360" y="20" text-anchor="middle" font-family="system-ui" font-size="13" font-weight="bold" fill="#333">Authentication &amp; Authorization Flow</text>
+
+            <!-- User -->
+            <rect x="30" y="60" width="100" height="50" rx="8" fill="#457b9d" opacity="0.15" stroke="#457b9d" stroke-width="2"/>
+            <text x="80" y="82" text-anchor="middle" font-family="system-ui" font-size="9" font-weight="bold" fill="#457b9d">User</text>
+            <text x="80" y="97" text-anchor="middle" font-family="system-ui" font-size="8" fill="#666">credentials</text>
+
+            <!-- Identity Provider -->
+            <rect x="200" y="60" width="130" height="50" rx="8" fill="#2a9d8f" opacity="0.15" stroke="#2a9d8f" stroke-width="2"/>
+            <text x="265" y="82" text-anchor="middle" font-family="system-ui" font-size="9" font-weight="bold" fill="#2a9d8f">Identity Provider</text>
+            <text x="265" y="97" text-anchor="middle" font-family="system-ui" font-size="8" fill="#666">verify → issue token</text>
+
+            <!-- API Gateway -->
+            <rect x="400" y="60" width="120" height="50" rx="8" fill="#e9c46a" opacity="0.15" stroke="#e9c46a" stroke-width="2"/>
+            <text x="460" y="82" text-anchor="middle" font-family="system-ui" font-size="9" font-weight="bold" fill="#e9c46a">API Gateway</text>
+            <text x="460" y="97" text-anchor="middle" font-family="system-ui" font-size="8" fill="#666">validate token</text>
+
+            <!-- Service -->
+            <rect x="590" y="60" width="100" height="50" rx="8" fill="#6c5ce7" opacity="0.15" stroke="#6c5ce7" stroke-width="2"/>
+            <text x="640" y="82" text-anchor="middle" font-family="system-ui" font-size="9" font-weight="bold" fill="#6c5ce7">Service</text>
+            <text x="640" y="97" text-anchor="middle" font-family="system-ui" font-size="8" fill="#666">check permissions</text>
+
+            <!-- Arrows -->
+            <path d="M130 75 L195 75" stroke="#555" stroke-width="1.5" fill="none" marker-end="url(#arr54)"/>
+            <text x="163" y="68" text-anchor="middle" font-family="system-ui" font-size="7" fill="#555">1. Login</text>
+
+            <path d="M265 110 L265 145 L80 145 L80 115" stroke="#2a9d8f" stroke-width="1.5" fill="none" marker-end="url(#arr54)" stroke-dasharray="4,2"/>
+            <text x="170" y="140" text-anchor="middle" font-family="system-ui" font-size="7" fill="#2a9d8f">2. Return JWT</text>
+
+            <path d="M130 95 L395 95" stroke="#555" stroke-width="1.5" fill="none" marker-end="url(#arr54)"/>
+            <text x="260" y="170" text-anchor="middle" font-family="system-ui" font-size="7" fill="#555">3. Request + Bearer token</text>
+
+            <path d="M520 85 L585 85" stroke="#555" stroke-width="1.5" fill="none" marker-end="url(#arr54)"/>
+            <text x="553" y="78" text-anchor="middle" font-family="system-ui" font-size="7" fill="#555">4. Forward</text>
+
+            <!-- Labels -->
+            <text x="80" y="195" text-anchor="middle" font-family="system-ui" font-size="8" fill="#457b9d">Authentication</text>
+            <text x="80" y="207" text-anchor="middle" font-family="system-ui" font-size="8" fill="#457b9d">(who are you?)</text>
+            <text x="640" y="195" text-anchor="middle" font-family="system-ui" font-size="8" fill="#6c5ce7">Authorization</text>
+            <text x="640" y="207" text-anchor="middle" font-family="system-ui" font-size="8" fill="#6c5ce7">(what can you do?)</text>
+        </svg>
+        <figcaption>Figure 1: User authenticates once, receives a token, and uses it for subsequent authorized requests.</figcaption>
+    </figure>
+
+    <h2>OAuth2 Flows</h2>
+
+    <div class="card">
+        <h3>Authorization Code Flow (Web Apps)</h3>
+        <ol>
+            <li>User clicks "Sign in with Google"</li>
+            <li>App redirects to Google's authorization server</li>
+            <li>User authenticates and consents</li>
+            <li>Google redirects back with an <strong>authorization code</strong></li>
+            <li>App exchanges code for tokens (server-to-server, secret stays safe)</li>
+            <li>App receives access token + refresh token</li>
+        </ol>
+        <p><strong>Why the extra step?</strong> The code exchange happens server-side, so the access token never touches the browser.</p>
+    </div>
+
+    <div class="card">
+        <h3>Client Credentials Flow (Service-to-Service)</h3>
+        <p>No human involved — a service authenticates itself:</p>
+        <ol>
+            <li>Service sends its <code>client_id</code> + <code>client_secret</code> to the auth server</li>
+            <li>Auth server validates and returns an access token</li>
+            <li>Service uses token to call other APIs</li>
+        </ol>
+        <p>Used for: background jobs, microservice-to-microservice calls, scheduled tasks.</p>
+    </div>
+
+    <h2>JWT Structure</h2>
+
+    <div class="card info">
+        <p>A JWT (JSON Web Token) has three base64-encoded parts separated by dots:</p>
+        <pre style="background:#1a1a2e;color:#e0e0e0;padding:12px;border-radius:6px;font-size:0.8em;overflow-x:auto;"><span style="color:#e63946">eyJhbGciOiJSUzI1NiJ9</span>.<span style="color:#2a9d8f">eyJzdWIiOiJ1c2VyMTIzIiwicm9sZSI6ImFkbWluIiwiZXhwIjoxNzA5MjUxMjAwfQ</span>.<span style="color:#e9c46a">dBjftJeZ4CVP-mB92K27uhbUJU1p...</span></pre>
+        <table style="width:100%; border-collapse:collapse; font-size:0.85em; margin-top:8px;">
+            <tr style="border-bottom:1px solid #ddd;">
+                <td style="padding:4px;color:#e63946;font-weight:bold;">Header</td>
+                <td style="padding:4px;">Algorithm + token type: <code>{"alg":"RS256","typ":"JWT"}</code></td>
+            </tr>
+            <tr style="border-bottom:1px solid #ddd;">
+                <td style="padding:4px;color:#2a9d8f;font-weight:bold;">Payload</td>
+                <td style="padding:4px;">Claims: <code>{"sub":"user123","role":"admin","exp":1709251200}</code></td>
+            </tr>
+            <tr>
+                <td style="padding:4px;color:#e9c46a;font-weight:bold;">Signature</td>
+                <td style="padding:4px;">HMAC or RSA signature over header + payload — tamper-proof</td>
+            </tr>
+        </table>
+        <p style="margin-top:8px;"><strong>Stateless verification:</strong> Any service with the public key can verify the token without calling the auth server.</p>
+    </div>
+
+    <h2>RBAC vs ABAC</h2>
+
+    <div class="card">
+        <table style="width:100%; border-collapse:collapse; font-size:0.9em;">
+            <tr style="border-bottom:2px solid #ddd;">
+                <th style="text-align:left;padding:6px;">Aspect</th>
+                <th style="text-align:left;padding:6px;">RBAC (Role-Based)</th>
+                <th style="text-align:left;padding:6px;">ABAC (Attribute-Based)</th>
+            </tr>
+            <tr style="border-bottom:1px solid #eee;">
+                <td style="padding:6px;">Decision based on</td>
+                <td style="padding:6px;">User's assigned role</td>
+                <td style="padding:6px;">Multiple attributes (role, time, location, resource)</td>
+            </tr>
+            <tr style="border-bottom:1px solid #eee;">
+                <td style="padding:6px;">Example</td>
+                <td style="padding:6px;">"admins can delete users"</td>
+                <td style="padding:6px;">"managers can approve expenses &lt; $10k during business hours"</td>
+            </tr>
+            <tr style="border-bottom:1px solid #eee;">
+                <td style="padding:6px;">Complexity</td>
+                <td style="padding:6px;">Simple, well-understood</td>
+                <td style="padding:6px;">Flexible but harder to audit</td>
+            </tr>
+            <tr>
+                <td style="padding:6px;">Best for</td>
+                <td style="padding:6px;">Most applications</td>
+                <td style="padding:6px;">Complex enterprises, fine-grained needs</td>
+            </tr>
+        </table>
+    </div>
+
+    <h2>Token Refresh &amp; Revocation</h2>
+
+    <div class="card">
+        <h3>Refresh Strategy</h3>
+        <ul>
+            <li><strong>Access tokens:</strong> Short-lived (5–15 min) — limits damage if leaked</li>
+            <li><strong>Refresh tokens:</strong> Longer-lived (days/weeks), stored securely, exchanged for new access tokens</li>
+            <li><strong>Rotation:</strong> Issue a new refresh token with each use; old one is invalidated</li>
+        </ul>
+        <h3>Revocation Strategies</h3>
+        <ul>
+            <li><strong>Token blocklist:</strong> Check each request against a revoked-token list (adds state)</li>
+            <li><strong>Short expiry:</strong> Don't revoke — just wait for it to expire (simplest)</li>
+            <li><strong>Token versioning:</strong> Bump user's token version; all older tokens become invalid</li>
+        </ul>
+    </div>
+
+    <h2>Real-World Examples</h2>
+
+    <div class="real-world">
+        <h3>Google's OAuth2: "Sign in with Google"</h3>
+        <p>Google's OAuth2 implementation enables millions of apps to authenticate users without handling passwords. The Authorization Code flow keeps secrets server-side. Scopes like <code>email</code>, <code>profile</code>, <code>calendar.readonly</code> let users grant minimal permissions. Google issues short-lived access tokens (1 hour) with refresh tokens for long sessions — a single identity provider serving the entire ecosystem.</p>
+    </div>
+
+    <div class="real-world">
+        <h3>Stripe: API Keys + Scoped Permissions</h3>
+        <p>Stripe uses <strong>restricted API keys</strong> — each key can be scoped to specific resources (charges: read-only, customers: write). They separate <em>publishable keys</em> (safe for browser) from <em>secret keys</em> (server-only). Keys can be rolled without downtime. This is Client Credentials pattern with fine-grained RBAC on each key.</p>
+    </div>
+
+    <h2>Interactive: Decode a JWT</h2>
+
+    <div class="interactive">
+        <h3>JWT Decoder</h3>
+        <p>Paste a JWT or use the example to see its decoded parts:</p>
+        <textarea id="jwt-input" rows="3" style="width:100%;max-width:600px;font-family:monospace;font-size:0.75em;padding:8px;border-radius:4px;border:1px solid #ccc;" placeholder="Paste a JWT here...">eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c2VyXzEyMyIsIm5hbWUiOiJBbGljZSBFbmdpbmVlciIsInJvbGUiOiJhZG1pbiIsImlhdCI6MTcwOTI0NzYwMCwiZXhwIjoxNzA5MjUxMjAwLCJpc3MiOiJhdXRoLmV4YW1wbGUuY29tIiwiYXVkIjoiYXBpLmV4YW1wbGUuY29tIn0.signature_would_be_here</textarea>
+        <br>
+        <button onclick="decodeJWT()">Decode</button>
+        <div id="jwt-output" style="margin-top:12px;font-size:0.85em;"></div>
+    </div>
+
+    <script>
+    (function() {
+        function b64Decode(str) {
+            try {
+                var padded = str.replace(/-/g, '+').replace(/_/g, '/');
+                while (padded.length % 4) padded += '=';
+                return JSON.parse(atob(padded));
+            } catch(e) {
+                return null;
+            }
+        }
+
+        window.decodeJWT = function() {
+            var token = document.getElementById('jwt-input').value.trim();
+            var output = document.getElementById('jwt-output');
+            var parts = token.split('.');
+
+            if (parts.length !== 3) {
+                output.innerHTML = '<span style="color:#e63946">Invalid JWT — must have 3 parts separated by dots.</span>';
+                return;
+            }
+
+            var header = b64Decode(parts[0]);
+            var payload = b64Decode(parts[1]);
+
+            var html = '<div style="margin-bottom:10px;padding:10px;background:#fdf0f0;border-left:4px solid #e63946;border-radius:4px;">';
+            html += '<strong style="color:#e63946;">Header:</strong><pre style="margin:4px 0 0;font-size:0.9em;">' + (header ? JSON.stringify(header, null, 2) : 'Could not decode') + '</pre></div>';
+
+            html += '<div style="margin-bottom:10px;padding:10px;background:#f0fdf4;border-left:4px solid #2a9d8f;border-radius:4px;">';
+            html += '<strong style="color:#2a9d8f;">Payload (Claims):</strong><pre style="margin:4px 0 0;font-size:0.9em;">' + (payload ? JSON.stringify(payload, null, 2) : 'Could not decode') + '</pre>';
+
+            if (payload && payload.exp) {
+                var expDate = new Date(payload.exp * 1000);
+                var isExpired = expDate < new Date();
+                html += '<p style="margin:6px 0 0;font-size:0.85em;">⏰ Expires: ' + expDate.toISOString() + (isExpired ? ' <span style="color:#e63946">(EXPIRED)</span>' : ' <span style="color:#2a9d8f">(valid)</span>') + '</p>';
+            }
+            html += '</div>';
+
+            html += '<div style="padding:10px;background:#fdf6e3;border-left:4px solid #e9c46a;border-radius:4px;">';
+            html += '<strong style="color:#e9c46a;">Signature:</strong> <code style="font-size:0.8em;">' + parts[2].substring(0, 40) + '...</code>';
+            html += '<p style="margin:4px 0 0;font-size:0.85em;">⚠️ Signature cannot be verified client-side without the key.</p></div>';
+
+            output.innerHTML = html;
+        };
+    })();
+    </script>
+
+    <div class="takeaway">
+        <h3>Key Takeaway</h3>
+        <p>Auth is a <strong>cross-cutting concern</strong> — centralize it at the gateway or identity service rather than implementing it in every microservice. Use OAuth2 for delegation, JWT for stateless verification, short-lived tokens for security, and the principle of least privilege for authorization.</p>
+    </div>
+
+    <div class="footnote">
+        <p><strong>Previous:</strong> <a href="0053-chaos-engineering.html">Chaos Engineering Principles</a> | <strong>Next:</strong> <a href="0055-network-security.html">Network Security (TLS, Firewalls, VPCs)</a></p>
+    </div>
+</body>
+</html>

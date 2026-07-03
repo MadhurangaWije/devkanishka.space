@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lesson 029 — Stateless Services &amp; Session Management</title>
+    <link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+    <h1>Stateless Services &amp; Session Management</h1>
+    <div class="lesson-meta">
+        <span>📘 Chapter 7: Scalability Patterns</span>
+        <span>⏱️ 9 min read</span>
+        <span>🏗️ Lesson 029</span>
+    </div>
+
+    <p>In <a href="0011-stateless-vs-stateful.html">Lesson 011</a>, we introduced stateless vs stateful services. Now we go deeper: where does state <em>hide</em> in supposedly stateless services, and how do you manage the state that must exist (like user sessions) without sacrificing scalability?</p>
+
+    <h2>Where State Hides</h2>
+
+    <div class="card info">
+        <h3>Your "Stateless" Service Probably Isn't</h3>
+        <p>State sneaks in through many back doors:</p>
+        <ul>
+            <li><strong>In-memory caches:</strong> A local HashMap of recently-fetched user profiles. If the next request hits a different server, cache miss.</li>
+            <li><strong>File uploads:</strong> Saving <code>/tmp/upload_123.jpg</code> locally. A subsequent request to process it lands on a different server — file not found.</li>
+            <li><strong>WebSocket connections:</strong> Client connects to Server A. If Server A dies, the connection and all subscription state is lost.</li>
+            <li><strong>Scheduled jobs:</strong> A cron that runs on one instance. If that instance scales down, the job disappears.</li>
+            <li><strong>Local disk logs:</strong> Writing to <code>./app.log</code>. Logs scatter across N servers — impossible to correlate.</li>
+            <li><strong>Rate limit counters:</strong> Tracking "this IP sent 50 requests" in local memory. Each server counts separately — limits are N× too generous.</li>
+        </ul>
+    </div>
+
+    <h2>Session Management Approaches</h2>
+
+    <figure class="diagram">
+        <svg viewBox="0 0 720 380" xmlns="http://www.w3.org/2000/svg">
+            <text x="360" y="22" text-anchor="middle" font-family="system-ui" font-size="13" font-weight="bold" fill="#333">Session Storage Approaches Compared</text>
+
+            <!-- Approach 1: Server-side (Redis) -->
+            <rect x="20" y="45" width="210" height="155" rx="8" fill="#2a9d8f" opacity="0.07" stroke="#2a9d8f" stroke-width="1.5"/>
+            <text x="125" y="65" text-anchor="middle" font-family="system-ui" font-size="10" font-weight="bold" fill="#2a9d8f">Server-Side (Redis/Memcached)</text>
+
+            <rect x="40" y="78" width="60" height="25" rx="3" fill="#264653" opacity="0.1" stroke="#264653" stroke-width="1"/>
+            <text x="70" y="94" text-anchor="middle" font-family="system-ui" font-size="7" fill="#264653">Server A</text>
+            <rect x="110" y="78" width="60" height="25" rx="3" fill="#264653" opacity="0.1" stroke="#264653" stroke-width="1"/>
+            <text x="140" y="94" text-anchor="middle" font-family="system-ui" font-size="7" fill="#264653">Server B</text>
+
+            <line x1="70" y1="103" x2="100" y2="125" stroke="#2a9d8f" stroke-width="1.5"/>
+            <line x1="140" y1="103" x2="110" y2="125" stroke="#2a9d8f" stroke-width="1.5"/>
+
+            <rect x="60" y="125" width="90" height="28" rx="4" fill="#2a9d8f" opacity="0.2" stroke="#2a9d8f" stroke-width="1.5"/>
+            <text x="105" y="142" text-anchor="middle" font-family="system-ui" font-size="8" font-weight="bold" fill="#2a9d8f">Redis Cluster</text>
+
+            <text x="125" y="170" text-anchor="middle" font-family="system-ui" font-size="7" fill="#2a9d8f">✓ Revocable</text>
+            <text x="125" y="181" text-anchor="middle" font-family="system-ui" font-size="7" fill="#2a9d8f">✓ Small cookie (just ID)</text>
+            <text x="125" y="192" text-anchor="middle" font-family="system-ui" font-size="7" fill="#e63946">✗ Extra hop (network latency)</text>
+
+            <!-- Approach 2: JWT (Client-side) -->
+            <rect x="250" y="45" width="210" height="155" rx="8" fill="#f4a261" opacity="0.1" stroke="#e76f51" stroke-width="1.5"/>
+            <text x="355" y="65" text-anchor="middle" font-family="system-ui" font-size="10" font-weight="bold" fill="#e76f51">Client-Side (JWT)</text>
+
+            <rect x="290" y="78" width="60" height="25" rx="3" fill="#264653" opacity="0.1" stroke="#264653" stroke-width="1"/>
+            <text x="320" y="94" text-anchor="middle" font-family="system-ui" font-size="7" fill="#264653">Server A</text>
+            <rect x="360" y="78" width="60" height="25" rx="3" fill="#264653" opacity="0.1" stroke="#264653" stroke-width="1"/>
+            <text x="390" y="94" text-anchor="middle" font-family="system-ui" font-size="7" fill="#264653">Server B</text>
+
+            <rect x="300" y="125" width="110" height="28" rx="4" fill="#f4a261" opacity="0.2" stroke="#e76f51" stroke-width="1.5"/>
+            <text x="355" y="137" text-anchor="middle" font-family="system-ui" font-size="8" font-weight="bold" fill="#e76f51">JWT in Cookie/Header</text>
+            <text x="355" y="148" text-anchor="middle" font-family="system-ui" font-size="6" fill="#666">header.payload.signature</text>
+
+            <text x="355" y="170" text-anchor="middle" font-family="system-ui" font-size="7" fill="#2a9d8f">✓ No server lookup needed</text>
+            <text x="355" y="181" text-anchor="middle" font-family="system-ui" font-size="7" fill="#2a9d8f">✓ Scales infinitely</text>
+            <text x="355" y="192" text-anchor="middle" font-family="system-ui" font-size="7" fill="#e63946">✗ Can't revoke until expiry</text>
+
+            <!-- Approach 3: Encrypted Cookie -->
+            <rect x="480" y="45" width="220" height="155" rx="8" fill="#457b9d" opacity="0.08" stroke="#457b9d" stroke-width="1.5"/>
+            <text x="590" y="65" text-anchor="middle" font-family="system-ui" font-size="10" font-weight="bold" fill="#457b9d">Encrypted Cookie</text>
+
+            <rect x="520" y="78" width="60" height="25" rx="3" fill="#264653" opacity="0.1" stroke="#264653" stroke-width="1"/>
+            <text x="550" y="94" text-anchor="middle" font-family="system-ui" font-size="7" fill="#264653">Server A</text>
+            <rect x="600" y="78" width="60" height="25" rx="3" fill="#264653" opacity="0.1" stroke="#264653" stroke-width="1"/>
+            <text x="630" y="94" text-anchor="middle" font-family="system-ui" font-size="7" fill="#264653">Server B</text>
+
+            <rect x="530" y="125" width="120" height="28" rx="4" fill="#457b9d" opacity="0.15" stroke="#457b9d" stroke-width="1.5"/>
+            <text x="590" y="137" text-anchor="middle" font-family="system-ui" font-size="8" font-weight="bold" fill="#457b9d">AES-encrypted cookie</text>
+            <text x="590" y="148" text-anchor="middle" font-family="system-ui" font-size="6" fill="#666">All state in the cookie</text>
+
+            <text x="590" y="170" text-anchor="middle" font-family="system-ui" font-size="7" fill="#2a9d8f">✓ No external storage</text>
+            <text x="590" y="181" text-anchor="middle" font-family="system-ui" font-size="7" fill="#2a9d8f">✓ Simple implementation</text>
+            <text x="590" y="192" text-anchor="middle" font-family="system-ui" font-size="7" fill="#e63946">✗ 4KB cookie size limit</text>
+
+            <!-- Comparison table at bottom -->
+            <rect x="20" y="215" width="680" height="150" rx="6" fill="#f8f9fa" stroke="#ddd" stroke-width="1"/>
+            <text x="360" y="237" text-anchor="middle" font-family="system-ui" font-size="10" font-weight="bold" fill="#333">Quick Comparison</text>
+
+            <!-- Headers -->
+            <text x="130" y="260" text-anchor="middle" font-family="system-ui" font-size="8" font-weight="bold" fill="#333">Feature</text>
+            <text x="280" y="260" text-anchor="middle" font-family="system-ui" font-size="8" font-weight="bold" fill="#2a9d8f">Redis</text>
+            <text x="430" y="260" text-anchor="middle" font-family="system-ui" font-size="8" font-weight="bold" fill="#e76f51">JWT</text>
+            <text x="580" y="260" text-anchor="middle" font-family="system-ui" font-size="8" font-weight="bold" fill="#457b9d">Enc. Cookie</text>
+
+            <line x1="40" y1="267" x2="680" y2="267" stroke="#ddd" stroke-width="1"/>
+
+            <text x="130" y="283" text-anchor="middle" font-family="system-ui" font-size="8" fill="#333">Instant revocation</text>
+            <text x="280" y="283" text-anchor="middle" font-family="system-ui" font-size="8" fill="#2a9d8f">✓ Yes</text>
+            <text x="430" y="283" text-anchor="middle" font-family="system-ui" font-size="8" fill="#e63946">✗ No*</text>
+            <text x="580" y="283" text-anchor="middle" font-family="system-ui" font-size="8" fill="#e63946">✗ No</text>
+
+            <text x="130" y="300" text-anchor="middle" font-family="system-ui" font-size="8" fill="#333">No external infra</text>
+            <text x="280" y="300" text-anchor="middle" font-family="system-ui" font-size="8" fill="#e63946">✗ Needs Redis</text>
+            <text x="430" y="300" text-anchor="middle" font-family="system-ui" font-size="8" fill="#2a9d8f">✓ Yes</text>
+            <text x="580" y="300" text-anchor="middle" font-family="system-ui" font-size="8" fill="#2a9d8f">✓ Yes</text>
+
+            <text x="130" y="317" text-anchor="middle" font-family="system-ui" font-size="8" fill="#333">Large session data</text>
+            <text x="280" y="317" text-anchor="middle" font-family="system-ui" font-size="8" fill="#2a9d8f">✓ Unlimited</text>
+            <text x="430" y="317" text-anchor="middle" font-family="system-ui" font-size="8" fill="#f4a261">~ Limited (header size)</text>
+            <text x="580" y="317" text-anchor="middle" font-family="system-ui" font-size="8" fill="#e63946">✗ 4KB max</text>
+
+            <text x="130" y="334" text-anchor="middle" font-family="system-ui" font-size="8" fill="#333">Read latency</text>
+            <text x="280" y="334" text-anchor="middle" font-family="system-ui" font-size="8" fill="#f4a261">~1ms (network hop)</text>
+            <text x="430" y="334" text-anchor="middle" font-family="system-ui" font-size="8" fill="#2a9d8f">0ms (local verify)</text>
+            <text x="580" y="334" text-anchor="middle" font-family="system-ui" font-size="8" fill="#2a9d8f">0ms (local decrypt)</text>
+
+            <text x="360" y="356" text-anchor="middle" font-family="system-ui" font-size="7" fill="#999">* JWT can use short expiry + refresh tokens, or maintain a blocklist (which requires server state)</text>
+        </svg>
+        <figcaption>Figure 1: Three session storage approaches — each trades off differently between scalability, revocability, and simplicity.</figcaption>
+    </figure>
+
+    <h2>JWT Deep Dive</h2>
+
+    <div class="card">
+        <h3>Structure: header.payload.signature</h3>
+        <p>A JWT is three Base64-encoded parts separated by dots:</p>
+        <ul>
+            <li><strong>Header:</strong> <code>{"alg": "HS256", "typ": "JWT"}</code> — which signing algorithm</li>
+            <li><strong>Payload:</strong> <code>{"sub": "user_123", "role": "admin", "exp": 1700000000}</code> — claims (data)</li>
+            <li><strong>Signature:</strong> <code>HMAC-SHA256(base64(header) + "." + base64(payload), secret)</code> — tamper-proof seal</li>
+        </ul>
+        <h4>Advantages</h4>
+        <ul>
+            <li>No server lookup — verify locally with the secret key</li>
+            <li>Contains all user info needed for authorization (role, permissions)</li>
+            <li>Works across services — any service with the key can verify</li>
+        </ul>
+        <h4>Disadvantages</h4>
+        <ul>
+            <li><strong>Can't revoke:</strong> Once issued, valid until expiry. A compromised token is dangerous.</li>
+            <li><strong>Size:</strong> A JWT with claims is 800+ bytes vs a 32-byte session ID</li>
+            <li><strong>Stale data:</strong> If user's role changes, the JWT still has the old role until re-issued</li>
+        </ul>
+        <p><strong>Mitigation:</strong> Use short-lived access tokens (15 min) + long-lived refresh tokens (stored server-side, revocable).</p>
+    </div>
+
+    <h2>Redis for Sessions</h2>
+
+    <div class="card">
+        <h3>Why Redis Is the Most Popular Session Store</h3>
+        <ul>
+            <li><strong>Speed:</strong> Sub-millisecond reads — barely slower than local memory</li>
+            <li><strong>TTL:</strong> <code>SET session:abc123 data EX 3600</code> — sessions auto-expire after 1 hour</li>
+            <li><strong>Atomic operations:</strong> <code>INCR</code>, <code>SETNX</code> for safe concurrent access</li>
+            <li><strong>Cluster mode:</strong> Redis Cluster shards across nodes for HA and horizontal scale</li>
+            <li><strong>Pub/Sub:</strong> Notify other services when a session is invalidated</li>
+        </ul>
+        <p><strong>Pattern:</strong> Client sends session cookie → app server looks up <code>session:{id}</code> in Redis → gets user data → processes request. Any server can handle any request.</p>
+    </div>
+
+    <h2>File Uploads in a Stateless World</h2>
+
+    <div class="card info">
+        <h3>Never Store Files Locally</h3>
+        <p>If a user uploads to Server A and their next request hits Server B, the file isn't there. Solutions:</p>
+        <ul>
+            <li><strong>Stream directly to object storage:</strong> Use presigned URLs (S3, GCS) — the client uploads straight to the storage service, never touching your app servers.</li>
+            <li><strong>Proxy through app server:</strong> Receive the file and immediately write to S3. Never write to local disk.</li>
+            <li><strong>Shared filesystem (NFS/EFS):</strong> All servers mount the same storage. Works but adds a single point of failure and latency.</li>
+        </ul>
+        <p><strong>Best practice:</strong> Presigned URLs. Your server generates a URL, the client uploads directly. Zero load on your app servers.</p>
+    </div>
+
+    <div class="real-world">
+        <h3>🏢 Real-World: How Spotify Manages Sessions</h3>
+        <p>Spotify runs thousands of stateless microservices. Here's how they handle session state:</p>
+        <ul>
+            <li><strong>Access tokens:</strong> Short-lived OAuth2 tokens (1 hour). Every API call includes the token. Services verify locally via a shared public key (asymmetric JWT).</li>
+            <li><strong>Refresh tokens:</strong> Stored server-side in a distributed session store. When access tokens expire, the client uses the refresh token to get a new one.</li>
+            <li><strong>Revocation:</strong> When a user changes their password, all refresh tokens for that user are invalidated. Access tokens naturally expire within an hour.</li>
+            <li><strong>Cross-device:</strong> Each device has its own session. You can see all active sessions in your account settings and revoke any one.</li>
+            <li><strong>Playback state:</strong> "Now playing" state is stored in a dedicated service (not in the session) — this lets you seamlessly hand off playback between devices.</li>
+        </ul>
+    </div>
+
+    <h2 class="interactive">Interactive: Design a Session Management System</h2>
+
+    <div class="interactive" id="session-designer">
+        <p><strong>Choose your session approach</strong> and see the trade-off analysis for your use case:</p>
+
+        <div style="margin: 1rem 0;">
+            <label style="display: block; margin-bottom: 0.5rem; font-size: 0.9rem; font-weight: bold;">Application type:</label>
+            <select id="app-type" onchange="analyzeSession()" style="padding: 0.4rem; border-radius: 4px; border: 1px solid #ddd; font-size: 0.9rem; width: 100%; max-width: 300px;">
+                <option value="ecommerce">E-commerce (shopping cart, checkout)</option>
+                <option value="saas">SaaS Dashboard (role-based access)</option>
+                <option value="api">Public API (third-party developers)</option>
+                <option value="realtime">Real-time Chat/Collaboration</option>
+            </select>
+        </div>
+
+        <div style="margin: 1rem 0;">
+            <label style="display: block; margin-bottom: 0.5rem; font-size: 0.9rem; font-weight: bold;">Session approach:</label>
+            <div style="display: flex; gap: 0.5rem; flex-wrap: wrap;">
+                <button onclick="pickApproach('redis')" id="btn-redis" style="padding: 0.5rem 1rem; border: 2px solid #2a9d8f; background: white; border-radius: 6px; cursor: pointer; font-size: 0.85rem;">Redis Sessions</button>
+                <button onclick="pickApproach('jwt')" id="btn-jwt" style="padding: 0.5rem 1rem; border: 2px solid #e76f51; background: white; border-radius: 6px; cursor: pointer; font-size: 0.85rem;">JWT Tokens</button>
+                <button onclick="pickApproach('cookie')" id="btn-cookie" style="padding: 0.5rem 1rem; border: 2px solid #457b9d; background: white; border-radius: 6px; cursor: pointer; font-size: 0.85rem;">Encrypted Cookies</button>
+                <button onclick="pickApproach('hybrid')" id="btn-hybrid" style="padding: 0.5rem 1rem; border: 2px solid #264653; background: white; border-radius: 6px; cursor: pointer; font-size: 0.85rem;">Hybrid (JWT + Redis)</button>
+            </div>
+        </div>
+
+        <div id="session-result" style="padding: 1rem; border-radius: 8px; margin: 1rem 0; display: none; background: #f8f9fa;"></div>
+    </div>
+
+    <script>
+    (function() {
+        const analysis = {
+            ecommerce: {
+                redis: { score: 4, text: "Good choice. Shopping carts need mutable state (add/remove items), and you need instant session revocation for security (logout = delete session). Redis handles this perfectly with TTL-based expiry." },
+                jwt: { score: 2, text: "Risky. Cart data in a JWT grows large (many items), and you can't update the JWT without re-issuing. If a user logs out on one device, other devices still have valid JWTs. For e-commerce, server-side sessions are safer." },
+                cookie: { score: 3, text: "Workable for small carts but hits the 4KB limit fast. Adding 20 items with variants won't fit. Also can't revoke on logout without a server-side blocklist." },
+                hybrid: { score: 5, text: "Excellent! Short-lived JWT for authentication (15min), Redis for cart state and session data. The JWT lets any server verify identity instantly; Redis stores the mutable cart. Best of both worlds." }
+            },
+            saas: {
+                redis: { score: 4, text: "Solid. Role changes take effect immediately (update the session), and you can force-logout compromised accounts. The 1ms Redis lookup is negligible." },
+                jwt: { score: 3, text: "Works if roles rarely change. Embed roles in the JWT for fast authorization checks. But if an admin revokes someone's access, the old JWT is still valid until expiry — a security gap." },
+                cookie: { score: 2, text: "Limiting. SaaS apps often need rich session data (current workspace, preferences, permissions). 4KB won't cut it for complex role hierarchies." },
+                hybrid: { score: 5, text: "Ideal. JWT carries identity + basic role for fast auth. Redis stores full permissions, workspace context, and feature flags. Role changes update Redis immediately; the JWT just identifies who you are." }
+            },
+            api: {
+                redis: { score: 3, text: "Works but adds latency to every API call. For high-throughput APIs, the Redis lookup per request adds up. You also need Redis to be globally distributed for low-latency worldwide." },
+                jwt: { score: 5, text: "Perfect fit! API tokens (OAuth2 bearer tokens) are the standard. No server lookup = minimal latency. Rate limiting is handled separately. Short expiry + refresh flow handles revocation." },
+                cookie: { score: 1, text: "Cookies don't work well for APIs — API clients use Authorization headers, not cookies. This approach is designed for browser-based sessions." },
+                hybrid: { score: 4, text: "Overkill for most APIs. JWT alone handles the common case. Use Redis only if you need real-time revocation (e.g., OAuth2 token revocation endpoint)." }
+            },
+            realtime: {
+                redis: { score: 5, text: "Essential. WebSocket connection state, presence indicators, typing status — all need shared mutable state. Redis Pub/Sub can broadcast events across servers. When a connection migrates, Redis has the session ready." },
+                jwt: { score: 2, text: "JWTs work for initial authentication, but real-time apps need mutable state (who's online, what rooms they're in, unread counts). You'll need Redis anyway for the real-time features." },
+                cookie: { score: 1, text: "Cookies aren't sent over WebSocket connections after the initial handshake. You need a persistent session store for connection state." },
+                hybrid: { score: 4, text: "Good approach: JWT authenticates the WebSocket handshake, then Redis manages all connection state (rooms, presence, message queues). The JWT is only used once at connection time." }
+            }
+        };
+
+        let currentApproach = null;
+
+        function pickApproach(approach) {
+            currentApproach = approach;
+            // Highlight selected
+            ['redis', 'jwt', 'cookie', 'hybrid'].forEach(a => {
+                document.getElementById('btn-' + a).style.background = a === approach ? '#f0f0f0' : 'white';
+            });
+            analyzeSession();
+        }
+
+        function analyzeSession() {
+            if (!currentApproach) return;
+            const appType = document.getElementById('app-type').value;
+            const result = analysis[appType][currentApproach];
+            const resultEl = document.getElementById('session-result');
+            resultEl.style.display = 'block';
+
+            const stars = '★'.repeat(result.score) + '☆'.repeat(5 - result.score);
+            const color = result.score >= 4 ? '#2a9d8f' : result.score >= 3 ? '#f4a261' : '#e63946';
+
+            resultEl.innerHTML = '<div style="font-size: 1.2rem; margin-bottom: 0.5rem; color: ' + color + ';">' + stars + ' <strong>' + result.score + '/5</strong></div><p style="margin: 0; font-size: 0.9rem;">' + result.text + '</p>';
+            resultEl.style.borderLeft = '4px solid ' + color;
+        }
+
+        window.pickApproach = pickApproach;
+        window.analyzeSession = analyzeSession;
+    })();
+    </script>
+
+    <div class="takeaway">
+        <h3>🎯 Key Takeaway</h3>
+        <p>Achieving true statelessness requires actively hunting down every place state accumulates — in-memory caches, local files, WebSocket connections, scheduled jobs. The payoff is <strong>effortless horizontal scaling</strong>: any server can handle any request, servers can be added/removed freely, and deployments have zero downtime. For the state that must exist (sessions), externalize it to Redis or encode it in JWTs — but understand the revocation trade-off of each approach.</p>
+    </div>
+
+    <div class="footnote">
+        <p><strong>Previous:</strong> <a href="0028-database-scaling-patterns.html">Database Scaling Patterns in Practice</a> | <strong>Next:</strong> <a href="0030-rate-limiting-and-throttling.html">Rate Limiting &amp; Throttling</a></p>
+    </div>
+</body>
+</html>

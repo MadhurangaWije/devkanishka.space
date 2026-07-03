@@ -1,0 +1,388 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lesson 030 — Rate Limiting &amp; Throttling</title>
+    <link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+    <h1>Rate Limiting &amp; Throttling</h1>
+    <div class="lesson-meta">
+        <span>📘 Chapter 7: Scalability Patterns</span>
+        <span>⏱️ 10 min read</span>
+        <span>🏗️ Lesson 030</span>
+    </div>
+
+    <p>Rate limiting is both a <strong>protective mechanism</strong> (prevent abuse, stop cascade failures) and a <strong>fairness mechanism</strong> (ensure one noisy client can't starve everyone else). Every production API needs it.</p>
+
+    <h2>Why Rate Limit?</h2>
+
+    <div class="card info">
+        <ul>
+            <li><strong>Prevent abuse:</strong> Stop brute-force attacks, credential stuffing, web scraping at scale</li>
+            <li><strong>Ensure fair usage:</strong> One customer shouldn't consume 90% of capacity</li>
+            <li><strong>Prevent cascade failures:</strong> A buggy client sending 10K req/s can take down your service for everyone</li>
+            <li><strong>Cost control:</strong> Especially for paid APIs or services with metered downstream dependencies</li>
+            <li><strong>Compliance:</strong> Some regulations require demonstrating you can throttle abusive usage</li>
+        </ul>
+    </div>
+
+    <h2>Algorithms: Token Bucket vs Leaky Bucket</h2>
+
+    <figure class="diagram">
+        <svg viewBox="0 0 720 300" xmlns="http://www.w3.org/2000/svg">
+            <text x="360" y="22" text-anchor="middle" font-family="system-ui" font-size="13" font-weight="bold" fill="#333">Token Bucket vs Leaky Bucket</text>
+
+            <!-- Token Bucket -->
+            <text x="180" y="50" text-anchor="middle" font-family="system-ui" font-size="11" font-weight="bold" fill="#2a9d8f">Token Bucket</text>
+
+            <!-- Bucket shape -->
+            <rect x="120" y="80" width="120" height="130" rx="6" fill="#2a9d8f" opacity="0.08" stroke="#2a9d8f" stroke-width="2"/>
+            <text x="180" y="72" text-anchor="middle" font-family="system-ui" font-size="8" fill="#666">capacity = 10 tokens</text>
+
+            <!-- Tokens (circles) -->
+            <circle cx="145" cy="185" r="8" fill="#2a9d8f" opacity="0.6"/>
+            <circle cx="165" cy="185" r="8" fill="#2a9d8f" opacity="0.6"/>
+            <circle cx="185" cy="185" r="8" fill="#2a9d8f" opacity="0.6"/>
+            <circle cx="205" cy="185" r="8" fill="#2a9d8f" opacity="0.6"/>
+            <circle cx="145" cy="165" r="8" fill="#2a9d8f" opacity="0.6"/>
+            <circle cx="165" cy="165" r="8" fill="#2a9d8f" opacity="0.6"/>
+            <circle cx="185" cy="165" r="8" fill="#2a9d8f" opacity="0.4"/>
+            <circle cx="205" cy="165" r="8" fill="#2a9d8f" opacity="0.3"/>
+
+            <!-- Refill arrow -->
+            <text x="180" y="97" text-anchor="middle" font-family="system-ui" font-size="7" fill="#2a9d8f">↓ refill: 2 tokens/sec</text>
+
+            <!-- Request consumes token -->
+            <line x1="245" y1="160" x2="280" y2="160" stroke="#264653" stroke-width="1.5" marker-end="url(#arrBlk)"/>
+            <text x="263" y="153" font-family="system-ui" font-size="7" fill="#264653">request</text>
+            <text x="263" y="172" font-family="system-ui" font-size="7" fill="#264653">takes 1 token</text>
+
+            <!-- Token bucket description -->
+            <text x="180" y="230" text-anchor="middle" font-family="system-ui" font-size="8" fill="#333">• Allows bursts (up to bucket size)</text>
+            <text x="180" y="244" text-anchor="middle" font-family="system-ui" font-size="8" fill="#333">• Steady rate = refill rate</text>
+            <text x="180" y="258" text-anchor="middle" font-family="system-ui" font-size="8" fill="#333">• Empty bucket → reject (429)</text>
+            <text x="180" y="278" text-anchor="middle" font-family="system-ui" font-size="8" fill="#2a9d8f">Used by: AWS, Stripe, most APIs</text>
+
+            <!-- Separator -->
+            <line x1="360" y1="45" x2="360" y2="290" stroke="#ddd" stroke-width="1" stroke-dasharray="4,4"/>
+
+            <!-- Leaky Bucket -->
+            <text x="540" y="50" text-anchor="middle" font-family="system-ui" font-size="11" font-weight="bold" fill="#e76f51">Leaky Bucket</text>
+
+            <!-- Bucket shape -->
+            <rect x="480" y="80" width="120" height="130" rx="6" fill="#e76f51" opacity="0.08" stroke="#e76f51" stroke-width="2"/>
+
+            <!-- Queue items -->
+            <rect x="495" y="95" width="90" height="14" rx="2" fill="#e76f51" opacity="0.3"/>
+            <text x="540" y="105" text-anchor="middle" font-family="system-ui" font-size="7" fill="#e76f51">req 5 (queued)</text>
+            <rect x="495" y="112" width="90" height="14" rx="2" fill="#e76f51" opacity="0.4"/>
+            <text x="540" y="122" text-anchor="middle" font-family="system-ui" font-size="7" fill="#e76f51">req 4 (queued)</text>
+            <rect x="495" y="129" width="90" height="14" rx="2" fill="#e76f51" opacity="0.5"/>
+            <text x="540" y="139" text-anchor="middle" font-family="system-ui" font-size="7" fill="#e76f51">req 3 (queued)</text>
+            <rect x="495" y="146" width="90" height="14" rx="2" fill="#e76f51" opacity="0.6"/>
+            <text x="540" y="156" text-anchor="middle" font-family="system-ui" font-size="7" fill="#e76f51">req 2 (queued)</text>
+            <rect x="495" y="163" width="90" height="14" rx="2" fill="#e76f51" opacity="0.8"/>
+            <text x="540" y="173" text-anchor="middle" font-family="system-ui" font-size="7" fill="#e76f51">req 1 (processing)</text>
+
+            <!-- Drain -->
+            <line x1="540" y1="210" x2="540" y2="215" stroke="#e76f51" stroke-width="2"/>
+            <text x="540" y="225" text-anchor="middle" font-family="system-ui" font-size="7" fill="#e76f51">↓ drains at constant rate: 2/sec</text>
+
+            <!-- Overflow -->
+            <text x="625" y="100" font-family="system-ui" font-size="7" fill="#e63946">overflow → reject</text>
+            <line x1="600" y1="90" x2="620" y2="95" stroke="#e63946" stroke-width="1" stroke-dasharray="2,2"/>
+
+            <!-- Leaky bucket description -->
+            <text x="540" y="248" text-anchor="middle" font-family="system-ui" font-size="8" fill="#333">• Smooths out bursts (constant output)</text>
+            <text x="540" y="262" text-anchor="middle" font-family="system-ui" font-size="8" fill="#333">• Requests queue up in the bucket</text>
+            <text x="540" y="276" text-anchor="middle" font-family="system-ui" font-size="8" fill="#333">• Full queue → reject (429)</text>
+            <text x="540" y="292" text-anchor="middle" font-family="system-ui" font-size="8" fill="#e76f51">Used by: Nginx, traffic shaping</text>
+
+            <defs>
+                <marker id="arrBlk" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+                    <polygon points="0 0, 8 3, 0 6" fill="#264653"/>
+                </marker>
+            </defs>
+        </svg>
+        <figcaption>Figure 1: Token Bucket allows bursts then limits; Leaky Bucket enforces a constant output rate by queuing requests.</figcaption>
+    </figure>
+
+    <h2>Window-Based Algorithms</h2>
+
+    <figure class="diagram">
+        <svg viewBox="0 0 720 240" xmlns="http://www.w3.org/2000/svg">
+            <text x="360" y="20" text-anchor="middle" font-family="system-ui" font-size="13" font-weight="bold" fill="#333">Fixed Window vs Sliding Window</text>
+
+            <!-- Fixed Window -->
+            <text x="180" y="48" text-anchor="middle" font-family="system-ui" font-size="10" font-weight="bold" fill="#457b9d">Fixed Window (limit: 10/min)</text>
+
+            <!-- Time axis -->
+            <line x1="40" y1="150" x2="330" y2="150" stroke="#333" stroke-width="1.5"/>
+            <text x="185" y="165" text-anchor="middle" font-family="system-ui" font-size="7" fill="#666">time →</text>
+
+            <!-- Window 1 -->
+            <rect x="40" y="65" width="140" height="80" fill="#457b9d" opacity="0.08" stroke="#457b9d" stroke-width="1.5"/>
+            <text x="110" y="80" text-anchor="middle" font-family="system-ui" font-size="7" fill="#457b9d">Window 1 (00:00-01:00)</text>
+            <!-- Requests in W1 -->
+            <circle cx="140" cy="105" r="3" fill="#457b9d"/><circle cx="148" cy="110" r="3" fill="#457b9d"/>
+            <circle cx="155" cy="100" r="3" fill="#457b9d"/><circle cx="162" cy="115" r="3" fill="#457b9d"/>
+            <text x="155" y="135" text-anchor="middle" font-family="system-ui" font-size="7" fill="#457b9d">4 requests</text>
+
+            <!-- Window 2 -->
+            <rect x="180" y="65" width="140" height="80" fill="#457b9d" opacity="0.08" stroke="#457b9d" stroke-width="1.5"/>
+            <text x="250" y="80" text-anchor="middle" font-family="system-ui" font-size="7" fill="#457b9d">Window 2 (01:00-02:00)</text>
+            <circle cx="190" cy="100" r="3" fill="#457b9d"/><circle cx="198" cy="108" r="3" fill="#457b9d"/>
+            <circle cx="193" cy="115" r="3" fill="#457b9d"/><circle cx="200" cy="120" r="3" fill="#457b9d"/>
+            <circle cx="207" cy="105" r="3" fill="#457b9d"/><circle cx="195" cy="125" r="3" fill="#457b9d"/>
+            <text x="200" y="135" text-anchor="middle" font-family="system-ui" font-size="7" fill="#457b9d">6 requests</text>
+
+            <!-- Boundary problem -->
+            <rect x="150" y="88" width="60" height="55" fill="#e63946" opacity="0.1" stroke="#e63946" stroke-width="1.5" stroke-dasharray="3,3"/>
+            <text x="180" y="175" text-anchor="middle" font-family="system-ui" font-size="7" fill="#e63946">⚠️ Boundary: 10 req in 30s span!</text>
+
+            <!-- Sliding Window -->
+            <text x="540" y="48" text-anchor="middle" font-family="system-ui" font-size="10" font-weight="bold" fill="#2a9d8f">Sliding Window (limit: 10/min)</text>
+
+            <!-- Time axis -->
+            <line x1="400" y1="150" x2="690" y2="150" stroke="#333" stroke-width="1.5"/>
+            <text x="545" y="165" text-anchor="middle" font-family="system-ui" font-size="7" fill="#666">time →</text>
+
+            <!-- Sliding window overlay -->
+            <rect x="460" y="65" width="180" height="80" fill="#2a9d8f" opacity="0.08" stroke="#2a9d8f" stroke-width="2" rx="4"/>
+            <text x="550" y="80" text-anchor="middle" font-family="system-ui" font-size="7" fill="#2a9d8f">← 60s sliding window →</text>
+
+            <!-- Requests scattered -->
+            <circle cx="475" cy="110" r="3" fill="#2a9d8f"/>
+            <circle cx="490" cy="105" r="3" fill="#2a9d8f"/>
+            <circle cx="510" cy="118" r="3" fill="#2a9d8f"/>
+            <circle cx="535" cy="100" r="3" fill="#2a9d8f"/>
+            <circle cx="555" cy="112" r="3" fill="#2a9d8f"/>
+            <circle cx="575" cy="108" r="3" fill="#2a9d8f"/>
+            <circle cx="600" cy="115" r="3" fill="#2a9d8f"/>
+            <circle cx="620" cy="102" r="3" fill="#2a9d8f"/>
+
+            <text x="550" y="135" text-anchor="middle" font-family="system-ui" font-size="7" fill="#2a9d8f">8 requests in any 60s window ✓</text>
+
+            <!-- Arrow showing window slides -->
+            <line x1="460" y1="155" x2="640" y2="155" stroke="#2a9d8f" stroke-width="1.5" marker-end="url(#arrGrn)"/>
+            <text x="550" y="178" text-anchor="middle" font-family="system-ui" font-size="7" fill="#2a9d8f">Window slides with each request — no boundary exploit</text>
+
+            <!-- Descriptions -->
+            <text x="180" y="200" text-anchor="middle" font-family="system-ui" font-size="8" fill="#457b9d">Simple counter per window. Reset at boundary.</text>
+            <text x="180" y="215" text-anchor="middle" font-family="system-ui" font-size="8" fill="#e63946">Bug: 2× burst possible at window edges.</text>
+
+            <text x="540" y="200" text-anchor="middle" font-family="system-ui" font-size="8" fill="#2a9d8f">Weighted count using previous + current window.</text>
+            <text x="540" y="215" text-anchor="middle" font-family="system-ui" font-size="8" fill="#2a9d8f">No boundary exploit. Slightly more memory.</text>
+
+            <defs>
+                <marker id="arrGrn" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+                    <polygon points="0 0, 8 3, 0 6" fill="#2a9d8f"/>
+                </marker>
+            </defs>
+        </svg>
+        <figcaption>Figure 2: Fixed windows allow boundary exploits (2× burst). Sliding windows eliminate this by considering a rolling time span.</figcaption>
+    </figure>
+
+    <h2>Where to Implement Rate Limiting</h2>
+
+    <div class="card">
+        <ul>
+            <li><strong>API Gateway / Edge:</strong> First line of defense. Blocks abusive traffic before it reaches your services. (Kong, AWS API Gateway, Cloudflare)</li>
+            <li><strong>Reverse Proxy:</strong> Nginx <code>limit_req</code> module — fast, lightweight, per-IP or per-route</li>
+            <li><strong>Application Layer:</strong> Business-logic aware — rate limit per user, per API key, per plan tier</li>
+            <li><strong>Per-Service:</strong> Each microservice protects itself — defense in depth</li>
+        </ul>
+        <p><strong>Best practice:</strong> Layer them. Edge catches volume attacks; application layer enforces business rules.</p>
+    </div>
+
+    <h2>HTTP Headers for Rate Limits</h2>
+
+    <div class="card info">
+        <h3>Communicate Limits Clearly</h3>
+        <p>Standard response headers (draft RFC 6585 / RateLimit fields):</p>
+        <ul>
+            <li><code>X-RateLimit-Limit: 5000</code> — max requests allowed in the window</li>
+            <li><code>X-RateLimit-Remaining: 4992</code> — requests left in current window</li>
+            <li><code>X-RateLimit-Reset: 1700000000</code> — Unix timestamp when the window resets</li>
+            <li><code>Retry-After: 30</code> — seconds to wait before retrying (on 429 responses)</li>
+        </ul>
+        <p>When rate limited, return <strong>HTTP 429 Too Many Requests</strong> with a clear error body explaining what happened and when to retry.</p>
+    </div>
+
+    <h2>Distributed Rate Limiting</h2>
+
+    <div class="card">
+        <h3>The Multi-Server Challenge</h3>
+        <p>With 10 servers, each counting locally, a client gets 10× the intended limit. Solutions:</p>
+        <ul>
+            <li><strong>Redis-based counters:</strong> All servers increment the same key in Redis. Use <code>INCR</code> + <code>EXPIRE</code> for fixed windows.</li>
+            <li><strong>Lua scripts for atomicity:</strong> Redis Lua scripts execute <code>INCR</code> + check + <code>EXPIRE</code> in one atomic operation — no race conditions.</li>
+            <li><strong>Sliding window in Redis:</strong> Use sorted sets — <code>ZADD</code> with timestamp, <code>ZRANGEBYSCORE</code> to count requests in the window, <code>ZREMRANGEBYSCORE</code> to clean up.</li>
+            <li><strong>Approximate (local + sync):</strong> Each server tracks locally, periodically syncs to a central store. Faster but allows slight over-limit.</li>
+        </ul>
+    </div>
+
+    <div class="real-world">
+        <h3>🏢 Real-World: GitHub's API Rate Limiting</h3>
+        <ul>
+            <li><strong>Authenticated:</strong> 5,000 requests per hour per user (identified by OAuth token)</li>
+            <li><strong>Unauthenticated:</strong> 60 requests per hour per IP address</li>
+            <li><strong>Search API:</strong> Separate, stricter limit — 30 requests per minute (expensive queries)</li>
+            <li><strong>Headers:</strong> Every response includes <code>X-RateLimit-Limit</code>, <code>X-RateLimit-Remaining</code>, <code>X-RateLimit-Reset</code></li>
+            <li><strong>Conditional requests:</strong> Requests returning 304 Not Modified don't count against limits — encourages caching</li>
+            <li><strong>Abuse detection:</strong> Beyond rate limits, GitHub detects patterns (rapid sequential page access) and temporarily blocks with 403</li>
+        </ul>
+    </div>
+
+    <div class="real-world">
+        <h3>🏢 Real-World: Stripe's Graceful Rate Limiting</h3>
+        <ul>
+            <li><strong>Per-key limits:</strong> Rate limits are per API key, not per IP — fairer for customers behind NAT</li>
+            <li><strong>Graduated response:</strong> First, slow down (add latency). Then reject with 429. Only ban for sustained abuse.</li>
+            <li><strong>Clear error messages:</strong> The 429 response body explains exactly which limit was hit, current usage, and when to retry</li>
+            <li><strong>Load shedding:</strong> Under extreme load, Stripe returns 503 with <code>Retry-After</code> — admits overload rather than serving errors</li>
+            <li><strong>Test mode:</strong> Higher limits in test mode so developers can iterate fast without hitting walls</li>
+        </ul>
+    </div>
+
+    <h2 class="interactive">Interactive: Token Bucket Visualizer</h2>
+
+    <div class="interactive" id="token-bucket-sim">
+        <p><strong>Configure the token bucket</strong> and send requests to see tokens deplete and refill:</p>
+
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin: 1rem 0;">
+            <div>
+                <label style="font-size: 0.85rem; display: block; margin-bottom: 0.3rem;">Bucket capacity: <strong id="cap-val">10</strong> tokens</label>
+                <input type="range" id="bucket-cap" min="3" max="20" value="10" oninput="updateBucketConfig()" style="width: 100%;"/>
+
+                <label style="font-size: 0.85rem; display: block; margin: 0.5rem 0 0.3rem;">Refill rate: <strong id="rate-val">2</strong> tokens/sec</label>
+                <input type="range" id="bucket-rate" min="1" max="10" value="2" oninput="updateBucketConfig()" style="width: 100%;"/>
+
+                <div style="margin-top: 1rem;">
+                    <button onclick="sendRequest()" id="send-btn" style="padding: 0.5rem 1.2rem; background: #2a9d8f; color: white; border: none; border-radius: 5px; cursor: pointer; font-size: 0.9rem; font-weight: bold;">Send Request</button>
+                    <button onclick="sendBurst()" style="padding: 0.5rem 1rem; background: #e76f51; color: white; border: none; border-radius: 5px; cursor: pointer; font-size: 0.85rem; margin-left: 0.5rem;">Send Burst (5)</button>
+                </div>
+            </div>
+
+            <div>
+                <div style="background: #f8f9fa; border-radius: 8px; padding: 0.8rem; text-align: center;">
+                    <div style="font-size: 0.8rem; color: #666; margin-bottom: 0.3rem;">Tokens Available</div>
+                    <div id="token-display" style="font-size: 2rem; font-weight: bold; color: #2a9d8f;">10</div>
+                    <div id="token-bar" style="background: #ddd; height: 20px; border-radius: 10px; margin: 0.5rem 0; overflow: hidden;">
+                        <div id="token-fill" style="background: #2a9d8f; height: 100%; width: 100%; transition: width 0.3s; border-radius: 10px;"></div>
+                    </div>
+                    <div style="display: flex; justify-content: space-between; font-size: 0.75rem; color: #999;">
+                        <span>0</span>
+                        <span id="token-max-label">10</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div style="display: flex; gap: 1rem; margin-top: 0.5rem;">
+            <div style="flex: 1;">
+                <div style="font-size: 0.8rem; font-weight: bold; margin-bottom: 0.3rem;">Request Log:</div>
+                <div id="req-log" style="background: #f8f9fa; border-radius: 6px; padding: 0.5rem; font-family: monospace; font-size: 0.75rem; max-height: 120px; overflow-y: auto;"></div>
+            </div>
+            <div style="text-align: center; min-width: 100px;">
+                <div style="font-size: 0.8rem; color: #666;">Accepted</div>
+                <div id="stat-accepted" style="font-size: 1.5rem; font-weight: bold; color: #2a9d8f;">0</div>
+                <div style="font-size: 0.8rem; color: #666; margin-top: 0.5rem;">Rejected</div>
+                <div id="stat-rejected" style="font-size: 1.5rem; font-weight: bold; color: #e63946;">0</div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+    (function() {
+        let capacity = 10;
+        let tokens = 10;
+        let refillRate = 2;
+        let accepted = 0;
+        let rejected = 0;
+        let lastRefill = Date.now();
+
+        const logEl = document.getElementById('req-log');
+
+        function refillTokens() {
+            const now = Date.now();
+            const elapsed = (now - lastRefill) / 1000;
+            tokens = Math.min(capacity, tokens + elapsed * refillRate);
+            lastRefill = now;
+            updateDisplay();
+        }
+
+        function updateDisplay() {
+            const displayTokens = Math.floor(tokens * 10) / 10;
+            document.getElementById('token-display').textContent = displayTokens.toFixed(1);
+            document.getElementById('token-fill').style.width = (tokens / capacity * 100) + '%';
+
+            const color = tokens < 2 ? '#e63946' : tokens < capacity * 0.4 ? '#f4a261' : '#2a9d8f';
+            document.getElementById('token-display').style.color = color;
+            document.getElementById('token-fill').style.background = color;
+
+            document.getElementById('stat-accepted').textContent = accepted;
+            document.getElementById('stat-rejected').textContent = rejected;
+        }
+
+        function log(msg, success) {
+            const color = success ? '#2a9d8f' : '#e63946';
+            const time = new Date().toLocaleTimeString([], {hour: '2-digit', minute: '2-digit', second: '2-digit', fractionalSecondDigits: 1});
+            logEl.innerHTML += '<div style="color:' + color + '">[' + time + '] ' + msg + '</div>';
+            logEl.scrollTop = logEl.scrollHeight;
+        }
+
+        function sendRequest() {
+            refillTokens();
+            if (tokens >= 1) {
+                tokens -= 1;
+                accepted++;
+                log('✓ 200 OK — token consumed (' + Math.floor(tokens*10)/10 + ' remaining)', true);
+            } else {
+                rejected++;
+                log('✗ 429 Too Many Requests — bucket empty! Retry-After: ' + Math.ceil((1 - tokens) / refillRate) + 's', false);
+            }
+            updateDisplay();
+        }
+
+        function sendBurst() {
+            for (let i = 0; i < 5; i++) {
+                setTimeout(function() { sendRequest(); }, i * 100);
+            }
+        }
+
+        function updateBucketConfig() {
+            refillTokens();
+            capacity = parseInt(document.getElementById('bucket-cap').value);
+            refillRate = parseInt(document.getElementById('bucket-rate').value);
+            tokens = Math.min(tokens, capacity);
+            document.getElementById('cap-val').textContent = capacity;
+            document.getElementById('rate-val').textContent = refillRate;
+            document.getElementById('token-max-label').textContent = capacity;
+            updateDisplay();
+        }
+
+        // Refill timer
+        setInterval(function() {
+            refillTokens();
+        }, 200);
+
+        window.sendRequest = sendRequest;
+        window.sendBurst = sendBurst;
+        window.updateBucketConfig = updateBucketConfig;
+        updateDisplay();
+    })();
+    </script>
+
+    <div class="takeaway">
+        <h3>🎯 Key Takeaway</h3>
+        <p>Rate limiting is both a <strong>protective mechanism</strong> and a <strong>fairness mechanism</strong>. Implement it at the edge for maximum protection (stop bad traffic before it reaches your services), and design clear feedback for clients hitting limits — include <code>Retry-After</code> headers, explain which limit was hit, and never silently drop requests. The token bucket algorithm is the most widely used because it allows natural bursts while enforcing a sustained rate. For distributed systems, centralize counters in Redis with atomic Lua scripts.</p>
+    </div>
+
+    <div class="footnote">
+        <p><strong>Previous:</strong> <a href="0029-stateless-services-and-session-management.html">Stateless Services &amp; Session Management</a> | <strong>Next chapter:</strong> Asynchronous Processing (coming soon)</p>
+    </div>
+</body>
+</html>

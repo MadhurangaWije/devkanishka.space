@@ -1,0 +1,353 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lesson 047 — gRPC &amp; Protocol Buffers</title>
+    <link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+    <h1>gRPC &amp; Protocol Buffers</h1>
+    <div class="lesson-meta">
+        <span>📘 Chapter 11: API Design</span>
+        <span>⏱️ 8 min read</span>
+        <span>🏗️ Lesson 047</span>
+    </div>
+
+    <p>When services talk to each other thousands of times per second, JSON over HTTP/1.1 becomes a bottleneck. Every message must be serialized to text, parsed back, and sent over a connection that can only handle one request at a time. <strong>gRPC</strong> eliminates these costs: binary serialization (Protocol Buffers), HTTP/2 multiplexing, and generated client/server code in any language. It's the default for high-performance internal communication.</p>
+
+    <h2>What Is gRPC?</h2>
+
+    <div class="card">
+        <h3>High-Performance RPC Framework</h3>
+        <ul>
+            <li><strong>gRPC</strong> = Google Remote Procedure Call — open-sourced in 2015</li>
+            <li>Uses <strong>HTTP/2</strong> for transport (multiplexing, header compression, bidirectional streaming)</li>
+            <li>Uses <strong>Protocol Buffers (protobuf)</strong> for serialization (binary, strongly typed, schema-driven)</li>
+            <li><strong>Code generation:</strong> Define your API in a <code>.proto</code> file → generate client stubs and server skeletons in 10+ languages</li>
+            <li>Built-in support for deadlines, cancellation, load balancing, and health checks</li>
+        </ul>
+    </div>
+
+    <figure class="diagram">
+        <svg viewBox="0 0 720 260" xmlns="http://www.w3.org/2000/svg">
+            <text x="360" y="22" text-anchor="middle" font-family="system-ui" font-size="14" font-weight="bold" fill="#333">gRPC Architecture: Code Generation Flow</text>
+
+            <!-- Proto file (center top) -->
+            <rect x="270" y="45" width="180" height="50" rx="6" fill="#e9c46a" opacity="0.3" stroke="#e9c46a" stroke-width="1.5"/>
+            <text x="360" y="65" text-anchor="middle" font-family="monospace" font-size="9" fill="#333">service UserService {</text>
+            <text x="360" y="78" text-anchor="middle" font-family="monospace" font-size="9" fill="#333">  rpc GetUser(...) returns (...)</text>
+            <text x="360" y="91" text-anchor="middle" font-family="monospace" font-size="9" fill="#333">}</text>
+            <text x="360" y="42" text-anchor="middle" font-family="system-ui" font-size="9" font-weight="bold" fill="#856a1a">user.proto</text>
+
+            <!-- protoc compiler -->
+            <rect x="310" y="110" width="100" height="28" rx="4" fill="#264653" opacity="0.85"/>
+            <text x="360" y="128" text-anchor="middle" font-family="system-ui" font-size="9" fill="#fff">protoc compiler</text>
+
+            <line x1="360" y1="95" x2="360" y2="110" stroke="#264653" stroke-width="1.5" marker-end="url(#arrowD)"/>
+
+            <!-- Generated client (left) -->
+            <line x1="310" y1="124" x2="180" y2="165" stroke="#457b9d" stroke-width="1.5" marker-end="url(#arrowD)"/>
+            <rect x="80" y="165" width="200" height="70" rx="6" fill="#457b9d" opacity="0.1" stroke="#457b9d" stroke-width="1.5"/>
+            <text x="180" y="183" text-anchor="middle" font-family="system-ui" font-size="9" font-weight="bold" fill="#457b9d">Generated Client Stub</text>
+            <text x="180" y="198" text-anchor="middle" font-family="monospace" font-size="8" fill="#333">client = UserServiceClient(channel)</text>
+            <text x="180" y="212" text-anchor="middle" font-family="monospace" font-size="8" fill="#333">user = client.GetUser(req)</text>
+            <text x="180" y="226" text-anchor="middle" font-family="system-ui" font-size="7" fill="#666">Python / Go / Java / ...</text>
+
+            <!-- Generated server (right) -->
+            <line x1="410" y1="124" x2="540" y2="165" stroke="#2a9d8f" stroke-width="1.5" marker-end="url(#arrowD)"/>
+            <rect x="440" y="165" width="200" height="70" rx="6" fill="#2a9d8f" opacity="0.1" stroke="#2a9d8f" stroke-width="1.5"/>
+            <text x="540" y="183" text-anchor="middle" font-family="system-ui" font-size="9" font-weight="bold" fill="#2a9d8f">Generated Server Skeleton</text>
+            <text x="540" y="198" text-anchor="middle" font-family="monospace" font-size="8" fill="#333">class UserService(pb2_grpc...):</text>
+            <text x="540" y="212" text-anchor="middle" font-family="monospace" font-size="8" fill="#333">  def GetUser(self, req, ctx):</text>
+            <text x="540" y="226" text-anchor="middle" font-family="system-ui" font-size="7" fill="#666">Implement business logic here</text>
+
+            <!-- HTTP/2 connection -->
+            <line x1="280" y1="210" x2="440" y2="210" stroke="#264653" stroke-width="2" stroke-dasharray="5,3"/>
+            <text x="360" y="250" text-anchor="middle" font-family="system-ui" font-size="9" fill="#264653">⟵ HTTP/2 + Protobuf binary frames ⟶</text>
+
+            <defs>
+                <marker id="arrowD" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto">
+                    <path d="M0,0 L6,3 L0,6 Z" fill="#264653"/>
+                </marker>
+            </defs>
+        </svg>
+        <figcaption>Figure 1: Define the API once in a .proto file; the compiler generates type-safe client and server code in any language.</figcaption>
+    </figure>
+
+    <h2>Protocol Buffers: Binary Serialization</h2>
+
+    <div class="card">
+        <h3>Smaller, Faster Than JSON</h3>
+        <pre><code>// user.proto
+syntax = "proto3";
+
+message User {
+  int32 id = 1;
+  string name = 2;
+  string email = 3;
+  repeated Order orders = 4;
+}
+
+message Order {
+  int32 id = 1;
+  float total = 2;
+  string status = 3;
+}
+
+service UserService {
+  rpc GetUser (GetUserRequest) returns (User);
+  rpc ListUsers (ListUsersRequest) returns (stream User);
+  rpc CreateUser (CreateUserRequest) returns (User);
+}</code></pre>
+        <p>Each field has a <strong>number</strong> (not a name) on the wire — that's what makes it so compact. Field names exist only in the schema for code generation.</p>
+    </div>
+
+    <div class="card info">
+        <h3>Size Comparison</h3>
+        <p>The same user object:</p>
+        <table style="width:100%; border-collapse:collapse; font-size:0.9em;">
+            <tr style="border-bottom:1px solid #ddd"><td><strong>JSON</strong></td><td><code>{"id":42,"name":"Alice","email":"alice@ex.com"}</code></td><td>47 bytes</td></tr>
+            <tr><td><strong>Protobuf</strong></td><td><code>08 2A 12 05 41 6C 69 63 65 1A 0C...</code></td><td>24 bytes</td></tr>
+        </table>
+        <p>~<strong>50% smaller</strong> for simple messages, up to <strong>10x smaller</strong> for large nested objects with repeated fields. Plus binary parsing is orders of magnitude faster than JSON string parsing.</p>
+    </div>
+
+    <h2>Four Streaming Types</h2>
+
+    <figure class="diagram">
+        <svg viewBox="0 0 720 300" xmlns="http://www.w3.org/2000/svg">
+            <text x="360" y="22" text-anchor="middle" font-family="system-ui" font-size="14" font-weight="bold" fill="#333">gRPC Streaming Patterns</text>
+
+            <!-- Unary -->
+            <rect x="20" y="45" width="160" height="100" rx="6" fill="#457b9d" opacity="0.08" stroke="#457b9d" stroke-width="1.5"/>
+            <text x="100" y="62" text-anchor="middle" font-family="system-ui" font-size="10" font-weight="bold" fill="#457b9d">Unary</text>
+            <rect x="35" y="75" width="45" height="20" rx="3" fill="#457b9d" opacity="0.3"/>
+            <text x="57" y="89" text-anchor="middle" font-family="system-ui" font-size="7" fill="#333">Client</text>
+            <rect x="120" y="75" width="45" height="20" rx="3" fill="#2a9d8f" opacity="0.3"/>
+            <text x="142" y="89" text-anchor="middle" font-family="system-ui" font-size="7" fill="#333">Server</text>
+            <line x1="80" y1="85" x2="118" y2="85" stroke="#457b9d" stroke-width="1.5" marker-end="url(#arrBlue)"/>
+            <line x1="120" y1="105" x2="82" y2="105" stroke="#2a9d8f" stroke-width="1.5" marker-end="url(#arrGreen)"/>
+            <text x="100" y="135" text-anchor="middle" font-family="system-ui" font-size="7" fill="#666">1 request → 1 response</text>
+
+            <!-- Server streaming -->
+            <rect x="195" y="45" width="160" height="100" rx="6" fill="#457b9d" opacity="0.08" stroke="#457b9d" stroke-width="1.5"/>
+            <text x="275" y="62" text-anchor="middle" font-family="system-ui" font-size="10" font-weight="bold" fill="#457b9d">Server Streaming</text>
+            <rect x="210" y="75" width="45" height="20" rx="3" fill="#457b9d" opacity="0.3"/>
+            <text x="232" y="89" text-anchor="middle" font-family="system-ui" font-size="7" fill="#333">Client</text>
+            <rect x="295" y="75" width="45" height="20" rx="3" fill="#2a9d8f" opacity="0.3"/>
+            <text x="317" y="89" text-anchor="middle" font-family="system-ui" font-size="7" fill="#333">Server</text>
+            <line x1="255" y1="85" x2="293" y2="85" stroke="#457b9d" stroke-width="1.5" marker-end="url(#arrBlue)"/>
+            <line x1="295" y1="100" x2="257" y2="100" stroke="#2a9d8f" stroke-width="1" marker-end="url(#arrGreen)"/>
+            <line x1="295" y1="108" x2="257" y2="108" stroke="#2a9d8f" stroke-width="1" marker-end="url(#arrGreen)"/>
+            <line x1="295" y1="116" x2="257" y2="116" stroke="#2a9d8f" stroke-width="1" marker-end="url(#arrGreen)"/>
+            <text x="275" y="135" text-anchor="middle" font-family="system-ui" font-size="7" fill="#666">1 request → stream of responses</text>
+
+            <!-- Client streaming -->
+            <rect x="370" y="45" width="160" height="100" rx="6" fill="#457b9d" opacity="0.08" stroke="#457b9d" stroke-width="1.5"/>
+            <text x="450" y="62" text-anchor="middle" font-family="system-ui" font-size="10" font-weight="bold" fill="#457b9d">Client Streaming</text>
+            <rect x="385" y="75" width="45" height="20" rx="3" fill="#457b9d" opacity="0.3"/>
+            <text x="407" y="89" text-anchor="middle" font-family="system-ui" font-size="7" fill="#333">Client</text>
+            <rect x="470" y="75" width="45" height="20" rx="3" fill="#2a9d8f" opacity="0.3"/>
+            <text x="492" y="89" text-anchor="middle" font-family="system-ui" font-size="7" fill="#333">Server</text>
+            <line x1="430" y1="85" x2="468" y2="85" stroke="#457b9d" stroke-width="1" marker-end="url(#arrBlue)"/>
+            <line x1="430" y1="93" x2="468" y2="93" stroke="#457b9d" stroke-width="1" marker-end="url(#arrBlue)"/>
+            <line x1="430" y1="101" x2="468" y2="101" stroke="#457b9d" stroke-width="1" marker-end="url(#arrBlue)"/>
+            <line x1="470" y1="116" x2="432" y2="116" stroke="#2a9d8f" stroke-width="1.5" marker-end="url(#arrGreen)"/>
+            <text x="450" y="135" text-anchor="middle" font-family="system-ui" font-size="7" fill="#666">Stream of requests → 1 response</text>
+
+            <!-- Bidirectional -->
+            <rect x="545" y="45" width="160" height="100" rx="6" fill="#457b9d" opacity="0.08" stroke="#457b9d" stroke-width="1.5"/>
+            <text x="625" y="62" text-anchor="middle" font-family="system-ui" font-size="10" font-weight="bold" fill="#457b9d">Bidirectional</text>
+            <rect x="560" y="75" width="45" height="20" rx="3" fill="#457b9d" opacity="0.3"/>
+            <text x="582" y="89" text-anchor="middle" font-family="system-ui" font-size="7" fill="#333">Client</text>
+            <rect x="645" y="75" width="45" height="20" rx="3" fill="#2a9d8f" opacity="0.3"/>
+            <text x="667" y="89" text-anchor="middle" font-family="system-ui" font-size="7" fill="#333">Server</text>
+            <line x1="605" y1="85" x2="643" y2="85" stroke="#457b9d" stroke-width="1" marker-end="url(#arrBlue)"/>
+            <line x1="605" y1="96" x2="643" y2="96" stroke="#457b9d" stroke-width="1" marker-end="url(#arrBlue)"/>
+            <line x1="645" y1="107" x2="607" y2="107" stroke="#2a9d8f" stroke-width="1" marker-end="url(#arrGreen)"/>
+            <line x1="645" y1="118" x2="607" y2="118" stroke="#2a9d8f" stroke-width="1" marker-end="url(#arrGreen)"/>
+            <text x="625" y="135" text-anchor="middle" font-family="system-ui" font-size="7" fill="#666">Both stream independently</text>
+
+            <!-- Use cases -->
+            <rect x="20" y="165" width="160" height="50" rx="4" fill="#f8f9fa" stroke="#ddd" stroke-width="1"/>
+            <text x="100" y="183" text-anchor="middle" font-family="system-ui" font-size="8" fill="#333">Standard request/reply</text>
+            <text x="100" y="198" text-anchor="middle" font-family="system-ui" font-size="7" fill="#666">GetUser, CreateOrder</text>
+
+            <rect x="195" y="165" width="160" height="50" rx="4" fill="#f8f9fa" stroke="#ddd" stroke-width="1"/>
+            <text x="275" y="183" text-anchor="middle" font-family="system-ui" font-size="8" fill="#333">Real-time feeds</text>
+            <text x="275" y="198" text-anchor="middle" font-family="system-ui" font-size="7" fill="#666">Stock prices, log tailing</text>
+
+            <rect x="370" y="165" width="160" height="50" rx="4" fill="#f8f9fa" stroke="#ddd" stroke-width="1"/>
+            <text x="450" y="183" text-anchor="middle" font-family="system-ui" font-size="8" fill="#333">Batch uploads</text>
+            <text x="450" y="198" text-anchor="middle" font-family="system-ui" font-size="7" fill="#666">File upload, sensor data</text>
+
+            <rect x="545" y="165" width="160" height="50" rx="4" fill="#f8f9fa" stroke="#ddd" stroke-width="1"/>
+            <text x="625" y="183" text-anchor="middle" font-family="system-ui" font-size="8" fill="#333">Chat, multiplayer</text>
+            <text x="625" y="198" text-anchor="middle" font-family="system-ui" font-size="7" fill="#666">Real-time collaboration</text>
+
+            <defs>
+                <marker id="arrBlue" markerWidth="5" markerHeight="5" refX="4" refY="2.5" orient="auto">
+                    <path d="M0,0 L5,2.5 L0,5 Z" fill="#457b9d"/>
+                </marker>
+                <marker id="arrGreen" markerWidth="5" markerHeight="5" refX="4" refY="2.5" orient="auto">
+                    <path d="M0,0 L5,2.5 L0,5 Z" fill="#2a9d8f"/>
+                </marker>
+            </defs>
+        </svg>
+        <figcaption>Figure 2: gRPC supports four communication patterns — from simple request/reply to full-duplex bidirectional streaming.</figcaption>
+    </figure>
+
+    <h2>Advantages Over REST</h2>
+
+    <div class="card">
+        <ul>
+            <li><strong>~10x smaller payloads:</strong> Binary protobuf vs text JSON</li>
+            <li><strong>Strongly typed:</strong> Generated code catches errors at compile time, not runtime</li>
+            <li><strong>HTTP/2 multiplexing:</strong> Multiple RPC calls over a single TCP connection, no head-of-line blocking</li>
+            <li><strong>Bidirectional streaming:</strong> Both sides can send data concurrently</li>
+            <li><strong>Deadlines/timeouts:</strong> Built into the protocol — propagate through call chains</li>
+            <li><strong>Language agnostic:</strong> One <code>.proto</code> generates Go, Java, Python, C++, Rust, etc.</li>
+        </ul>
+    </div>
+
+    <h2>When to Use (and When Not)</h2>
+
+    <div class="card info">
+        <h3>✅ Use gRPC When:</h3>
+        <ul>
+            <li>Internal service-to-service communication (microservices)</li>
+            <li>Low-latency, high-throughput requirements</li>
+            <li>Polyglot environments (teams using different languages)</li>
+            <li>Streaming data (real-time updates, log streaming)</li>
+        </ul>
+        <h3>❌ Don't Use gRPC When:</h3>
+        <ul>
+            <li><strong>Browser clients:</strong> Limited native support (need gRPC-Web proxy)</li>
+            <li><strong>Human-readable debugging:</strong> Binary messages aren't curl-friendly</li>
+            <li><strong>Simple CRUD APIs:</strong> Overhead of proto definitions isn't worth it</li>
+            <li><strong>Third-party/public APIs:</strong> REST or GraphQL are more accessible</li>
+        </ul>
+    </div>
+
+    <h2>gRPC-Web &amp; Connect</h2>
+
+    <div class="card">
+        <h3>Bridging to Browsers</h3>
+        <p><strong>gRPC-Web:</strong> An official spec that enables browser clients to call gRPC services through an Envoy proxy that translates HTTP/1.1 to HTTP/2. Limited to unary and server-streaming (no client or bidi streaming).</p>
+        <p><strong>Connect (Buf):</strong> A newer protocol that's gRPC-compatible but also works as plain HTTP — no proxy needed. Supports JSON encoding for debugging while keeping binary for production. Growing rapidly in adoption.</p>
+    </div>
+
+    <div class="real-world">
+        <h3>🌍 Google's Internal Usage</h3>
+        <p>Google processes <strong>10 billion gRPC calls per second</strong> across their internal infrastructure. Every Google service communicates via gRPC — from Search to YouTube to Cloud. The framework was extracted from their internal "Stubby" RPC system that's been running since 2001.</p>
+    </div>
+
+    <div class="real-world">
+        <h3>🌍 Netflix's Hybrid Approach</h3>
+        <p>Netflix uses gRPC for all backend service-to-service communication (high performance, type safety between 1000+ microservices) while exposing <strong>REST and GraphQL externally</strong> for their client apps and third-party integrations. The pattern: gRPC inside, REST/GraphQL at the edge.</p>
+    </div>
+
+    <h2>Interactive: Proto Definition &amp; Size Comparison</h2>
+
+    <div class="interactive" id="proto-playground">
+        <h3>🎮 Define a Service &amp; Compare Sizes</h3>
+        <p>See how a protobuf message compares to JSON in size. Add fields to the message and watch the size difference grow.</p>
+        <div style="margin:1em 0;">
+            <div style="display:flex; gap:1em; flex-wrap:wrap;">
+                <div style="flex:1; min-width:250px;">
+                    <strong>Message fields:</strong>
+                    <div id="field-list" style="margin:0.5em 0;"></div>
+                    <select id="field-type" style="padding:4px; border-radius:4px; border:1px solid #ccc;">
+                        <option value="int32">int32</option>
+                        <option value="string">string</option>
+                        <option value="float">float</option>
+                        <option value="bool">bool</option>
+                    </select>
+                    <input id="field-name" placeholder="field name" style="padding:4px; border-radius:4px; border:1px solid #ccc; width:100px;">
+                    <button onclick="addField()" style="padding:4px 10px; background:#2a9d8f; color:white; border:none; border-radius:4px; cursor:pointer;">Add</button>
+                    <button onclick="resetFields()" style="padding:4px 10px; background:#e76f51; color:white; border:none; border-radius:4px; cursor:pointer; margin-left:4px;">Reset</button>
+                </div>
+                <div style="flex:1; min-width:250px;">
+                    <strong>Size comparison:</strong>
+                    <div id="size-comparison" style="margin:0.5em 0; font-family:monospace; font-size:0.85em;"></div>
+                </div>
+            </div>
+            <div id="proto-output" style="margin-top:1em; background:#1a1a2e; color:#8ec07c; padding:12px; border-radius:4px; font-family:monospace; font-size:0.8em; white-space:pre;"></div>
+        </div>
+    </div>
+
+    <script>
+    (function() {
+        var fields = [
+            { type: 'int32', name: 'id', sampleValue: 42 },
+            { type: 'string', name: 'name', sampleValue: 'Alice' }
+        ];
+
+        function estimateProtobufSize(fields) {
+            var size = 0;
+            fields.forEach(function(f) {
+                size += 1; // tag byte
+                if (f.type === 'int32') size += 2; // varint
+                else if (f.type === 'float') size += 4;
+                else if (f.type === 'bool') size += 1;
+                else if (f.type === 'string') size += 1 + String(f.sampleValue).length; // length prefix + data
+            });
+            return size;
+        }
+
+        function estimateJsonSize(fields) {
+            var obj = {};
+            fields.forEach(function(f) { obj[f.name] = f.sampleValue; });
+            return JSON.stringify(obj).length;
+        }
+
+        function render() {
+            var listEl = document.getElementById('field-list');
+            listEl.innerHTML = fields.map(function(f, i) {
+                return '<span style="display:inline-block; background:#f0f0f0; padding:2px 8px; border-radius:3px; margin:2px; font-size:0.85em;">' + f.type + ' ' + f.name + ' = ' + (i+1) + '</span>';
+            }).join(' ');
+
+            var proto = 'message MyMessage {\n' + fields.map(function(f, i) {
+                return '  ' + f.type + ' ' + f.name + ' = ' + (i+1) + ';';
+            }).join('\n') + '\n}';
+            document.getElementById('proto-output').textContent = proto;
+
+            var jsonSize = estimateJsonSize(fields);
+            var protoSize = estimateProtobufSize(fields);
+            var ratio = (jsonSize / protoSize).toFixed(1);
+            var compEl = document.getElementById('size-comparison');
+            compEl.innerHTML = '<div style="margin:4px 0;">JSON:     <strong>' + jsonSize + ' bytes</strong> <span style="display:inline-block; background:#e76f51; height:12px; width:' + (jsonSize * 2) + 'px; border-radius:2px; vertical-align:middle;"></span></div>' +
+                '<div style="margin:4px 0;">Protobuf: <strong>' + protoSize + ' bytes</strong> <span style="display:inline-block; background:#2a9d8f; height:12px; width:' + (protoSize * 2) + 'px; border-radius:2px; vertical-align:middle;"></span></div>' +
+                '<div style="margin:4px 0; color:#2a9d8f;">Protobuf is <strong>' + ratio + 'x smaller</strong></div>';
+        }
+
+        window.addField = function() {
+            var type = document.getElementById('field-type').value;
+            var name = document.getElementById('field-name').value.trim();
+            if (!name) return;
+            var sample = type === 'int32' ? 100 : type === 'float' ? 3.14 : type === 'bool' ? true : 'sample_value';
+            fields.push({ type: type, name: name, sampleValue: sample });
+            document.getElementById('field-name').value = '';
+            render();
+        };
+
+        window.resetFields = function() {
+            fields = [{ type: 'int32', name: 'id', sampleValue: 42 }, { type: 'string', name: 'name', sampleValue: 'Alice' }];
+            render();
+        };
+
+        render();
+    })();
+    </script>
+
+    <div class="takeaway">
+        <h3>🎯 Key Takeaway</h3>
+        <p>gRPC is the <strong>default choice for internal service-to-service communication</strong> when performance matters. Binary serialization (protobuf) gives 10x size reduction, HTTP/2 enables multiplexing and streaming, and code generation provides type safety across languages. Use REST or GraphQL for external/browser-facing APIs where human readability and broad tooling support matter more than raw performance.</p>
+    </div>
+
+    <div class="footnote">
+        <p><strong>Previous:</strong> <a href="0046-graphql-when-rest-isnt-enough.html">GraphQL: When REST Isn't Enough</a> | <strong>Next:</strong> <a href="0048-api-versioning-backward-compatibility.html">API Versioning &amp; Backward Compatibility</a></p>
+    </div>
+</body>
+</html>

@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lesson 063 — Design a Chat System (End-to-End)</title>
+    <link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+    <h1>Design a Chat System (End-to-End)</h1>
+    <div class="lesson-meta">
+        <span>📘 Chapter 15: Putting It All Together</span>
+        <span>⏱️ 10 min read</span>
+        <span>🏗️ Lesson 063</span>
+    </div>
+
+    <p>Chat is deceptively complex. The core problem isn't sending messages — it's managing <strong>millions of persistent connections</strong>, guaranteeing <strong>message ordering</strong>, and handling <strong>offline delivery</strong> gracefully.</p>
+
+    <h2>Requirements</h2>
+
+    <div class="card">
+        <h3>Functional</h3>
+        <ul>
+            <li>1-on-1 messaging and group chat (up to 500 members)</li>
+            <li>Online/offline presence indicators</li>
+            <li>Message history with pagination</li>
+            <li>Read receipts, typing indicators</li>
+            <li>Push notifications for offline users</li>
+        </ul>
+        <h3>Non-Functional</h3>
+        <ul>
+            <li><strong>Scale:</strong> 50M DAU, each sending ~40 messages/day = 2B messages/day</li>
+            <li><strong>Latency:</strong> &lt;200ms end-to-end delivery for online users</li>
+            <li><strong>Reliability:</strong> No message loss — at-least-once delivery</li>
+            <li><strong>Ordering:</strong> Messages appear in correct order within a conversation</li>
+        </ul>
+    </div>
+
+    <h2>Real-Time Transport: WebSocket vs Alternatives</h2>
+
+    <div class="card">
+        <table style="width:100%; border-collapse:collapse; font-size:0.9em;">
+            <tr style="border-bottom:2px solid #ddd;"><th style="text-align:left; padding:6px;">Protocol</th><th style="text-align:left; padding:6px;">How It Works</th><th style="text-align:left; padding:6px;">Best For</th></tr>
+            <tr style="border-bottom:1px solid #eee;"><td style="padding:6px;"><strong>WebSocket</strong></td><td style="padding:6px;">Full-duplex persistent connection</td><td style="padding:6px;">Chat — bidirectional, low overhead ✓</td></tr>
+            <tr style="border-bottom:1px solid #eee;"><td style="padding:6px;"><strong>Long Polling</strong></td><td style="padding:6px;">Client polls, server holds until data</td><td style="padding:6px;">Fallback when WS unavailable</td></tr>
+            <tr><td style="padding:6px;"><strong>SSE</strong></td><td style="padding:6px;">Server-to-client only stream</td><td style="padding:6px;">Notifications — unidirectional only</td></tr>
+        </table>
+        <p style="margin-top:8px; font-size:0.85em;"><strong>Key insight:</strong> WebSockets are stateful — each connection is pinned to a specific server. This complicates load balancing and deployment.</p>
+    </div>
+
+    <h2>System Architecture</h2>
+
+    <figure class="diagram">
+        <svg viewBox="0 0 720 340" xmlns="http://www.w3.org/2000/svg">
+            <defs>
+                <marker id="arr63" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+                    <polygon points="0 0, 8 3, 0 6" fill="#666"/>
+                </marker>
+            </defs>
+            <text x="360" y="18" text-anchor="middle" font-family="system-ui" font-size="13" font-weight="bold" fill="#333">Chat System Architecture</text>
+
+            <!-- Clients -->
+            <rect x="15" y="80" width="70" height="40" rx="5" fill="#6c5ce7" opacity="0.12" stroke="#6c5ce7" stroke-width="1.5"/>
+            <text x="50" y="103" text-anchor="middle" font-family="system-ui" font-size="8" font-weight="bold" fill="#6c5ce7">Client A</text>
+            <rect x="15" y="220" width="70" height="40" rx="5" fill="#6c5ce7" opacity="0.12" stroke="#6c5ce7" stroke-width="1.5"/>
+            <text x="50" y="243" text-anchor="middle" font-family="system-ui" font-size="8" font-weight="bold" fill="#6c5ce7">Client B</text>
+
+            <!-- WS Servers -->
+            <rect x="130" y="60" width="100" height="55" rx="6" fill="#2a9d8f" opacity="0.12" stroke="#2a9d8f" stroke-width="1.5"/>
+            <text x="180" y="80" text-anchor="middle" font-family="system-ui" font-size="8" font-weight="bold" fill="#2a9d8f">WebSocket</text>
+            <text x="180" y="92" text-anchor="middle" font-family="system-ui" font-size="8" font-weight="bold" fill="#2a9d8f">Server 1</text>
+            <text x="180" y="108" text-anchor="middle" font-family="system-ui" font-size="7" fill="#666">Holds connections</text>
+            <rect x="130" y="200" width="100" height="55" rx="6" fill="#2a9d8f" opacity="0.12" stroke="#2a9d8f" stroke-width="1.5"/>
+            <text x="180" y="220" text-anchor="middle" font-family="system-ui" font-size="8" font-weight="bold" fill="#2a9d8f">WebSocket</text>
+            <text x="180" y="232" text-anchor="middle" font-family="system-ui" font-size="8" font-weight="bold" fill="#2a9d8f">Server 2</text>
+            <text x="180" y="248" text-anchor="middle" font-family="system-ui" font-size="7" fill="#666">Holds connections</text>
+
+            <path d="M85 100 L128 90" stroke="#6c5ce7" stroke-width="1.2" marker-end="url(#arr63)"/>
+            <path d="M85 240 L128 230" stroke="#6c5ce7" stroke-width="1.2" marker-end="url(#arr63)"/>
+            <text x="100" y="80" font-family="system-ui" font-size="6" fill="#6c5ce7">WS</text>
+            <text x="100" y="255" font-family="system-ui" font-size="6" fill="#6c5ce7">WS</text>
+
+            <!-- Message Service -->
+            <rect x="290" y="110" width="110" height="60" rx="6" fill="#e63946" opacity="0.12" stroke="#e63946" stroke-width="1.5"/>
+            <text x="345" y="132" text-anchor="middle" font-family="system-ui" font-size="9" font-weight="bold" fill="#e63946">Message Service</text>
+            <text x="345" y="146" text-anchor="middle" font-family="system-ui" font-size="7" fill="#666">Route, validate,</text>
+            <text x="345" y="158" text-anchor="middle" font-family="system-ui" font-size="7" fill="#666">persist, fan-out</text>
+            <path d="M230 90 L288 125" stroke="#666" stroke-width="1.2" marker-end="url(#arr63)"/>
+            <path d="M230 225 L288 155" stroke="#666" stroke-width="1.2" marker-end="url(#arr63)"/>
+
+            <!-- Message Queue -->
+            <rect x="450" y="80" width="90" height="45" rx="6" fill="#e9c46a" opacity="0.15" stroke="#e9c46a" stroke-width="1.5"/>
+            <text x="495" y="100" text-anchor="middle" font-family="system-ui" font-size="8" font-weight="bold" fill="#e9c46a">Message Queue</text>
+            <text x="495" y="113" text-anchor="middle" font-family="system-ui" font-size="7" fill="#666">Kafka / RabbitMQ</text>
+            <path d="M400 130 L448 108" stroke="#666" stroke-width="1.2" marker-end="url(#arr63)"/>
+
+            <!-- Storage -->
+            <rect x="450" y="155" width="90" height="45" rx="6" fill="#457b9d" opacity="0.12" stroke="#457b9d" stroke-width="1.5"/>
+            <text x="495" y="175" text-anchor="middle" font-family="system-ui" font-size="8" font-weight="bold" fill="#457b9d">Message Store</text>
+            <text x="495" y="188" text-anchor="middle" font-family="system-ui" font-size="7" fill="#666">Cassandra / HBase</text>
+            <path d="M400 145 L448 168" stroke="#666" stroke-width="1.2" marker-end="url(#arr63)"/>
+
+            <!-- Presence -->
+            <rect x="590" y="210" width="100" height="45" rx="6" fill="#6c5ce7" opacity="0.1" stroke="#6c5ce7" stroke-width="1.5"/>
+            <text x="640" y="230" text-anchor="middle" font-family="system-ui" font-size="8" font-weight="bold" fill="#6c5ce7">Presence Service</text>
+            <text x="640" y="243" text-anchor="middle" font-family="system-ui" font-size="7" fill="#666">Online/offline/typing</text>
+
+            <!-- Push -->
+            <rect x="590" y="280" width="100" height="40" rx="6" fill="#e63946" opacity="0.1" stroke="#e63946" stroke-width="1"/>
+            <text x="640" y="300" text-anchor="middle" font-family="system-ui" font-size="8" font-weight="bold" fill="#e63946">Push Notifications</text>
+            <text x="640" y="313" text-anchor="middle" font-family="system-ui" font-size="7" fill="#666">APNs / FCM</text>
+
+            <!-- Connection from queue back to WS servers -->
+            <path d="M495 80 L495 50 L180 50 L180 58" stroke="#2a9d8f" stroke-width="1.2" stroke-dasharray="4" marker-end="url(#arr63)"/>
+            <text x="340" y="44" text-anchor="middle" font-family="system-ui" font-size="7" fill="#2a9d8f">deliver to recipient's WS server</text>
+
+            <!-- Offline path -->
+            <path d="M540 105 L588 295" stroke="#e63946" stroke-width="1" stroke-dasharray="3" marker-end="url(#arr63)"/>
+            <text x="575" y="270" font-family="system-ui" font-size="6" fill="#e63946">offline user</text>
+        </svg>
+        <figcaption>Figure 1: Messages flow through a central service, stored durably, then routed to the recipient's WebSocket server or push notification.</figcaption>
+    </figure>
+
+    <h2>Message Storage &amp; Ordering</h2>
+
+    <div class="card">
+        <h3>Partitioning Strategy</h3>
+        <p>Partition by <code>conversation_id</code> — all messages in a conversation live on the same partition, ensuring <strong>ordering within a conversation</strong>.</p>
+        <p><strong>Schema:</strong> <code>(conversation_id, message_id) → {sender, body, timestamp, status}</code></p>
+        <p><strong>Message ID:</strong> Snowflake-style (timestamp + server_id + sequence) — globally unique and time-sortable.</p>
+
+        <h3>Delivery Guarantees</h3>
+        <ul>
+            <li><strong>At-least-once:</strong> Server retries until client ACKs receipt</li>
+            <li><strong>Client-side dedup:</strong> Clients ignore messages with already-seen IDs</li>
+            <li><strong>Ordering:</strong> Message IDs are monotonically increasing per conversation</li>
+        </ul>
+    </div>
+
+    <h2>Group Chat Fan-Out</h2>
+
+    <div class="card info">
+        <table style="width:100%; border-collapse:collapse; font-size:0.9em;">
+            <tr style="border-bottom:2px solid #ddd;"><th style="text-align:left; padding:6px;">Approach</th><th style="text-align:left; padding:6px;">How</th><th style="text-align:left; padding:6px;">Best For</th></tr>
+            <tr style="border-bottom:1px solid #eee;"><td style="padding:6px;"><strong>Write-time fan-out</strong></td><td style="padding:6px;">Copy message to each member's inbox</td><td style="padding:6px;">Small groups (&lt;500) — fast reads</td></tr>
+            <tr><td style="padding:6px;"><strong>Read-time fan-out</strong></td><td style="padding:6px;">Members pull from shared conversation</td><td style="padding:6px;">Large channels (1000+) — efficient writes</td></tr>
+        </table>
+        <p style="margin-top:8px; font-size:0.85em;">WhatsApp uses write-time for groups (max 1024). Discord uses read-time for servers with millions of members.</p>
+    </div>
+
+    <div class="real-world">
+        <h3>WhatsApp: 100B Messages/Day with Erlang</h3>
+        <ul>
+            <li>Each server handles <strong>2M+ connections</strong> using Erlang's lightweight processes</li>
+            <li>Messages stored only until delivered — <strong>no permanent server-side history</strong> (end-to-end encrypted)</li>
+            <li>Mnesia DB for routing tables (which user → which server)</li>
+            <li>Simple protocol: message + ACK + retry = guaranteed delivery</li>
+        </ul>
+    </div>
+
+    <div class="real-world">
+        <h3>Discord: Massive Servers with Eventual Consistency</h3>
+        <ul>
+            <li>Channels with millions of members — read-time fan-out is essential</li>
+            <li>Messages stored in Cassandra, partitioned by channel + time bucket</li>
+            <li>Eventual consistency accepted — message may appear slightly out of order across clients</li>
+            <li>Presence uses a heartbeat + gossip protocol across gateway servers</li>
+        </ul>
+    </div>
+
+    <h2>Interactive: Design Choices Quiz</h2>
+
+    <div class="interactive">
+        <h3>Pick the Right Approach</h3>
+        <div id="quiz-container"></div>
+        <div id="quiz-score" style="margin-top:12px; padding:10px; background:#f8f9fa; border-radius:8px; border:1px solid #ddd; font-size:0.9em;"></div>
+    </div>
+
+    <script>
+    (function() {
+        var questions = [
+            { q: "A user sends a message but the recipient is offline. What do you do?", opts: ["Drop the message", "Store and deliver when they reconnect + push notification", "Hold in memory and retry for 5 minutes"], answer: 1 },
+            { q: "A group has 200 members. How do you deliver messages?", opts: ["Read-time fan-out (pull from shared log)", "Write-time fan-out (push to each inbox)", "Broadcast via WebSocket pub/sub"], answer: 1 },
+            { q: "How do you ensure message ordering in a conversation?", opts: ["Timestamp from client clock", "Monotonically increasing server-assigned IDs per conversation", "Random UUID per message"], answer: 1 },
+            { q: "A WebSocket server crashes with 100K connections. What happens?", opts: ["All messages are lost", "Clients reconnect to another server; undelivered messages are retried from the queue", "Users must restart their app"], answer: 1 }
+        ];
+        var answers = [];
+        var container = document.getElementById('quiz-container');
+
+        function render() {
+            var html = '';
+            questions.forEach(function(q, i) {
+                var answered = answers[i] !== undefined;
+                var correct = answers[i] === q.answer;
+                html += '<div style="margin:10px 0; padding:10px; border-left:3px solid ' + (answered ? (correct ? '#2a9d8f' : '#e63946') : '#ddd') + '; padding-left:12px;">';
+                html += '<strong>' + (i+1) + '. ' + q.q + '</strong><br>';
+                q.opts.forEach(function(opt, j) {
+                    var isSelected = answers[i] === j;
+                    var bg = '#fff', border = '#ccc', color = '#333';
+                    if (answered && j === q.answer) { bg = '#2a9d8f'; color = '#fff'; border = '#2a9d8f'; }
+                    else if (isSelected && !correct) { bg = '#e63946'; color = '#fff'; border = '#e63946'; }
+                    html += '<button onclick="answerQuiz(' + i + ',' + j + ')" style="display:block; margin:4px 0; padding:5px 10px; border-radius:4px; border:1px solid ' + border + '; background:' + bg + '; color:' + color + '; cursor:pointer; font-size:0.85em; text-align:left;"' + (answered ? ' disabled' : '') + '>' + opt + '</button>';
+                });
+                html += '</div>';
+            });
+            container.innerHTML = html;
+
+            var done = answers.filter(function(a) { return a !== undefined; }).length;
+            var right = answers.filter(function(a, i) { return a === questions[i].answer; }).length;
+            if (done === questions.length) {
+                document.getElementById('quiz-score').innerHTML = '<strong>Score: ' + right + '/' + questions.length + '</strong> — ' + (right === 4 ? 'Perfect! You understand chat system design.' : right >= 2 ? 'Good grasp of the fundamentals.' : 'Review the architecture above and try again.');
+            }
+        }
+
+        window.answerQuiz = function(qi, oi) { answers[qi] = oi; render(); };
+        render();
+    })();
+    </script>
+
+    <div class="takeaway">
+        <h3>Key Takeaway</h3>
+        <p>Chat systems are fundamentally about <strong>managing persistent connections and message ordering</strong>. The real complexity lies in edge cases: offline delivery (store-and-forward), ordering guarantees (server-assigned monotonic IDs), presence at scale (heartbeat + gossip), and group fan-out strategy (write-time for small groups, read-time for large channels). WebSockets add statefulness — plan for server failures and connection migration.</p>
+    </div>
+
+    <div class="footnote">
+        <p><strong>Previous:</strong> <a href="0062-design-url-shortener.html">Design a URL Shortener</a> | <strong>Next:</strong> <a href="0064-design-news-feed.html">Design a News Feed</a></p>
+    </div>
+</body>
+</html>

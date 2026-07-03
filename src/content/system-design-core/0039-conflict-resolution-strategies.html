@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lesson 039 — Conflict Resolution Strategies</title>
+    <link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+    <h1>Conflict Resolution Strategies</h1>
+    <div class="lesson-meta">
+        <span>📘 Chapter 9: Consistency &amp; Distributed Consensus</span>
+        <span>⏱️ 9 min read</span>
+        <span>🏗️ Lesson 039</span>
+    </div>
+
+    <p>In any distributed system with multiple replicas accepting writes, <strong>conflicts are inevitable</strong>. Two clients update the same data simultaneously on different nodes. When those nodes sync up, which value wins? The answer depends on your conflict resolution strategy — and there's no single right answer.</p>
+
+    <h2>When Conflicts Arise</h2>
+
+    <div class="card info">
+        <p>Conflicts happen when:</p>
+        <ul>
+            <li>Two clients write to the <strong>same key</strong> on different replicas (multi-leader or leaderless replication)</li>
+            <li>A network partition heals and replicas have <strong>divergent state</strong></li>
+            <li>Multiple users edit the <strong>same document</strong> simultaneously (collaborative editing)</li>
+        </ul>
+        <p>Strong consistency avoids conflicts by forcing all writes through one leader — but that costs availability and latency. If you choose eventual consistency, you <em>must</em> have a conflict resolution strategy.</p>
+    </div>
+
+    <h2>Last-Write-Wins (LWW)</h2>
+
+    <div class="card">
+        <h3>Simple But Lossy</h3>
+        <p>Attach a timestamp to each write. When replicas sync, the write with the <strong>latest timestamp</strong> wins; the other is silently discarded.</p>
+        <ul>
+            <li><strong>Pros:</strong> Simple to implement, deterministic, converges quickly</li>
+            <li><strong>Cons:</strong> <span style="color:#e63946">Data loss</span> — the "losing" write disappears forever. Clock skew can make the "wrong" write win.</li>
+            <li><strong>Use when:</strong> Data loss is acceptable (cache values, sensor readings, session data)</li>
+        </ul>
+    </div>
+
+    <figure class="diagram">
+        <svg viewBox="0 0 680 200" xmlns="http://www.w3.org/2000/svg">
+            <text x="340" y="20" text-anchor="middle" font-family="system-ui" font-size="13" font-weight="bold" fill="#333">Last-Write-Wins — Data Loss Example</text>
+
+            <!-- Timeline -->
+            <line x1="80" y1="100" x2="620" y2="100" stroke="#ddd" stroke-width="2"/>
+
+            <!-- Client A write -->
+            <rect x="150" y="50" width="130" height="35" rx="5" fill="#457b9d" opacity="0.15" stroke="#457b9d" stroke-width="1.5"/>
+            <text x="215" y="64" text-anchor="middle" font-family="system-ui" font-size="8" fill="#457b9d">Client A (Node 1)</text>
+            <text x="215" y="78" text-anchor="middle" font-family="system-ui" font-size="9" font-weight="bold" fill="#457b9d">SET name = "Alice"</text>
+            <line x1="215" y1="85" x2="215" y2="97" stroke="#457b9d" stroke-width="1.5"/>
+            <text x="215" y="120" text-anchor="middle" font-family="system-ui" font-size="7" fill="#666">t = 10:00:01.000</text>
+
+            <!-- Client B write -->
+            <rect x="350" y="50" width="130" height="35" rx="5" fill="#e76f51" opacity="0.15" stroke="#e76f51" stroke-width="1.5"/>
+            <text x="415" y="64" text-anchor="middle" font-family="system-ui" font-size="8" fill="#e76f51">Client B (Node 2)</text>
+            <text x="415" y="78" text-anchor="middle" font-family="system-ui" font-size="9" font-weight="bold" fill="#e76f51">SET name = "Bob"</text>
+            <line x1="415" y1="85" x2="415" y2="97" stroke="#e76f51" stroke-width="1.5"/>
+            <text x="415" y="120" text-anchor="middle" font-family="system-ui" font-size="7" fill="#666">t = 10:00:01.002</text>
+
+            <!-- Result -->
+            <rect x="500" y="140" width="150" height="40" rx="5" fill="#e76f51" opacity="0.1" stroke="#e76f51" stroke-width="1.5"/>
+            <text x="575" y="157" text-anchor="middle" font-family="system-ui" font-size="8" fill="#e76f51">LWW Result:</text>
+            <text x="575" y="173" text-anchor="middle" font-family="system-ui" font-size="10" font-weight="bold" fill="#e76f51">name = "Bob" wins</text>
+
+            <text x="215" y="165" text-anchor="middle" font-family="system-ui" font-size="8" fill="#e63946">⚠️ "Alice" is lost forever!</text>
+            <text x="215" y="178" text-anchor="middle" font-family="system-ui" font-size="7" fill="#999">Client A gets no error — thinks write succeeded</text>
+        </svg>
+        <figcaption>Figure 1: LWW picks the later timestamp. Client A's write is silently discarded — both clients think their write succeeded.</figcaption>
+    </figure>
+
+    <h2>Vector Clocks</h2>
+
+    <div class="card">
+        <h3>Detect Conflicts Without Losing Data</h3>
+        <p>Instead of a single timestamp, each node maintains a vector of counters — one per node. This lets the system detect when writes are <strong>concurrent</strong> (neither happened before the other) vs <strong>causally ordered</strong> (one happened after the other).</p>
+        <ul>
+            <li>If vector A ≤ vector B component-wise → A happened before B (no conflict)</li>
+            <li>If neither A ≤ B nor B ≤ A → concurrent writes → <strong>conflict detected</strong></li>
+            <li>Conflicts are preserved and passed to application or user for resolution</li>
+        </ul>
+        <p><strong>Used by:</strong> Amazon Dynamo (original paper), Riak</p>
+    </div>
+
+    <h2>CRDTs (Conflict-free Replicated Data Types)</h2>
+
+    <div class="card info">
+        <h3>Data Structures That Merge Automatically</h3>
+        <p>CRDTs are specially designed data structures where <strong>all concurrent operations can be merged without conflicts</strong>. The merge operation is commutative, associative, and idempotent.</p>
+        <ul>
+            <li><strong>G-Counter:</strong> Grow-only counter. Each node tracks its own increments. Merge = sum all nodes' values.</li>
+            <li><strong>PN-Counter:</strong> Supports increment and decrement (two G-Counters: one for adds, one for removes).</li>
+            <li><strong>G-Set:</strong> Grow-only set. Merge = union.</li>
+            <li><strong>OR-Set (Observed-Remove Set):</strong> Supports add and remove. Tags each element with a unique ID.</li>
+            <li><strong>LWW-Register:</strong> A CRDT version of last-write-wins for single values.</li>
+        </ul>
+    </div>
+
+    <figure class="diagram">
+        <svg viewBox="0 0 700 220" xmlns="http://www.w3.org/2000/svg">
+            <text x="350" y="20" text-anchor="middle" font-family="system-ui" font-size="13" font-weight="bold" fill="#333">CRDT Counter — Automatic Conflict-Free Merge</text>
+
+            <!-- Replica A -->
+            <rect x="50" y="50" width="180" height="70" rx="6" fill="#457b9d" opacity="0.1" stroke="#457b9d" stroke-width="1.5"/>
+            <text x="140" y="70" text-anchor="middle" font-family="system-ui" font-size="9" font-weight="bold" fill="#457b9d">Replica A</text>
+            <text x="140" y="90" text-anchor="middle" font-family="system-ui" font-size="8" fill="#555">A's count: 3 (incremented 3x)</text>
+            <text x="140" y="105" text-anchor="middle" font-family="system-ui" font-size="8" fill="#555">B's count: 0 (hasn't seen B)</text>
+            <text x="140" y="118" text-anchor="middle" font-family="system-ui" font-size="7" fill="#999">Local view: total = 3</text>
+
+            <!-- Replica B -->
+            <rect x="470" y="50" width="180" height="70" rx="6" fill="#e76f51" opacity="0.1" stroke="#e76f51" stroke-width="1.5"/>
+            <text x="560" y="70" text-anchor="middle" font-family="system-ui" font-size="9" font-weight="bold" fill="#e76f51">Replica B</text>
+            <text x="560" y="90" text-anchor="middle" font-family="system-ui" font-size="8" fill="#555">A's count: 0 (hasn't seen A)</text>
+            <text x="560" y="105" text-anchor="middle" font-family="system-ui" font-size="8" fill="#555">B's count: 5 (incremented 5x)</text>
+            <text x="560" y="118" text-anchor="middle" font-family="system-ui" font-size="7" fill="#999">Local view: total = 5</text>
+
+            <!-- Merge arrow -->
+            <line x1="230" y1="130" x2="340" y2="160" stroke="#2a9d8f" stroke-width="2"/>
+            <line x1="470" y1="130" x2="360" y2="160" stroke="#2a9d8f" stroke-width="2"/>
+
+            <!-- Merged result -->
+            <rect x="260" y="155" width="180" height="50" rx="6" fill="#2a9d8f" opacity="0.15" stroke="#2a9d8f" stroke-width="2"/>
+            <text x="350" y="175" text-anchor="middle" font-family="system-ui" font-size="9" font-weight="bold" fill="#2a9d8f">After Merge</text>
+            <text x="350" y="192" text-anchor="middle" font-family="system-ui" font-size="9" fill="#333">A=3, B=5 → total = <tspan font-weight="bold">8</tspan> ✓</text>
+
+            <text x="350" y="215" text-anchor="middle" font-family="system-ui" font-size="8" fill="#2a9d8f">No data lost! Both increments preserved. Merge = max(each node's counter).</text>
+        </svg>
+        <figcaption>Figure 2: A G-Counter CRDT — each replica tracks its own increments. Merge takes the max of each node's counter, giving the correct total.</figcaption>
+    </figure>
+
+    <h2>Application-Level Resolution</h2>
+
+    <div class="card">
+        <h3>Let the Application (or User) Decide</h3>
+        <p>When automatic resolution isn't appropriate, present conflicts to application logic or the end user:</p>
+        <ul>
+            <li><strong>Git merge conflicts:</strong> When two branches modify the same line, Git asks the developer to resolve manually</li>
+            <li><strong>Google Docs:</strong> Uses Operational Transformation (OT) — transforms concurrent edits so they can all be applied in any order and produce the same result</li>
+            <li><strong>Custom business logic:</strong> "If two users book the same slot, the one who paid first wins"</li>
+        </ul>
+    </div>
+
+    <h2>Real-World Examples</h2>
+
+    <div class="real-world">
+        <h3>🏢 Google Docs — Operational Transformation</h3>
+        <p>Google Docs lets dozens of users edit simultaneously without conflicts:</p>
+        <ul>
+            <li>Each edit is an <strong>operation</strong> (insert char at position X, delete range Y-Z)</li>
+            <li>When concurrent edits arrive, the server <strong>transforms</strong> them: if User A inserts at position 5 and User B inserts at position 3, then A's position shifts to 6 (because B's insert pushed everything right)</li>
+            <li>All clients converge to the same document state regardless of the order operations arrive</li>
+            <li>This is <em>not</em> a CRDT — it requires a central server to order operations</li>
+        </ul>
+    </div>
+
+    <div class="real-world">
+        <h3>🏢 Figma — CRDTs for Collaborative Design</h3>
+        <p>Figma uses CRDTs to enable real-time collaborative design:</p>
+        <ul>
+            <li>Each design element (rectangle, text, etc.) is a CRDT that can be independently modified</li>
+            <li>Moving an element on one client while another changes its color → both changes merge cleanly (different properties)</li>
+            <li>For conflicting changes to the same property (two users resize the same box) → LWW per property</li>
+            <li>No central authority needed for conflict resolution — peers can sync directly</li>
+        </ul>
+    </div>
+
+    <div class="real-world">
+        <h3>🏢 Amazon Shopping Cart — Favor Adds</h3>
+        <p>Amazon's Dynamo-based cart resolves conflicts with a business rule:</p>
+        <ul>
+            <li>If replicas diverge (one has item X, another doesn't), <strong>take the union</strong> — keep the item</li>
+            <li>Rationale: a "phantom" item in cart is a minor annoyance (customer removes it); a <em>lost</em> item is a lost sale</li>
+            <li>This is domain-specific: "when in doubt, favor the action that leads to revenue"</li>
+        </ul>
+    </div>
+
+    <h2 class="interactive">Interactive: Conflict Resolution Simulator</h2>
+
+    <div class="interactive" id="conflict-sim">
+        <p><strong>Two clients write to the same key concurrently. Choose a resolution strategy:</strong></p>
+
+        <div style="display: flex; gap: 0.5rem; margin: 1rem 0; flex-wrap: wrap;">
+            <button onclick="setStrategy('lww')" id="btn-lww" style="padding: 0.5rem 1rem; border: 2px solid #e76f51; background: #e76f51; color: white; border-radius: 6px; cursor: pointer; font-weight: bold;">LWW</button>
+            <button onclick="setStrategy('crdt')" id="btn-crdt" style="padding: 0.5rem 1rem; border: 2px solid #2a9d8f; background: white; color: #2a9d8f; border-radius: 6px; cursor: pointer; font-weight: bold;">CRDT (Counter)</button>
+            <button onclick="setStrategy('app')" id="btn-app" style="padding: 0.5rem 1rem; border: 2px solid #457b9d; background: white; color: #457b9d; border-radius: 6px; cursor: pointer; font-weight: bold;">App Logic (Union)</button>
+        </div>
+
+        <div style="display: flex; gap: 1.5rem; margin: 1rem 0; flex-wrap: wrap;">
+            <div style="flex:1; min-width:180px; border: 2px solid #457b9d; border-radius: 8px; padding: 1rem; text-align: center;">
+                <div style="font-weight: bold;">Client A (Node 1)</div>
+                <div id="client-a-action" style="font-family: monospace; font-size: 0.85rem; margin: 0.5rem 0; background: #f8f9fa; padding: 0.4rem; border-radius: 4px;">—</div>
+                <button onclick="clientWrite('a')" style="padding: 0.3rem 0.8rem; border: 1px solid #457b9d; background: white; border-radius: 4px; cursor: pointer; font-size: 0.8rem;">✏️ Write</button>
+            </div>
+            <div style="flex:1; min-width:180px; border: 2px solid #e76f51; border-radius: 8px; padding: 1rem; text-align: center;">
+                <div style="font-weight: bold;">Client B (Node 2)</div>
+                <div id="client-b-action" style="font-family: monospace; font-size: 0.85rem; margin: 0.5rem 0; background: #f8f9fa; padding: 0.4rem; border-radius: 4px;">—</div>
+                <button onclick="clientWrite('b')" style="padding: 0.3rem 0.8rem; border: 1px solid #e76f51; background: white; border-radius: 4px; cursor: pointer; font-size: 0.8rem;">✏️ Write</button>
+            </div>
+        </div>
+
+        <button onclick="resolveConflict()" style="padding: 0.5rem 1.2rem; border: 2px solid #333; background: white; border-radius: 6px; cursor: pointer; font-weight: bold; margin: 0.5rem 0;">🔄 Sync &amp; Resolve</button>
+        <button onclick="resetConflict()" style="padding: 0.5rem 1rem; border: 1px solid #ddd; background: #f8f9fa; border-radius: 4px; cursor: pointer; margin: 0.5rem 0;">Reset</button>
+
+        <div id="conflict-log" style="background: #f8f9fa; border-radius: 8px; padding: 0.8rem; font-family: monospace; font-size: 0.8rem; max-height: 150px; overflow-y: auto; margin-top: 0.8rem;"></div>
+    </div>
+
+    <script>
+    (function() {
+        let strategy = 'lww';
+        let aWrites = [];
+        let bWrites = [];
+        let aCounter = 0;
+        let bCounter = 0;
+        const logEl = document.getElementById('conflict-log');
+        const items = ['apple', 'banana', 'cherry', 'date', 'elderberry'];
+
+        function log(msg) {
+            logEl.innerHTML += '<div>' + msg + '</div>';
+            logEl.scrollTop = logEl.scrollHeight;
+        }
+
+        function updateActions() {
+            if (strategy === 'lww') {
+                document.getElementById('client-a-action').textContent = aWrites.length ? 'SET color = "' + aWrites[aWrites.length-1] + '"' : '—';
+                document.getElementById('client-b-action').textContent = bWrites.length ? 'SET color = "' + bWrites[bWrites.length-1] + '"' : '—';
+            } else if (strategy === 'crdt') {
+                document.getElementById('client-a-action').textContent = 'counter += ' + aCounter;
+                document.getElementById('client-b-action').textContent = 'counter += ' + bCounter;
+            } else {
+                document.getElementById('client-a-action').textContent = 'cart: {' + aWrites.join(', ') + '}';
+                document.getElementById('client-b-action').textContent = 'cart: {' + bWrites.join(', ') + '}';
+            }
+        }
+
+        window.setStrategy = function(s) {
+            strategy = s;
+            aWrites = []; bWrites = []; aCounter = 0; bCounter = 0;
+            const btns = {lww: 'btn-lww', crdt: 'btn-crdt', app: 'btn-app'};
+            const colors = {lww: '#e76f51', crdt: '#2a9d8f', app: '#457b9d'};
+            Object.keys(btns).forEach(function(k) {
+                var el = document.getElementById(btns[k]);
+                el.style.background = k === s ? colors[k] : 'white';
+                el.style.color = k === s ? 'white' : colors[k];
+            });
+            log('⚙️ Strategy: <strong>' + (s === 'lww' ? 'Last-Write-Wins' : s === 'crdt' ? 'CRDT Counter' : 'App Logic (Union)') + '</strong>');
+            updateActions();
+        };
+
+        window.clientWrite = function(client) {
+            if (strategy === 'lww') {
+                var colors = ['red', 'blue', 'green', 'purple', 'orange'];
+                var val = colors[Math.floor(Math.random() * colors.length)];
+                if (client === 'a') { aWrites.push(val); log('✏️ Client A: SET color = "' + val + '" (t=' + Date.now() % 10000 + ')'); }
+                else { bWrites.push(val); log('✏️ Client B: SET color = "' + val + '" (t=' + Date.now() % 10000 + ')'); }
+            } else if (strategy === 'crdt') {
+                if (client === 'a') { aCounter++; log('✏️ Client A: counter++ (local: ' + aCounter + ')'); }
+                else { bCounter++; log('✏️ Client B: counter++ (local: ' + bCounter + ')'); }
+            } else {
+                var item = items[Math.floor(Math.random() * items.length)];
+                if (client === 'a') { if (aWrites.indexOf(item) === -1) aWrites.push(item); log('✏️ Client A: add "' + item + '" to cart'); }
+                else { if (bWrites.indexOf(item) === -1) bWrites.push(item); log('✏️ Client B: add "' + item + '" to cart'); }
+            }
+            updateActions();
+        };
+
+        window.resolveConflict = function() {
+            if (strategy === 'lww') {
+                if (!aWrites.length && !bWrites.length) { log('⚠️ No writes to resolve.'); return; }
+                var winner = bWrites.length ? bWrites[bWrites.length-1] : aWrites[aWrites.length-1];
+                var loser = aWrites.length ? aWrites[aWrites.length-1] : null;
+                log('🔄 Syncing... Conflict detected!');
+                log('📊 Resolution (LWW): color = "<strong>' + winner + '</strong>" <span style="color:#e63946">(Client ' + (bWrites.length ? 'B' : 'A') + ' wins, other write LOST)</span>');
+                if (loser && loser !== winner) log('💀 Lost data: "' + loser + '" — gone forever');
+            } else if (strategy === 'crdt') {
+                log('🔄 Syncing... Merging counters...');
+                var total = aCounter + bCounter;
+                log('📊 Resolution (CRDT): A=' + aCounter + ' + B=' + bCounter + ' = <strong>' + total + '</strong> <span style="color:#2a9d8f">✓ No data lost!</span>');
+            } else {
+                log('🔄 Syncing... Merging carts (union)...');
+                var merged = [];
+                aWrites.concat(bWrites).forEach(function(item) { if (merged.indexOf(item) === -1) merged.push(item); });
+                log('📊 Resolution (Union): cart = {<strong>' + merged.join(', ') + '</strong>} <span style="color:#2a9d8f">✓ All items preserved!</span>');
+            }
+        };
+
+        window.resetConflict = function() {
+            aWrites = []; bWrites = []; aCounter = 0; bCounter = 0;
+            logEl.innerHTML = '';
+            updateActions();
+            log('🔄 Reset. Choose a strategy and make concurrent writes.');
+        };
+
+        updateActions();
+    })();
+    </script>
+
+    <div class="takeaway">
+        <h3>🎯 Key Takeaway</h3>
+        <p>There's no universal conflict resolution — choose based on your data semantics. <strong>LWW</strong> for simplicity when data loss is acceptable (caches, metrics). <strong>CRDTs</strong> for automatic conflict-free merge (counters, sets, collaborative editing). <strong>Application logic</strong> for complex domain rules (shopping carts favor adds, booking systems favor first-payer). The key question: what happens to data integrity when two writes collide?</p>
+    </div>
+
+    <div class="footnote">
+        <p><strong>Previous:</strong> <a href="0038-consensus-algorithms-raft.html">Consensus Algorithms (Raft Simplified)</a> | <strong>Next chapter:</strong> Microservices &amp; Communication (coming soon)</p>
+    </div>
+</body>
+</html>
