@@ -23,8 +23,7 @@ export default function TutorialsPage() {
             Learn it the way I did.
           </h1>
           <p className="font-mono text-base text-text-secondary max-w-xl leading-relaxed">
-            These come out of my own self-learning — the same problems I ran into, in the
-            order I actually learned them. I&apos;m publishing them here hoping they make
+            These come out of my own self-learning — inspired by the real struggles I ran into along the way. I&apos;m publishing them here hoping they make
             someone else&apos;s journey a little smoother. But reading these isn&apos;t the
             work — you still have to sit with the hard parts, think them through on your
             own, and get your hands dirty applying it. Consider this a push in the right
