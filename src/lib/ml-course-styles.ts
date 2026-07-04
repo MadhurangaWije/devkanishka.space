@@ -145,11 +145,39 @@ export const ML_COURSE_CSS = `
   line-height: 1.7;
 }
 
+/* Jupyter-notebook-style cell numbering (visual only — nothing executes).
+   nb-cell increments once per Python code block, in document order; the
+   output block right after it re-reads the same counter value without
+   incrementing, so "In [3]:" is always paired with the matching "Out[3]:". */
+.ml-lesson-host .content-wrapper { counter-reset: nb-cell; }
+.ml-lesson-host pre:has(> code.language-python) {
+  position: relative;
+  border-left: 3px solid var(--blue);
+  border-top-left-radius: 4px;
+  border-bottom-left-radius: 4px;
+  padding-top: 2.15rem;
+  counter-increment: nb-cell;
+}
+.ml-lesson-host pre:has(> code.language-python)::before {
+  content: "In [" counter(nb-cell) "]:";
+  position: absolute;
+  top: 0.7rem;
+  left: 1.5rem;
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  font-weight: 700;
+  color: var(--blue);
+  opacity: 0.9;
+}
+
 /* Output blocks */
 .ml-lesson-host .output-block {
   background: #0a0a12;
   border: 1px solid var(--border);
-  border-top: 2px solid var(--violet);
+  border-left: 3px solid var(--green);
+  border-top: none;
+  border-top-left-radius: 0;
+  border-bottom-left-radius: var(--r-md);
   border-radius: 0 0 var(--r-md) var(--r-md);
   padding: 0.9rem 1.25rem;
   margin-top: -1rem;
@@ -158,13 +186,20 @@ export const ML_COURSE_CSS = `
   font-size: 0.8rem;
   color: var(--green);
   line-height: 1.7;
+  white-space: pre-wrap;
 }
 .ml-lesson-host .output-label {
-  font-size: 0.65rem;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  color: var(--text-light);
+  font-size: 0; /* visually replaced below; text node stays for screen readers */
   margin-bottom: 0.4rem;
+  display: block;
+}
+.ml-lesson-host .output-label::before {
+  content: "Out[" counter(nb-cell) "]:";
+  font-size: 0.7rem;
+  font-weight: 700;
+  font-family: var(--font-mono);
+  color: var(--green);
+  opacity: 0.9;
 }
 
 /* Callouts */
