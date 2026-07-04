@@ -126,7 +126,8 @@ export const ML_COURSE_CSS = `
   border: 1px solid var(--border);
 }
 
-/* Code blocks */
+/* Code blocks (fallback styling for non-notebook code, e.g. bash/yaml
+   snippets that are intentionally NOT wrapped in .jupyter-cell below) */
 .ml-lesson-host pre {
   background: var(--bg-code) !important;
   border-radius: var(--r-md);
@@ -145,43 +146,123 @@ export const ML_COURSE_CSS = `
   line-height: 1.7;
 }
 
-/* Jupyter-notebook-style cell numbering (visual only — nothing executes).
-   nb-cell increments once per Python code block, in document order; the
-   output block right after it re-reads the same counter value without
-   incrementing, so "In [3]:" is always paired with the matching "Out[3]:". */
-.ml-lesson-host .content-wrapper { counter-reset: nb-cell; }
-.ml-lesson-host pre:has(> code.language-python) {
-  position: relative;
-  border-left: 3px solid var(--blue);
-  border-top-left-radius: 4px;
-  border-bottom-left-radius: 4px;
-  padding-top: 2.15rem;
-  counter-increment: nb-cell;
+/* ────────────────────────────────────────────────────────────────────────
+   Jupyter-notebook-style cells (visual only — nothing executes).
+   Structure per cell:
+     .jupyter-cell
+       .jupyter-input-row  > .input-prompt + .input-box (pre/code)
+       .jupyter-output-row > .output-prompt + .output-box (.output-text | .output-table)
+   ──────────────────────────────────────────────────────────────────────── */
+.ml-lesson-host .jupyter-cell {
+  margin: 1.25rem 0;
+  border-radius: var(--r-md);
+  overflow: hidden;
+  border: 1px solid var(--border);
 }
-.ml-lesson-host pre:has(> code.language-python)::before {
-  content: "In [" counter(nb-cell) "]:";
-  position: absolute;
-  top: 0.7rem;
-  left: 1.5rem;
+.ml-lesson-host .jupyter-input-row,
+.ml-lesson-host .jupyter-output-row {
+  display: flex;
+  align-items: stretch;
+}
+.ml-lesson-host .jupyter-output-row { border-top: 1px solid var(--border); }
+
+/* Prompts: fixed, identical width so input/output text columns line up */
+.ml-lesson-host .input-prompt,
+.ml-lesson-host .output-prompt {
+  flex: 0 0 4.75rem;
+  width: 4.75rem;
+  padding: 1.25rem 0.6rem 0 0;
+  text-align: right;
   font-family: var(--font-mono);
-  font-size: 0.7rem;
+  font-size: 0.72rem;
   font-weight: 700;
+  line-height: 1.7;
+  white-space: nowrap;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.ml-lesson-host .input-prompt {
   color: var(--blue);
-  opacity: 0.9;
+  background: var(--bg-code);
+}
+.ml-lesson-host .output-prompt {
+  color: var(--red);
+  background: #0a0a12;
 }
 
-/* Output blocks */
+.ml-lesson-host .input-box,
+.ml-lesson-host .output-box {
+  flex: 1 1 auto;
+  min-width: 0; /* allow child <pre> to shrink and scroll instead of overflowing the flex row */
+}
+
+/* The <pre><code> inside .input-box keeps Prism's syntax highlighting —
+   just drop the standalone card chrome since .jupyter-cell now provides it. */
+.ml-lesson-host .input-box pre {
+  margin: 0;
+  border: none;
+  border-radius: 0;
+  background: var(--bg-code) !important;
+}
+
+/* Output variant A: plain console/text output */
+.ml-lesson-host .output-text {
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  line-height: 1.7;
+  color: var(--green);
+  background: transparent;
+  border: none;
+  padding: 0.9rem 1.25rem 0.9rem 0.6rem;
+  white-space: pre-wrap;
+}
+
+/* Output variant B: rich DataFrame/table output, styled to match pandas'
+   default to_html() rendering — a real Jupyter notebook renders DataFrames
+   this way (white background, light-gray grid) regardless of the
+   notebook's own light/dark theme, so this is intentionally NOT dark-themed. */
+.ml-lesson-host .output-box .output-table {
+  padding: 0.75rem 1rem;
+  background: #fdfdfd;
+  overflow-x: auto;
+}
+.ml-lesson-host .output-table table {
+  border-collapse: collapse;
+  font-family: var(--font-sans);
+  font-size: 0.8rem;
+  color: #262626;
+  background: #ffffff;
+}
+.ml-lesson-host .output-table th,
+.ml-lesson-host .output-table td {
+  border: 1px solid #d3d3d3;
+  padding: 0.45rem 0.85rem;
+}
+.ml-lesson-host .output-table th {
+  font-weight: 700;
+  text-align: center;
+  background: #f5f5f5;
+}
+.ml-lesson-host .output-table td {
+  text-align: right;
+}
+.ml-lesson-host .output-table tbody tr:nth-child(even) {
+  background: #f7f7f7;
+}
+.ml-lesson-host .output-table tbody tr:nth-child(odd) {
+  background: #ffffff;
+}
+
+/* Standalone illustrative output blocks (a handful of lessons show a
+   reference log/UI screenshot-as-text that isn't the output of the
+   immediately preceding cell — these keep a simple labeled-card style
+   rather than being forced into the In[]/Out[] pairing above). */
 .ml-lesson-host .output-block {
   background: #0a0a12;
   border: 1px solid var(--border);
-  border-left: 3px solid var(--green);
-  border-top: none;
-  border-top-left-radius: 0;
-  border-bottom-left-radius: var(--r-md);
-  border-radius: 0 0 var(--r-md) var(--r-md);
+  border-radius: var(--r-md);
   padding: 0.9rem 1.25rem;
-  margin-top: -1rem;
-  margin-bottom: 1.25rem;
+  margin: 1.25rem 0;
   font-family: var(--font-mono);
   font-size: 0.8rem;
   color: var(--green);
@@ -189,17 +270,12 @@ export const ML_COURSE_CSS = `
   white-space: pre-wrap;
 }
 .ml-lesson-host .output-label {
-  font-size: 0; /* visually replaced below; text node stays for screen readers */
+  font-size: 0.65rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-light);
   margin-bottom: 0.4rem;
-  display: block;
-}
-.ml-lesson-host .output-label::before {
-  content: "Out[" counter(nb-cell) "]:";
-  font-size: 0.7rem;
-  font-weight: 700;
-  font-family: var(--font-mono);
-  color: var(--green);
-  opacity: 0.9;
+  font-family: var(--font-sans);
 }
 
 /* Callouts */
