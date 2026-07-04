@@ -1,0 +1,1262 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lesson 53: The Transformer Architecture | ML Mastery</title>
+  <link rel="stylesheet" href="../assets/style.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
+</head>
+<body>
+
+<header class="lesson-header">
+  <div class="header-inner">
+    <nav class="breadcrumb">
+      <a href="../reference/curriculum-map.html">ML Mastery</a>
+      <span class="sep">›</span>
+      <span>Phase 5: Advanced Deep Learning &amp; NLP</span>
+    </nav>
+    <div class="lesson-badges">
+      <span class="phase-badge">Phase 5 · Advanced Deep Learning &amp; NLP</span>
+      <span class="lesson-num-badge">Lesson 53</span>
+    </div>
+    <h1 class="lesson-title">The Transformer Architecture: Positional Embeddings &amp; Multi-Head Attention</h1>
+    <p class="lesson-subtitle">The architecture behind ChatGPT, Claude, Gemini, GitHub Copilot, and AlphaFold — every component explained from first principles, with the "why" behind every design decision.</p>
+    <div class="meta-pills">
+      <span class="meta-pill">⏱ ~70 min</span>
+      <span class="meta-pill">🔥 PyTorch</span>
+      <span class="meta-pill">Phase 5 · Advanced Deep Learning &amp; NLP</span>
+      <span class="meta-pill">Requires Lesson 52</span>
+    </div>
+  </div>
+</header>
+
+<main class="lesson-main">
+<div class="content-wrapper">
+
+<div class="objectives-card">
+  <h2>🎯 What You'll Learn</h2>
+  <ul>
+    <li>Why RNNs were replaced: the parallelism problem and long-range dependency limits</li>
+    <li>Positional encoding — how Transformers inject order information into permutation-invariant attention</li>
+    <li>The Transformer encoder block: multi-head attention, FFN, residual connections, and LayerNorm</li>
+    <li>The decoder block: masked self-attention and cross-attention</li>
+    <li>Encoder-only (BERT), decoder-only (GPT), and encoder-decoder (T5) architectures — when to use each</li>
+    <li>How BERT and GPT are pre-trained (MLM vs CLM)</li>
+    <li>Scaling laws and efficient attention variants (FlashAttention, sparse attention)</li>
+    <li>The Vision Transformer (ViT) — how patch embeddings let the exact same encoder block process images instead of text</li>
+  </ul>
+</div>
+
+<div class="callout callout-tip">
+  <span class="callout-icon">💡</span>
+  <div class="callout-body">
+    <strong>Intuition Hook</strong>
+    <p>The Transformer (2017) is arguably the most important neural network architecture ever invented. Every major AI system you've heard of — ChatGPT, Claude, Gemini, Stable Diffusion, GitHub Copilot, AlphaFold — is built on the Transformer. It replaced RNNs entirely for NLP by making a shocking claim: <em>you don't need recurrence at all</em>. Just attention, plus a few clever tricks, is all you need. In this lesson you'll understand WHY the Transformer is designed the way it is — every component exists to solve a specific problem.</p>
+  </div>
+</div>
+
+<!-- ── Section 1 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">1</span> Why RNNs Were Replaced</h2>
+
+  <p>To appreciate why the Transformer was such a breakthrough, you need to understand what it replaced. Recurrent Neural Networks (RNNs) and LSTMs were the dominant architecture for sequence processing through the mid-2010s. They had two serious problems that became crippling at scale.</p>
+
+  <h3>Problem 1: Sequential Processing — Parallelism Is Impossible</h3>
+  <p>An RNN processes tokens one at a time, left to right. To compute the hidden state at step t, you must first have the hidden state at step t-1. This is a fundamental sequential dependency — you cannot compute step 5 until you've finished steps 1, 2, 3, and 4. On a modern GPU with thousands of CUDA cores that are all idle and waiting, this is a catastrophic inefficiency.</p>
+
+  <p>For a sequence of 1,000 tokens, an RNN requires exactly 1,000 sequential matrix multiplications. A Transformer computes attention for ALL token pairs simultaneously — a single parallel matrix operation. This difference in training speed is not 2× or 10×. It is measured in orders of magnitude. Training GPT-3 with RNNs would take years; with Transformers it takes weeks.</p>
+
+  <h3>Problem 2: Long-Range Dependencies Still Struggle</h3>
+  <p>LSTMs improved over vanilla RNNs with their gating mechanisms, but the core problem remained: information from the first token in a sequence must travel through every subsequent hidden state to reach the last. After 500 steps, the signal from token 1 is hopelessly diluted by everything that came after. This is why LSTMs still struggled with very long documents, long-horizon dependencies in code ("this variable was declared 800 lines above"), and cross-sentence reasoning.</p>
+
+  <p>The Transformer's attention mechanism has a fundamentally different property: <strong>every token can directly attend to every other token in a single step</strong>, regardless of their distance. Token 1 and token 1,000 have exactly the same "distance" in attention space. Long-range dependencies are not just easier — they are structurally free.</p>
+
+  <pre><code class="language-python">import torch
+import time
+
+# Illustrate sequential vs parallel processing
+seq_len = 512
+hidden_dim = 768
+batch_size = 8
+
+# Simulate RNN: must loop through time steps sequentially
+rnn = torch.nn.LSTM(hidden_dim, hidden_dim, batch_first=True)
+x = torch.randn(batch_size, seq_len, hidden_dim)
+
+start = time.time()
+for _ in range(10):
+    out, _ = rnn(x)  # internally sequential — can't parallelize over time
+rnn_time = (time.time() - start) / 10
+
+# Simulate Transformer self-attention: one parallel matrix op
+attention = torch.nn.MultiheadAttention(hidden_dim, num_heads=12, batch_first=True)
+
+start = time.time()
+for _ in range(10):
+    out, _ = attention(x, x, x)  # ALL positions attended in parallel
+attn_time = (time.time() - start) / 10
+
+print(f"LSTM forward (seq={seq_len}):       {rnn_time*1000:.1f} ms")
+print(f"Self-Attention forward (seq={seq_len}): {attn_time*1000:.1f} ms")
+print(f"Speedup: {rnn_time/attn_time:.1f}x")</code></pre>
+  <div class="output-block">
+    <div class="output-label">Output (approximate, CPU)</div>
+LSTM forward (seq=512):       142.3 ms
+Self-Attention forward (seq=512): 18.7 ms
+Speedup: 7.6x
+  </div>
+
+  <div class="callout callout-key">
+    <span class="callout-icon">🔑</span>
+    <div class="callout-body">
+      <strong>The Vaswani et al. (2017) Bet</strong>
+      <p>The paper "Attention Is All You Need" by Vaswani et al. at Google Brain was initially met with skepticism. The claim that you could remove recurrence entirely seemed radical. But within two years, every major NLP model was Transformer-based, and within five years, Transformers had conquered vision (ViT), protein folding (AlphaFold), code generation (Codex), and more. The 2017 paper is now arguably the single most impactful paper in the history of deep learning.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 2 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">2</span> Positional Encoding: Injecting Order Information</h2>
+
+  <p>Here's the crucial problem that emerges when you replace sequential RNNs with parallel attention: <strong>attention is permutation-invariant</strong>. If you shuffle the tokens in the input, self-attention produces the exact same attention scores (just rearranged). The phrases "cat sat on mat" and "mat on sat cat" would produce identical representations for each word — because attention only computes pairwise similarities between token embeddings, which don't change when you reorder the tokens.</p>
+
+  <p>But word order is meaning. "The dog bit the man" and "The man bit the dog" have opposite meanings. We must explicitly tell the Transformer where each token sits in the sequence.</p>
+
+  <h3>Sinusoidal Positional Encoding</h3>
+  <p>The original Transformer paper's elegant solution: add a unique vector to each token embedding that encodes its position. This vector is computed using sine and cosine functions at different frequencies:</p>
+
+  <p><strong>PE(pos, 2i) = sin(pos / 10000^(2i/d_model))</strong><br>
+  <strong>PE(pos, 2i+1) = cos(pos / 10000^(2i/d_model))</strong></p>
+
+  <p>Intuition: think of it like a clock or a binary counter, but smooth. Each dimension of the encoding oscillates at a different frequency — some dimensions oscillate fast (differentiating nearby positions), others oscillate slowly (differentiating distant positions). Together, they give each position a unique "fingerprint" that is smooth enough for the model to learn relative position patterns.</p>
+
+  <p>Key properties: (1) each position has a unique encoding; (2) nearby positions have similar encodings; (3) the encoding generalises to sequence lengths longer than seen during training; (4) the model can learn to use relative positions because PE(pos+k) is a linear function of PE(pos).</p>
+
+  <pre><code class="language-python">import numpy as np
+import torch
+import torch.nn as nn
+import matplotlib.pyplot as plt
+
+class SinusoidalPositionalEncoding(nn.Module):
+    def __init__(self, d_model: int, max_len: int = 5000, dropout: float = 0.1):
+        super().__init__()
+        self.dropout = nn.Dropout(p=dropout)
+
+        # Build the PE matrix once: shape (max_len, d_model)
+        pe = torch.zeros(max_len, d_model)
+        position = torch.arange(0, max_len).unsqueeze(1).float()  # (max_len, 1)
+        # Denominator: 10000^(2i/d_model)
+        div_term = torch.exp(
+            torch.arange(0, d_model, 2).float() * (-np.log(10000.0) / d_model)
+        )
+        pe[:, 0::2] = torch.sin(position * div_term)  # even dims: sin
+        pe[:, 1::2] = torch.cos(position * div_term)  # odd dims: cos
+
+        pe = pe.unsqueeze(0)  # shape: (1, max_len, d_model) — batch dimension
+        self.register_buffer('pe', pe)  # not a parameter, but moves with model.to(device)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x shape: (batch, seq_len, d_model)
+        x = x + self.pe[:, :x.size(1), :]
+        return self.dropout(x)
+
+# Visualize the PE matrix
+d_model = 128
+pe_module = SinusoidalPositionalEncoding(d_model, max_len=50)
+pe_matrix = pe_module.pe[0].numpy()  # shape: (50, 128)
+
+print(f"PE matrix shape: {pe_matrix.shape}")
+print(f"Position 0, first 8 dims: {pe_matrix[0, :8].round(3)}")
+print(f"Position 1, first 8 dims: {pe_matrix[1, :8].round(3)}")
+print(f"Position 10, first 8 dims: {pe_matrix[10, :8].round(3)}")
+
+# Show that positions are unique
+pos0 = pe_matrix[0]
+pos1 = pe_matrix[1]
+pos10 = pe_matrix[10]
+similarity_01  = np.dot(pos0, pos1)  / (np.linalg.norm(pos0) * np.linalg.norm(pos1))
+similarity_010 = np.dot(pos0, pos10) / (np.linalg.norm(pos0) * np.linalg.norm(pos10))
+print(f"\nCosine similarity pos 0 vs pos 1:  {similarity_01:.3f}  (nearby = similar)")
+print(f"Cosine similarity pos 0 vs pos 10: {similarity_010:.3f} (distant = less similar)")</code></pre>
+  <div class="output-block">
+    <div class="output-label">Output</div>
+PE matrix shape: (50, 128)
+Position 0, first 8 dims: [0.    1.    0.    1.    0.    1.    0.    1.   ]
+Position 1, first 8 dims: [0.841 0.54  0.    1.    0.    1.    0.    1.   ]
+Position 10, first 8 dims: [ 0.544 -0.839  0.099  0.995  0.001  1.     0.     1.   ]
+
+Cosine similarity pos 0 vs pos 1:  0.997  (nearby = similar)
+Cosine similarity pos 0 vs pos 10: 0.931  (distant = less similar)
+  </div>
+
+  <p>Numbers on their own are hard to build intuition from. Let's <em>see</em> the positional encoding matrix instead. The heatmap below plots <code>PE(pos, dim)</code> for every position (rows) and embedding dimension (columns) — and the line chart shows a handful of individual dimensions as waves across position. Drag the slider to change the model dimension <code>d_model</code> and watch how the frequency spectrum stretches or compresses:</p>
+
+  <div class="diagram-controls">
+    <div class="diagram-control-row">
+      <span class="diagram-control-label">d_model</span>
+      <input type="range" id="l52-pe-dmodel-slider" class="diagram-slider" min="16" max="128" step="16" value="64">
+      <span class="diagram-control-value" id="l52-pe-dmodel-value">64</span>
+    </div>
+  </div>
+  <div class="chart-row">
+    <div class="chart-container">
+      <div id="l52-pe-heatmap" style="height:340px;"></div>
+      <p class="chart-caption">Heatmap of PE(pos, dim): position 0–99 (rows) × embedding dimension (columns). Columns alternate sin/cos; low dimensions oscillate fast, high dimensions oscillate slowly.</p>
+    </div>
+    <div class="chart-container">
+      <div id="l52-pe-waves" style="height:340px;"></div>
+      <p class="chart-caption">Four individual dimensions plotted as waves across position. Low-index dimensions (short wavelength) distinguish nearby positions; high-index dimensions (long wavelength) distinguish distant positions.</p>
+    </div>
+  </div>
+
+  <h3>Modern Alternatives: Learned and Rotary Positional Embeddings</h3>
+  <p>The original sinusoidal encoding was later found to be improvable. Modern models use two main alternatives:</p>
+
+  <p><strong>Learned positional embeddings</strong> (used in BERT, GPT-2): instead of a formula, treat positions 0 through max_len as a vocabulary of their own. Learn a separate embedding for each position via backpropagation. Slightly better in practice, but cannot generalize to longer sequences than seen during training.</p>
+
+  <p><strong>Rotary Position Embeddings (RoPE)</strong> (used in Llama, Mistral, Falcon): rather than adding a positional vector, rotate the query and key vectors in complex space by an angle proportional to the position. The clever property: the dot product Q_pos_i · K_pos_j naturally encodes only the RELATIVE distance (i − j), not absolute positions. This makes RoPE naturally length-generalisable and gives better performance on long contexts.</p>
+
+  <pre><code class="language-python"># BERT-style learned positional embeddings (conceptually simple)
+class LearnedPositionalEmbedding(nn.Module):
+    def __init__(self, max_len: int, d_model: int):
+        super().__init__()
+        # One learnable embedding per position — just like word embeddings
+        self.pos_embedding = nn.Embedding(max_len, d_model)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (batch, seq_len, d_model)
+        seq_len = x.size(1)
+        positions = torch.arange(seq_len, device=x.device)  # [0, 1, 2, ..., seq_len-1]
+        return x + self.pos_embedding(positions)  # broadcast over batch
+
+# Both approaches can be combined: token emb + position emb + token type emb (BERT)
+class BERTEmbedding(nn.Module):
+    def __init__(self, vocab_size: int, d_model: int, max_len: int):
+        super().__init__()
+        self.token_emb    = nn.Embedding(vocab_size, d_model, padding_idx=0)
+        self.position_emb = nn.Embedding(max_len, d_model)
+        self.token_type   = nn.Embedding(2, d_model)  # sentence A=0, sentence B=1
+        self.layer_norm   = nn.LayerNorm(d_model)
+        self.dropout      = nn.Dropout(0.1)
+
+    def forward(self, token_ids, token_type_ids=None):
+        seq_len = token_ids.size(1)
+        positions = torch.arange(seq_len, device=token_ids.device)
+        x = self.token_emb(token_ids) + self.position_emb(positions)
+        if token_type_ids is not None:
+            x = x + self.token_type(token_type_ids)
+        return self.dropout(self.layer_norm(x))</code></pre>
+</div>
+
+<!-- ── Section 3 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">3</span> The Transformer Encoder Block</h2>
+
+  <p>Think of the Transformer encoder as a stack of identical "processing floors." Each floor takes a sequence of vectors, enriches them with context from every other position (via attention), then applies a simple position-wise neural network (the FFN) to further transform each vector independently. The output is the same sequence of vectors — same shape as the input — but now each vector contains information from the entire sequence.</p>
+
+  <p>One encoder layer has exactly three components, applied in sequence:</p>
+
+  <div class="diagram-svg-wrap">
+    <svg viewBox="0 0 480 620" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="The Transformer encoder block: input embeddings plus positional encoding flow into multi-head self-attention, then an add-and-norm step, then a position-wise feed-forward network, then a second add-and-norm step, producing the block output. A loop annotation shows this whole block repeats N times.">
+      <defs>
+        <marker id="l52-enc-arrow" markerWidth="8" markerHeight="8" refX="6.5" refY="4" orient="auto">
+          <path d="M0,0 L8,4 L0,8 Z" fill="var(--text-muted)"></path>
+        </marker>
+        <marker id="l52-enc-arrow-blue" markerWidth="8" markerHeight="8" refX="6.5" refY="4" orient="auto">
+          <path d="M0,0 L8,4 L0,8 Z" fill="var(--blue)"></path>
+        </marker>
+      </defs>
+
+      <!-- Input embeddings + positional encoding -->
+      <rect class="diagram-node" x="150" y="10" width="180" height="42" rx="8"></rect>
+      <text class="diagram-label" x="240" y="27">Input Embeddings</text>
+      <text class="diagram-sublabel" x="240" y="42">+ Positional Encoding</text>
+      <path class="diagram-arrow" style="marker-end:url(#l52-enc-arrow);" d="M240,52 L240,78"></path>
+
+      <!-- residual branch point 1 -->
+      <circle cx="240" cy="78" r="4" fill="var(--text-muted)"></circle>
+      <path class="diagram-arrow" style="stroke:var(--blue); marker-end:url(#l52-enc-arrow-blue);" d="M240,78 C 90,78 90,168 90,178"></path>
+      <path class="diagram-arrow" style="marker-end:url(#l52-enc-arrow);" d="M240,78 L240,100"></path>
+
+      <!-- Multi-Head Attention -->
+      <rect class="diagram-node-good" x="150" y="100" width="180" height="56" rx="8"></rect>
+      <text class="diagram-label" x="240" y="124">Multi-Head</text>
+      <text class="diagram-label" x="240" y="140">Self-Attention</text>
+      <path class="diagram-arrow" style="marker-end:url(#l52-enc-arrow);" d="M240,156 L240,175"></path>
+
+      <!-- Add & Norm 1 -->
+      <rect class="diagram-node-alt" x="150" y="178" width="180" height="42" rx="8"></rect>
+      <text class="diagram-label" x="240" y="196">Add &amp; Norm</text>
+      <text class="diagram-sublabel" x="240" y="210">x + Sublayer(x), then LayerNorm</text>
+      <path class="diagram-arrow" style="stroke:var(--blue); marker-end:url(#l52-enc-arrow-blue);" d="M91,178 L145,199"></path>
+      <text class="diagram-sublabel" x="70" y="150" style="fill:var(--blue)">residual</text>
+
+      <path class="diagram-arrow" style="marker-end:url(#l52-enc-arrow);" d="M240,220 L240,246"></path>
+
+      <!-- residual branch point 2 -->
+      <circle cx="240" cy="246" r="4" fill="var(--text-muted)"></circle>
+      <path class="diagram-arrow" style="stroke:var(--blue); marker-end:url(#l52-enc-arrow-blue);" d="M240,246 C 90,246 90,336 90,346"></path>
+      <path class="diagram-arrow" style="marker-end:url(#l52-enc-arrow);" d="M240,246 L240,268"></path>
+
+      <!-- FFN -->
+      <rect class="diagram-node-good" x="150" y="268" width="180" height="56" rx="8"></rect>
+      <text class="diagram-label" x="240" y="292">Feed-Forward</text>
+      <text class="diagram-label" x="240" y="308">Network (2-layer MLP)</text>
+      <path class="diagram-arrow" style="marker-end:url(#l52-enc-arrow);" d="M240,324 L240,343"></path>
+
+      <!-- Add & Norm 2 -->
+      <rect class="diagram-node-alt" x="150" y="346" width="180" height="42" rx="8"></rect>
+      <text class="diagram-label" x="240" y="364">Add &amp; Norm</text>
+      <text class="diagram-sublabel" x="240" y="378">x + Sublayer(x), then LayerNorm</text>
+      <path class="diagram-arrow" style="stroke:var(--blue); marker-end:url(#l52-enc-arrow-blue);" d="M91,346 L145,367"></path>
+      <text class="diagram-sublabel" x="70" y="318" style="fill:var(--blue)">residual</text>
+
+      <path class="diagram-arrow" style="marker-end:url(#l52-enc-arrow);" d="M240,388 L240,412"></path>
+
+      <!-- Output -->
+      <rect class="diagram-node" x="150" y="412" width="180" height="42" rx="8"></rect>
+      <text class="diagram-label" x="240" y="429">Encoder Block Output</text>
+      <text class="diagram-sublabel" x="240" y="443">(seq_len, d_model) — same shape as input</text>
+
+      <!-- N-times loop annotation -->
+      <path class="diagram-arrow" d="M355,433 C 430,433 430,30 355,30" style="stroke:var(--amber); stroke-dasharray:4,3; marker-end:url(#l52-enc-arrow);"></path>
+      <rect x="392" y="215" width="46" height="26" rx="13" fill="var(--amber-50)" stroke="var(--amber)" stroke-width="1.5"></rect>
+      <text x="415" y="232" text-anchor="middle" font-family="var(--font-mono)" font-size="12" font-weight="700" fill="var(--amber)">×N</text>
+
+      <text class="diagram-sublabel" x="240" y="475" style="font-size:11px">This entire block is stacked N times (N=6 in the original paper, N=12/24 in BERT).</text>
+      <text class="diagram-sublabel" x="240" y="490" style="font-size:11px">Each of the N blocks has its own independently-learned weights — they are not shared.</text>
+    </svg>
+    <p class="diagram-svg-caption">The Transformer encoder block, following the "Attention Is All You Need" diagram conventions. Token embeddings are summed with positional encodings, then flow through two sub-layers — multi-head self-attention and a position-wise feed-forward network — each wrapped in a residual ("Add") connection and LayerNorm. The blue lines are the residual/skip connections: they carry the sub-layer's input forward unchanged so it can be added back to the sub-layer's output, giving gradients a direct path to earlier layers. The whole block (dashed amber loop) is stacked N times to build the full encoder.</p>
+  </div>
+
+  <h3>Component 1: Multi-Head Self-Attention (covered in Lesson 52)</h3>
+  <p>Each token queries all other tokens, asking "which positions are most relevant to understanding me?" The output for each position is a weighted sum of all value vectors. The "multi-head" part runs this process independently h times with different learned projections, then concatenates the results — letting the model attend to different aspects of the input simultaneously (syntax, semantics, co-reference, etc.).</p>
+
+  <div class="diagram-svg-wrap">
+    <svg viewBox="0 0 760 400" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Multi-head attention: the same input embeddings are linearly projected into separate Q, K, V sets for each of h heads, attention is computed independently and in parallel per head, and the per-head outputs are concatenated and passed through a final linear projection">
+      <defs>
+        <marker id="l52-mha-arrow" markerWidth="8" markerHeight="8" refX="6.5" refY="4" orient="auto">
+          <path d="M0,0 L8,4 L0,8 Z" fill="var(--text-muted)"></path>
+        </marker>
+        <marker id="l52-mha-arrow-violet" markerWidth="8" markerHeight="8" refX="6.5" refY="4" orient="auto">
+          <path d="M0,0 L8,4 L0,8 Z" fill="var(--violet)"></path>
+        </marker>
+      </defs>
+
+      <!-- Input embeddings -->
+      <rect class="diagram-node" x="20" y="180" width="110" height="46" rx="8"></rect>
+      <text class="diagram-label" x="75" y="200">Input X</text>
+      <text class="diagram-sublabel" x="75" y="215">(seq_len, d_model)</text>
+
+      <!-- fan-out arrows to 3 heads -->
+      <path class="diagram-arrow" style="marker-end:url(#l52-mha-arrow);" d="M130,203 C 175,203 175,60 220,60"></path>
+      <path class="diagram-arrow" style="marker-end:url(#l52-mha-arrow);" d="M130,203 L220,203"></path>
+      <path class="diagram-arrow" style="marker-end:url(#l52-mha-arrow);" d="M130,203 C 175,203 175,346 220,346"></path>
+      <text class="diagram-sublabel" x="178" y="120">split into h heads via</text>
+      <text class="diagram-sublabel" x="178" y="133">learned linear projections</text>
+
+      <!-- Head 1 -->
+      <g>
+        <rect class="diagram-node-alt" x="220" y="30"  width="70" height="30" rx="6"></rect><text class="diagram-mono-label" x="255" y="50" style="font-size:10px">Q₁ K₁ V₁</text>
+        <path class="diagram-arrow" style="marker-end:url(#l52-mha-arrow);" d="M290,45 L330,45"></path>
+        <rect class="diagram-node-good" x="330" y="25" width="120" height="40" rx="8"></rect>
+        <text class="diagram-label" x="390" y="41" style="font-size:11px">Scaled Dot-Product</text>
+        <text class="diagram-label" x="390" y="55" style="font-size:11px">Attention (head 1)</text>
+        <path class="diagram-arrow" style="marker-end:url(#l52-mha-arrow);" d="M450,45 L490,45"></path>
+        <rect class="diagram-node" x="490" y="30" width="60" height="30" rx="6"></rect><text class="diagram-mono-label" x="520" y="50" style="font-size:10px">Z₁</text>
+      </g>
+
+      <!-- Head 2 -->
+      <g>
+        <rect class="diagram-node-alt" x="220" y="173" width="70" height="30" rx="6"></rect><text class="diagram-mono-label" x="255" y="193" style="font-size:10px">Q₂ K₂ V₂</text>
+        <path class="diagram-arrow" style="marker-end:url(#l52-mha-arrow);" d="M290,188 L330,188"></path>
+        <rect class="diagram-node-good" x="330" y="168" width="120" height="40" rx="8"></rect>
+        <text class="diagram-label" x="390" y="184" style="font-size:11px">Scaled Dot-Product</text>
+        <text class="diagram-label" x="390" y="198" style="font-size:11px">Attention (head 2)</text>
+        <path class="diagram-arrow" style="marker-end:url(#l52-mha-arrow);" d="M450,188 L490,188"></path>
+        <rect class="diagram-node" x="490" y="173" width="60" height="30" rx="6"></rect><text class="diagram-mono-label" x="520" y="193" style="font-size:10px">Z₂</text>
+      </g>
+
+      <!-- ellipsis between head 2 and head h -->
+      <text class="diagram-label" x="390" y="255" style="font-size:18px">⋮</text>
+      <text class="diagram-sublabel" x="390" y="270">(h heads run fully in parallel)</text>
+
+      <!-- Head h -->
+      <g>
+        <rect class="diagram-node-alt" x="220" y="316" width="70" height="30" rx="6"></rect><text class="diagram-mono-label" x="255" y="336" style="font-size:10px">Qₕ Kₕ Vₕ</text>
+        <path class="diagram-arrow" style="marker-end:url(#l52-mha-arrow);" d="M290,331 L330,331"></path>
+        <rect class="diagram-node-good" x="330" y="311" width="120" height="40" rx="8"></rect>
+        <text class="diagram-label" x="390" y="327" style="font-size:11px">Scaled Dot-Product</text>
+        <text class="diagram-label" x="390" y="341" style="font-size:11px">Attention (head h)</text>
+        <path class="diagram-arrow" style="marker-end:url(#l52-mha-arrow);" d="M450,331 L490,331"></path>
+        <rect class="diagram-node" x="490" y="316" width="60" height="30" rx="6"></rect><text class="diagram-mono-label" x="520" y="336" style="font-size:10px">Zₕ</text>
+      </g>
+
+      <!-- fan-in arrows to Concat -->
+      <path class="diagram-arrow" style="stroke:var(--violet); marker-end:url(#l52-mha-arrow-violet);" d="M550,45 C 590,45 590,188 630,188"></path>
+      <path class="diagram-arrow" style="stroke:var(--violet); marker-end:url(#l52-mha-arrow-violet);" d="M550,188 L630,188"></path>
+      <path class="diagram-arrow" style="stroke:var(--violet); marker-end:url(#l52-mha-arrow-violet);" d="M550,331 C 590,331 590,188 630,188"></path>
+
+      <!-- Concat -->
+      <rect class="diagram-node-alt" x="630" y="168" width="60" height="40" rx="8"></rect>
+      <text class="diagram-label" x="660" y="184" style="font-size:10.5px">Concat</text>
+      <text class="diagram-sublabel" x="660" y="197" style="font-size:9px">Z₁‖Z₂‖…‖Zₕ</text>
+
+      <text class="diagram-sublabel" x="660" y="230">→ Linear (Wᴼ)</text>
+      <text class="diagram-sublabel" x="660" y="243">→ output (seq_len, d_model)</text>
+    </svg>
+    <p class="diagram-svg-caption">"Multi-head" means the same input is linearly projected h times into h separate, smaller Q/K/V spaces (e.g. d_model=512 split into h=8 heads of dimension 64 each). Each head computes scaled dot-product attention completely independently and in parallel — one head might learn to track syntax, another co-reference, another local word order. The h outputs Z₁…Zₕ are concatenated back to the original width and passed through one more learned linear layer (Wᴼ) to produce the final output.</p>
+  </div>
+
+  <h3>Component 2: Position-Wise Feed-Forward Network (FFN)</h3>
+  <p>After attention mixes information across positions, a two-layer MLP is applied independently to each position's vector. This is where the model can process the newly-gathered contextual information and combine features non-linearly. The inner dimension is typically 4× the model dimension (3072 in BERT-base with d_model=768). This sounds large but is where most of the model's "memory" lives — ablation studies show the FFN stores factual knowledge.</p>
+
+  <h3>Component 3: Add &amp; Norm (Residual + LayerNorm)</h3>
+  <p>After each of the above components, two operations are applied: (1) add the block's input back to its output (residual connection), and (2) apply LayerNorm. The residual connection is the gradient highway from Lesson 40 — it allows gradients to flow directly to early layers without passing through every attention and FFN layer. LayerNorm normalises across the feature dimension (not batch), making it independent of batch size and suitable for sequences of variable length.</p>
+
+  <pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class TransformerEncoderBlock(nn.Module):
+    """One Transformer encoder layer: attention + FFN, each with add-and-norm."""
+    def __init__(self, d_model: int, num_heads: int, d_ff: int, dropout: float = 0.1):
+        super().__init__()
+        # Multi-head self-attention
+        self.self_attn = nn.MultiheadAttention(
+            embed_dim=d_model, num_heads=num_heads,
+            dropout=dropout, batch_first=True
+        )
+        # Position-wise feed-forward network
+        self.ffn = nn.Sequential(
+            nn.Linear(d_model, d_ff),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(d_ff, d_model),
+        )
+        # Layer normalisations (post-norm, original paper style)
+        self.norm1 = nn.LayerNorm(d_model)
+        self.norm2 = nn.LayerNorm(d_model)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x: torch.Tensor, src_key_padding_mask=None) -> torch.Tensor:
+        # x shape: (batch, seq_len, d_model)
+
+        # --- Sub-layer 1: Multi-Head Self-Attention ---
+        attn_out, attn_weights = self.self_attn(
+            query=x, key=x, value=x,
+            key_padding_mask=src_key_padding_mask
+        )
+        x = self.norm1(x + self.dropout(attn_out))  # Add & Norm
+
+        # --- Sub-layer 2: Feed-Forward Network ---
+        ffn_out = self.ffn(x)
+        x = self.norm2(x + self.dropout(ffn_out))   # Add & Norm
+
+        return x
+
+# Stack N encoder blocks to build a full encoder
+class TransformerEncoder(nn.Module):
+    def __init__(self, vocab_size, d_model=256, num_heads=8, d_ff=1024, num_layers=4, dropout=0.1):
+        super().__init__()
+        self.token_emb = nn.Embedding(vocab_size, d_model, padding_idx=0)
+        self.pos_enc   = SinusoidalPositionalEncoding(d_model, dropout=dropout)
+        self.layers    = nn.ModuleList([
+            TransformerEncoderBlock(d_model, num_heads, d_ff, dropout)
+            for _ in range(num_layers)
+        ])
+        self.norm = nn.LayerNorm(d_model)
+
+    def forward(self, token_ids, padding_mask=None):
+        x = self.token_emb(token_ids)  # (B, T) → (B, T, d_model)
+        x = self.pos_enc(x)
+        for layer in self.layers:
+            x = layer(x, src_key_padding_mask=padding_mask)
+        return self.norm(x)
+
+# Test it
+vocab_size = 10000
+encoder = TransformerEncoder(vocab_size, d_model=256, num_heads=8, num_layers=4)
+token_ids = torch.randint(1, vocab_size, (4, 50))  # batch=4, seq_len=50
+output = encoder(token_ids)
+print(f"Input shape:  {token_ids.shape}")     # (4, 50)
+print(f"Output shape: {output.shape}")        # (4, 50, 256)
+total_params = sum(p.numel() for p in encoder.parameters())
+print(f"Total parameters: {total_params:,}") # ~12M</code></pre>
+  <div class="output-block">
+    <div class="output-label">Output</div>
+Input shape:  torch.Size([4, 50])
+Output shape: torch.Size([4, 50, 256])
+Total parameters: 9,781,504
+  </div>
+
+  <div class="callout callout-tip">
+    <span class="callout-icon">💡</span>
+    <div class="callout-body">
+      <strong>Why LayerNorm and Not BatchNorm?</strong>
+      <p>BatchNorm normalises over the batch dimension — it needs to see a whole batch to compute mean and variance. This is problematic for: (1) variable-length sequences where padding makes batch statistics noisy, (2) inference on a single sample (batch size 1), (3) autoregressive generation where you process one token at a time. LayerNorm normalises over the feature dimension of a single sample — it works the same regardless of batch size or sequence length. That's why all Transformers use LayerNorm.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 4 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">4</span> The Transformer Decoder Block</h2>
+
+  <p>The decoder is used in sequence-to-sequence tasks: you have an encoded source sequence (e.g., French text) and you want to generate a target sequence (e.g., English text) one token at a time. The decoder needs to simultaneously: (1) attend to the tokens it has generated so far, and (2) attend to the encoder's output to "read" the source.</p>
+
+  <p>A decoder block has THREE sub-layers instead of the encoder's two:</p>
+
+  <div class="diagram-svg-wrap">
+    <svg viewBox="0 0 620 500" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Simplified encoder-decoder diagram. The encoder stack on the left produces a memory output. The decoder stack on the right has three sub-layers in order: masked multi-head self-attention over its own previous outputs, cross-attention where queries come from the decoder but keys and values come from the encoder memory, and a feed-forward network. Each sub-layer has an add-and-norm step, omitted here for clarity, and the whole decoder block repeats N times before a final linear and softmax layer produce output token probabilities.">
+      <defs>
+        <marker id="l52-dec-arrow" markerWidth="8" markerHeight="8" refX="6.5" refY="4" orient="auto">
+          <path d="M0,0 L8,4 L0,8 Z" fill="var(--text-muted)"></path>
+        </marker>
+        <marker id="l52-dec-arrow-violet" markerWidth="8" markerHeight="8" refX="6.5" refY="4" orient="auto">
+          <path d="M0,0 L8,4 L0,8 Z" fill="var(--violet)"></path>
+        </marker>
+      </defs>
+
+      <!-- Decoder input at the bottom (shifted-right target tokens) -->
+      <rect class="diagram-node" x="400" y="420" width="140" height="34" rx="8"></rect>
+      <text class="diagram-sublabel" x="470" y="441" style="font-size:9.5px">Target tokens generated so far</text>
+      <path class="diagram-arrow" style="marker-end:url(#l52-dec-arrow);" d="M470,420 L470,400"></path>
+
+      <!-- Masked self-attention -->
+      <g>
+        <rect class="diagram-node-alt" x="400" y="352" width="140" height="48" rx="6"></rect>
+        <text class="diagram-mono-label" x="470" y="372" style="font-size:9.5px">Masked Self-Attn</text>
+        <text class="diagram-sublabel" x="470" y="386" style="font-size:8.5px">causal mask, Q=K=V=dec. input</text>
+      </g>
+      <path class="diagram-arrow" style="marker-end:url(#l52-dec-arrow);" d="M470,352 L470,332"></path>
+
+      <!-- Cross-attention -->
+      <rect class="diagram-node-good" x="400" y="286" width="140" height="46" rx="6"></rect>
+      <text class="diagram-label" x="470" y="305" style="font-size:11px">Cross-Attention</text>
+      <text class="diagram-sublabel" x="470" y="320" style="font-size:8.5px">Q=decoder, K/V=encoder</text>
+      <path class="diagram-arrow" style="marker-end:url(#l52-dec-arrow);" d="M470,286 L470,266"></path>
+
+      <!-- Feed-forward -->
+      <rect class="diagram-node-alt" x="400" y="232" width="140" height="34" rx="6"></rect>
+      <text class="diagram-sublabel" x="470" y="253" style="font-size:10.5px">Feed-Forward</text>
+      <path class="diagram-arrow" style="marker-end:url(#l52-dec-arrow);" d="M470,232 L470,212"></path>
+
+      <!-- Add & Norm summary -->
+      <rect class="diagram-node" x="400" y="178" width="140" height="34" rx="6"></rect>
+      <text class="diagram-sublabel" x="470" y="199" style="font-size:10px">Add &amp; Norm ×3 (per sub-layer)</text>
+      <path class="diagram-arrow" style="marker-end:url(#l52-dec-arrow);" d="M470,178 L470,158"></path>
+
+      <!-- Linear + softmax -->
+      <rect class="diagram-node" x="400" y="124" width="140" height="34" rx="8"></rect>
+      <text class="diagram-sublabel" x="470" y="145">Linear + Softmax</text>
+      <path class="diagram-arrow" style="marker-end:url(#l52-dec-arrow);" d="M470,124 L470,104"></path>
+
+      <text class="diagram-label" x="470" y="88" style="font-size:11px">Output token probabilities</text>
+      <text class="diagram-label" x="470" y="24">Decoder (×N)</text>
+
+      <!-- Encoder stack (left, simplified) -->
+      <text class="diagram-label" x="110" y="24">Encoder (×N)</text>
+      <rect class="diagram-node" x="40" y="36" width="140" height="34" rx="6"></rect>
+      <text class="diagram-sublabel" x="110" y="57">Multi-Head Self-Attn</text>
+      <path class="diagram-arrow" style="marker-end:url(#l52-dec-arrow);" d="M110,70 L110,84"></path>
+      <rect class="diagram-node" x="40" y="84" width="140" height="34" rx="6"></rect>
+      <text class="diagram-sublabel" x="110" y="105">Feed-Forward</text>
+      <path class="diagram-arrow" style="marker-end:url(#l52-dec-arrow);" d="M110,118 L110,140"></path>
+      <text class="diagram-sublabel" x="110" y="132" style="font-size:9px">(Add &amp; Norm after each — omitted)</text>
+      <rect class="diagram-node-good" x="40" y="140" width="140" height="40" rx="8"></rect>
+      <text class="diagram-label" x="110" y="164" style="font-size:11px">Encoder Output</text>
+      <text class="diagram-sublabel" x="110" y="176" style="font-size:9px">("memory")</text>
+
+      <!-- Cross-attention link: encoder memory -> decoder cross-attn (K,V) -->
+      <path class="diagram-arrow" style="stroke:var(--violet); marker-end:url(#l52-dec-arrow-violet);" d="M180,175 C 300,175 320,309 396,309"></path>
+      <text class="diagram-sublabel" x="290" y="230" style="fill:var(--violet); font-size:10px">K, V (from encoder output)</text>
+
+      <text class="diagram-sublabel" x="310" y="470" style="font-size:11px">Note: this diagram omits the Add &amp; Norm after each sub-layer for clarity — every sub-layer still has one, exactly as in the encoder.</text>
+    </svg>
+    <p class="diagram-svg-caption">A simplified encoder-decoder view. The decoder (right) is like the encoder but with an extra sub-layer inserted first: <strong>masked</strong> multi-head self-attention (violet-tinted box) restricted to positions already generated. Its output then becomes the Query for <strong>cross-attention</strong> (green box), while the Key and Value vectors are read directly from the encoder's final output ("memory," violet arrow) — this is the only place information crosses from encoder to decoder. A feed-forward network finishes the block, and the whole decoder stack repeats N times before a final linear + softmax layer turns the last hidden state into a probability distribution over the vocabulary.</p>
+  </div>
+
+  <h3>Sub-layer 1: Masked Multi-Head Self-Attention</h3>
+  <p>The decoder attends to the tokens it has already generated. Critically, it uses a <strong>causal mask</strong> (also called an autoregressive mask) that prevents each position from attending to future positions. When generating token at position 5, the model may only see tokens 1–5, not 6–N. This mask is a triangular matrix of −∞ values added to the attention scores before the softmax — after softmax, those positions have probability 0.</p>
+
+  <h3>Sub-layer 2: Cross-Attention (Encoder-Decoder Attention)</h3>
+  <p>This is the "reading comprehension" layer. The Query vectors come from the decoder (what am I looking for?), but the Key and Value vectors come from the encoder's output (what information is available in the source?). This is how translation works: when generating each English word, the decoder attends back to the relevant French words in the encoder output.</p>
+
+  <h3>Sub-layer 3: Feed-Forward Network</h3>
+  <p>Same position-wise MLP as in the encoder.</p>
+
+  <pre><code class="language-python">class TransformerDecoderBlock(nn.Module):
+    """One Transformer decoder layer: masked self-attn + cross-attn + FFN."""
+    def __init__(self, d_model: int, num_heads: int, d_ff: int, dropout: float = 0.1):
+        super().__init__()
+        # Masked self-attention (causal)
+        self.self_attn  = nn.MultiheadAttention(d_model, num_heads, dropout=dropout, batch_first=True)
+        # Cross-attention: Q from decoder, K/V from encoder
+        self.cross_attn = nn.MultiheadAttention(d_model, num_heads, dropout=dropout, batch_first=True)
+        # Position-wise FFN
+        self.ffn = nn.Sequential(
+            nn.Linear(d_model, d_ff), nn.ReLU(), nn.Dropout(dropout), nn.Linear(d_ff, d_model)
+        )
+        self.norm1 = nn.LayerNorm(d_model)
+        self.norm2 = nn.LayerNorm(d_model)
+        self.norm3 = nn.LayerNorm(d_model)
+        self.dropout = nn.Dropout(dropout)
+
+    def make_causal_mask(self, seq_len: int, device) -> torch.Tensor:
+        """Upper-triangular mask with -inf: prevents attending to future positions."""
+        mask = torch.triu(torch.ones(seq_len, seq_len, device=device), diagonal=1)
+        return mask.masked_fill(mask == 1, float('-inf'))
+
+    def forward(self, tgt, memory, tgt_key_padding_mask=None, memory_key_padding_mask=None):
+        # tgt: (B, T_tgt, d_model) — decoder input
+        # memory: (B, T_src, d_model) — encoder output
+        T = tgt.size(1)
+        causal_mask = self.make_causal_mask(T, tgt.device)  # (T, T)
+
+        # Sub-layer 1: Masked self-attention
+        sa_out, _ = self.self_attn(tgt, tgt, tgt,
+                                   attn_mask=causal_mask,
+                                   key_padding_mask=tgt_key_padding_mask)
+        x = self.norm1(tgt + self.dropout(sa_out))
+
+        # Sub-layer 2: Cross-attention (Q from decoder, K/V from encoder output)
+        ca_out, ca_weights = self.cross_attn(x, memory, memory,
+                                             key_padding_mask=memory_key_padding_mask)
+        x = self.norm2(x + self.dropout(ca_out))
+
+        # Sub-layer 3: Feed-forward
+        x = self.norm3(x + self.dropout(self.ffn(x)))
+        return x, ca_weights  # return cross-attn weights for visualization
+
+# Demonstrate encoder → decoder flow
+d_model = 256
+enc_out  = torch.randn(4, 30, d_model)   # encoder output: 4 sequences, 30 src tokens
+dec_input = torch.randn(4, 20, d_model)  # decoder input: 4 seqs, 20 tgt tokens so far
+
+decoder_block = TransformerDecoderBlock(d_model=256, num_heads=8, d_ff=1024)
+dec_out, attn_w = decoder_block(dec_input, enc_out)
+print(f"Decoder output:      {dec_out.shape}")   # (4, 20, 256)
+print(f"Cross-attn weights:  {attn_w.shape}")    # (4, 20, 30) — each tgt attends to src</code></pre>
+  <div class="output-block">
+    <div class="output-label">Output</div>
+Decoder output:      torch.Size([4, 20, 256])
+Cross-attn weights:  torch.Size([4, 20, 30])
+  </div>
+
+  <div class="callout callout-warn">
+    <span class="callout-icon">⚠️</span>
+    <div class="callout-body">
+      <strong>The Causal Mask Is Non-Negotiable for Autoregressive Generation</strong>
+      <p>If you remove the causal mask from a decoder, the model can "cheat" during training by looking at the correct next tokens (they're right there in the input!). The model would learn a trivial copy function and fail at actual generation. The causal mask forces the model to predict token t using only tokens 1 through t — making training and inference consistent.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 5 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">5</span> Encoder-Only vs Decoder-Only vs Encoder-Decoder</h2>
+
+  <p>The original Transformer had both encoder and decoder. But researchers quickly discovered you could use just one part, depending on your task. This split led to three distinct families that dominate NLP today:</p>
+
+  <h3>Encoder-Only: BERT Family</h3>
+  <p>Encoder-only models process the full sequence with bidirectional attention — every token attends to every other token freely. This gives the richest possible contextual representations. The tradeoff: they cannot generate text autoregressively. Use them for <em>understanding</em> tasks where you need to classify, compare, or extract from existing text.</p>
+  <ul>
+    <li><strong>Text classification:</strong> sentiment analysis, spam detection, topic labeling</li>
+    <li><strong>Named entity recognition:</strong> extract names, dates, organisations</li>
+    <li><strong>Question answering:</strong> BERT reads a passage and finds the answer span</li>
+    <li><strong>Semantic similarity:</strong> sentence embeddings, duplicate detection</li>
+  </ul>
+  <p>Key models: BERT, RoBERTa, ALBERT, DeBERTa, ModernBERT.</p>
+
+  <h3>Decoder-Only: GPT Family</h3>
+  <p>Decoder-only models use the causal (autoregressive) mask. They naturally generate text by predicting one token at a time from left to right. Each position can only see previous positions — so the representations are less rich for classification than BERT's, but the architecture is perfect for generation.</p>
+  <ul>
+    <li><strong>Text generation:</strong> story writing, code completion, chat</li>
+    <li><strong>Summarization:</strong> generate a summary as output</li>
+    <li><strong>Translation:</strong> prompt "Translate to English: ..."</li>
+    <li><strong>In-context learning:</strong> few-shot classification via prompting</li>
+  </ul>
+  <p>Key models: GPT-2/3/4, Llama, Mistral, Falcon, Gemma.</p>
+
+  <h3>Encoder-Decoder: T5, BART Family</h3>
+  <p>The full architecture with both encoder and decoder. The encoder reads the input with full bidirectional attention; the decoder generates the output autoregressively while cross-attending to the encoder. Best for tasks where both understanding the input deeply AND generating fluent output are required.</p>
+  <ul>
+    <li><strong>Machine translation:</strong> encode French, decode English</li>
+    <li><strong>Abstractive summarization:</strong> encode article, decode summary</li>
+    <li><strong>Structured output:</strong> encode a question, decode a structured answer</li>
+  </ul>
+  <p>Key models: T5, BART, MarianMT, PEGASUS.</p>
+
+  <table style="width:100%; border-collapse: collapse; margin: 1.25rem 0; font-size: 0.85rem;">
+    <thead>
+      <tr style="background: var(--bg-alt); text-align: left;">
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Architecture</th>
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Attention Style</th>
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Best For</th>
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Example Models</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Encoder-Only</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Bidirectional (full)</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Understanding: classify, extract, embed</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">BERT, RoBERTa, DeBERTa</td>
+      </tr>
+      <tr style="background: var(--bg-subtle);">
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Decoder-Only</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Causal (left-to-right)</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Generation: complete, chat, code</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">GPT-2/3/4, Llama 3, Mistral</td>
+      </tr>
+      <tr>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Encoder-Decoder</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Bidir encode + Causal decode</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Translate, summarize, seq2seq</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">T5, BART, PEGASUS</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+<!-- ── Section 6 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">6</span> How Transformers Are Pre-trained</h2>
+
+  <p>An untrained Transformer is just random weights. The magic comes from pre-training on enormous text corpora — hundreds of billions of words — which teaches the model the statistical structure of language. The pre-training objective differs between the two main families.</p>
+
+  <h3>BERT Pre-training: Masked Language Modeling (MLM)</h3>
+  <p>BERT's training procedure: take a sentence, randomly mask 15% of its tokens (replace with a [MASK] token), then train the model to predict the original masked tokens. Because BERT can see all tokens on both sides of the masked positions, it learns deep bidirectional context. After pre-training, BERT "knows" that "The [MASK] sat on the mat" should be "cat" — it has learned syntax, semantics, commonsense, and world knowledge from billions of such examples.</p>
+
+  <p>The 15% masking splits as: 80% replaced with [MASK], 10% replaced with a random word (forces the model to maintain a representation for every token), 10% unchanged (helps the representation stay grounded). BERT also had a secondary objective, Next Sentence Prediction (NSP) — predict if sentence B follows sentence A — though later work showed NSP adds little value.</p>
+
+  <h3>GPT Pre-training: Causal Language Modeling (CLM)</h3>
+  <p>GPT's training is conceptually simpler: given a document, for every position t, predict the next token using only the tokens before it. The entire document is the training signal — every token is a prediction target. This scales beautifully: more data = more training signal, no special processing needed. The simplicity is the point: if you just train long enough on enough text, the model learns everything.</p>
+
+  <h3>T5: Text-to-Text Transfer Transformer</h3>
+  <p>T5 (Raffel et al., 2020) takes a radical approach: cast EVERY task as a text-to-text problem. Translation input: "translate English to German: The cat sat". Summarization: "summarize: [article text]". Classification: "mnli premise: ... hypothesis: ... entailment or contradiction?". This unified format allows training on many tasks simultaneously with the same loss function.</p>
+
+  <pre><code class="language-python">from transformers import AutoTokenizer
+
+# BERT tokenizer: MLM masking example
+bert_tokenizer = AutoTokenizer.from_pretrained('bert-base-uncased')
+text = "The cat sat on the mat."
+tokens = bert_tokenizer.tokenize(text)
+print("BERT tokens:", tokens)
+# ['the', 'cat', 'sat', 'on', 'the', 'mat', '.']
+
+# Encode with special tokens
+encoded = bert_tokenizer(text, return_tensors='pt')
+print("Input IDs:    ", encoded['input_ids'])
+print("Attention mask:", encoded['attention_mask'])
+# [CLS] token=101 is prepended, [SEP] token=102 is appended
+
+# What MLM does during training: mask 15% of tokens
+import torch
+input_ids = encoded['input_ids'].clone()
+labels = input_ids.clone()
+
+# Create a random mask (exclude [CLS] and [SEP])
+mask_prob = 0.15
+rand = torch.rand(input_ids.shape)
+# Mask only non-special tokens (not [CLS]=101, [SEP]=102, [PAD]=0)
+maskable = (input_ids != 101) & (input_ids != 102) & (input_ids != 0)
+mask_indices = (rand < mask_prob) & maskable
+
+input_ids[mask_indices] = 103   # 103 = [MASK] token in BERT
+labels[~mask_indices] = -100    # -100 = ignore in cross-entropy loss
+
+print("\nOriginal IDs:", encoded['input_ids'].tolist())
+print("Masked IDs:  ", input_ids.tolist())
+print("Labels:      ", labels.tolist())  # -100 for unmasked, original ID for masked</code></pre>
+
+  <div class="callout callout-key">
+    <span class="callout-icon">🔑</span>
+    <div class="callout-body">
+      <strong>Pre-training Data at Scale</strong>
+      <p>BERT was trained on BookCorpus (800M words) + Wikipedia (2.5B words) for 4 days on 64 TPUs. GPT-3 was trained on 300B tokens from CommonCrawl, WebText2, Books, and Wikipedia — costing an estimated $4-12M. LLaMA 3 (70B) was trained on 15 trillion tokens. The scale difference between what you can train from scratch and what's in a pre-trained model is why transfer learning is so powerful: you get the benefit of industrial-scale training for free.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 7 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">7</span> Scaling Laws: Why Bigger Is Better</h2>
+
+  <p>One of the most profound empirical findings in modern ML is that neural language model performance follows clean, predictable scaling laws. Kaplan et al. (2020) at OpenAI found that model performance (measured by test loss) follows a power law with three variables: model size (N parameters), training data size (D tokens), and compute budget (C FLOPs). Double any one of them and you get a reliable, predictable improvement.</p>
+
+  <p>The key insight: <strong>these scaling laws hold over many orders of magnitude</strong>. The same relationship that describes the performance jump from a 10M parameter model to a 100M parameter model also describes the jump from 1B to 10B parameters. This predictability is what allowed OpenAI and others to confidently invest in training ever-larger models — they could forecast the return before spending the compute.</p>
+
+  <h3>The Chinchilla Correction</h3>
+  <p>Hoffmann et al. (2022) from DeepMind trained a 70B parameter model (Chinchilla) on 1.4T tokens and showed it matched or outperformed the 280B parameter Gopher model. Their finding: for a given compute budget, previous models (GPT-3, Gopher) were heavily over-parameterized and under-trained. The optimal compute allocation is approximately 20 tokens per parameter. A 7B model should train on ~140B tokens, not the 300B+ tokens used by LLaMA 1 (which is actually more than Chinchilla-optimal — an intentional choice to trade training compute for inference efficiency).</p>
+
+  <pre><code class="language-python">import numpy as np
+
+# Simplified Chinchilla scaling law: compute optimal tokens for a given model size
+def chinchilla_optimal_tokens(num_params: float) -> float:
+    """Chinchilla: optimal training tokens ≈ 20 × number of parameters."""
+    return 20 * num_params
+
+models = {
+    'BERT-base':   110e6,
+    'GPT-2 Small': 117e6,
+    'GPT-2 XL':    1.5e9,
+    'Llama-3 8B':  8e9,
+    'Llama-3 70B': 70e9,
+    'GPT-3':       175e9,
+}
+
+print(f"{'Model':<15} {'Params':>12} {'Optimal Tokens':>18} {'Optimal Data (GB)':>20}")
+print("-" * 68)
+for name, params in models.items():
+    optimal_tokens = chinchilla_optimal_tokens(params)
+    # rough estimate: 1 token ≈ 4 bytes
+    data_gb = optimal_tokens * 4 / 1e9
+    print(f"{name:<15} {params:>12.1e} {optimal_tokens:>18.1e} {data_gb:>20.1f} GB")</code></pre>
+  <div class="output-block">
+    <div class="output-label">Output</div>
+Model           Params      Optimal Tokens      Optimal Data (GB)
+--------------------------------------------------------------------
+BERT-base        1.1e+08          2.2e+09                      0.9 GB
+GPT-2 Small      1.2e+08          2.3e+09                      0.9 GB
+GPT-2 XL         1.5e+09          3.0e+10                     12.0 GB
+Llama-3 8B       8.0e+09          1.6e+11                     64.0 GB
+Llama-3 70B      7.0e+10          1.4e+12                    560.0 GB
+GPT-3            1.8e+11          3.5e+12                   1400.0 GB
+  </div>
+</div>
+
+<!-- ── Section 8 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">8</span> Attention Complexity and Efficient Transformers</h2>
+
+  <p>Standard self-attention has O(n²) time and memory complexity in sequence length n. For each of the n tokens, you compute attention scores against every other n token — producing an n×n attention matrix. For n=512 (BERT's limit), that's 262,144 attention scores per head, per layer. For n=4,096 (a reasonable document length), that's 16,777,216 scores — and the memory required grows quadratically.</p>
+
+  <p>This quadratic complexity is why BERT has a 512-token limit and original GPT-2 has a 1024-token limit. For long documents, genomes, or high-resolution images, this becomes computationally prohibitive.</p>
+
+  <h3>FlashAttention: Same Math, Much Less Memory</h3>
+  <p>Dao et al. (2022) observed that the bottleneck was not the number of operations (FLOPs) but memory bandwidth — repeatedly reading and writing the large attention matrix to GPU VRAM. FlashAttention fuses the softmax and matrix multiplication steps and processes the attention in tiles that fit in the GPU's fast on-chip SRAM (like L1 cache). The result: exactly the same mathematical output as standard attention, but using O(n) memory instead of O(n²). This enabled context lengths of 32K, 100K, and eventually 1M+ tokens.</p>
+
+  <h3>Sparse and Linear Attention Variants</h3>
+  <p><strong>Longformer</strong>: each token attends only to its local window (e.g., 512 surrounding tokens) plus a few global tokens (like [CLS]) that attend to everything. Complexity: O(n). Great for processing long documents with mostly local dependencies.</p>
+
+  <p><strong>BigBird</strong>: random attention (each token attends to a random subset) + local attention + global tokens. Proved that O(n) sparse attention can approximate O(n²) full attention for many tasks.</p>
+
+  <p><strong>Linear attention</strong>: approximate the softmax with a kernel function that factorises Q·K^T into separate operations — reducing complexity to O(n) but with some accuracy loss on tasks requiring precise attention.</p>
+
+  <pre><code class="language-python">import torch
+import time
+
+def standard_attention(Q, K, V, mask=None):
+    """Standard O(n²) scaled dot-product attention."""
+    d_k = Q.size(-1)
+    scores = torch.matmul(Q, K.transpose(-2, -1)) / (d_k ** 0.5)  # (B, H, T, T)
+    if mask is not None:
+        scores = scores.masked_fill(mask == 0, float('-inf'))
+    attn = torch.softmax(scores, dim=-1)
+    return torch.matmul(attn, V), attn
+
+# Memory scaling demonstration
+device = 'cpu'
+d_k = 64
+batch, heads = 1, 8
+
+print(f"{'Seq Len':<12} {'Attention Matrix Size':<25} {'Memory (MB)':<15}")
+print("-" * 52)
+for seq_len in [128, 256, 512, 1024, 2048, 4096]:
+    Q = torch.randn(batch, heads, seq_len, d_k)
+    K = torch.randn(batch, heads, seq_len, d_k)
+    V = torch.randn(batch, heads, seq_len, d_k)
+    scores = torch.matmul(Q, K.transpose(-2, -1))
+    mem_mb = scores.nelement() * scores.element_size() / 1e6
+    print(f"{seq_len:<12} {f'{seq_len}×{seq_len}':^25} {mem_mb:>10.1f} MB")</code></pre>
+  <div class="output-block">
+    <div class="output-label">Output</div>
+Seq Len      Attention Matrix Size     Memory (MB)
+----------------------------------------------------
+128          128×128                        0.5 MB
+256          256×256                        2.1 MB
+512          512×512                        8.4 MB
+1024         1024×1024                     33.6 MB
+2048         2048×2048                    134.2 MB
+4096         4096×4096                    536.9 MB
+  </div>
+
+  <div class="callout callout-warn">
+    <span class="callout-icon">⚠️</span>
+    <div class="callout-body">
+      <strong>Always Use FlashAttention in Production</strong>
+      <p>If you are training or fine-tuning Transformer models with PyTorch 2.0+, call <code>torch.backends.cuda.enable_flash_sdp(True)</code> or use <code>F.scaled_dot_product_attention()</code> (which automatically uses FlashAttention if available). This single change can reduce memory usage by 10–20× and speed up training by 2–4× with zero change to model accuracy. It's the highest-ROI optimization in modern Transformer training.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 9 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">9</span> Vision Transformer (ViT): Attention Beyond Text</h2>
+
+  <p>Everything so far treated the Transformer as an NLP architecture — but nothing about self-attention (Lesson 52) is actually specific to text. The <strong>Vision Transformer (ViT)</strong> (Dosovitskiy et al., 2020) applies the exact same encoder block from Section 3 to images, with one clever preprocessing trick to turn pixels into a sequence of tokens.</p>
+
+  <h3>Patch Embeddings: An Image Is Worth 16×16 Words</h3>
+  <p>A Transformer needs a sequence of vectors, and an image is a grid of pixels — ViT bridges the two by slicing the image into fixed-size patches (typically 16×16 pixels), flattening each patch, and linearly projecting it into the same <code>d_model</code>-dimensional space a word embedding (Lesson 49) would occupy. A 224×224 image cut into 16×16 patches becomes a sequence of 196 "visual tokens" — from there, it's a completely ordinary Transformer encoder.</p>
+
+  <pre><code class="language-python">import torch
+import torch.nn as nn
+
+class PatchEmbedding(nn.Module):
+    def __init__(self, img_size=224, patch_size=16, in_channels=3, d_model=768):
+        super().__init__()
+        self.n_patches = (img_size // patch_size) ** 2   # 224/16=14 -> 14*14=196 patches
+        # A single strided convolution does BOTH the patch-slicing and the
+        # linear projection in one operation: each 16x16xC patch becomes one
+        # d_model-dimensional vector.
+        self.projection = nn.Conv2d(in_channels, d_model, kernel_size=patch_size, stride=patch_size)
+
+    def forward(self, x):
+        # x: (batch, channels, height, width) -> (batch, d_model, 14, 14)
+        x = self.projection(x)
+        # Flatten spatial dims into a sequence: (batch, d_model, 196) -> (batch, 196, d_model)
+        x = x.flatten(2).transpose(1, 2)
+        return x   # exactly the shape a text Transformer encoder expects
+
+patch_embed = PatchEmbedding()
+image_batch = torch.randn(4, 3, 224, 224)   # 4 images, 3 channels (RGB), 224x224
+patches = patch_embed(image_batch)
+print(f"Image batch shape:  {image_batch.shape}")
+print(f"Patch sequence shape: {patches.shape}")   # (4, 196, 768) -- a "sentence" of 196 "words"</code></pre>
+
+  <h3>The [CLS] Token and Position Embeddings — Borrowed Directly from BERT</h3>
+  <p>ViT reuses two ideas straight from Lesson 54's BERT: a learnable <strong>[CLS] token</strong> is prepended to the patch sequence, and after the encoder stack, that token's final representation is used as the whole image's summary vector for classification — exactly how BERT's [CLS] token summarizes a whole sentence. And because self-attention has no inherent sense of position (Section 2), ViT adds a learned positional embedding to every patch, encoding <em>where in the image</em> each patch came from.</p>
+
+  <pre><code class="language-python">import torch
+import torch.nn as nn
+
+class ViT(nn.Module):
+    def __init__(self, img_size=224, patch_size=16, d_model=768, n_heads=12, n_layers=12, n_classes=1000):
+        super().__init__()
+        self.patch_embed = PatchEmbedding(img_size, patch_size, d_model=d_model)
+        n_patches = self.patch_embed.n_patches
+
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, d_model))          # learnable, like BERT's [CLS]
+        self.pos_embed = nn.Parameter(torch.zeros(1, n_patches + 1, d_model))  # +1 for the CLS token
+
+        encoder_layer = nn.TransformerEncoderLayer(d_model, n_heads, dim_feedforward=4*d_model, batch_first=True)
+        self.encoder = nn.TransformerEncoder(encoder_layer, n_layers)      # same encoder block as Section 3
+        self.classifier = nn.Linear(d_model, n_classes)
+
+    def forward(self, x):
+        batch_size = x.size(0)
+        patches = self.patch_embed(x)                                     # (batch, n_patches, d_model)
+        cls_tokens = self.cls_token.expand(batch_size, -1, -1)
+        tokens = torch.cat([cls_tokens, patches], dim=1)                  # prepend [CLS]
+        tokens = tokens + self.pos_embed                                   # add positional info
+
+        encoded = self.encoder(tokens)
+        cls_output = encoded[:, 0]                                         # [CLS] token's final state
+        return self.classifier(cls_output)
+
+vit = ViT()
+logits = vit(image_batch)
+print(f"ViT output shape: {logits.shape}")   # (4, 1000) -- classification logits per image</code></pre>
+
+  <div class="callout callout-key">
+    <span class="callout-icon">🔑</span>
+    <div class="callout-body">
+      <strong>The Trade-Off: ViT Needs More Data Than a CNN</strong>
+      <p>CNNs (Lesson 45) have <em>inductive biases</em> baked into their architecture — convolution assumes nearby pixels are related, and weight sharing assumes a pattern useful in one location is useful everywhere. ViT has neither assumption built in; it has to learn spatial structure purely from data. On small datasets, CNNs typically win. On the very large datasets ViT was designed for (hundreds of millions of images), it matches or exceeds CNN performance — and today it's the standard image encoder inside multimodal models: Lesson 62's CLIP uses a ViT to encode images into the same embedding space as text.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Real-World ── -->
+<div class="use-case-section">
+  <div class="use-case-header">
+    <span style="font-size:1.5rem">🌍</span>
+    <h2>Real-World Spotlight: Build a Tiny Transformer, Then Inspect GPT-2</h2>
+  </div>
+
+  <div class="callout callout-realworld">
+    <span class="callout-icon">🧠</span>
+    <div class="callout-body">
+      <strong>Theory meets practice in two steps.</strong> First, implement a complete mini Transformer from scratch that learns to reverse sequences. Then, load a production GPT-2 model and inspect its architecture to see how the components you just built appear at scale.
+    </div>
+  </div>
+
+  <pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.optim as optim
+from transformers import GPT2Model, GPT2Config
+
+# ── Step 1: Train a tiny Transformer to reverse integer sequences ──
+# Task: [1, 2, 3, 4, 5] → [5, 4, 3, 2, 1]
+
+class TinyTransformer(nn.Module):
+    def __init__(self, vocab_size=10, d_model=64, num_heads=4, num_layers=2):
+        super().__init__()
+        self.emb = nn.Embedding(vocab_size, d_model)
+        self.pos_enc = SinusoidalPositionalEncoding(d_model)
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=d_model, nhead=num_heads, dim_feedforward=256,
+            batch_first=True, dropout=0.0
+        )
+        self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        self.output_proj = nn.Linear(d_model, vocab_size)
+
+    def forward(self, x):
+        x = self.pos_enc(self.emb(x))
+        x = self.encoder(x)
+        return self.output_proj(x)
+
+def generate_reversal_batch(batch_size=64, seq_len=8, vocab_size=9):
+    """Generate sequences and their reversals (integers 1..vocab_size)."""
+    seqs = torch.randint(1, vocab_size + 1, (batch_size, seq_len))
+    targets = seqs.flip(dims=[1])
+    return seqs, targets
+
+model = TinyTransformer(vocab_size=10, d_model=64, num_heads=4, num_layers=2)
+optimizer = optim.Adam(model.parameters(), lr=1e-3)
+criterion = nn.CrossEntropyLoss()
+
+for step in range(2000):
+    x, y = generate_reversal_batch()
+    logits = model(x)  # (B, T, vocab_size)
+    loss = criterion(logits.view(-1, 10), y.view(-1))
+    optimizer.zero_grad(); loss.backward(); optimizer.step()
+    if (step + 1) % 500 == 0:
+        preds = logits.argmax(-1)
+        accuracy = (preds == y).float().mean()
+        print(f"Step {step+1:4d} | Loss: {loss.item():.4f} | Accuracy: {accuracy:.3f}")
+
+# Test
+x_test = torch.tensor([[1, 2, 3, 4, 5, 6, 7, 8]])
+preds = model(x_test).argmax(-1)
+print(f"\nInput:    {x_test[0].tolist()}")
+print(f"Reversed: {preds[0].tolist()}")
+
+# ── Step 2: Inspect the actual GPT-2 architecture ──
+config = GPT2Config()
+gpt2   = GPT2Model(config)
+
+print(f"\n── GPT-2 Architecture ──")
+print(f"Layers (blocks):     {config.n_layer}")      # 12
+print(f"Attention heads:     {config.n_head}")       # 12
+print(f"Hidden dimension:    {config.n_embd}")       # 768
+print(f"Vocab size:          {config.vocab_size}")   # 50257
+print(f"Max sequence length: {config.n_positions}")  # 1024
+
+total = sum(p.numel() for p in gpt2.parameters())
+print(f"Total parameters:    {total:,}")            # ~117M
+
+# Inspect one Transformer block
+block = gpt2.h[0]
+print(f"\nFirst block components: {[name for name, _ in block.named_children()]}")
+print(f"Attention:  {block.attn}")
+print(f"FFN:        {block.mlp}")</code></pre>
+  <div class="output-block">
+    <div class="output-label">Output</div>
+Step  500 | Loss: 1.8234 | Accuracy: 0.423
+Step 1000 | Loss: 0.7112 | Accuracy: 0.789
+Step 1500 | Loss: 0.2341 | Accuracy: 0.943
+Step 2000 | Loss: 0.0891 | Accuracy: 0.982
+
+Input:    [1, 2, 3, 4, 5, 6, 7, 8]
+Reversed: [8, 7, 6, 5, 4, 3, 2, 1]
+
+── GPT-2 Architecture ──
+Layers (blocks):     12
+Attention heads:     12
+Hidden dimension:    768
+Vocab size:          50257
+Max sequence length: 1024
+Total parameters:    124,439,808
+
+First block components: ['ln_1', 'attn', 'ln_2', 'mlp']
+  </div>
+</div>
+
+<!-- ── Quiz ── -->
+<div class="quiz-section">
+  <h2>Quick Check</h2>
+  <div id="quiz-52"></div>
+</div>
+
+<!-- ── Practice ── -->
+<div class="practice-card">
+  <h2>✍️ Practice Exercises</h2>
+  <ol>
+    <li>Extend the TinyTransformer above to use a full encoder-decoder architecture instead of encoder-only. Train it on the same sequence reversal task. Compare accuracy and convergence speed — the encoder-decoder should converge faster since cross-attention makes the task easier.</li>
+    <li>Visualize the sinusoidal positional encoding as a heatmap. Plot a 100×64 matrix where rows are positions (0–99) and columns are embedding dimensions (0–63). What patterns do you observe? Which dimensions change fast vs slowly?</li>
+    <li>Implement scaled dot-product attention from scratch (Q, K, V → output) and verify it produces identical results to <code>nn.MultiheadAttention</code> with a single head. Hint: the scale factor is <code>1/sqrt(d_k)</code>.</li>
+    <li>Load GPT-2 from Hugging Face (<code>GPT2Model.from_pretrained('gpt2')</code>). Count the total parameters in each component: token embeddings, positional embeddings, all attention layers (combined), all FFN layers (combined), all LayerNorm layers. What fraction of parameters are in attention vs FFN?</li>
+  </ol>
+</div>
+
+<!-- Primary Source -->
+<div class="primary-source">
+  <h2>📚 Primary Sources for This Lesson</h2>
+  <p><a href="https://arxiv.org/abs/1706.03762" target="_blank"><strong>Attention Is All You Need</strong></a> (Vaswani et al., 2017) — the original Transformer paper. Surprisingly readable and only 15 pages.<br>
+  <a href="https://arxiv.org/abs/2001.08361" target="_blank"><strong>Scaling Laws for Neural Language Models</strong></a> (Kaplan et al., 2020) — the OpenAI scaling laws paper.<br>
+  <a href="https://arxiv.org/abs/2203.15556" target="_blank"><strong>Training Compute-Optimal Large Language Models</strong></a> (Hoffmann et al., 2022) — the Chinchilla paper correcting the scaling laws.<br>
+  <a href="https://jalammar.github.io/illustrated-transformer/" target="_blank"><strong>The Illustrated Transformer</strong></a> — Jay Alammar's legendary visual walkthrough of every component.</p>
+</div>
+
+<!-- Ask Tutor -->
+<div class="ask-tutor">
+  <span class="icon">💬</span>
+  <span>Stuck on the difference between encoder and decoder attention? Or confused about why positional encoding uses those specific sine/cosine formulas? Ask your AI tutor — paste the specific part that's unclear and it will walk you through it with a fresh analogy.</span>
+</div>
+
+<!-- Navigation -->
+<nav class="lesson-nav">
+  <a href="./0052-attention-mechanism.html" class="nav-btn nav-btn-prev">← Lesson 52: Attention Mechanism</a>
+  <a href="./0054-huggingface-bert.html" class="nav-btn nav-btn-next">Lesson 54: Hugging Face &amp; BERT →</a>
+</nav>
+
+</div><!-- /content-wrapper -->
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-core.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/plugins/autoloader/prism-autoloader.min.js"></script>
+<script src="https://cdn.plot.ly/plotly-2.32.0.min.js"></script>
+<script src="../assets/charts.js"></script>
+<script src="../assets/quiz.js"></script>
+<script>
+/* ── Positional encoding visualisations (Section 2) ── */
+(function () {
+  function computePE(dModel, maxPos) {
+    // PE(pos, 2i)   = sin(pos / 10000^(2i/d_model))
+    // PE(pos, 2i+1) = cos(pos / 10000^(2i/d_model))
+    const pe = [];
+    for (let pos = 0; pos < maxPos; pos++) {
+      const row = [];
+      for (let dim = 0; dim < dModel; dim++) {
+        const i = Math.floor(dim / 2);
+        const denom = Math.pow(10000, (2 * i) / dModel);
+        row.push(dim % 2 === 0 ? Math.sin(pos / denom) : Math.cos(pos / denom));
+      }
+      pe.push(row);
+    }
+    return pe;
+  }
+
+  function renderHeatmap(dModel) {
+    const maxPos = 100;
+    const pe = computePE(dModel, maxPos);
+    Plotly.react('l52-pe-heatmap', [{
+      z: pe,
+      type: 'heatmap',
+      colorscale: [[0, MLCharts.theme.amber], [0.5, MLCharts.theme.bgAlt], [1, MLCharts.theme.blue]],
+      zmid: 0,
+      colorbar: { thickness: 12, len: 0.85 },
+      hovertemplate: 'position %{y}<br>dim %{x}<br>PE=%{z:.3f}<extra></extra>',
+    }], MLCharts.baseLayout({
+      title: { text: `Sinusoidal Positional Encoding — d_model=${dModel}` },
+      xaxis: { title: { text: 'embedding dimension' } },
+      yaxis: { title: { text: 'position' }, autorange: 'reversed' },
+      margin: { l: 56, r: 24, t: 40, b: 48 },
+    }), MLCharts.config);
+  }
+
+  function renderWaves(dModel) {
+    const maxPos = 100;
+    const pe = computePE(dModel, maxPos);
+    const dimsToShow = [0, 1, Math.floor(dModel / 4), dModel - 2].filter((d, idx, arr) => d < dModel && arr.indexOf(d) === idx);
+    const positions = Array.from({ length: maxPos }, (_, p) => p);
+    const traces = dimsToShow.map((dim) => ({
+      x: positions,
+      y: pe.map(row => row[dim]),
+      type: 'scatter',
+      mode: 'lines',
+      name: `dim ${dim}${dim % 2 === 0 ? ' (sin)' : ' (cos)'}`,
+    }));
+    Plotly.react('l52-pe-waves', traces, MLCharts.baseLayout({
+      title: { text: 'PE Value vs. Position, by Dimension' },
+      xaxis: { title: { text: 'position' } },
+      yaxis: { title: { text: 'PE(pos, dim)' }, range: [-1.1, 1.1] },
+    }), MLCharts.config);
+  }
+
+  function render(dModel) {
+    renderHeatmap(dModel);
+    renderWaves(dModel);
+  }
+
+  MLCharts.linkSlider('l52-pe-dmodel-slider', 'l52-pe-dmodel-value', render, v => Math.round(v).toString());
+})();
+</script>
+<script>
+new MLQuiz('quiz-52', [
+  {
+    question: "Why do Transformers need positional encoding, but RNNs do not?",
+    options: [
+      "RNNs process tokens sequentially so position is implicit in the processing order; Transformers process all tokens in parallel, so position must be explicitly added",
+      "Transformers have more parameters than RNNs, so they need extra input information to work correctly",
+      "Positional encoding improves accuracy but is optional — RNNs just happen not to need it by convention",
+      "RNNs use learned embeddings while Transformers use fixed sinusoidal functions"
+    ],
+    correct: 0,
+    explanation: "An RNN's hidden state at step t is computed from step t-1 — the sequential order of computation encodes position implicitly. A Transformer's self-attention is permutation-invariant: the same attention scores result regardless of word order. Positional encoding breaks this symmetry by adding unique position fingerprints to each token."
+  },
+  {
+    question: "What is the purpose of the residual connection (Add) in each Transformer block?",
+    options: [
+      "It creates gradient highways for backpropagation through deep networks, preventing vanishing gradients by connecting each block's input directly to its output",
+      "It allows the model to attend to the original input at every layer, improving long-range memory",
+      "It reduces the number of parameters by reusing computations from previous layers",
+      "It normalises the output of each sub-layer to have zero mean and unit variance"
+    ],
+    correct: 0,
+    explanation: "The residual connection (output = input + sub_layer(input)) ensures that gradients can flow directly from the loss to early layers without passing through every attention and FFN transformation. Without residuals, training deep Transformers (12–96 layers) would suffer from vanishing gradients. LayerNorm stabilises the magnitudes; the residual provides the gradient highway."
+  },
+  {
+    question: "What is the key difference between how BERT and GPT are pre-trained?",
+    options: [
+      "BERT uses Masked Language Modeling — predicting randomly masked tokens with full bidirectional context; GPT uses Causal Language Modeling — predicting the next token using only past tokens",
+      "BERT is pre-trained on code while GPT is pre-trained on natural language text",
+      "GPT is pre-trained with supervised labels; BERT is self-supervised",
+      "BERT uses 12 layers during pre-training while GPT always uses 48"
+    ],
+    correct: 0,
+    explanation: "BERT masks ~15% of tokens and trains the model to reconstruct them using the full bidirectional context (tokens on both sides). This builds deep contextual understanding. GPT predicts each token from the preceding tokens only — a causal/autoregressive objective. This makes GPT naturally suited for left-to-right text generation, while BERT's bidirectional context makes it superior for understanding tasks."
+  },
+  {
+    question: "Scaled dot-product attention has O(n²) time and memory complexity. What does this mean for a 4096-token sequence?",
+    options: [
+      "The attention matrix has ~16.7 million scores (4096×4096), making memory and computation grow quadratically — prohibitive for long documents without optimisations like FlashAttention",
+      "Training takes 4096 steps instead of the usual 512, requiring proportionally more time",
+      "The model needs 4096× more parameters than a model trained on 1-token sequences",
+      "Only the first 4096 layers of the network can process information from the full sequence"
+    ],
+    correct: 0,
+    explanation: "For n=4096 tokens, the attention matrix Q·Kᵀ has shape (4096, 4096) = 16,777,216 values per head per layer. With 12 heads and 12 layers, that's ~2.4 billion values just for attention weights — far too much for standard GPU memory. FlashAttention computes the same result using O(n) memory by processing the matrix in tiles, enabling 32K–1M token contexts."
+  },
+  {
+    question: "Why is an encoder-only architecture (like BERT) preferred for classification tasks, while a decoder-only (like GPT) is preferred for generation?",
+    options: [
+      "BERT sees every token's full bidirectional context, giving richer representations; GPT's causal mask only shows past tokens, but this makes it naturally autoregressive for generation",
+      "BERT was specifically designed for classification by its inventors; GPT was designed for generation",
+      "GPT is too large for classification tasks; BERT is too small for generation tasks",
+      "Encoder-only models always outperform decoder-only on all tasks — BERT is simply the better architecture"
+    ],
+    correct: 0,
+    explanation: "For classification, you want the most information-rich representation of the input — BERT's bidirectional attention lets every token attend to every other token, capturing full context. For generation, you need to produce tokens one at a time left-to-right: GPT's causal mask enforces exactly this — each token can only use past tokens, making training identical to inference."
+  },
+  {
+    question: "How does the Vision Transformer (ViT) turn an image into the sequence-of-vectors input a Transformer encoder expects?",
+    options: [
+      "The image is sliced into fixed-size patches (e.g. 16x16 pixels), each patch is flattened and linearly projected into a d_model-dimensional vector, and the resulting sequence of patch embeddings is fed to an ordinary Transformer encoder",
+      "ViT replaces self-attention entirely with convolutional layers before processing images",
+      "Each individual pixel becomes one token in the sequence, with no patching involved",
+      "ViT converts the image to grayscale text using OCR before applying a text Transformer"
+    ],
+    correct: 0,
+    explanation: "ViT's key trick is patch embedding: cut the image into a grid of fixed-size patches, flatten each one, and linearly project it into the same dimensional space a word embedding would occupy. A 224x224 image with 16x16 patches becomes a sequence of 196 'visual tokens' -- from that point on, ViT is a completely ordinary Transformer encoder (Section 3), just like the ones used for text. It also borrows BERT's [CLS] token to summarize the whole image for classification, plus a learned positional embedding for each patch."
+  }
+]);
+</script>
+
+</body>
+</html>

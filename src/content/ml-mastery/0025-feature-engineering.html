@@ -42,6 +42,7 @@
     <li>Build polynomial and interaction features with <code>PolynomialFeatures</code> and manual creation</li>
     <li>Remove low-information features with <code>VarianceThreshold</code>, <code>SelectKBest</code>, and correlation filtering</li>
     <li>Use wrapper and embedded methods — RFE, RFECV, Lasso, and <code>SelectFromModel</code></li>
+    <li>Target-encode high-cardinality categoricals (zip codes, merchant IDs) without leaking the label into the encoded feature</li>
   </ul>
 </div>
 
@@ -54,7 +55,7 @@
   <p>Feature engineering encompasses two distinct activities:</p>
   <ul>
     <li><strong>Feature creation</strong>: generating new columns that make the signal more explicit for the model — transforming raw values, creating ratios, extracting temporal patterns, or computing group statistics</li>
-    <li><strong>Feature selection</strong>: removing columns that add noise, redundancy, or multicollinearity — keeping only the features that genuinely help the model generalise</li>
+    <li><strong>Feature selection</strong>: removing columns that add noise, redundancy, or multicollinearity — keeping only the features that genuinely help the model generalize</li>
   </ul>
 
   <pre><code class="language-python">import pandas as pd
@@ -589,6 +590,78 @@ print(f"Full pipeline CV R²: {cv_r2:.4f}")
 print("\nWorkflow complete. Pipeline is leakage-free and production-ready.")</code></pre>
 </div>
 
+<!-- ── Section 9 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">9</span> Target Encoding for High-Cardinality Categoricals</h2>
+
+  <p>Lesson 10's one-hot encoding works well for a categorical feature with a handful of levels — but what about <code>zip_code</code> (40,000+ US values), <code>merchant_id</code> (millions), or <code>user_id</code>? One-hot encoding these explodes your feature count into the hundreds of thousands, most of them near-useless single-occurrence columns. <strong>Target encoding</strong> replaces each category with a single number: the average target value for that category.</p>
+
+  <pre><code class="language-python">import pandas as pd
+import numpy as np
+
+np.random.seed(42)
+n = 5000
+zip_codes = np.random.choice([f'ZIP{i:05d}' for i in range(800)], size=n)   # 800 distinct zips
+# Some zips genuinely have higher default rates than others
+zip_risk = {z: np.random.beta(2, 8) for z in set(zip_codes)}
+default = np.array([np.random.random() < zip_risk[z] for z in zip_codes]).astype(int)
+
+df = pd.DataFrame({'zip_code': zip_codes, 'default': default})
+
+# Naive target encoding: replace each category with its mean target value
+zip_means = df.groupby('zip_code')['default'].mean()
+df['zip_code_encoded'] = df['zip_code'].map(zip_means)
+print(df[['zip_code', 'default', 'zip_code_encoded']].head())
+print(f"\n{df['zip_code'].nunique()} zip codes -> 1 numeric column instead of {df['zip_code'].nunique()} one-hot columns")</code></pre>
+
+  <div class="callout callout-warn">
+    <span class="callout-icon">⚠️</span>
+    <div class="callout-body">
+      <strong>The Leakage Trap: Never Compute the Mean Using a Row's Own Target</strong>
+      <p>The naive version above has a serious flaw: a zip code with only 2 rows gets encoded using the mean of exactly those 2 rows — including each row's own <code>default</code> value. The model can then partially "read" the label straight off the encoded feature, especially for rare categories. This is the same fit-on-train-only discipline from Lesson 10, applied one level deeper: target statistics must never be computed using the very row they're about to be attached to.</p>
+    </div>
+  </div>
+
+  <pre><code class="language-python">from sklearn.model_selection import KFold
+import numpy as np
+import pandas as pd
+
+def kfold_target_encode(df, cat_col, target_col, n_splits=5, smoothing=10, global_seed=42):
+    """
+    Leakage-free target encoding:
+    1. For each fold, compute category means using ONLY the other folds' data
+    2. Blend each category's mean toward the global mean (smoothing) so
+       rare categories don't get a noisy, overconfident estimate
+    """
+    global_mean = df[target_col].mean()
+    encoded = pd.Series(index=df.index, dtype=float)
+
+    kf = KFold(n_splits=n_splits, shuffle=True, random_state=global_seed)
+    for train_idx, val_idx in kf.split(df):
+        train_fold, val_fold = df.iloc[train_idx], df.iloc[val_idx]
+
+        stats = train_fold.groupby(cat_col)[target_col].agg(['mean', 'count'])
+        # Smoothed mean: blends the category's own mean with the global mean,
+        # weighted by how much data that category actually has
+        smoothed = (stats['mean'] * stats['count'] + global_mean * smoothing) / (stats['count'] + smoothing)
+
+        encoded.iloc[val_idx] = val_fold[cat_col].map(smoothed).fillna(global_mean).values
+
+    return encoded
+
+df['zip_code_encoded_safe'] = kfold_target_encode(df, 'zip_code', 'default')
+print(df[['zip_code', 'default', 'zip_code_encoded_safe']].head())
+
+# sklearn's built-in TargetEncoder (1.3+) does this same fold-based
+# smoothing automatically -- prefer it in production code:
+from sklearn.preprocessing import TargetEncoder
+encoder = TargetEncoder(smooth='auto', cv=5, random_state=42)
+X_encoded = encoder.fit_transform(df[['zip_code']], df['default'])
+print(f"\nsklearn TargetEncoder output shape: {X_encoded.shape}")</code></pre>
+
+  <p>Compare the naive and leakage-free encodings on rare categories — the gap is the leakage made visible: naive encoding for a zip code with just 2 rows will often show 0.0 or 1.0 (perfectly matching its own tiny sample), while the smoothed, out-of-fold version pulls that estimate back toward the global average until there's enough evidence to trust it.</p>
+</div>
+
 <!-- ── Real-World Spotlight ── -->
 <div class="use-case-section">
   <div class="use-case-header">
@@ -790,7 +863,7 @@ new MLQuiz('lesson-25-quiz', [
     question: "Why apply a log transform to a right-skewed feature like income?",
     options: [
       "To compress the long tail and make the distribution more symmetric, which benefits linear models and improves coefficient interpretability",
-      "To normalise the feature to [0, 1] range, which all ML models require",
+      "To normalize the feature to [0, 1] range, which all ML models require",
       "To remove outliers from the training data before fitting",
       "Log transforms are required only for tree-based models, not linear models"
     ],
@@ -806,7 +879,7 @@ new MLQuiz('lesson-25-quiz', [
       "Drops the bottom 1% of features ranked by their correlation with the target"
     ],
     correct: 0,
-    explanation: "VarianceThreshold removes features that don't vary enough to carry signal. A constant feature (all values identical) has variance=0 and is useless. A feature with variance=0.001 barely changes across samples and provides almost no discrimination. Setting threshold=0.01 removes all features where the variance of the (ideally standardised) feature is below 0.01. This is a fast, model-agnostic first-pass cleanup."
+    explanation: "VarianceThreshold removes features that don't vary enough to carry signal. A constant feature (all values identical) has variance=0 and is useless. A feature with variance=0.001 barely changes across samples and provides almost no discrimination. Setting threshold=0.01 removes all features where the variance of the (ideally standardized) feature is below 0.01. This is a fast, model-agnostic first-pass cleanup."
   },
   {
     question: "Recursive Feature Elimination (RFE) works by doing what?",
@@ -840,6 +913,17 @@ new MLQuiz('lesson-25-quiz', [
     ],
     correct: 0,
     explanation: "SelectFromModel wraps any fitted estimator and extracts features whose importance/coefficient exceeds a threshold. When used with Lasso, it fits the Lasso model (which zeroes out unimportant coefficients) and then retains only features where the absolute coefficient > threshold (default: 1e-5). This is embedded feature selection — selection happens as part of the Lasso fitting process itself, not as a separate step."
+  },
+  {
+    question: "Why is naive target encoding (replacing each category with the mean target value computed from ALL rows in that category) a data leakage risk?",
+    options: [
+      "A row's own target value contributes to the mean used to encode that same row, so rare categories can end up encoding the label almost directly into the feature",
+      "Target encoding is only valid for regression problems, never classification",
+      "sklearn's TargetEncoder does not support categorical features with more than 100 levels",
+      "Naive target encoding always produces exactly the same result as one-hot encoding"
+    ],
+    correct: 0,
+    explanation: "If a category has only 2 rows, its 'mean target value' is computed using those exact 2 rows -- including each row's own label. The model can then partially read the answer straight off the encoded feature, especially for rare categories, which is a severe form of leakage. The fix is to compute each row's encoding using only OTHER rows (typically via K-Fold, as sklearn's TargetEncoder does internally), combined with smoothing toward the global mean so rare categories don't get an overconfident estimate."
   }
 ]);
 </script>

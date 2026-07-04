@@ -301,6 +301,25 @@ export const ML_COURSE_CSS = `
 .ml-lesson-host .diagram-sublabel { font-family: var(--font-sans); font-size: 10.5px; fill: var(--text-muted); text-anchor: middle; }
 .ml-lesson-host .diagram-mono-label { font-family: var(--font-mono); font-size: 11px; font-weight: 600; text-anchor: middle; }
 
+/* Concept videos (Remotion-rendered) */
+.ml-lesson-host .video-container {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  padding: 1rem 1rem 0.75rem;
+  margin: 1.75rem 0 1.25rem;
+}
+.ml-lesson-host .video-container video {
+  width: 100%;
+  height: auto;
+  border-radius: var(--r-md);
+  display: block;
+  background: #1a1d27;
+}
+.ml-lesson-host .video-caption {
+  font-size: 0.8rem; color: var(--text-muted); text-align: center; font-style: italic; margin: 0.6rem 0 0.25rem;
+}
+
 /* Real-world use case */
 .ml-lesson-host .use-case-section {
   background: var(--teal-50);

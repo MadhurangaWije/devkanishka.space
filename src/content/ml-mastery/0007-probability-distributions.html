@@ -223,6 +223,7 @@ print("\nThis is the base rate fallacy: ignoring the rarity of disease inflates 
   <ul>
     <li><strong>Bernoulli(p)</strong> — a single trial with two outcomes (0 or 1). A coin flip is Bernoulli(0.5). Used as the output distribution for binary classifiers.</li>
     <li><strong>Binomial(n, p)</strong> — the number of successes in n independent Bernoulli trials. "How many of 100 coin flips are heads?" follows Binomial(100, 0.5).</li>
+    <li><strong>Poisson(λ)</strong> — the number of events occurring in a fixed interval of time or space, given they happen at a known average rate λ and independently of each other. "How many customer support tickets arrive per hour?" or "how many typos per page?" follow a Poisson distribution.</li>
   </ul>
 
   <pre><code class="language-python">import numpy as np
@@ -251,6 +252,33 @@ ax.set_title('Binomial(n=100, p=0.03) — Defects per Batch', fontsize=12)
 ax.set_xlabel('Number of Defects'); ax.set_ylabel('Probability')
 ax.set_xlim(-0.5, 15.5)
 plt.tight_layout(); plt.show()</code></pre>
+
+  <p>The Poisson distribution is the limiting case of the Binomial when n is very large and p is very small, but the product n·p (the expected count, λ) stays fixed — which is exactly the "rare event, many opportunities" pattern behind server error rates, fraud incidents, and website crashes:</p>
+
+  <pre><code class="language-python">from scipy import stats
+import numpy as np
+
+# ── Poisson: number of server errors per hour, historical average λ=4 ──
+lam = 4
+poisson = stats.poisson(mu=lam)
+
+print(f"P(exactly 0 errors):     {poisson.pmf(0):.4f}")
+print(f"P(exactly 4 errors):     {poisson.pmf(4):.4f}")   # highest single-value probability
+print(f"P(more than 8 errors):   {1 - poisson.cdf(8):.4f}")   # tail risk — worth alerting on?
+print(f"Mean = Variance = λ:     mean={poisson.mean():.1f}, var={poisson.var():.1f}")
+
+# Poisson as the n->infinity, p->0 limit of Binomial with n*p held constant
+n_large, p_small = 10_000, lam / 10_000
+binom_approx = stats.binom(n=n_large, p=p_small)
+print(f"\nBinomial({n_large}, {p_small:.5f}) P(X=4): {binom_approx.pmf(4):.4f}  (should ≈ Poisson's {poisson.pmf(4):.4f})")</code></pre>
+
+  <div class="callout callout-tip">
+    <span class="callout-icon">💡</span>
+    <div class="callout-body">
+      <strong>Where Poisson Shows Up in ML</strong>
+      <p>Poisson regression (a generalized linear model, closely related to logistic regression's use of the sigmoid) is the standard tool for modeling count data directly — predicted website visits, insurance claims, or disease cases — rather than forcing a continuous model like linear regression onto data that can only take non-negative integer values.</p>
+    </div>
+  </div>
 
   <h3>Continuous Distributions</h3>
   <p>Use a <strong>PDF</strong> (Probability Density Function) — probability is the area under the curve, not the height at a point. P(X = exactly 1.0) = 0 for any continuous distribution; you need an interval: P(0.9 ≤ X ≤ 1.1).</p>
@@ -589,6 +617,66 @@ for method, col in [('Z-score', 'z_outlier'), ('IQR', 'iqr_outlier')]:
   </div>
 </div>
 
+<!-- ── Section 9 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">9</span> The Central Limit Theorem</h2>
+
+  <p>Everything in Sections 5–8 leaned on the normal distribution — but real-world features are rarely perfectly normal (income is right-skewed, response times are right-skewed, most raw measurements have some quirk). The <strong>Central Limit Theorem (CLT)</strong> is the reason normality shows up everywhere in statistics and ML anyway, and it makes a claim that sounds almost too good to be true:</p>
+
+  <div class="callout callout-key">
+    <span class="callout-icon">🔑</span>
+    <div class="callout-body">
+      <strong>The Central Limit Theorem</strong>
+      <p>If you repeatedly draw random samples of size n from <em>any</em> distribution with a finite mean and variance — normal, uniform, exponential, wildly skewed, doesn't matter — and compute the <strong>mean of each sample</strong>, the distribution of those sample means approaches a normal distribution as n grows, centered on the true population mean. This holds even when the original population is nothing like a bell curve.</p>
+    </div>
+  </div>
+
+  <pre><code class="language-python">import numpy as np
+import matplotlib.pyplot as plt
+
+np.random.seed(42)
+
+def pd_skew(x):
+    import pandas as pd
+    return pd.Series(x).skew()
+
+# A deliberately NON-normal population: exponential (heavily right-skewed)
+population = np.random.exponential(scale=2.0, size=100_000)
+print(f"Population mean={population.mean():.3f}, skewness={pd_skew(population):.2f} "
+      f"(heavily right-skewed, nothing like a bell curve)")
+
+# Draw many samples of size n, record each sample's MEAN
+def sampling_distribution_of_the_mean(population, n, n_samples=5000):
+    means = [np.random.choice(population, size=n, replace=True).mean()
+             for _ in range(n_samples)]
+    return np.array(means)
+
+fig, axes = plt.subplots(1, 4, figsize=(16, 3.5))
+axes[0].hist(population, bins=60, color='indianred', alpha=0.8)
+axes[0].set_title(f'Population\n(skew={pd_skew(population):.2f}, clearly NOT normal)')
+
+for ax, n in zip(axes[1:], [2, 10, 50]):
+    sample_means = sampling_distribution_of_the_mean(population, n)
+    ax.hist(sample_means, bins=60, color='steelblue', alpha=0.8)
+    ax.set_title(f'Means of {n}-sample draws\n(skew={pd_skew(sample_means):.2f})')
+
+plt.tight_layout()
+plt.savefig('clt_demo.png', dpi=150)
+# As n grows from 2 -> 10 -> 50, the histogram of sample means becomes
+# visibly more symmetric and bell-shaped, even though every single sample
+# was drawn from a badly skewed exponential population.</code></pre>
+
+  <p>The CLT also predicts <em>how tightly</em> those sample means cluster: the standard deviation of the sampling distribution of the mean — called the <strong>standard error</strong> — shrinks as <em>σ/√n</em>. Bigger samples don't just look more normal; they also produce dramatically more precise estimates of the true population mean.</p>
+
+  <div class="callout callout-tip">
+    <span class="callout-icon">💡</span>
+    <div class="callout-body">
+      <strong>Why This Matters for ML</strong>
+      <p>The CLT is the theoretical foundation underneath almost every "is this difference real?" question in ML: comparing two models' cross-validation scores (Lesson 21), running an A/B test on a new model in production (Lesson 69), or simply trusting that a validation set's average metric is a reasonable estimate of true performance. Whenever you see a confidence interval, a p-value, or a claim that a metric is "statistically significantly" different, the CLT is quietly doing the work of justifying why a normal-distribution-based calculation is valid, even though the underlying data itself is never perfectly normal.</p>
+    </div>
+  </div>
+</div>
+
 <!-- ── Real-World Use Case ── -->
 <div class="use-case-section">
   <div class="use-case-header">
@@ -892,6 +980,17 @@ new MLQuiz('lesson-07-quiz', [
     ],
     correct: 0,
     explanation: "On right-skewed data, the few extreme values in the right tail inflate both the mean (pulling it right) and the std (making it larger). This makes the Z-score threshold (mean ± 3σ) much wider than it should be, and the extreme values may not actually exceed 3σ even though they're clearly anomalous. IQR is robust because Q1 and Q3 are computed from the middle 50% of data, which is completely unaffected by the extreme tail values."
+  },
+  {
+    question: "According to the Central Limit Theorem, what happens to the distribution of sample means as sample size n grows, even if the original population is heavily skewed?",
+    options: [
+      "The distribution of sample means approaches a normal distribution, centered on the true population mean, regardless of the population's original shape",
+      "The sample means become more skewed in the same direction as the original population as n increases",
+      "The CLT only applies when the original population is already approximately normal",
+      "Sample means stay uniformly distributed no matter how large n gets"
+    ],
+    correct: 0,
+    explanation: "The CLT's power is that it makes no assumption about the shape of the original population — exponential, uniform, wildly skewed, it doesn't matter. As long as the population has a finite mean and variance, the distribution of sample means computed from repeated random samples of size n converges to a normal distribution as n grows, centered on the true population mean. This is why normal-distribution-based statistics (confidence intervals, hypothesis tests) remain valid even when working with obviously non-normal raw data."
   }
 ]);
 </script>

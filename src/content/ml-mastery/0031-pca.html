@@ -1,0 +1,1129 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lesson 31: Principal Component Analysis (PCA) | ML Mastery</title>
+  <link rel="stylesheet" href="../assets/style.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
+</head>
+<body>
+
+<header class="lesson-header">
+  <div class="header-inner">
+    <nav class="breadcrumb">
+      <a href="../reference/curriculum-map.html">ML Mastery</a>
+      <span class="sep">›</span>
+      <span>Phase 3: Unsupervised Learning</span>
+    </nav>
+    <div class="lesson-badges">
+      <span class="phase-badge">Phase 3 · Unsupervised Learning</span>
+      <span class="lesson-num-badge">Lesson 31</span>
+    </div>
+    <h1 class="lesson-title">Principal Component Analysis (PCA)</h1>
+    <p class="lesson-subtitle">How to compress 100 correlated features into 10 uncorrelated ones without losing the information that matters — the most important dimensionality reduction tool in the ML toolkit.</p>
+    <div class="meta-pills">
+      <span class="meta-pill">⏱ ~60 min</span>
+      <span class="meta-pill">🐍 scikit-learn + NumPy</span>
+      <span class="meta-pill">📐 Unsupervised Learning</span>
+      <span class="meta-pill">Requires Lessons 1–29</span>
+    </div>
+  </div>
+</header>
+
+<main class="lesson-main">
+<div class="content-wrapper">
+
+<div class="objectives-card">
+  <h2>🎯 What You'll Learn</h2>
+  <ul>
+    <li>Understand the curse of dimensionality and why high-dimensional data is problematic for ML</li>
+    <li>Grasp what principal components are geometrically: orthogonal directions of maximum variance in feature space</li>
+    <li>Use <code>pca.explained_variance_ratio_</code> to choose how many components to retain</li>
+    <li>Implement PCA with scikit-learn for visualization, preprocessing, and noise reduction</li>
+    <li>Interpret loading plots and biplots to understand which original features drive each principal component</li>
+  </ul>
+</div>
+
+<!-- ── Section 1 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">1</span> The Curse of Dimensionality</h2>
+
+  <p>As the number of features (dimensions) in a dataset grows, several fundamental problems emerge that make machine learning harder:</p>
+
+  <ul>
+    <li><strong>Data becomes exponentially sparse</strong>: In 1D, 10 points cover a line reasonably. In 10D, you'd need 10¹⁰ points for the same coverage. In practice, your 10,000 training samples become microscopically sparse in 100-dimensional space.</li>
+    <li><strong>Distances become meaningless</strong>: In high dimensions, the ratio of maximum to minimum pairwise distance approaches 1. All points are approximately the same distance from each other — making distance-based algorithms (KNN, K-Means, SVM with RBF) ineffective.</li>
+    <li><strong>Many features are correlated</strong>: A dataset of 100 economic indicators doesn't have 100 independent dimensions of variation. Perhaps 5–10 underlying factors (GDP growth, inflation, employment, etc.) drive most of the variation. The rest is redundant.</li>
+    <li><strong>Overfitting risk increases</strong>: Models have more parameters to overfit. A linear model on 100 features has 101 coefficients — each one can be tuned to noise.</li>
+  </ul>
+
+  <pre><code class="language-python">import numpy as np
+
+def distance_concentration_demo(n_dims_list, n_points=1000, n_trials=5):
+    """Demonstrate that distances concentrate as dimensionality grows."""
+    np.random.seed(42)
+    print(f"{'Dimensions':>12}  {'Mean Dist':>10}  {'Std Dist':>10}  {'Std/Mean (rel.)':>16}")
+    print("-" * 54)
+    for d in n_dims_list:
+        ratios = []
+        for _ in range(n_trials):
+            X = np.random.randn(n_points, d)
+            # Pairwise distances between first 100 points
+            dists = np.sqrt(((X[:100, None] - X[None, :100]) ** 2).sum(axis=2))
+            upper = dists[np.triu_indices(100, k=1)]
+            ratios.append(upper.std() / upper.mean())
+        mean_ratio = np.mean(ratios)
+        print(f"{d:>12}  {'n/a':>10}  {'n/a':>10}  {mean_ratio:>16.4f}")
+        # std/mean decreases toward 0 as d increases → all distances similar
+
+distance_concentration_demo([2, 5, 10, 50, 100, 500])
+# As dimensions grow, std/mean → 0 (all pairwise distances are nearly equal)</code></pre>
+
+  <div class="callout callout-key">
+    <span class="callout-icon">🔑</span>
+    <div class="callout-body">
+      <strong>Dimensionality Reduction Is Not Optional</strong>
+      <p>For tabular data with hundreds of correlated features, for image data (a 64×64 image has 4096 dimensions), or for text (vocabulary sizes of 50,000+), you cannot train good models directly on the raw features without first reducing dimensionality. PCA is the standard tool for linear dimensionality reduction.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 2 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">2</span> What PCA Does</h2>
+
+  <p>PCA (Principal Component Analysis) finds a new coordinate system for your data. The new axes — called <strong>principal components (PCs)</strong> — are chosen so that:</p>
+  <ol>
+    <li>PC1 is the direction along which the data has the <strong>maximum variance</strong></li>
+    <li>PC2 is the direction of the second-most variance, and is <strong>perpendicular (orthogonal)</strong> to PC1</li>
+    <li>PC3 is orthogonal to both PC1 and PC2, and has the third-most variance</li>
+    <li>...and so on for all n_features PCs</li>
+  </ol>
+
+  <p>By projecting data onto the top K PCs (where K &lt;&lt; n_features), you retain the dimensions that contain the most information (variance) while discarding dimensions that are mostly noise or redundancy.</p>
+
+  <pre><code class="language-python">import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.preprocessing import StandardScaler
+from sklearn.decomposition import PCA
+
+np.random.seed(42)
+
+# Create 2D data with high correlation (captures the concept simply)
+n = 200
+x1 = np.random.randn(n)
+x2 = 0.8 * x1 + 0.2 * np.random.randn(n)   # x2 is mostly x1 + noise
+X_2d = np.column_stack([x1, x2])
+
+# Scale first
+scaler = StandardScaler()
+X_2d_sc = scaler.fit_transform(X_2d)
+
+# Apply PCA
+pca_2d = PCA(n_components=2)
+pca_2d.fit(X_2d_sc)
+
+print("=== PCA on 2D Correlated Data ===")
+print(f"PC1 explained variance ratio: {pca_2d.explained_variance_ratio_[0]:.4f} "
+      f"({pca_2d.explained_variance_ratio_[0]*100:.1f}%)")
+print(f"PC2 explained variance ratio: {pca_2d.explained_variance_ratio_[1]:.4f} "
+      f"({pca_2d.explained_variance_ratio_[1]*100:.1f}%)")
+print(f"\nPC1 direction: {pca_2d.components_[0].round(4)}")
+print(f"PC2 direction: {pca_2d.components_[1].round(4)}")
+print(f"PC1 · PC2 = {np.dot(pca_2d.components_[0], pca_2d.components_[1]):.10f}")  # ≈ 0
+
+# Visualize original data + PC directions
+fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+
+axes[0].scatter(X_2d_sc[:, 0], X_2d_sc[:, 1], alpha=0.5, s=15)
+origin = np.zeros(2)
+scale = 2.0
+for i, (color, label) in enumerate(zip(['red', 'blue'], ['PC1', 'PC2'])):
+    comp = pca_2d.components_[i] * np.sqrt(pca_2d.explained_variance_[i]) * scale
+    axes[0].annotate('', xy=origin + comp, xytext=origin,
+                     arrowprops=dict(arrowstyle='->', color=color, lw=2))
+    axes[0].text(*(origin + comp * 1.15), label, color=color, fontsize=12, fontweight='bold')
+axes[0].set_title('Original Feature Space\nwith PC Directions')
+axes[0].set_aspect('equal')
+axes[0].grid(alpha=0.3)
+
+# Projected data
+X_proj = pca_2d.transform(X_2d_sc)
+axes[1].scatter(X_proj[:, 0], X_proj[:, 1], alpha=0.5, s=15, c='steelblue')
+axes[1].set_xlabel('PC1 (max variance)')
+axes[1].set_ylabel('PC2 (second variance)')
+axes[1].set_title('Projected onto PC Space\nData is now uncorrelated')
+axes[1].grid(alpha=0.3)
+plt.tight_layout()
+plt.savefig('pca_concept.png', dpi=150)</code></pre>
+</div>
+
+<!-- ── Section 3 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">3</span> The Math Intuition</h2>
+
+  <p>You don't need to implement PCA from scratch, but understanding the math helps you use it correctly and debug problems. The key idea:</p>
+
+  <p>PCA finds the <strong>eigenvectors of the covariance matrix</strong> of the (scaled) data. The covariance matrix C = (1/n) XᵀX captures how each pair of features varies together. Its eigenvectors are the directions of maximum variance (the principal components), and the corresponding eigenvalues tell you how much variance each direction captures.</p>
+
+  <p>Let's make this concrete with the same kind of 2D correlated dataset used above. The scatter below shows 200 points with strong positive correlation, its centroid (the data's mean), and the two principal component directions — PC1 (longer arrow, direction of maximum variance) and PC2 (shorter arrow, orthogonal to PC1) — computed via a closed-form eigendecomposition of the 2×2 covariance matrix. No library needed: for a symmetric 2×2 matrix <code>[[a, b], [b, d]]</code>, the eigenvalues have an exact quadratic-formula solution.</p>
+
+  <p>But don't just take PCA's word for it. Drag the angle slider to rotate a <strong>candidate axis</strong> (the dashed gray line) around the centroid, and watch the "variance captured" readout update live — it's simply the variance of the data after projecting every point onto that axis. Try to manually find the angle that <em>maximizes</em> captured variance before clicking "Snap to PC1". You'll find they're exactly the same direction — this is the entire idea behind PCA: <strong>PC1 isn't an arbitrary choice, it is by definition the variance-maximizing direction</strong>, and rotating to any other angle can only capture less.</p>
+
+  <div class="diagram-controls">
+    <div class="diagram-control-row">
+      <span class="diagram-control-label">Candidate Axis Angle (θ)</span>
+      <input type="range" id="l30-angle-slider" class="diagram-slider" min="0" max="180" step="1" value="0">
+      <span class="diagram-control-value" id="l30-angle-value">0°</span>
+    </div>
+    <div class="diagram-btn-group" id="l30-snap-buttons" style="margin-bottom:0;">
+      <button class="diagram-btn" id="l30-snap-pc1">Snap to PC1</button>
+      <button class="diagram-btn" id="l30-snap-pc2">Snap to PC2</button>
+    </div>
+  </div>
+  <div class="chart-container">
+    <div id="l30-pca-chart" style="height:440px;"></div>
+    <p class="chart-caption" id="l30-pca-caption">Rotate the dashed axis and watch the variance readout — PC1 is whichever direction makes that number largest.</p>
+  </div>
+  <div class="diagram-controls" style="margin-bottom: 1.5rem;">
+    <div class="diagram-control-row" style="flex:1 1 100%; justify-content: space-between;">
+      <span class="diagram-control-label">Variance captured along candidate axis</span>
+      <span class="diagram-control-value" id="l30-variance-readout" style="font-size:1.05rem;">0.000</span>
+    </div>
+    <div class="diagram-control-row" style="flex:1 1 100%; justify-content: space-between;">
+      <span class="diagram-control-label">PC1 variance (the maximum possible)</span>
+      <span class="diagram-control-value" id="l30-pc1-readout" style="font-size:1.05rem;">0.000</span>
+    </div>
+  </div>
+
+  <pre><code class="language-python">import numpy as np
+from sklearn.decomposition import PCA
+from sklearn.preprocessing import StandardScaler
+
+np.random.seed(42)
+n, d = 100, 4
+X_raw = np.random.randn(n, d)
+# Make some features correlated
+X_raw[:, 1] = 0.8 * X_raw[:, 0] + 0.2 * np.random.randn(n)
+X_raw[:, 3] = -0.7 * X_raw[:, 2] + 0.3 * np.random.randn(n)
+
+# Scale
+X = StandardScaler().fit_transform(X_raw)
+
+# ── Manual PCA via eigendecomposition ──
+cov_matrix = (X.T @ X) / n    # covariance matrix: shape (d, d)
+print("Covariance matrix shape:", cov_matrix.shape)
+print("Covariance matrix (rounded):")
+print(cov_matrix.round(3))
+
+eigenvalues, eigenvectors = np.linalg.eigh(cov_matrix)
+
+# eigh returns in ascending order — sort descending
+idx = np.argsort(eigenvalues)[::-1]
+eigenvalues  = eigenvalues[idx]
+eigenvectors = eigenvectors[:, idx]
+
+explained_ratio = eigenvalues / eigenvalues.sum()
+print(f"\nEigenvalues:             {eigenvalues.round(4)}")
+print(f"Explained variance ratio: {explained_ratio.round(4)}")
+
+# ── Compare to sklearn PCA ──
+pca_sk = PCA(n_components=4)
+pca_sk.fit(X)
+print(f"\nsklearn EVR:              {pca_sk.explained_variance_ratio_.round(4)}")
+# Should match (up to sign conventions in eigenvectors)</code></pre>
+
+  <div class="callout callout-tip">
+    <span class="callout-icon">💡</span>
+    <div class="callout-body">
+      <strong>Sklearn Uses SVD, Not Eigendecomposition</strong>
+      <p>In practice, sklearn's PCA uses Singular Value Decomposition (SVD) of the data matrix, which is numerically more stable than directly computing eigenvectors of the covariance matrix (especially for high-dimensional data). The results are mathematically equivalent. You never need to implement this yourself — just know that eigenvalues ↔ variance and eigenvectors ↔ PC directions.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 4 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">4</span> Explained Variance Ratio: How Many Components?</h2>
+
+  <p>The most important post-fit attribute is <code>pca.explained_variance_ratio_</code>: a 1D array where each entry is the proportion of total variance captured by that component. The cumulative sum tells you how much total variance you retain with the first K components.</p>
+
+  <p>The standard tool for visualizing this trade-off is the <strong>scree plot</strong>: a bar (or line) chart of explained variance per component, with a cumulative line overlaid. Below is a scree plot for the 4-feature correlated dataset from Section 3 (where feature 2 ≈ 0.8×feature 1 + noise, and feature 4 ≈ −0.7×feature 3 + noise). Because of those two correlated pairs, you'd expect roughly two "real" dimensions of variation hiding inside four features — watch where the bars drop off and where the cumulative line bends:</p>
+
+  <div class="chart-container">
+    <div id="l30-scree-chart" style="height:400px;"></div>
+    <p class="chart-caption" id="l30-scree-caption">Individual explained variance (bars) and cumulative variance (line) for each principal component, computed from the Section 3 dataset's covariance matrix.</p>
+  </div>
+
+  <pre><code class="language-python">import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.decomposition import PCA
+from sklearn.preprocessing import StandardScaler
+from sklearn.datasets import fetch_california_housing
+
+# A real high-dimensional dataset
+housing = fetch_california_housing()
+X_housing = housing.data
+print(f"Housing dataset: {X_housing.shape}")   # (20640, 8)
+
+scaler = StandardScaler()
+X_sc = scaler.fit_transform(X_housing)
+
+pca = PCA()   # no n_components → compute all
+pca.fit(X_sc)
+
+evr = pca.explained_variance_ratio_
+cumulative_evr = np.cumsum(evr)
+
+print("\nComponent  Explained  Cumulative")
+print("-" * 40)
+for i, (ev, cev) in enumerate(zip(evr, cumulative_evr)):
+    n_comp_str = f"PC{i+1:2d}"
+    bar = "█" * int(ev * 50)
+    print(f"{n_comp_str}:  {ev:.4f}  ({cev:.4f})  {bar}")
+
+# How many components for 90%, 95%, 99% variance?
+for threshold in [0.80, 0.90, 0.95, 0.99]:
+    n_comp = np.argmax(cumulative_evr >= threshold) + 1
+    print(f"\n{threshold*100:.0f}% variance → {n_comp} components "
+          f"(reduced from {X_sc.shape[1]})")
+
+# ── Cumulative explained variance plot ──
+fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+
+axes[0].bar(range(1, len(evr)+1), evr, color='steelblue', alpha=0.7, label='Individual')
+axes[0].set_xlabel('Principal Component')
+axes[0].set_ylabel('Explained Variance Ratio')
+axes[0].set_title('Individual Explained Variance')
+axes[0].legend()
+
+axes[1].plot(range(1, len(cumulative_evr)+1), cumulative_evr,
+             'bo-', markersize=8, linewidth=2)
+axes[1].axhline(y=0.95, color='red', linestyle='--', label='95% threshold')
+axes[1].axhline(y=0.90, color='orange', linestyle='--', label='90% threshold')
+axes[1].set_xlabel('Number of Components')
+axes[1].set_ylabel('Cumulative Explained Variance')
+axes[1].set_title('Cumulative Explained Variance')
+axes[1].set_ylim([0, 1.05])
+axes[1].legend()
+axes[1].grid(alpha=0.3)
+plt.tight_layout()
+plt.savefig('pca_variance.png', dpi=150)</code></pre>
+
+  <div class="callout callout-warn">
+    <span class="callout-icon">⚠️</span>
+    <div class="callout-body">
+      <strong>95% Variance Is a Guideline, Not a Rule</strong>
+      <p>The 95% threshold is a common starting point but should be adjusted based on your task. For visualization (2D/3D), you might keep only 2–3 components regardless. For a preprocessing pipeline, cross-validate <code>n_components</code> as a hyperparameter. For noise reduction, even 80–85% retention can work well because the discarded components often contain noise.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 5 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">5</span> Full PCA Implementation with Scikit-learn</h2>
+
+  <pre><code class="language-python">import numpy as np
+from sklearn.decomposition import PCA
+from sklearn.preprocessing import StandardScaler
+from sklearn.pipeline import Pipeline
+from sklearn.linear_model import LogisticRegression
+from sklearn.model_selection import cross_val_score
+from sklearn.datasets import load_digits
+
+# High-dimensional dataset: 64 features (8x8 images of digits)
+digits = load_digits()
+X_digits, y_digits = digits.data, digits.target
+print(f"Digits dataset: {X_digits.shape}")  # (1797, 64)
+
+# ── Method 1: Specify exact n_components ──
+scaler = StandardScaler()
+X_sc = scaler.fit_transform(X_digits)
+
+pca_20 = PCA(n_components=20, random_state=42)
+X_20 = pca_20.fit_transform(X_sc)
+print(f"\nWith 20 components: {pca_20.explained_variance_ratio_.sum()*100:.1f}% variance retained")
+print(f"Shape: {X_sc.shape} → {X_20.shape}")
+
+# ── Method 2: Auto-select components for 95% variance ──
+pca_95 = PCA(n_components=0.95, random_state=42)
+X_95 = pca_95.fit_transform(X_sc)
+print(f"\nFor 95% variance: {pca_95.n_components_} components selected")
+print(f"Shape: {X_sc.shape} → {X_95.shape}")
+
+# ── Method 3: PCA in a Pipeline (correct way for cross-validation) ──
+pipe_raw = Pipeline([
+    ('scaler', StandardScaler()),
+    ('clf',    LogisticRegression(max_iter=1000, random_state=42))
+])
+pipe_pca = Pipeline([
+    ('scaler', StandardScaler()),
+    ('pca',    PCA(n_components=0.95, random_state=42)),
+    ('clf',    LogisticRegression(max_iter=1000, random_state=42))
+])
+
+cv_raw = cross_val_score(pipe_raw, X_digits, y_digits, cv=5, scoring='accuracy')
+cv_pca = cross_val_score(pipe_pca, X_digits, y_digits, cv=5, scoring='accuracy')
+
+print(f"\nWithout PCA: {cv_raw.mean():.4f} ± {cv_raw.std():.4f}")
+print(f"With PCA:    {cv_pca.mean():.4f} ± {cv_pca.std():.4f}")
+
+# Key attributes after fitting
+print(f"\nExplained variance ratio (first 10): {pca_95.explained_variance_ratio_[:10].round(4)}")
+print(f"Components shape (loadings): {pca_95.components_.shape}")
+print(f"Singular values (first 5): {pca_95.singular_values_[:5].round(2)}")
+
+# ── Reconstruct data from PCA (inverse transform) ──
+X_reconstructed = pca_95.inverse_transform(X_95)
+reconstruction_error = np.mean((X_sc - X_reconstructed) ** 2)
+print(f"\nMean reconstruction error (MSE): {reconstruction_error:.6f}")
+print(f"This represents {(1 - pca_95.explained_variance_ratio_.sum())*100:.1f}% discarded variance")</code></pre>
+</div>
+
+<!-- ── Section 6 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">6</span> PCA for Visualization</h2>
+
+  <p>Reducing to 2 or 3 dimensions allows direct visual inspection of high-dimensional data. PCA-based visualization can reveal cluster structure, outliers, and class separation that would be completely invisible in the original feature space.</p>
+
+  <pre><code class="language-python">import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.decomposition import PCA
+from sklearn.preprocessing import StandardScaler
+from sklearn.datasets import load_digits
+
+digits = load_digits()
+X, y = digits.data, digits.target
+
+scaler = StandardScaler()
+X_sc = scaler.fit_transform(X)
+
+# ── 2D PCA Visualization ──
+pca_2d = PCA(n_components=2, random_state=42)
+X_2d = pca_2d.fit_transform(X_sc)
+
+fig, axes = plt.subplots(1, 2, figsize=(15, 6))
+colors = plt.cm.tab10(np.linspace(0, 1, 10))
+
+for digit in range(10):
+    mask = y == digit
+    axes[0].scatter(X_2d[mask, 0], X_2d[mask, 1],
+                    c=[colors[digit]], alpha=0.6, s=15, label=str(digit))
+
+axes[0].set_xlabel(f'PC1 ({pca_2d.explained_variance_ratio_[0]*100:.1f}% variance)')
+axes[0].set_ylabel(f'PC2 ({pca_2d.explained_variance_ratio_[1]*100:.1f}% variance)')
+axes[0].set_title('MNIST Digits: 64D → 2D via PCA')
+axes[0].legend(title='Digit', bbox_to_anchor=(1.02, 1), loc='upper left', fontsize=8)
+
+# Annotate a few representative points
+for digit in range(10):
+    mask = y == digit
+    centroid = X_2d[mask].mean(axis=0)
+    axes[0].annotate(str(digit), centroid, fontsize=10, fontweight='bold',
+                     ha='center', va='center',
+                     bbox=dict(boxstyle='round,pad=0.2', facecolor='white', alpha=0.7))
+
+# ── 3D PCA ──
+pca_3d = PCA(n_components=3, random_state=42)
+X_3d = pca_3d.fit_transform(X_sc)
+ax3d = fig.add_subplot(122, projection='3d')
+for digit in range(10):
+    mask = y == digit
+    ax3d.scatter(X_3d[mask, 0], X_3d[mask, 1], X_3d[mask, 2],
+                 c=[colors[digit]], alpha=0.4, s=10, label=str(digit))
+ax3d.set_xlabel('PC1')
+ax3d.set_ylabel('PC2')
+ax3d.set_zlabel('PC3')
+ax3d.set_title(f'3D PCA ({sum(pca_3d.explained_variance_ratio_)*100:.1f}% variance)')
+plt.tight_layout()
+plt.savefig('pca_digits_vis.png', dpi=150)
+
+total_2d = pca_2d.explained_variance_ratio_.sum()
+total_3d = pca_3d.explained_variance_ratio_.sum()
+print(f"2D PCA: {total_2d*100:.1f}% variance captured")
+print(f"3D PCA: {total_3d*100:.1f}% variance captured")</code></pre>
+</div>
+
+<!-- ── Section 7 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">7</span> PCA as Preprocessing: Noise Reduction and Speedup</h2>
+
+  <p>Beyond visualization, PCA is a powerful preprocessing step. Low-variance components often capture noise rather than signal — discarding them can actually <em>improve</em> model performance, not just speed it up.</p>
+
+  <pre><code class="language-python">import numpy as np
+import time
+from sklearn.decomposition import PCA
+from sklearn.preprocessing import StandardScaler
+from sklearn.svm import SVC
+from sklearn.pipeline import Pipeline
+from sklearn.model_selection import GridSearchCV, cross_val_score
+from sklearn.datasets import load_digits
+
+X_digits, y_digits = load_digits(return_X_y=True)
+
+# ── Time comparison: with vs without PCA ──
+pipelines = {
+    'No PCA (64 dims)':    Pipeline([('sc', StandardScaler()), ('svm', SVC(kernel='rbf', C=10))]),
+    'PCA 20 dims':         Pipeline([('sc', StandardScaler()), ('pca', PCA(n_components=20)),   ('svm', SVC(kernel='rbf', C=10))]),
+    'PCA 95% variance':    Pipeline([('sc', StandardScaler()), ('pca', PCA(n_components=0.95)), ('svm', SVC(kernel='rbf', C=10))]),
+}
+
+for name, pipe in pipelines.items():
+    t0 = time.time()
+    scores = cross_val_score(pipe, X_digits, y_digits, cv=5, scoring='accuracy')
+    elapsed = time.time() - t0
+    print(f"{name}: accuracy={scores.mean():.4f}±{scores.std():.4f}  time={elapsed:.2f}s")
+
+# ── Cross-validating n_components as a hyperparameter ──
+pipe_cv = Pipeline([
+    ('sc',  StandardScaler()),
+    ('pca', PCA()),
+    ('svm', SVC(kernel='rbf', C=10))
+])
+param_grid = {'pca__n_components': [5, 10, 20, 30, 40, 50]}
+grid = GridSearchCV(pipe_cv, param_grid, cv=5, scoring='accuracy', n_jobs=-1)
+grid.fit(X_digits, y_digits)
+
+print(f"\nBest n_components: {grid.best_params_['pca__n_components']}")
+print(f"Best CV accuracy:  {grid.best_score_:.4f}")
+
+# Results table
+for params, mean_sc in zip(grid.cv_results_['params'], grid.cv_results_['mean_test_score']):
+    print(f"  n_components={params['pca__n_components']:3d}: {mean_sc:.4f}")</code></pre>
+
+  <div class="callout callout-tip">
+    <span class="callout-icon">💡</span>
+    <div class="callout-body">
+      <strong>When NOT to Use PCA</strong>
+      <p>Avoid PCA when original feature interpretability is critical — in medical or legal settings where "feature X caused this prediction" matters. After PCA, you can only say "a combination of all features caused this prediction," which is often unacceptable. Also avoid PCA when features are already sparse (e.g., one-hot encoded categories) — PCA destroys the sparse structure and may increase memory usage. Use it primarily for numerical features with potential correlations.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 8 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">8</span> Loading Plots and Biplots</h2>
+
+  <p>The <code>pca.components_</code> matrix (shape: n_components × n_features) contains the "loadings" — each row is a principal component, and each value tells you how much that original feature contributes to that component. Positive loading: feature increases → PC increases. Negative: inverse relationship.</p>
+
+  <pre><code class="language-python">import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.decomposition import PCA
+from sklearn.preprocessing import StandardScaler
+from sklearn.datasets import load_iris
+
+iris = load_iris()
+X_iris = iris.data
+feature_names = iris.feature_names
+
+scaler = StandardScaler()
+X_sc = scaler.fit_transform(X_iris)
+
+pca_iris = PCA(n_components=4)
+pca_iris.fit(X_sc)
+X_pca = pca_iris.transform(X_sc)
+
+# ── Loading table ──
+print("=== PCA Loadings (components_) ===")
+print(f"{'Feature':<30}  {'PC1':>8}  {'PC2':>8}  {'PC3':>8}  {'PC4':>8}")
+print("-" * 62)
+for j, fname in enumerate(feature_names):
+    row = [pca_iris.components_[i, j] for i in range(4)]
+    print(f"{fname:<30}  " + "  ".join(f"{v:>8.4f}" for v in row))
+
+evr = pca_iris.explained_variance_ratio_
+print(f"\n{'Explained Variance':<30}  " + "  ".join(f"{v:>8.4f}" for v in evr))
+print(f"{'Cumulative':<30}  " + "  ".join(f"{v:>8.4f}" for v in np.cumsum(evr)))
+
+# ── Loading bar plots ──
+fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+for i in range(2):
+    loadings = pca_iris.components_[i]
+    colors = ['#e41a1c' if l < 0 else '#377eb8' for l in loadings]
+    axes[i].barh(feature_names, loadings, color=colors, alpha=0.8)
+    axes[i].axvline(0, color='black', linewidth=0.8)
+    axes[i].set_xlabel('Loading value')
+    axes[i].set_title(f'PC{i+1} Loadings ({evr[i]*100:.1f}% variance)\n'
+                      f'Blue = positive, Red = negative')
+    axes[i].grid(axis='x', alpha=0.3)
+
+plt.suptitle('Feature Contributions to Principal Components', fontsize=12)
+plt.tight_layout()
+plt.savefig('pca_loadings.png', dpi=150)
+
+# ── Biplot: PC scatter + feature vectors ──
+fig, ax = plt.subplots(figsize=(9, 8))
+colors_species = ['#e41a1c', '#377eb8', '#4daf4a']
+for sp in range(3):
+    mask = iris.target == sp
+    ax.scatter(X_pca[mask, 0], X_pca[mask, 1],
+               c=colors_species[sp], alpha=0.6, s=40, label=iris.target_names[sp])
+
+# Draw feature loading arrows scaled for visibility
+arrow_scale = 2.5
+for j, fname in enumerate(feature_names):
+    ax.annotate('', xy=(pca_iris.components_[0, j] * arrow_scale,
+                         pca_iris.components_[1, j] * arrow_scale),
+                xytext=(0, 0),
+                arrowprops=dict(arrowstyle='->', color='darkorange', lw=2))
+    offset_x = 0.1 * np.sign(pca_iris.components_[0, j])
+    offset_y = 0.1 * np.sign(pca_iris.components_[1, j])
+    ax.text(pca_iris.components_[0, j] * arrow_scale + offset_x,
+            pca_iris.components_[1, j] * arrow_scale + offset_y,
+            fname.replace(' (cm)', ''), fontsize=9, color='darkorange')
+
+ax.set_xlabel(f'PC1 ({evr[0]*100:.1f}%)')
+ax.set_ylabel(f'PC2 ({evr[1]*100:.1f}%)')
+ax.set_title('Biplot: PCA Scatter + Feature Loading Vectors')
+ax.legend()
+ax.grid(alpha=0.3)
+plt.tight_layout()
+plt.savefig('pca_biplot.png', dpi=150)
+
+print("\nPC1 Interpretation: all features load positively and strongly.")
+print("PC1 captures overall flower size — petal and sepal dimensions together.")
+print("PC2 distinguishes sepal length from sepal width (opposite signs).")</code></pre>
+</div>
+
+<!-- ── Real-World Spotlight ── -->
+<div class="use-case-section">
+  <div class="use-case-header">
+    <span style="font-size:1.5rem">🌍</span>
+    <h2>Real-World Spotlight: Eigenfaces — PCA on Facial Images</h2>
+  </div>
+  <p>One of the most celebrated applications of PCA is <strong>Eigenfaces</strong> (Turk &amp; Pentland, 1991): reducing high-dimensional face images (thousands of pixels) to a compact PCA representation that still enables accurate face recognition. Each principal component — an "eigenface" — captures a dimension of variation across the face dataset (lighting, pose, expression, identity features).</p>
+  <pre><code class="language-python">import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.decomposition import PCA
+from sklearn.preprocessing import StandardScaler
+from sklearn.svm import SVC
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import classification_report
+from sklearn.datasets import fetch_lfw_people
+
+# Load Labeled Faces in the Wild (LFW) dataset
+# min_faces_per_person=70 keeps only subjects with enough samples
+try:
+    lfw = fetch_lfw_people(min_faces_per_person=70, resize=0.4)
+    X_faces = lfw.data
+    y_faces = lfw.target
+    target_names = lfw.target_names
+    h, w = lfw.images.shape[1:]
+    n_samples, n_features = X_faces.shape
+    n_classes = len(target_names)
+    print(f"LFW Dataset: {n_samples} images, {n_features} features ({h}x{w} pixels)")
+    print(f"Number of people: {n_classes}")
+    print(f"Classes: {', '.join(target_names)}")
+except Exception:
+    # Fallback: simulate the key metrics if LFW is unavailable
+    print("(Simulated LFW-like metrics — real LFW requires internet download)")
+    n_samples, n_features, h, w, n_classes = 1140, 1850, 50, 37, 7
+    X_faces = np.random.randn(n_samples, n_features)
+    y_faces = np.repeat(np.arange(n_classes), n_samples // n_classes)
+    target_names = [f'Person_{i}' for i in range(n_classes)]
+    print(f"Simulated: {n_samples} images, {n_features} features, {n_classes} classes")
+
+# ── Split ──
+X_tr, X_te, y_tr, y_te = train_test_split(
+    X_faces, y_faces, test_size=0.25, stratify=y_faces, random_state=42)
+
+# ── Scale ──
+scaler = StandardScaler()
+X_tr_sc = scaler.fit_transform(X_tr)
+X_te_sc = scaler.transform(X_te)
+
+# ── PCA: try different n_components ──
+print(f"\n{'n_comp':>8}  {'Variance':>10}  {'Train Acc':>11}  {'Test Acc':>10}")
+print("-" * 45)
+for n_comp in [30, 50, 100, 150, 200]:
+    pca = PCA(n_components=n_comp, svd_solver='randomized', whiten=True, random_state=42)
+    X_tr_pca = pca.fit_transform(X_tr_sc)
+    X_te_pca = pca.transform(X_te_sc)
+    clf = SVC(kernel='rbf', C=1000, gamma=0.005)
+    clf.fit(X_tr_pca, y_tr)
+    tr_acc = clf.score(X_tr_pca, y_tr)
+    te_acc = clf.score(X_te_pca, y_te)
+    total_var = pca.explained_variance_ratio_.sum()
+    print(f"{n_comp:>8}  {total_var:>10.4f}  {tr_acc:>11.4f}  {te_acc:>10.4f}")
+
+# ── Visualize the first eigenfaces ──
+pca_vis = PCA(n_components=12, whiten=True, random_state=42)
+pca_vis.fit(X_tr_sc)
+
+fig, axes = plt.subplots(3, 4, figsize=(12, 9))
+for i, ax in enumerate(axes.flat):
+    if i < 12:
+        if n_features == h * w:  # Only if shape is correct
+            eigenface = pca_vis.components_[i].reshape(h, w)
+        else:
+            eigenface = pca_vis.components_[i][:h*w].reshape(h, w) if h*w <= n_features else np.random.randn(h, w)
+        ax.imshow(eigenface, cmap='gray', interpolation='nearest')
+        ax.set_title(f'Eigenface {i+1}\n({pca_vis.explained_variance_ratio_[i]*100:.1f}%)', fontsize=9)
+    ax.axis('off')
+plt.suptitle('Top 12 Eigenfaces (Principal Components of Face Images)', fontsize=12)
+plt.tight_layout()
+plt.savefig('eigenfaces.png', dpi=150)
+
+# ── Financial portfolio example ──
+print("\n--- Bonus: PCA on Financial Returns ---")
+np.random.seed(42)
+n_days, n_stocks = 500, 50
+# Simulate 3 underlying market factors driving stock returns
+factors = np.random.randn(n_days, 3)
+loadings_sim = np.random.randn(n_stocks, 3)
+noise_sim = 0.3 * np.random.randn(n_days, n_stocks)
+returns = factors @ loadings_sim.T + noise_sim
+
+scaler_fin = StandardScaler()
+returns_sc = scaler_fin.fit_transform(returns)
+pca_fin = PCA(n_components=0.90)
+pca_fin.fit(returns_sc)
+print(f"50 stocks → {pca_fin.n_components_} PCA factors for 90% variance")
+print(f"Variance per factor: {pca_fin.explained_variance_ratio_[:5].round(4)} ...")</code></pre>
+  <p>The eigenfaces demonstration shows the fundamental compression power of PCA: 1850-dimensional face images can be represented by 150 eigenface coefficients while retaining enough information for highly accurate face recognition. Each eigenface is a "basis image" — a pattern of light and dark regions that captures a dimension of variation across faces. The first eigenfaces capture lighting variation (the most variable aspect of face images); later ones capture progressively finer identity features. Modern deep learning approaches have largely superseded eigenfaces for recognition accuracy, but PCA remains the standard for analysis and compression of image datasets.</p>
+</div>
+
+<!-- ── Quiz ── -->
+<div class="quiz-section">
+  <div id="lesson-30-quiz"></div>
+</div>
+
+<!-- ── Practice ── -->
+<div class="practice-card">
+  <h2>✍️ Practice Exercises</h2>
+  <ol>
+    <li>Load the Wine dataset (13 features, 3 classes). Apply PCA after scaling and plot the cumulative explained variance. How many components are needed for 95% variance? Visualize the data in 2D PCA space, color-coded by wine class. Do the three classes separate well?</li>
+    <li>Train a <code>KNeighborsClassifier</code> on the Digits dataset with and without PCA preprocessing (try n_components = 10, 20, 30, 40, 64). Plot test accuracy vs n_components. Where is the sweet spot?</li>
+    <li>Investigate reconstruction quality: apply PCA with 5, 10, 20, 40, 64 components to a digit image. Use <code>inverse_transform</code> to reconstruct it and display all versions side-by-side. At what n_components is the reconstructed digit clearly recognisable?</li>
+    <li>Use <code>pca.components_</code> to make a loading bar plot for the first 3 components of the Wine dataset. What features drive PC1? Do they make physical/chemical sense?</li>
+  </ol>
+</div>
+
+<!-- ── Primary Source ── -->
+<div class="primary-source">
+  <h2>📚 Primary Source for This Lesson</h2>
+  <p><a href="https://scikit-learn.org/stable/modules/decomposition.html#pca" target="_blank"><strong>scikit-learn: Decomposition — PCA</strong></a> — complete API reference including randomized PCA, incremental PCA for large datasets, and kernel PCA for non-linear dimensionality reduction.<br>
+  For the mathematical foundations, see Jolliffe (2002) <em>Principal Component Analysis</em> (2nd ed.) — the definitive reference. For eigenfaces, see Turk &amp; Pentland (1991) "Eigenfaces for Recognition" in the Journal of Cognitive Neuroscience.</p>
+</div>
+
+<!-- ── Ask Tutor ── -->
+<div class="ask-tutor">
+  <span class="icon">💬</span>
+  <span>PCA giving negative loadings that seem counterintuitive? Confused about how to choose n_components? Seeing worse performance after PCA? Your AI tutor can walk through the explained variance plot with your specific dataset and help you diagnose what's happening.</span>
+</div>
+
+<!-- ── Navigation ── -->
+<nav class="lesson-nav">
+  <a href="./0030-gaussian-mixture-models-em.html" class="nav-btn">← Lesson 30: Gaussian Mixture Models &amp; the EM Algorithm</a>
+  <a href="./0032-tsne-umap.html" class="nav-btn nav-btn-next">Lesson 32: t-SNE &amp; UMAP →</a>
+</nav>
+
+</div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-core.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/plugins/autoloader/prism-autoloader.min.js"></script>
+<script src="https://cdn.plot.ly/plotly-2.32.0.min.js"></script>
+<script src="../assets/charts.js"></script>
+<script src="../assets/quiz.js"></script>
+<script>
+/* ── Interactive PCA explorer (Section 3) + Scree plot (Section 4) ── */
+(function () {
+
+  /* ---------- Shared linear algebra helpers ---------- */
+
+  // Closed-form eigendecomposition of a symmetric 2x2 matrix [[a, b], [b, d]].
+  // Eigenvalues solve lambda^2 - (a+d)*lambda + (a*d - b*b) = 0 (quadratic formula).
+  function eig2x2(a, b, d) {
+    const trace = a + d;
+    const det = a * d - b * b;
+    const disc = Math.sqrt(Math.max(trace * trace / 4 - det, 0));
+    const lambda1 = trace / 2 + disc;   // larger eigenvalue
+    const lambda2 = trace / 2 - disc;   // smaller eigenvalue
+
+    function eigenvector(lambda) {
+      // (A - lambda*I) v = 0  ->  for row [a-lambda, b], v = [b, lambda-a] (normalized)
+      let vx, vy;
+      if (Math.abs(b) > 1e-12) {
+        vx = b;
+        vy = lambda - a;
+      } else {
+        // matrix already diagonal
+        vx = (Math.abs(a - lambda) < 1e-9) ? 1 : 0;
+        vy = (Math.abs(d - lambda) < 1e-9) ? 1 : 0;
+      }
+      const norm = Math.sqrt(vx * vx + vy * vy) || 1;
+      return [vx / norm, vy / norm];
+    }
+
+    return {
+      values: [lambda1, lambda2],
+      vectors: [eigenvector(lambda1), eigenvector(lambda2)],
+    };
+  }
+
+  // Generic symmetric eigendecomposition via the cyclic Jacobi method.
+  // Simple, numerically robust, and more than adequate for the small
+  // (4x4) covariance matrices used in this lesson's scree plot.
+  function jacobiEigenDecomposition(matrix, maxSweeps) {
+    const n = matrix.length;
+    const A = matrix.map(row => row.slice());
+    let V = Array.from({ length: n }, (_, i) =>
+      Array.from({ length: n }, (_, j) => (i === j ? 1 : 0))
+    );
+
+    for (let sweep = 0; sweep < (maxSweeps || 100); sweep++) {
+      let off = 0;
+      for (let p = 0; p < n; p++) {
+        for (let q = p + 1; q < n; q++) off += A[p][q] * A[p][q];
+      }
+      if (off < 1e-14) break;
+
+      for (let p = 0; p < n; p++) {
+        for (let q = p + 1; q < n; q++) {
+          if (Math.abs(A[p][q]) < 1e-15) continue;
+          const theta = (A[q][q] - A[p][p]) / (2 * A[p][q]);
+          const t = Math.sign(theta || 1) / (Math.abs(theta) + Math.sqrt(theta * theta + 1));
+          const c = 1 / Math.sqrt(t * t + 1);
+          const s = t * c;
+
+          const App = A[p][p], Aqq = A[q][q], Apq = A[p][q];
+          A[p][p] = c * c * App - 2 * s * c * Apq + s * s * Aqq;
+          A[q][q] = s * s * App + 2 * s * c * Apq + c * c * Aqq;
+          A[p][q] = 0; A[q][p] = 0;
+
+          for (let i = 0; i < n; i++) {
+            if (i !== p && i !== q) {
+              const Aip = A[i][p], Aiq = A[i][q];
+              A[i][p] = c * Aip - s * Aiq; A[p][i] = A[i][p];
+              A[i][q] = s * Aip + c * Aiq; A[q][i] = A[i][q];
+            }
+          }
+          for (let i = 0; i < n; i++) {
+            const Vip = V[i][p], Viq = V[i][q];
+            V[i][p] = c * Vip - s * Viq;
+            V[i][q] = s * Vip + c * Viq;
+          }
+        }
+      }
+    }
+
+    const values = A.map((row, i) => row[i]);
+    const idx = values.map((v, i) => i).sort((i, j) => values[j] - values[i]);
+    return {
+      values: idx.map(i => values[i]),
+      vectors: idx.map(i => V.map(row => row[i])),
+    };
+  }
+
+  function mean(arr) { return arr.reduce((s, v) => s + v, 0) / arr.length; }
+
+  function covarianceMatrix(columns) {
+    // columns: array of d arrays, each length n (already centered or not)
+    const d = columns.length;
+    const n = columns[0].length;
+    const means = columns.map(mean);
+    const centered = columns.map((col, j) => col.map(v => v - means[j]));
+    const cov = Array.from({ length: d }, () => new Array(d).fill(0));
+    for (let i = 0; i < d; i++) {
+      for (let j = 0; j < d; j++) {
+        let s = 0;
+        for (let k = 0; k < n; k++) s += centered[i][k] * centered[j][k];
+        cov[i][j] = s / n;
+      }
+    }
+    return { cov, means, centered };
+  }
+
+  /* ---------- Seeded RNG so the dataset is stable across reloads ---------- */
+  function mulberry32(seed) {
+    return function () {
+      seed |= 0; seed = (seed + 0x6D2B79F5) | 0;
+      let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+  function randn(rng) {
+    // Box-Muller transform
+    const u1 = Math.max(rng(), 1e-12), u2 = rng();
+    return Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
+  }
+
+  /* =========================================================
+     Section 3: Interactive 2D PCA explorer
+     ========================================================= */
+
+  const rngA = mulberry32(42);
+  const N_POINTS = 200;
+  const x1 = Array.from({ length: N_POINTS }, () => randn(rngA));
+  const x2 = x1.map(v => 0.8 * v + 0.2 * randn(rngA));
+
+  const { cov: cov2, means: means2 } = covarianceMatrix([x1, x2]);
+  const eig2 = eig2x2(cov2[0][0], cov2[0][1], cov2[1][1]);
+  const pc1Vec = eig2.vectors[0], pc1Val = eig2.values[0];
+  const pc2Vec = eig2.vectors[1], pc2Val = eig2.values[1];
+  const pc1AngleDeg = (Math.atan2(pc1Vec[1], pc1Vec[0]) * 180 / Math.PI + 180) % 180;
+  const pc2AngleDeg = (pc1AngleDeg + 90) % 180;
+
+  function varianceAlongAngle(angleDeg) {
+    const rad = angleDeg * Math.PI / 180;
+    const ux = Math.cos(rad), uy = Math.sin(rad);
+    const projections = x1.map((v, i) => (v - means2[0]) * ux + (x2[i] - means2[1]) * uy);
+    const m = mean(projections);
+    return mean(projections.map(p => (p - m) * (p - m)));
+  }
+
+  function axisEndpoints(angleDeg, length) {
+    const rad = angleDeg * Math.PI / 180;
+    const ux = Math.cos(rad), uy = Math.sin(rad);
+    return {
+      x: [means2[0] - ux * length, means2[0] + ux * length],
+      y: [means2[1] - uy * length, means2[1] + uy * length],
+    };
+  }
+
+  function renderPCAChart(angleDeg) {
+    const axisLine = axisEndpoints(angleDeg, 3.2);
+
+    const pc1Arrow = {
+      x: means2[0] + pc1Vec[0] * Math.sqrt(pc1Val) * 2,
+      y: means2[1] + pc1Vec[1] * Math.sqrt(pc1Val) * 2,
+    };
+    const pc2Arrow = {
+      x: means2[0] + pc2Vec[0] * Math.sqrt(pc2Val) * 2,
+      y: means2[1] + pc2Vec[1] * Math.sqrt(pc2Val) * 2,
+    };
+
+    const traces = [
+      {
+        x: x1, y: x2, type: 'scatter', mode: 'markers',
+        marker: { color: MLCharts.theme.blue, size: 6, opacity: 0.5 },
+        name: 'Data points', hovertemplate: 'x1=%{x:.2f}<br>x2=%{y:.2f}<extra></extra>',
+      },
+      {
+        x: axisLine.x, y: axisLine.y, type: 'scatter', mode: 'lines',
+        line: { color: MLCharts.theme.textMuted, width: 2, dash: 'dash' },
+        name: 'Candidate axis (drag slider)', hoverinfo: 'skip',
+      },
+      {
+        x: [means2[0], pc1Arrow.x], y: [means2[1], pc1Arrow.y], type: 'scatter', mode: 'lines',
+        line: { color: MLCharts.theme.red, width: 3 },
+        name: 'PC1 (max variance)', hoverinfo: 'skip',
+      },
+      {
+        x: [means2[0], pc2Arrow.x], y: [means2[1], pc2Arrow.y], type: 'scatter', mode: 'lines',
+        line: { color: MLCharts.theme.green, width: 3 },
+        name: 'PC2 (orthogonal)', hoverinfo: 'skip',
+      },
+      {
+        x: [means2[0]], y: [means2[1]], type: 'scatter', mode: 'markers',
+        marker: { color: MLCharts.theme.heading, size: 10, symbol: 'x' },
+        name: 'Centroid', hovertemplate: 'centroid<extra></extra>',
+      },
+    ];
+
+    const layout = MLCharts.baseLayout({
+      xaxis: { title: { text: 'Feature x1' }, range: [-4, 4], scaleanchor: 'y', scaleratio: 1 },
+      yaxis: { title: { text: 'Feature x2' }, range: [-4, 4] },
+      annotations: [
+        {
+          x: pc1Arrow.x, y: pc1Arrow.y, ax: means2[0], ay: means2[1],
+          xref: 'x', yref: 'y', axref: 'x', ayref: 'y',
+          showarrow: true, arrowhead: 2, arrowsize: 1.4, arrowwidth: 2.5,
+          arrowcolor: MLCharts.theme.red, text: '', standoff: 2,
+        },
+        {
+          x: pc1Arrow.x, y: pc1Arrow.y, xref: 'x', yref: 'y',
+          text: 'PC1', showarrow: false, font: { color: MLCharts.theme.red, size: 12, family: MLCharts.theme.fontSans },
+          xshift: 18, yshift: 6,
+        },
+        {
+          x: pc2Arrow.x, y: pc2Arrow.y, ax: means2[0], ay: means2[1],
+          xref: 'x', yref: 'y', axref: 'x', ayref: 'y',
+          showarrow: true, arrowhead: 2, arrowsize: 1.4, arrowwidth: 2.5,
+          arrowcolor: MLCharts.theme.green, text: '', standoff: 2,
+        },
+        {
+          x: pc2Arrow.x, y: pc2Arrow.y, xref: 'x', yref: 'y',
+          text: 'PC2', showarrow: false, font: { color: MLCharts.theme.green, size: 12, family: MLCharts.theme.fontSans },
+          xshift: 18, yshift: 6,
+        },
+      ],
+    });
+
+    Plotly.react('l30-pca-chart', traces, layout, MLCharts.config);
+
+    const varianceHere = varianceAlongAngle(angleDeg);
+    const varianceReadout = document.getElementById('l30-variance-readout');
+    const pc1Readout = document.getElementById('l30-pc1-readout');
+    const caption = document.getElementById('l30-pca-caption');
+    if (varianceReadout) varianceReadout.textContent = varianceHere.toFixed(3);
+    if (pc1Readout) pc1Readout.textContent = pc1Val.toFixed(3);
+
+    if (caption) {
+      const angleDiff = Math.min(Math.abs(angleDeg - pc1AngleDeg), 180 - Math.abs(angleDeg - pc1AngleDeg));
+      if (angleDiff < 1.5) {
+        caption.textContent = `θ = ${angleDeg.toFixed(0)}° — this IS the PC1 direction: variance captured (${varianceHere.toFixed(3)}) is at its maximum. Any other angle captures less.`;
+      } else {
+        const angleDiff2 = Math.min(Math.abs(angleDeg - pc2AngleDeg), 180 - Math.abs(angleDeg - pc2AngleDeg));
+        if (angleDiff2 < 1.5) {
+          caption.textContent = `θ = ${angleDeg.toFixed(0)}° — this is the PC2 direction: variance captured (${varianceHere.toFixed(3)}) is at its minimum, the worst possible 1D summary of this data.`;
+        } else {
+          caption.textContent = `θ = ${angleDeg.toFixed(0)}° — variance captured: ${varianceHere.toFixed(3)} (PC1's maximum is ${pc1Val.toFixed(3)}). Keep rotating toward ${pc1AngleDeg.toFixed(0)}° to capture more.`;
+        }
+      }
+    }
+  }
+
+  MLCharts.linkSlider('l30-angle-slider', 'l30-angle-value', renderPCAChart, v => v.toFixed(0) + '°');
+
+  const angleSliderEl = document.getElementById('l30-angle-slider');
+  const snapPC1Btn = document.getElementById('l30-snap-pc1');
+  const snapPC2Btn = document.getElementById('l30-snap-pc2');
+  if (angleSliderEl && snapPC1Btn) {
+    snapPC1Btn.addEventListener('click', () => {
+      angleSliderEl.value = pc1AngleDeg.toFixed(0);
+      angleSliderEl.dispatchEvent(new Event('input'));
+    });
+  }
+  if (angleSliderEl && snapPC2Btn) {
+    snapPC2Btn.addEventListener('click', () => {
+      angleSliderEl.value = pc2AngleDeg.toFixed(0);
+      angleSliderEl.dispatchEvent(new Event('input'));
+    });
+  }
+
+  /* =========================================================
+     Section 4: Scree plot for the 4-feature correlated dataset
+     (mirrors the np.random.seed(42) example in Section 3's code)
+     ========================================================= */
+
+  const rngB = mulberry32(42);
+  const N_SCREE = 100;
+  const f0 = Array.from({ length: N_SCREE }, () => randn(rngB));
+  const f1raw = Array.from({ length: N_SCREE }, () => randn(rngB));
+  const f2 = Array.from({ length: N_SCREE }, () => randn(rngB));
+  const f3raw = Array.from({ length: N_SCREE }, () => randn(rngB));
+  const f1 = f1raw.map((v, i) => 0.8 * f0[i] + 0.2 * v);
+  const f3 = f3raw.map((v, i) => -0.7 * f2[i] + 0.3 * v);
+
+  const { cov: cov4 } = covarianceMatrix([f0, f1, f2, f3]);
+  const eig4 = jacobiEigenDecomposition(cov4, 100);
+  const totalVar = eig4.values.reduce((s, v) => s + v, 0);
+  const evr = eig4.values.map(v => v / totalVar);
+  const cumEvr = evr.reduce((acc, v) => {
+    acc.push((acc.length ? acc[acc.length - 1] : 0) + v);
+    return acc;
+  }, []);
+
+  function renderScreeChart() {
+    const labels = evr.map((_, i) => 'PC' + (i + 1));
+
+    const traces = [
+      {
+        x: labels, y: evr, type: 'bar',
+        marker: { color: MLCharts.theme.blue },
+        name: 'Individual explained variance',
+        hovertemplate: '%{x}: %{y:.1%}<extra></extra>',
+      },
+      {
+        x: labels, y: cumEvr, type: 'scatter', mode: 'lines+markers',
+        line: { color: MLCharts.theme.amber, width: 2.5 },
+        marker: { color: MLCharts.theme.amber, size: 8 },
+        name: 'Cumulative explained variance',
+        yaxis: 'y',
+        hovertemplate: '%{x}: %{y:.1%} cumulative<extra></extra>',
+      },
+    ];
+
+    const layout = MLCharts.baseLayout({
+      xaxis: { title: { text: 'Principal Component' } },
+      yaxis: { title: { text: 'Proportion of Variance' }, range: [0, 1.05], tickformat: '.0%' },
+      shapes: [{
+        type: 'line', x0: -0.5, x1: labels.length - 0.5, y0: 0.95, y1: 0.95,
+        line: { color: MLCharts.theme.red, width: 1.5, dash: 'dot' },
+        xref: 'x', yref: 'y',
+      }],
+      annotations: [{
+        x: labels.length - 1, y: 0.95, text: '95% threshold', showarrow: false,
+        yshift: 10, font: { color: MLCharts.theme.red, size: 11 },
+      }],
+    });
+
+    Plotly.react('l30-scree-chart', traces, layout, MLCharts.config);
+
+    const caption = document.getElementById('l30-scree-caption');
+    if (caption) {
+      const nFor95 = cumEvr.findIndex(v => v >= 0.95) + 1;
+      caption.textContent = `PC1+PC2 already capture ${(cumEvr[1] * 100).toFixed(1)}% of total variance — the two correlated feature pairs collapse into roughly two real dimensions. ${nFor95} component(s) reach the 95% threshold (dotted line).`;
+    }
+  }
+
+  renderScreeChart();
+})();
+</script>
+<script>
+new MLQuiz('lesson-30-quiz', [
+  {
+    question: "What must you always do before applying PCA, and why?",
+    options: [
+      "Scale features with StandardScaler — PCA is variance-based and will prioritize high-variance features if scales differ",
+      "Remove correlated features — PCA cannot handle multicollinearity in the input data",
+      "Apply log transformation — PCA requires approximately normally distributed features",
+      "Drop all categorical features — PCA only works with binary or ordinal data"
+    ],
+    correct: 0,
+    explanation: "PCA finds directions of maximum variance. If feature A has range [0, 1000] and feature B has range [0, 1], feature A will dominate purely because of its scale — not because it's more informative. StandardScaler normalises each feature to mean=0 and std=1, giving all features equal initial weight. Without scaling, PCA essentially ignores low-variance features regardless of their actual importance."
+  },
+  {
+    question: "pca.explained_variance_ratio_ = [0.45, 0.23, 0.12, ...]. What does keeping the first 2 components preserve?",
+    options: [
+      "68% of the total variance in the data",
+      "45% of the total variance — only PC1 counts for the main component",
+      "23% of the total variance — only the second, orthogonal component matters",
+      "100% of the variance — PCA never discards information with 2 components"
+    ],
+    correct: 0,
+    explanation: "explained_variance_ratio_ gives the fraction of total variance captured by each individual component. To find the variance retained by keeping k components, sum the first k values: 0.45 + 0.23 = 0.68 = 68%. This is also directly available as np.cumsum(pca.explained_variance_ratio_)[1] (index 1 = 2nd cumulative sum = sum of first 2 components)."
+  },
+  {
+    question: "PCA(n_components=0.95) does what?",
+    options: [
+      "Automatically selects the minimum number of components needed to explain 95% of the variance",
+      "Retains 95% of the original features by dropping the 5% least important ones",
+      "Sets the PCA learning rate to 0.95 for iterative fitting",
+      "Keeps only components where the individual explained variance ratio exceeds 0.95"
+    ],
+    correct: 0,
+    explanation: "When n_components is a float in (0, 1), sklearn interprets it as a variance threshold and automatically selects the minimum number of integer components whose cumulative explained_variance_ratio_ reaches that threshold. After fitting, pca.n_components_ tells you how many components were selected. This is the recommended way to use PCA in pipelines where you want to tune the variance threshold as a hyperparameter."
+  },
+  {
+    question: "What is a principal component geometrically?",
+    options: [
+      "A direction (vector) in the original feature space along which the data has maximum variance",
+      "A cluster center computed as the mean of the most variable data points",
+      "A normalized version of an original feature after removing its correlation with other features",
+      "The axis of symmetry of the data's probability distribution"
+    ],
+    correct: 0,
+    explanation: "A principal component is a unit vector (direction) in the d-dimensional original feature space. When you project the data onto this direction, the resulting 1D projection has maximum variance (compared to any other direction). PC1 is the direction of highest variance; PC2 is the direction of second-highest variance that is also perpendicular to PC1; and so on. pca.components_[i] gives you this direction vector — its values are the loadings showing how much each original feature contributes."
+  },
+  {
+    question: "Why might PCA hurt model interpretability?",
+    options: [
+      "The principal components are linear combinations of all original features, making it impossible to say 'feature X was important'",
+      "PCA removes the most important features because they have the highest variance",
+      "PCA standardises all features, making the original units meaningless",
+      "PCA is a lossy compression, so any predictions on PCA data are only approximations"
+    ],
+    correct: 0,
+    explanation: "After PCA, each principal component is a weighted linear combination of ALL original features. For example, PC1 might be 0.52×sepal_length + 0.53×sepal_width + 0.58×petal_length + 0.56×petal_width. A model trained on PC1 cannot tell you 'sepal_length was important' — it can only say 'this particular combination of all four features was important.' In regulated industries (credit scoring, medical diagnosis), this loss of feature-level interpretability may be unacceptable."
+  }
+]);
+</script>
+
+</body>
+</html>

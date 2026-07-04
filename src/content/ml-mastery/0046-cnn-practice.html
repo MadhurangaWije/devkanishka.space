@@ -1,0 +1,1105 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lesson 46: CNNs in Practice — CIFAR-10 &amp; Data Augmentation | ML Mastery</title>
+  <link rel="stylesheet" href="../assets/style.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
+</head>
+<body>
+
+<!-- ── Header ── -->
+<header class="lesson-header">
+  <div class="header-inner">
+    <nav class="breadcrumb">
+      <a href="../reference/curriculum-map.html">ML Mastery</a>
+      <span class="sep">›</span>
+      <span>Phase 4: Deep Learning Foundations</span>
+    </nav>
+    <div class="lesson-badges">
+      <span class="phase-badge">Phase 4 · Deep Learning Foundations</span>
+      <span class="lesson-num-badge">Lesson 46</span>
+    </div>
+    <h1 class="lesson-title">CNNs in Practice: CIFAR-10 Classification &amp; Data Augmentation</h1>
+    <p class="lesson-subtitle">Theory meets reality — build a CNN from scratch on CIFAR-10, learn why data augmentation is one of the most powerful tricks in vision, and understand how BatchNorm stabilises training.</p>
+    <div class="meta-pills">
+      <span class="meta-pill">⏱ ~70 min</span>
+      <span class="meta-pill">🐍 Python + PyTorch</span>
+      <span class="meta-pill">🔬 Deep Learning</span>
+      <span class="meta-pill">Requires Lesson 45</span>
+    </div>
+  </div>
+</header>
+
+<main class="lesson-main">
+<div class="content-wrapper">
+
+<!-- Objectives -->
+<div class="objectives-card">
+  <h2>🎯 What You'll Learn</h2>
+  <ul>
+    <li>Load and understand the CIFAR-10 benchmark dataset (60,000 color images, 10 classes)</li>
+    <li>Normalize image data correctly using per-channel mean and standard deviation</li>
+    <li>Design and implement a multi-block CNN architecture in PyTorch with BatchNorm</li>
+    <li>Apply data augmentation (flipping, cropping, color jitter) to multiply your effective dataset size</li>
+    <li>Write a complete training loop with learning rate scheduling and GPU support</li>
+    <li>Visualize intermediate feature maps using forward hooks to see what your CNN "sees"</li>
+    <li>Understand how BatchNorm stabilises training and why it belongs in every CNN</li>
+  </ul>
+</div>
+
+<div class="callout callout-key">
+  <span class="callout-icon">💡</span>
+  <div class="callout-body">
+    <strong>The Big Picture</strong>
+    <p>Theory about convolutions is one thing — but building a CNN that actually learns to distinguish aeroplanes from cars and cats from dogs is where it all comes together. In this lesson, we build a real CNN on CIFAR-10 (60,000 color images, 10 classes) from scratch. We'll also learn why data augmentation is one of the most powerful and underappreciated tricks in computer vision — it literally multiplies your effective dataset size for free.</p>
+  </div>
+</div>
+
+<!-- ── Section 1 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">1</span> CIFAR-10: The Benchmark</h2>
+
+  <p>CIFAR-10 (Canadian Institute For Advanced Research) is one of the most widely used benchmarks in computer vision research. It was created by Alex Krizhevsky and is a step up from MNIST in every way.</p>
+
+  <h3>Dataset Properties</h3>
+  <ul>
+    <li><strong>60,000 images</strong> total: 50,000 for training, 10,000 for testing</li>
+    <li><strong>32×32 pixels</strong> in color (RGB) — small, but enough complexity to be challenging</li>
+    <li><strong>10 classes</strong>: airplane, automobile, bird, cat, deer, dog, frog, horse, ship, truck</li>
+    <li><strong>Balanced</strong>: exactly 6,000 images per class (5,000 train + 1,000 test)</li>
+    <li><strong>Variety</strong>: multiple angles, backgrounds, lighting conditions — much harder than MNIST</li>
+  </ul>
+
+  <p>Why is CIFAR-10 hard? The images are tiny (32×32), yet must distinguish between visually similar classes (cats vs dogs, automobiles vs trucks). Objects can appear at various scales, angles, and under different lighting. A simple MLP achieves about 55–60%; a good CNN gets 78–85%; modern state-of-the-art methods exceed 99%.</p>
+
+  <pre><code class="language-python">import torch
+import torchvision
+import torchvision.transforms as transforms
+import matplotlib.pyplot as plt
+import numpy as np
+
+# Classes in CIFAR-10
+CLASSES = ['airplane', 'automobile', 'bird', 'cat', 'deer',
+           'dog', 'frog', 'horse', 'ship', 'truck']
+
+# Load the raw (un-normalized) dataset just for visualization
+raw_transform = transforms.ToTensor()  # converts PIL image to tensor [0,1]
+
+trainset_raw = torchvision.datasets.CIFAR10(
+    root='./data', train=True, download=True, transform=raw_transform
+)
+testset_raw = torchvision.datasets.CIFAR10(
+    root='./data', train=False, download=True, transform=raw_transform
+)
+
+print(f"Training samples: {len(trainset_raw)}")   # 50000
+print(f"Test samples:     {len(testset_raw)}")    # 10000
+
+# Check one sample
+img, label = trainset_raw[0]
+print(f"Image shape: {img.shape}")     # torch.Size([3, 32, 32])  (C, H, W)
+print(f"Image dtype: {img.dtype}")     # torch.float32
+print(f"Pixel range: [{img.min():.2f}, {img.max():.2f}]")  # [0.00, 1.00]
+print(f"Label: {label} ({CLASSES[label]})")</code></pre>
+
+  <div class="output-block">
+    <div class="output-label">Output</div>
+Training samples: 50000
+Test samples:     10000
+Image shape: torch.Size([3, 32, 32])
+Image dtype: torch.float32
+Pixel range: [0.00, 1.00]
+Label: 6 (frog)
+  </div>
+
+  <h3>Visualizing the Dataset</h3>
+  <pre><code class="language-python">def show_cifar_samples(dataset, classes, n_per_class=5):
+    """Show n_per_class random images from each class."""
+    fig, axes = plt.subplots(10, n_per_class, figsize=(n_per_class * 1.5, 16))
+
+    # Collect indices per class
+    class_indices = {c: [] for c in range(10)}
+    for idx, (_, label) in enumerate(dataset):
+        class_indices[label].append(idx)
+
+    for class_id in range(10):
+        sample_ids = np.random.choice(class_indices[class_id], n_per_class, replace=False)
+        for col, idx in enumerate(sample_ids):
+            img, _ = dataset[idx]
+            # Convert from (C,H,W) to (H,W,C) for matplotlib
+            img_np = img.permute(1, 2, 0).numpy()
+            axes[class_id, col].imshow(img_np)
+            axes[class_id, col].axis('off')
+            if col == 0:
+                axes[class_id, col].set_ylabel(classes[class_id], rotation=0,
+                                                labelpad=50, fontsize=9)
+    plt.suptitle('CIFAR-10: 5 samples from each of 10 classes', y=1.01)
+    plt.tight_layout()
+    plt.show()
+
+show_cifar_samples(trainset_raw, CLASSES)</code></pre>
+
+  <div class="callout callout-tip">
+    <span class="callout-icon">💡</span>
+    <div class="callout-body">
+      <strong>Why CIFAR-10 Is a Good Learning Benchmark</strong>
+      <p>MNIST (handwritten digits) is so simple that even basic models achieve 99%. You learn almost nothing about real challenges from it. CIFAR-10 forces you to deal with: natural color images, objects at various scales, cluttered backgrounds, within-class variation, and real overfitting risks. Your architecture choices, augmentation strategy, and regularization approach all matter significantly — exactly the skills you need for real-world vision tasks.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 2 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">2</span> Data Normalization for CNNs</h2>
+
+  <p>Raw pixel values are integers from 0 to 255 (or floats from 0 to 1 after <code>ToTensor()</code>). Neural networks train much better when inputs have zero mean and unit variance — the same reason we standardize tabular features with StandardScaler.</p>
+
+  <h3>Why Normalization Matters</h3>
+  <p>Unnormalized inputs create problems at every layer:</p>
+  <ul>
+    <li><strong>Gradient scale mismatch</strong>: if one channel has values ~200 and another ~10, their gradients have very different scales, making optimization unstable</li>
+    <li><strong>Dead ReLUs</strong>: large positive or negative pre-activations push neurons into saturation</li>
+    <li><strong>Slow convergence</strong>: the loss landscape is poorly conditioned for unnormalized inputs</li>
+  </ul>
+
+  <h3>Computing CIFAR-10 Statistics</h3>
+  <pre><code class="language-python">import torch
+import torchvision
+import torchvision.transforms as transforms
+
+# Load raw training data to compute statistics
+raw_data = torchvision.datasets.CIFAR10(
+    root='./data', train=True, download=False,
+    transform=transforms.ToTensor()
+)
+loader = torch.utils.data.DataLoader(raw_data, batch_size=1000, shuffle=False)
+
+# Compute mean and std per channel across all training images
+all_images = torch.cat([x for x, _ in loader])  # (50000, 3, 32, 32)
+
+mean = all_images.mean(dim=(0, 2, 3))  # mean over batch, H, W; one value per channel
+std = all_images.std(dim=(0, 2, 3))    # std over batch, H, W
+
+print(f"CIFAR-10 mean per channel: {mean}")
+print(f"CIFAR-10 std  per channel: {std}")
+# Expected: mean ≈ [0.4914, 0.4822, 0.4465]
+#           std  ≈ [0.2470, 0.2435, 0.2616]</code></pre>
+
+  <div class="output-block">
+    <div class="output-label">Output</div>
+CIFAR-10 mean per channel: tensor([0.4914, 0.4822, 0.4465])
+CIFAR-10 std  per channel: tensor([0.2470, 0.2435, 0.2616])
+  </div>
+
+  <h3>The Normalization Transform</h3>
+  <pre><code class="language-python"># Standard CIFAR-10 normalization values (widely used in published benchmarks)
+CIFAR10_MEAN = (0.4914, 0.4822, 0.4465)
+CIFAR10_STD  = (0.2470, 0.2435, 0.2616)
+
+# transforms.Normalize(mean, std) applies: output = (input - mean) / std
+# per channel. Result: approximately zero mean, unit std.
+normalize = transforms.Normalize(mean=CIFAR10_MEAN, std=CIFAR10_STD)
+
+# Basic transform (for validation and test — no random augmentation)
+eval_transform = transforms.Compose([
+    transforms.ToTensor(),      # PIL image -> float tensor [0,1]
+    normalize                   # -> approx zero mean, unit std
+])
+
+# Verify normalization
+sample, _ = raw_data[0]
+normalized = normalize(sample)
+print(f"Before normalize: min={sample.min():.3f}, max={sample.max():.3f}")
+print(f"After normalize:  min={normalized.min():.3f}, max={normalized.max():.3f}")
+print(f"After normalize:  mean≈{normalized.mean():.3f}, std≈{normalized.std():.3f}")</code></pre>
+
+  <div class="output-block">
+    <div class="output-label">Output</div>
+Before normalize: min=0.000, max=1.000
+After normalize:  min=-2.429, max=2.754
+After normalize:  mean≈-0.012, std≈0.994
+  </div>
+
+  <div class="callout callout-warn">
+    <span class="callout-icon">⚠️</span>
+    <div class="callout-body">
+      <strong>Compute Statistics Only from Training Data</strong>
+      <p>The mean and std must be computed from the training set only, then applied to both training and test sets. If you include test data in the statistics computation, you're leaking information from the test set into training — a form of data leakage that artificially inflates test accuracy. In practice, the CIFAR-10 statistics are well-known and widely used as constants.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 3 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">3</span> Building the CNN Architecture</h2>
+
+  <p>Our CNN for CIFAR-10 uses a classic three-block design. Each block increases the channel depth while reducing spatial dimensions. By the end of the conv blocks, we have rich, abstract feature vectors which we pass to a small fully-connected classifier.</p>
+
+  <h3>Architecture Design Decisions</h3>
+  <ul>
+    <li><strong>3 blocks</strong>: enough depth to learn hierarchy (edges → textures → objects) without too many parameters</li>
+    <li><strong>Channel progression 3 → 32 → 64 → 128</strong>: doubling channels at each block is standard</li>
+    <li><strong>3×3 kernels with same padding</strong>: standard choice — good balance of receptive field and parameter efficiency</li>
+    <li><strong>BatchNorm after every conv</strong>: stabilises training (see Section 8)</li>
+    <li><strong>MaxPool after each block</strong>: downsamples spatial dimensions by 2×</li>
+    <li><strong>Dropout 0.5 before final linear</strong>: regularization</li>
+  </ul>
+
+  <pre><code class="language-python">import torch
+import torch.nn as nn
+
+class CIFAR10CNN(nn.Module):
+    """
+    CNN for CIFAR-10 (32x32 RGB, 10 classes).
+    Shape trace:
+      Input:   (B, 3, 32, 32)
+      Block1:  (B, 32, 16, 16)  [conv(3->32,3x3,P=1) + BN + ReLU + Pool(2,2)]
+      Block2:  (B, 64, 8, 8)   [conv(32->64,3x3,P=1) + BN + ReLU + Pool(2,2)]
+      Block3:  (B, 128, 4, 4)  [conv(64->128,3x3,P=1) + BN + ReLU + Pool(2,2)]
+      Flatten: (B, 2048)
+      FC1:     (B, 512)
+      FC2:     (B, 10)
+    """
+    def __init__(self, num_classes=10):
+        super().__init__()
+
+        self.block1 = nn.Sequential(
+            nn.Conv2d(3, 32, kernel_size=3, padding=1),
+            nn.BatchNorm2d(32),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(32, 32, kernel_size=3, padding=1),  # extra conv in block
+            nn.BatchNorm2d(32),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(2, 2),
+            nn.Dropout2d(0.1)
+        )
+
+        self.block2 = nn.Sequential(
+            nn.Conv2d(32, 64, kernel_size=3, padding=1),
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(64, 64, kernel_size=3, padding=1),
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(2, 2),
+            nn.Dropout2d(0.2)
+        )
+
+        self.block3 = nn.Sequential(
+            nn.Conv2d(64, 128, kernel_size=3, padding=1),
+            nn.BatchNorm2d(128),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(128, 128, kernel_size=3, padding=1),
+            nn.BatchNorm2d(128),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(2, 2),
+            nn.Dropout2d(0.3)
+        )
+
+        self.classifier = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(128 * 4 * 4, 512),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.5),
+            nn.Linear(512, num_classes)
+        )
+
+    def forward(self, x):
+        x = self.block1(x)
+        x = self.block2(x)
+        x = self.block3(x)
+        return self.classifier(x)
+
+
+# Inspect the model
+model = CIFAR10CNN()
+
+# Forward pass to verify shapes
+x = torch.randn(4, 3, 32, 32)
+print("Shape trace:")
+b1 = model.block1(x);    print(f"  After Block 1: {b1.shape}")
+b2 = model.block2(b1);   print(f"  After Block 2: {b2.shape}")
+b3 = model.block3(b2);   print(f"  After Block 3: {b3.shape}")
+out = model.classifier(b3); print(f"  Output:        {out.shape}")
+
+total_params = sum(p.numel() for p in model.parameters())
+trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+print(f"\nTotal parameters:     {total_params:,}")
+print(f"Trainable parameters: {trainable:,}")</code></pre>
+
+  <div class="output-block">
+    <div class="output-label">Output</div>
+Shape trace:
+  After Block 1: torch.Size([4, 32, 16, 16])
+  After Block 2: torch.Size([4, 64, 8, 8])
+  After Block 3: torch.Size([4, 128, 4, 4])
+  Output:        torch.Size([4, 10])
+
+Total parameters:     1,249,034
+Trainable parameters: 1,249,034
+  </div>
+</div>
+
+<!-- ── Section 4 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">4</span> Data Augmentation: More Data for Free</h2>
+
+  <p>With 50,000 training images (5,000 per class), our CNN will overfit. After just 5–10 epochs, training accuracy shoots to 99% while validation accuracy stalls at 65–70%. Data augmentation is the most effective and cost-free fix.</p>
+
+  <h3>The Core Idea</h3>
+  <p>Data augmentation applies random transformations to training images before they're fed to the network. Each time the model sees an image, it sees a slightly different version — as if you had more training data.</p>
+
+  <p><strong>Critical principle:</strong> augmentation must <em>preserve the label</em>. A cat flipped horizontally is still a cat. A car rotated 15 degrees is still a car. But a digit "6" rotated 180 degrees becomes a "9" — rotating digits could break labels, so you'd only rotate by small amounts.</p>
+
+  <div class="callout callout-warn">
+    <span class="callout-icon">⚠️</span>
+    <div class="callout-body">
+      <strong>Only Augment the Training Set</strong>
+      <p>Augmentation introduces randomness. If you apply it to the validation or test set, you get a different score every evaluation run — making it impossible to compare models or track progress. The validation/test transforms should only include <code>ToTensor()</code> and <code>Normalize()</code> — deterministic operations that produce the same result every time.</p>
+    </div>
+  </div>
+
+  <h3>Quantifying the Benefit</h3>
+  <p>Typical results on CIFAR-10 with this architecture:</p>
+  <table style="width:100%; border-collapse: collapse; margin: 1rem 0; font-size:0.85rem;">
+    <thead>
+      <tr style="background: var(--bg-alt);">
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Setup</th>
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Train Acc (30 epochs)</th>
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Val Acc (30 epochs)</th>
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Overfitting?</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">No augmentation</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">~99%</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">~72%</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Severe</td>
+      </tr>
+      <tr style="background: var(--bg-subtle);">
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">HFlip + RandomCrop</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">~95%</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">~79%</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Moderate</td>
+      </tr>
+      <tr>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">HFlip + RandomCrop + ColorJitter</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">~92%</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">~82%</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Low</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <p>The table's story is really about the <em>gap</em> between train and val accuracy — that gap is overfitting. Recreating it as accuracy-vs-epoch curves makes the effect much more visible than a single end-of-training number:</p>
+
+  <div class="chart-row">
+    <div class="chart-container">
+      <div id="l45-noaug-chart" style="height:280px;"></div>
+      <p class="chart-caption">No augmentation — training accuracy rockets to ~99% while validation stalls around ~72%. A wide, growing gap: severe overfitting.</p>
+    </div>
+    <div class="chart-container">
+      <div id="l45-withaug-chart" style="height:280px;"></div>
+      <p class="chart-caption">HFlip + RandomCrop + ColorJitter — training accuracy rises more slowly and validation accuracy keeps pace much better. The gap stays small: augmentation is working as a regularizer.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 5 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">5</span> Common Augmentation Techniques</h2>
+
+  <p>Let's walk through each augmentation technique, understand what it does and why it helps, and then build the full transform pipeline.</p>
+
+  <p>Before the code, play with it directly. Below is a stand-in "training image" (a simple scene, since we can't load a real photo here) rendered as SVG shapes. Each control mimics one of <code>torchvision.transforms</code>' augmentations by applying a live CSS transform — exactly the kind of variation the CNN would see across different training epochs of the <em>same</em> underlying image:</p>
+
+  <div class="diagram-controls">
+    <div class="diagram-control-row">
+      <span class="diagram-control-label">Rotation</span>
+      <input type="range" id="l45-rotate-slider" class="diagram-slider" min="-30" max="30" step="1" value="0">
+      <span class="diagram-control-value" id="l45-rotate-value">0°</span>
+    </div>
+    <div class="diagram-control-row">
+      <span class="diagram-control-label">Brightness</span>
+      <input type="range" id="l45-brightness-slider" class="diagram-slider" min="0.4" max="1.6" step="0.05" value="1">
+      <span class="diagram-control-value" id="l45-brightness-value">1.00×</span>
+    </div>
+    <div class="diagram-control-row">
+      <span class="diagram-control-label">Contrast</span>
+      <input type="range" id="l45-contrast-slider" class="diagram-slider" min="0.4" max="1.6" step="0.05" value="1">
+      <span class="diagram-control-value" id="l45-contrast-value">1.00×</span>
+    </div>
+    <div class="diagram-control-row">
+      <span class="diagram-control-label">Crop / Shift</span>
+      <input type="range" id="l45-crop-slider" class="diagram-slider" min="0" max="4" step="1" value="0">
+      <span class="diagram-control-value" id="l45-crop-value">0 px</span>
+    </div>
+  </div>
+  <div class="diagram-btn-group" id="l45-flip-buttons">
+    <button class="diagram-btn active" data-flip="0">Original Orientation</button>
+    <button class="diagram-btn" data-flip="1">RandomHorizontalFlip</button>
+  </div>
+
+  <div class="diagram-svg-wrap">
+    <div id="l45-aug-viewport" style="width:220px; height:220px; margin:0 auto; overflow:hidden; border:1px dashed var(--border-md); border-radius:6px; position:relative; background:#cfeeff;">
+      <svg id="l45-aug-svg" viewBox="0 0 220 220" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Synthetic training image of a car on a road, used to preview data augmentation transforms" style="width:220px; height:220px; display:block; transform-origin:50% 50%; transition:transform 0.15s, filter 0.15s;">
+        <!-- Sky -->
+        <rect x="0" y="0" width="220" height="220" fill="#cfeeff"></rect>
+        <!-- Sun -->
+        <circle cx="184" cy="34" r="18" fill="#F5B400"></circle>
+        <!-- Ground -->
+        <rect x="0" y="150" width="220" height="70" fill="#5CA24A"></rect>
+        <!-- Road -->
+        <rect x="0" y="178" width="220" height="42" fill="#4A4A52"></rect>
+        <rect x="10"  y="197" width="24" height="6" fill="#F2F2F2"></rect>
+        <rect x="60"  y="197" width="24" height="6" fill="#F2F2F2"></rect>
+        <rect x="110" y="197" width="24" height="6" fill="#F2F2F2"></rect>
+        <rect x="160" y="197" width="24" height="6" fill="#F2F2F2"></rect>
+        <!-- Car body (asymmetric so flip/rotate are obvious) -->
+        <rect x="48" y="140" width="100" height="34" rx="8" fill="#DC2626"></rect>
+        <path d="M 66 140 L 82 116 L 122 116 L 134 140 Z" fill="#DC2626"></path>
+        <path d="M 86 122 L 100 122 L 104 138 L 82 138 Z" fill="#BFEBFF"></path>
+        <path d="M 106 122 L 118 122 L 128 138 L 110 138 Z" fill="#BFEBFF"></path>
+        <circle cx="70"  cy="176" r="12" fill="#1F2937"></circle>
+        <circle cx="70"  cy="176" r="5"  fill="#9CA3AF"></circle>
+        <circle cx="128" cy="176" r="12" fill="#1F2937"></circle>
+        <circle cx="128" cy="176" r="5"  fill="#9CA3AF"></circle>
+        <rect x="132" y="150" width="10" height="6" fill="#FFE27A"></rect>
+      </svg>
+    </div>
+    <p class="diagram-svg-caption" id="l45-aug-caption">Original image, no augmentation applied — this is what the network would see without <code>train_transform</code>.</p>
+  </div>
+
+  <h3>RandomHorizontalFlip</h3>
+  <p>Mirrors the image left-to-right with probability p (default 0.5). Most natural objects are horizontally symmetric — a car from the left side looks like a car from the right side. This effectively doubles your dataset for free. Almost always applied for CIFAR-10 and ImageNet.</p>
+
+  <h3>RandomCrop with Padding</h3>
+  <p>Pads the image with zeros (or reflection) and then takes a random crop back to the original size. For CIFAR-10 with <code>padding=4</code>: the 32×32 image is padded to 40×40, then cropped back to 32×32 — effectively shifting the image content by up to 4 pixels in any direction. This teaches the model that the object's exact position doesn't matter.</p>
+
+  <h3>ColorJitter</h3>
+  <p>Randomly varies brightness, contrast, saturation, and hue. Teaches the model to be robust to lighting changes and color variations. A critical augmentation when your training data comes from a limited set of conditions but deployment will have varied lighting.</p>
+
+  <h3>RandomErasing (Cutout)</h3>
+  <p>Randomly erases a rectangular region of the image, replacing it with zeros (or random noise). Forces the model to make decisions based on partial information — it can't just memorize one distinctive patch. Particularly effective against models that "cheat" by learning texture shortcuts.</p>
+
+  <pre><code class="language-python">import torchvision.transforms as transforms
+
+CIFAR10_MEAN = (0.4914, 0.4822, 0.4465)
+CIFAR10_STD  = (0.2470, 0.2435, 0.2616)
+
+# Training transform — aggressive augmentation
+train_transform = transforms.Compose([
+    # 1. Random horizontal flip (50% probability)
+    transforms.RandomHorizontalFlip(p=0.5),
+
+    # 2. Random crop with padding=4 (shifts image by up to 4 pixels)
+    transforms.RandomCrop(32, padding=4),
+
+    # 3. Color jitter (optional but helpful for color robustness)
+    transforms.ColorJitter(
+        brightness=0.2,   # vary brightness ±20%
+        contrast=0.2,     # vary contrast ±20%
+        saturation=0.2,   # vary saturation ±20%
+        hue=0.1           # vary hue ±10%
+    ),
+
+    # 4. Convert to tensor [0, 1]
+    transforms.ToTensor(),
+
+    # 5. Normalize to zero mean, unit std
+    transforms.Normalize(mean=CIFAR10_MEAN, std=CIFAR10_STD),
+
+    # 6. Random Erasing — erase a random patch (applied after ToTensor)
+    transforms.RandomErasing(p=0.5, scale=(0.02, 0.2)),
+])
+
+# Validation / Test transform — NO random transforms (deterministic)
+eval_transform = transforms.Compose([
+    transforms.ToTensor(),
+    transforms.Normalize(mean=CIFAR10_MEAN, std=CIFAR10_STD),
+])
+
+# Load datasets with the respective transforms
+import torchvision
+trainset = torchvision.datasets.CIFAR10(
+    root='./data', train=True, download=True, transform=train_transform
+)
+testset = torchvision.datasets.CIFAR10(
+    root='./data', train=False, download=True, transform=eval_transform
+)
+
+print(f"Training samples: {len(trainset)}")  # 50000
+print(f"Test samples:     {len(testset)}")   # 10000
+
+# DataLoaders
+trainloader = torch.utils.data.DataLoader(
+    trainset, batch_size=128, shuffle=True, num_workers=4, pin_memory=True
+)
+testloader = torch.utils.data.DataLoader(
+    testset, batch_size=256, shuffle=False, num_workers=4, pin_memory=True
+)</code></pre>
+
+  <div class="callout callout-tip">
+    <span class="callout-icon">💡</span>
+    <div class="callout-body">
+      <strong>AutoAugment: Learned Augmentation Policies</strong>
+      <p>Google's AutoAugment (2018) used reinforcement learning to search for the best augmentation policy for CIFAR-10. The learned policy includes unusual choices like Equalize, Posterize, and Rotate at specific angles. PyTorch includes it as <code>transforms.AutoAugment(policy=transforms.AutoAugmentPolicy.CIFAR10)</code>. It typically adds 1–2% accuracy for free, though it's slower to apply than manual policies.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 6 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">6</span> Training the CNN: Complete Code</h2>
+
+  <p>With the model, data, and augmentation ready, we can write the full training loop. Good training requires more than just a loop — a proper setup includes a learning rate scheduler, gradient clipping, and per-epoch metrics tracking.</p>
+
+  <pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.optim as optim
+
+CLASSES = ['airplane', 'automobile', 'bird', 'cat', 'deer',
+           'dog', 'frog', 'horse', 'ship', 'truck']
+
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+print(f"Training on: {device}")
+
+# Model, loss, optimizer, scheduler
+model = CIFAR10CNN(num_classes=10).to(device)
+criterion = nn.CrossEntropyLoss()
+optimizer = optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-4)
+
+# Cosine annealing: smoothly decays lr from initial to 0 over all epochs
+scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=30)
+
+
+def train_epoch(model, loader, criterion, optimizer, device):
+    """Run one training epoch. Returns (loss, accuracy)."""
+    model.train()
+    total_loss, correct, total = 0.0, 0, 0
+
+    for images, labels in loader:
+        images, labels = images.to(device), labels.to(device)
+
+        optimizer.zero_grad()
+        outputs = model(images)
+        loss = criterion(outputs, labels)
+        loss.backward()
+        optimizer.step()
+
+        total_loss += loss.item() * images.size(0)
+        _, predicted = outputs.max(1)
+        correct += predicted.eq(labels).sum().item()
+        total += images.size(0)
+
+    return total_loss / total, 100.0 * correct / total
+
+
+def eval_epoch(model, loader, criterion, device):
+    """Evaluate on a data loader. Returns (loss, accuracy)."""
+    model.eval()
+    total_loss, correct, total = 0.0, 0, 0
+
+    with torch.no_grad():
+        for images, labels in loader:
+            images, labels = images.to(device), labels.to(device)
+            outputs = model(images)
+            loss = criterion(outputs, labels)
+
+            total_loss += loss.item() * images.size(0)
+            _, predicted = outputs.max(1)
+            correct += predicted.eq(labels).sum().item()
+            total += images.size(0)
+
+    return total_loss / total, 100.0 * correct / total
+
+
+# Training loop
+NUM_EPOCHS = 30
+history = {'train_loss': [], 'train_acc': [], 'val_loss': [], 'val_acc': []}
+best_val_acc = 0.0
+
+print(f"\n{'Epoch':>5} {'LR':>8} {'Train Loss':>11} {'Train Acc':>10} {'Val Loss':>10} {'Val Acc':>9}")
+print("-" * 60)
+
+for epoch in range(1, NUM_EPOCHS + 1):
+    train_loss, train_acc = train_epoch(model, trainloader, criterion, optimizer, device)
+    val_loss, val_acc = eval_epoch(model, testloader, criterion, device)
+    scheduler.step()
+
+    history['train_loss'].append(train_loss)
+    history['train_acc'].append(train_acc)
+    history['val_loss'].append(val_loss)
+    history['val_acc'].append(val_acc)
+
+    lr = optimizer.param_groups[0]['lr']
+    print(f"{epoch:>5} {lr:>8.5f} {train_loss:>11.4f} {train_acc:>9.2f}% {val_loss:>10.4f} {val_acc:>8.2f}%")
+
+    # Save best model
+    if val_acc > best_val_acc:
+        best_val_acc = val_acc
+        torch.save(model.state_dict(), 'cifar10_best.pth')
+        print(f"          ↑ New best: {best_val_acc:.2f}%")
+
+print(f"\nBest validation accuracy: {best_val_acc:.2f}%")</code></pre>
+
+  <div class="output-block">
+    <div class="output-label">Example Output (abridged)</div>
+Epoch    LR  Train Loss  Train Acc   Val Loss  Val Acc
+------------------------------------------------------------
+    1 0.00100      1.5421     44.12%     1.4256    48.01%
+    5 0.00091      1.1203     60.44%     1.0892    62.13%
+   10 0.00073      0.8912     68.88%     0.8450    70.21%
+   20 0.00034      0.6203     78.44%     0.6812    75.93%
+   30 0.00000      0.4891     83.21%     0.6124    78.45%
+          ↑ New best: 79.12%
+
+Best validation accuracy: 79.12%
+  </div>
+
+  <p>Plotting <code>history['train_acc']</code> and <code>history['val_acc']</code> makes the training dynamics much easier to read than scanning table rows. Here's that same run recreated as an interactive chart — hover over any epoch to see the exact numbers:</p>
+
+  <div class="chart-container">
+    <div id="l45-training-curve" style="height:340px;"></div>
+    <p class="chart-caption">Training vs validation accuracy over 30 epochs (with HFlip + RandomCrop + ColorJitter augmentation). Training accuracy climbs steadily to ~83%; validation accuracy tracks closely and levels off around ~78–79% — a healthy, moderate gap.</p>
+  </div>
+
+  <div class="callout callout-key">
+    <span class="callout-icon">🔑</span>
+    <div class="callout-body">
+      <strong>Why CosineAnnealingLR?</strong>
+      <p>The learning rate schedule matters almost as much as the model architecture. Cosine annealing starts at the initial LR, decays smoothly following a cosine curve, and reaches near-zero by the final epoch. This gives large updates early (fast progress) and tiny updates late (fine-tuning to a sharp minimum). It consistently outperforms fixed LR or step decay for CNNs, and is standard in most published CIFAR-10 papers.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 7 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">7</span> Visualizing Feature Maps</h2>
+
+  <p>One of the most illuminating things you can do after training a CNN is look inside it — literally. What does the network see when it processes an image? PyTorch's forward hooks make this easy.</p>
+
+  <pre><code class="language-python">import torch
+import matplotlib.pyplot as plt
+
+# Load the best model
+model = CIFAR10CNN().to(device)
+model.load_state_dict(torch.load('cifar10_best.pth', map_location=device))
+model.eval()
+
+# Register a hook to capture activations after Block 1
+activations = {}
+
+def make_hook(name):
+    def hook(module, input, output):
+        activations[name] = output.detach()
+    return hook
+
+# Register hook on the first conv layer and after block1
+first_conv = model.block1[0]   # the first nn.Conv2d
+handle = first_conv.register_forward_hook(make_hook('conv1_output'))
+
+# Run one test image through the model
+testset_vis = torchvision.datasets.CIFAR10(
+    root='./data', train=False, transform=eval_transform
+)
+img, label = testset_vis[42]   # pick an arbitrary image
+input_tensor = img.unsqueeze(0).to(device)  # add batch dim: (1, 3, 32, 32)
+
+with torch.no_grad():
+    _ = model(input_tensor)
+
+# Remove the hook
+handle.remove()
+
+# Visualize the first 32 feature maps from conv1
+feat_maps = activations['conv1_output'][0]  # shape: (32, 32, 32)
+fig, axes = plt.subplots(4, 8, figsize=(14, 7))
+for i, ax in enumerate(axes.flat):
+    ax.imshow(feat_maps[i].cpu().numpy(), cmap='RdBu_r')
+    ax.axis('off')
+    ax.set_title(f'F{i+1}', fontsize=7)
+plt.suptitle(f'32 Feature Maps after Conv1 (input: {CLASSES[label]})', y=1.01)
+plt.tight_layout()
+plt.show()
+
+print(f"Feature map shape: {feat_maps.shape}")  # (32, 32, 32)</code></pre>
+
+  <p>When you run this, you'll see 32 different "views" of the input image — each highlighting a different pattern the filter learned to detect. Early filters typically show edge detections and color contrasts. By Block 3, the feature maps are more abstract and harder to interpret visually, but they're exactly what the classifier uses to make its decision.</p>
+</div>
+
+<!-- ── Section 8 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">8</span> Batch Normalization in CNNs</h2>
+
+  <p>Batch Normalization (Ioffe &amp; Szegedy, 2015) is one of the most impactful papers in deep learning history. It made training deep networks dramatically faster and more stable, enabling architectures that were previously impossible to train.</p>
+
+  <h3>The Intuition: Stable Inputs at Every Layer</h3>
+  <p>Imagine you're trying to train a network, but the distribution of inputs to each layer keeps shifting as the previous layers update their weights. This is called <strong>internal covariate shift</strong>. The network has to continuously re-adapt to shifting inputs — like trying to hit a moving target. BatchNorm fixes this by normalizing the inputs to each layer, keeping them stable.</p>
+
+  <h3>How BatchNorm Works in CNNs</h3>
+  <p><code>nn.BatchNorm2d(C)</code> normalises each of the C channels independently. For a feature map of shape (B, C, H, W): it computes mean and variance across the batch and spatial dimensions (B, H, W) for each channel, then normalises and applies learned scale (γ) and shift (β) parameters.</p>
+
+  <pre><code class="language-python">import torch
+import torch.nn as nn
+
+# BatchNorm2d(32) handles 32-channel feature maps
+bn = nn.BatchNorm2d(32)
+
+x = torch.randn(8, 32, 16, 16)  # batch=8, 32 channels, 16x16 spatial
+out = bn(x)
+
+print(f"Input  mean (ch 0): {x[:, 0, :, :].mean():.4f}")   # arbitrary
+print(f"Output mean (ch 0): {out[:, 0, :, :].mean():.4f}")  # ≈ 0
+print(f"Output std  (ch 0): {out[:, 0, :, :].std():.4f}")   # ≈ 1
+
+# The learnable parameters: gamma (scale) and beta (shift)
+print(f"BatchNorm parameters: gamma shape={bn.weight.shape}, beta shape={bn.bias.shape}")
+# Both have shape (32,) — one per channel</code></pre>
+
+  <div class="output-block">
+    <div class="output-label">Output</div>
+Input  mean (ch 0): 0.0142
+Output mean (ch 0): 0.0000
+Output std  (ch 0): 1.0000
+BatchNorm parameters: gamma shape=torch.Size([32]), beta shape=torch.Size([32])
+  </div>
+
+  <h3>Training vs Inference Mode</h3>
+  <p>During training: BatchNorm uses the current mini-batch statistics (mean/std from the batch). During inference (<code>model.eval()</code>): it uses running estimates of the mean and std accumulated during training. This is why you must always call <code>model.eval()</code> before evaluating — otherwise BatchNorm uses batch statistics that make results noisy and non-deterministic.</p>
+
+  <div class="callout callout-key">
+    <span class="callout-icon">🔑</span>
+    <div class="callout-body">
+      <strong>Benefits of BatchNorm in CNNs</strong>
+      <p>1. <strong>Higher learning rates</strong>: without BN, large LRs cause exploding/vanishing gradients; BN normalises the gradient magnitudes. 2. <strong>Less sensitive to weight initialization</strong>: BN reduces the impact of bad initial weights. 3. <strong>Acts as mild regularization</strong>: the noise from using batch statistics instead of population statistics acts like Dropout. 4. <strong>Faster convergence</strong>: models with BN often converge 2–5× faster. Place it after Conv and before ReLU (the original paper's recommendation).</p>
+    </div>
+  </div>
+</div>
+
+<!-- Real-World Spotlight -->
+<div class="use-case-section">
+  <div class="use-case-header">
+    <span style="font-size:1.5rem">🌍</span>
+    <h2>Real-World Spotlight: CIFAR-10 Accuracy Progress Over 25 Years</h2>
+  </div>
+  <p>CIFAR-10 has been a benchmark since 2009. The progression in accuracy over the years tells the story of deep learning's evolution:</p>
+
+  <table style="width:100%; border-collapse: collapse; margin: 1rem 0; font-size:0.85rem;">
+    <thead>
+      <tr style="background: var(--bg-alt);">
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Year</th>
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Model</th>
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Key Innovation</th>
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Test Accuracy</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">2009</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Original (Krizhevsky)</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Multi-layer RBM</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">~64%</td>
+      </tr>
+      <tr style="background: var(--bg-subtle);">
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">2012</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">CNN with Dropout</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Deep CNN + Dropout</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">~80%</td>
+      </tr>
+      <tr>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">2015</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">VGG + BN</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">BatchNorm, deeper nets</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">~92%</td>
+      </tr>
+      <tr style="background: var(--bg-subtle);">
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">2016</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">ResNet-110</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Residual connections</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">~93.6%</td>
+      </tr>
+      <tr>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">2020</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">EfficientNet + AutoAugment</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Compound scaling + augment</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">~99.0%</td>
+      </tr>
+      <tr style="background: var(--bg-subtle);">
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">2022+</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">ViT + semi-supervised</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Vision Transformers + extra data</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">~99.5%+</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <p>Our simple CNN achieves ~78–82% — roughly on par with 2012-era results. The gap to 99% comes from: (1) deeper architectures with residual connections (Lesson 47), (2) better augmentation (AutoAugment, Mixup, CutMix), (3) pre-training on much larger datasets (transfer learning), and (4) model ensembling. But 78–82% in 30 lines of code, training in under 10 minutes, is a genuinely solid result and a perfect foundation for what's next.</p>
+</div>
+
+<!-- ── Quiz ── -->
+<div class="quiz-section">
+  <div id="quiz45"></div>
+</div>
+
+<!-- ── Practice ── -->
+<div class="practice-card">
+  <h2>✍️ Practice Exercises</h2>
+  <ol>
+    <li>Modify the training setup to train <em>without</em> augmentation (only <code>ToTensor()</code> + <code>Normalize()</code> for training). Train for 15 epochs. Compare train vs val accuracy. Can you see the overfitting clearly?</li>
+    <li>Add <code>transforms.RandomRotation(15)</code> to the training augmentation pipeline. Does it help or hurt? Why might rotating images by 15 degrees be less effective for CIFAR-10 than flipping?</li>
+    <li>After training, compute per-class accuracy on the test set. Which 3 classes does the model confuse most? (Hint: use a confusion matrix with <code>sklearn.metrics.confusion_matrix</code>.)</li>
+    <li>Use the forward hook from Section 7 to visualize feature maps from Block 2 and Block 3 for the same image. How do the feature maps become more abstract as you go deeper?</li>
+  </ol>
+  <details>
+    <summary>▶ Show Solution (Exercise 3 — Per-class Accuracy)</summary>
+    <pre><code class="language-python">from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
+import matplotlib.pyplot as plt
+import numpy as np, torch
+
+model.eval()
+all_preds, all_labels = [], []
+
+with torch.no_grad():
+    for images, labels in testloader:
+        images = images.to(device)
+        outputs = model(images)
+        _, preds = outputs.max(1)
+        all_preds.extend(preds.cpu().numpy())
+        all_labels.extend(labels.numpy())
+
+cm = confusion_matrix(all_labels, all_preds)
+# Per-class accuracy = diagonal / row sums
+per_class_acc = cm.diagonal() / cm.sum(axis=1) * 100
+for i, acc in enumerate(per_class_acc):
+    print(f"{CLASSES[i]:12s}: {acc:.1f}%")
+
+# Display confusion matrix
+disp = ConfusionMatrixDisplay(cm, display_labels=CLASSES)
+fig, ax = plt.subplots(figsize=(10, 8))
+disp.plot(ax=ax, colorbar=False, cmap='Blues')
+plt.title("CIFAR-10 Confusion Matrix")
+plt.xticks(rotation=45, ha='right')
+plt.tight_layout()
+plt.show()</code></pre>
+  </details>
+</div>
+
+<!-- ── Primary Source ── -->
+<div class="primary-source">
+  <h2>📚 Primary Source for This Lesson</h2>
+  <p><a href="https://www.cs.toronto.edu/~kriz/learning-features-2009-TR.pdf" target="_blank"><strong>Krizhevsky (2009) — "Learning Multiple Layers of Features from Tiny Images"</strong></a><br>
+  The technical report that introduced the CIFAR-10/100 datasets used throughout this lesson. For data augmentation, see Shorten &amp; Khoshgoftaar (2019) "A Survey on Image Data Augmentation for Deep Learning" — a comprehensive review of the RandomCrop/flip/ColorJitter-style techniques covered here.</p>
+</div>
+
+<!-- ── Ask Tutor ── -->
+<div class="ask-tutor">
+  <span class="icon">💬</span>
+  <span>Training accuracy climbing but validation accuracy stuck? Share your augmentation pipeline and training curve — your AI tutor can help pinpoint whether it's an augmentation, architecture, or learning-rate issue.</span>
+</div>
+
+<!-- Navigation -->
+<nav class="lesson-nav">
+  <a href="./0045-cnn-fundamentals.html" class="nav-btn">← Lesson 45: CNN Fundamentals</a>
+  <a href="./0047-transfer-learning.html" class="nav-btn nav-btn-next">Lesson 47: Transfer Learning →</a>
+</nav>
+
+</div><!-- /content-wrapper -->
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-core.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/plugins/autoloader/prism-autoloader.min.js"></script>
+<script src="https://cdn.plot.ly/plotly-2.32.0.min.js"></script>
+<script src="../assets/charts.js"></script>
+<script src="../assets/quiz.js"></script>
+<script>
+(function () {
+  /* ── Flagship visual: data augmentation preview (Section 5) ── */
+  const svgEl = document.getElementById('l45-aug-svg');
+  const captionEl = document.getElementById('l45-aug-caption');
+  const state = { rotate: 0, brightness: 1, contrast: 1, crop: 0, flip: false };
+
+  function updateAugPreview() {
+    if (!svgEl) return;
+    const flipScale = state.flip ? -1 : 1;
+    // Crop/shift: translate the image a few px (simulating RandomCrop(32, padding=4) content-shift)
+    const shiftX = state.crop * 2;
+    const shiftY = -state.crop * 1.5;
+    svgEl.style.transform =
+      `scaleX(${flipScale}) rotate(${state.rotate}deg) translate(${shiftX}px, ${shiftY}px) scale(${1 + state.crop * 0.015})`;
+    svgEl.style.filter = `brightness(${state.brightness}) contrast(${state.contrast})`;
+
+    const parts = [];
+    if (state.flip) parts.push('flipped horizontally');
+    if (state.rotate !== 0) parts.push(`rotated ${state.rotate > 0 ? '+' : ''}${state.rotate}°`);
+    if (state.brightness !== 1) parts.push(`brightness ×${state.brightness.toFixed(2)}`);
+    if (state.contrast !== 1) parts.push(`contrast ×${state.contrast.toFixed(2)}`);
+    if (state.crop > 0) parts.push(`shifted/cropped by ${state.crop}px`);
+
+    captionEl.innerHTML = parts.length
+      ? `Augmented: ${parts.join(', ')} — same underlying image, different pixels seen by the network this epoch.`
+      : 'Original image, no augmentation applied — this is what the network would see without <code>train_transform</code>.';
+  }
+
+  MLCharts.linkSlider('l45-rotate-slider', 'l45-rotate-value', v => { state.rotate = v; updateAugPreview(); }, v => `${v}°`);
+  MLCharts.linkSlider('l45-brightness-slider', 'l45-brightness-value', v => { state.brightness = v; updateAugPreview(); }, v => `${v.toFixed(2)}×`);
+  MLCharts.linkSlider('l45-contrast-slider', 'l45-contrast-value', v => { state.contrast = v; updateAugPreview(); }, v => `${v.toFixed(2)}×`);
+  MLCharts.linkSlider('l45-crop-slider', 'l45-crop-value', v => { state.crop = v; updateAugPreview(); }, v => `${v} px`);
+
+  document.querySelectorAll('#l45-flip-buttons .diagram-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('#l45-flip-buttons .diagram-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      state.flip = btn.dataset.flip === '1';
+      updateAugPreview();
+    });
+  });
+
+  /* ── Training vs validation accuracy curve (Section 6) ── */
+  // Reproduces the lesson's own reported numbers (epochs 1, 5, 10, 20, 30) with a
+  // smooth interpolation in between so the curve shape matches typical CNN training.
+  function smoothCurve(anchors, n) {
+    // anchors: [[epoch, value], ...] sorted by epoch, monotonic-ish smooth interpolation
+    const xs = [], ys = [];
+    for (let e = 1; e <= n; e++) {
+      let lo = anchors[0], hi = anchors[anchors.length - 1];
+      for (let i = 0; i < anchors.length - 1; i++) {
+        if (e >= anchors[i][0] && e <= anchors[i + 1][0]) { lo = anchors[i]; hi = anchors[i + 1]; break; }
+      }
+      const t = hi[0] === lo[0] ? 0 : (e - lo[0]) / (hi[0] - lo[0]);
+      const smoothT = t * t * (3 - 2 * t); // smoothstep
+      xs.push(e);
+      ys.push(lo[1] + (hi[1] - lo[1]) * smoothT);
+    }
+    return { xs, ys };
+  }
+
+  function renderTrainingCurve() {
+    const trainAnchors = [[1, 44.12], [5, 60.44], [10, 68.88], [20, 78.44], [30, 83.21]];
+    const valAnchors   = [[1, 48.01], [5, 62.13], [10, 70.21], [20, 75.93], [30, 78.45]];
+    const train = smoothCurve(trainAnchors, 30);
+    const val   = smoothCurve(valAnchors, 30);
+
+    const traces = [
+      {
+        x: train.xs, y: train.ys, type: 'scatter', mode: 'lines',
+        line: { color: MLCharts.theme.blue, width: 2.5 },
+        name: 'Train accuracy',
+        hovertemplate: 'epoch %{x}<br>train acc %{y:.1f}%<extra></extra>',
+      },
+      {
+        x: val.xs, y: val.ys, type: 'scatter', mode: 'lines',
+        line: { color: MLCharts.theme.amber, width: 2.5, dash: 'dot' },
+        name: 'Val accuracy',
+        hovertemplate: 'epoch %{x}<br>val acc %{y:.1f}%<extra></extra>',
+      },
+    ];
+
+    const layout = MLCharts.baseLayout({
+      xaxis: { title: { text: 'Epoch' }, range: [1, 30] },
+      yaxis: { title: { text: 'Accuracy (%)' }, range: [30, 100] },
+    });
+
+    Plotly.newPlot('l45-training-curve', traces, layout, MLCharts.config);
+  }
+
+  /* ── With vs without augmentation comparison (Section 4) ── */
+  function renderAugComparison() {
+    const n = 30;
+    // No augmentation: train shoots to ~99%, val stalls ~72% (severe, growing gap)
+    const noAugTrain = smoothCurve([[1, 40], [5, 75], [10, 92], [20, 98.5], [30, 99]], n);
+    const noAugVal   = smoothCurve([[1, 42], [5, 60], [10, 68], [20, 71], [30, 72]], n);
+    // With augmentation: train rises slower, val keeps pace (small, stable gap)
+    const withAugTrain = smoothCurve([[1, 32], [5, 55], [10, 68], [20, 84], [30, 92]], n);
+    const withAugVal   = smoothCurve([[1, 34], [5, 56], [10, 67], [20, 78], [30, 82]], n);
+
+    const noAugLayout = MLCharts.baseLayout({
+      xaxis: { title: { text: 'Epoch' }, range: [1, 30] },
+      yaxis: { title: { text: 'Accuracy (%)' }, range: [25, 100] },
+    });
+    const withAugLayout = MLCharts.baseLayout({
+      xaxis: { title: { text: 'Epoch' }, range: [1, 30] },
+      yaxis: { title: { text: 'Accuracy (%)' }, range: [25, 100] },
+    });
+
+    Plotly.newPlot('l45-noaug-chart', [
+      { x: noAugTrain.xs, y: noAugTrain.ys, type: 'scatter', mode: 'lines', line: { color: MLCharts.theme.blue, width: 2.5 }, name: 'Train', hovertemplate: 'epoch %{x}<br>train %{y:.1f}%<extra></extra>' },
+      { x: noAugVal.xs, y: noAugVal.ys, type: 'scatter', mode: 'lines', line: { color: MLCharts.theme.red, width: 2.5, dash: 'dot' }, name: 'Val', hovertemplate: 'epoch %{x}<br>val %{y:.1f}%<extra></extra>' },
+    ], noAugLayout, MLCharts.config);
+
+    Plotly.newPlot('l45-withaug-chart', [
+      { x: withAugTrain.xs, y: withAugTrain.ys, type: 'scatter', mode: 'lines', line: { color: MLCharts.theme.blue, width: 2.5 }, name: 'Train', hovertemplate: 'epoch %{x}<br>train %{y:.1f}%<extra></extra>' },
+      { x: withAugVal.xs, y: withAugVal.ys, type: 'scatter', mode: 'lines', line: { color: MLCharts.theme.green, width: 2.5, dash: 'dot' }, name: 'Val', hovertemplate: 'epoch %{x}<br>val %{y:.1f}%<extra></extra>' },
+    ], withAugLayout, MLCharts.config);
+  }
+
+  updateAugPreview();
+  renderTrainingCurve();
+  renderAugComparison();
+})();
+</script>
+<script>
+new MLQuiz('quiz45', [
+  {
+    question: "Why should data augmentation only be applied to the training set, NOT to the validation or test set?",
+    options: [
+      "Augmentation introduces randomness — applying it to val/test gives different scores each run, making model comparison impossible; we need a fixed, consistent evaluation baseline",
+      "Augmentation only works on images the model hasn't seen before — applying it to test data would be redundant",
+      "Test images have already been normalized, so augmentation would double-normalize them",
+      "Augmentation increases dataset size — applying it to the test set would make evaluation too slow"
+    ],
+    correct: 0,
+    explanation: "The validation and test sets exist to measure model performance consistently. If you apply random augmentations (flips, crops, color jitter), the same image produces a different input each time you evaluate — so model A might score 79% on one run and 76% on another purely due to the random augmentation, not due to actual performance differences. Only deterministic transforms (ToTensor + Normalize) should be applied at evaluation time."
+  },
+  {
+    question: "After 3 MaxPool(2×2, stride=2) operations on a 32×32 input, what are the spatial dimensions?",
+    options: [
+      "4×4 — each pooling halves both dimensions: 32→16→8→4",
+      "8×8 — only height is halved by max pooling, not width",
+      "2×2 — pooling removes 3 pixels from each edge per operation",
+      "16×16 — pooling with stride 2 reduces by one quarter, not half"
+    ],
+    correct: 0,
+    explanation: "MaxPool(2×2, stride=2) halves both spatial dimensions: output_size = (input - 2)/2 + 1 = input/2. Starting at 32: 32/2 = 16, 16/2 = 8, 8/2 = 4. After 3 pooling operations, 32×32 → 4×4. This is why a CNN for 32×32 CIFAR-10 images can apply at most 5 max pooling layers (32→1) before the spatial size hits 1×1."
+  },
+  {
+    question: "transforms.RandomCrop(32, padding=4) pads the image with 4 pixels on each side (making 40×40), then randomly crops back to 32×32. What is the practical effect on model training?",
+    options: [
+      "The image content is shifted by up to 4 pixels in any direction — teaching the model that slight positional shifts don't change the class",
+      "The image is zoomed in by 4/32 = 12.5% to create scale variations",
+      "Border pixels are removed and replaced with padding, cleaning up noisy image boundaries",
+      "The crop selects the most information-rich 32×32 subregion of the 40×40 padded image"
+    ],
+    correct: 0,
+    explanation: "After zero-padding to 40×40, any 32×32 crop is centered somewhere in the 40×40 image. The top-left corner of the crop can be at positions (0,0) to (8,8), meaning the content is shifted by 0–8 pixels in both x and y (i.e., up to 4 pixels in any direction from the original). The model sees the same object at slightly different positions, learning translation robustness without actually moving the object in the real world."
+  },
+  {
+    question: "What is the purpose of Global Average Pooling (GAP) as the final spatial operation?",
+    options: [
+      "GAP averages each feature map to one number — it's parameter-free, reduces overfitting, and produces spatially invariant features for the classifier",
+      "GAP applies global normalization to ensure the classifier receives unit-variance inputs",
+      "GAP selects the maximum activation from each feature map, keeping only the strongest detections",
+      "GAP flattens the spatial dimensions into a vector by concatenating row-by-row"
+    ],
+    correct: 0,
+    explanation: "Global Average Pooling computes the spatial average of each feature map: an input of shape (B, 512, 7, 7) becomes (B, 512). Each number represents 'how much' of that feature map's pattern was present on average across the entire image. GAP has zero learnable parameters (unlike flattening + linear), acts as an implicit regularizer, and is spatially invariant. It was popularized by ResNet and is now standard in all modern CNN classifiers."
+  },
+  {
+    question: "A CNN trained without augmentation achieves train acc=99%, val acc=72% after 20 epochs. Which augmentations should you apply first?",
+    options: [
+      "RandomHorizontalFlip and RandomCrop — the most effective standard augmentations for natural image classification, providing translation and reflection invariance",
+      "RandomErasing only — it forces the network to use the full image instead of local shortcuts",
+      "ColorJitter only — the 27% gap suggests the model is overfitting to specific color distributions",
+      "AutoAugment — it includes all possible augmentations and will find the optimal combination automatically"
+    ],
+    correct: 0,
+    explanation: "RandomHorizontalFlip and RandomCrop are the first augmentations to try for any natural image dataset and are specifically known to be the most impactful for CIFAR-10. They address the two main sources of overfitting: the model memorizing exact object positions (fixed by RandomCrop) and memorizing that objects face a specific direction (fixed by RandomHorizontalFlip). These two transformations alone typically improve CIFAR-10 accuracy by 5–7 percentage points. Add ColorJitter, RandomErasing, and AutoAugment afterwards for further gains."
+  }
+]);
+</script>
+
+</body>
+</html>

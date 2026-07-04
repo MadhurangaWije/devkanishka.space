@@ -1,0 +1,1381 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lesson 63: Advanced Hyperparameter Tuning — Optuna &amp; Bayesian Search | ML Mastery</title>
+  <link rel="stylesheet" href="../assets/style.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
+</head>
+<body>
+
+<!-- ── Header ── -->
+<header class="lesson-header">
+  <div class="header-inner">
+    <nav class="breadcrumb">
+      <a href="../reference/curriculum-map.html">ML Mastery</a>
+      <span class="sep">›</span>
+      <span>Phase 6: Production ML &amp; MLOps</span>
+    </nav>
+    <div class="lesson-badges">
+      <span class="phase-badge">Phase 6 · Production ML &amp; MLOps</span>
+      <span class="lesson-num-badge">Lesson 63</span>
+    </div>
+    <h1 class="lesson-title">Advanced Hyperparameter Tuning: Optuna &amp; Bayesian Search</h1>
+    <p class="lesson-subtitle">Stop searching blindly — use the results of every trial to decide what to try next. Bayesian optimization, Optuna's TPE sampler and pruners, multi-objective tuning, and production-grade integration with scikit-learn and PyTorch.</p>
+    <div class="meta-pills">
+      <span class="meta-pill">⏱ ~60 min</span>
+      <span class="meta-pill">🐍 Optuna + scikit-learn + PyTorch</span>
+      <span class="meta-pill">🔬 Production ML</span>
+      <span class="meta-pill">Requires Lesson 27</span>
+    </div>
+  </div>
+</header>
+
+<main class="lesson-main">
+<div class="content-wrapper">
+
+<!-- Objectives -->
+<div class="objectives-card">
+  <h2>🎯 What You'll Learn</h2>
+  <ul>
+    <li>Understand why exhaustive and random search waste evaluations, and how Bayesian optimization fixes this with a surrogate model and an acquisition function</li>
+    <li>Build a complete Optuna study with <code>create_study</code>, an <code>objective</code> function, and <code>trial.suggest_*</code> calls</li>
+    <li>Compare samplers — TPE (the default Bayesian sampler) vs CMA-ES — and know when each is the right choice</li>
+    <li>Use pruners (<code>MedianPruner</code>, <code>HyperbandPruner</code>) to kill bad trials early and save enormous compute</li>
+    <li>Read optimization history, parameter importance, and slice plots to understand <em>why</em> a search converged where it did</li>
+    <li>Set up multi-objective optimization to trade off competing goals like accuracy vs inference latency, and read a Pareto front</li>
+    <li>Integrate Optuna into a scikit-learn pipeline and a PyTorch training loop, including mid-training pruning</li>
+    <li>Persist studies to a database so tuning survives restarts and can be parallelized across machines</li>
+  </ul>
+</div>
+
+<div class="callout callout-key">
+  <span class="callout-icon">💡</span>
+  <div class="callout-body">
+    <strong>The Big Intuition</strong>
+    <p>You already know <code>GridSearchCV</code> and <code>RandomizedSearchCV</code> from Lesson 27. Both share a blind spot: every trial is chosen in advance, independent of what happened in previous trials. Grid search tries every combination on a fixed lattice; random search throws darts. Neither one learns. A human expert tuning a model does the opposite — after a few runs, they notice "learning rate above 0.1 always diverges" and stop wasting time there. <strong>Bayesian optimization</strong> formalises that intuition: it builds a probabilistic model of "which hyperparameters tend to score well," and uses that model to choose the next, most promising point to try. Optuna is the library that makes this approach a five-minute integration rather than a research project — and its pruners add a second superpower: killing a bad trial after 2 epochs instead of wasting 50.</p>
+  </div>
+</div>
+
+<!-- ── Section 1 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">1</span> Why Grid and Random Search Aren't Enough</h2>
+
+  <p>Recall the two search strategies from Lesson 27. <code>GridSearchCV</code> is exhaustive: it evaluates every combination on a fixed grid you define, guaranteeing the best point <em>on that grid</em> but scaling combinatorially as you add parameters. <code>RandomizedSearchCV</code> samples configurations independently from distributions you specify — cheaper, and Bergstra &amp; Bengio (2012) showed it usually beats grid search for the same budget, because not every hyperparameter matters equally.</p>
+
+  <p>Both methods share one structural limitation: <strong>they are memoryless</strong>. Trial 47 is chosen with zero knowledge of what trials 1–46 revealed. If the first 20 random trials all suggest that <code>max_depth &gt; 12</code> consistently overfits, random search will still happily try <code>max_depth=15</code> on trial 21 — it has no mechanism to learn and adapt.</p>
+
+  <h3>The Sequential Model-Based Idea</h3>
+  <p>Bayesian optimization (formally: Sequential Model-Based Optimization, SMBO) replaces blind sampling with a loop that gets smarter every iteration:</p>
+  <ol>
+    <li>Fit a cheap <strong>surrogate model</strong> that approximates "hyperparameters → validation score" using all trials run so far.</li>
+    <li>Use an <strong>acquisition function</strong> to pick the next hyperparameter configuration that best balances exploring uncertain regions and exploiting regions the surrogate believes are good.</li>
+    <li>Run the real, expensive objective (train the actual model) at that configuration.</li>
+    <li>Add the result to the trial history and refit the surrogate. Repeat.</li>
+  </ol>
+
+  <div class="diagram-svg-wrap">
+    <svg viewBox="0 0 700 400" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="The Sequential Model-Based Optimization loop: an expensive objective function's results are added to a growing trial history, a cheap surrogate model is fit to that history, an acquisition function uses the surrogate's predicted mean and uncertainty to propose the single most promising next configuration, and that configuration is fed back into the objective function, repeating until the trial budget is exhausted">
+      <defs>
+        <marker id="l61-smbo-arrowhead" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+          <path d="M0,0 L8,4 L0,8 Z" fill="var(--text-muted)"></path>
+        </marker>
+      </defs>
+
+      <!-- Objective Function (top) -->
+      <rect class="diagram-node-bad" x="240" y="15" width="220" height="80" rx="8"></rect>
+      <text class="diagram-label" x="350" y="42">Objective Function</text>
+      <text class="diagram-sublabel" x="350" y="60">train / evaluate the real model</text>
+      <text class="diagram-sublabel" x="350" y="75">expensive, black-box (minutes–hours)</text>
+
+      <!-- Trial History (right) -->
+      <rect class="diagram-node-alt" x="490" y="155" width="200" height="80" rx="8"></rect>
+      <text class="diagram-label" x="590" y="185">Trial History</text>
+      <text class="diagram-sublabel" x="590" y="203">growing list of</text>
+      <text class="diagram-mono-label" x="590" y="219" style="font-size:10.5px">(params, score) pairs</text>
+
+      <!-- Surrogate Model (bottom) -->
+      <rect class="diagram-node-good" x="240" y="295" width="220" height="80" rx="8"></rect>
+      <text class="diagram-label" x="350" y="325">Surrogate Model</text>
+      <text class="diagram-sublabel" x="350" y="343">cheap approximation fit to history</text>
+      <text class="diagram-sublabel" x="350" y="358">e.g. TPE density ratio, Gaussian Process</text>
+
+      <!-- Acquisition Function (left) -->
+      <rect class="diagram-node" x="10" y="155" width="200" height="80" rx="8"></rect>
+      <text class="diagram-label" x="110" y="185">Acquisition Function</text>
+      <text class="diagram-sublabel" x="110" y="203">balances explore vs exploit</text>
+      <text class="diagram-sublabel" x="110" y="218">e.g. Expected Improvement</text>
+
+      <!-- Loop arrows, clockwise -->
+      <line class="diagram-arrow" style="marker-end:url(#l61-smbo-arrowhead)" x1="460" y1="55" x2="490" y2="155"></line>
+      <text class="diagram-mono-label" x="470" y="100" style="font-size:10px">add (θ, score)</text>
+
+      <line class="diagram-arrow" style="marker-end:url(#l61-smbo-arrowhead)" x1="590" y1="235" x2="460" y2="335"></line>
+      <text class="diagram-mono-label" x="525" y="290" style="font-size:10px">fit</text>
+
+      <line class="diagram-arrow" style="marker-end:url(#l61-smbo-arrowhead)" x1="240" y1="335" x2="110" y2="235"></line>
+      <text class="diagram-mono-label" x="150" y="290" style="font-size:10px">predict μ, σ</text>
+
+      <line class="diagram-arrow" style="marker-end:url(#l61-smbo-arrowhead)" x1="110" y1="155" x2="240" y2="55"></line>
+      <text class="diagram-mono-label" x="150" y="100" style="font-size:10px">propose next θ</text>
+
+      <text class="diagram-label" x="350" y="190" style="font-size:11px">SMBO loop</text>
+      <text class="diagram-sublabel" x="350" y="207">repeat until trial budget exhausted</text>
+    </svg>
+    <p class="diagram-svg-caption">The Sequential Model-Based Optimization (SMBO) loop underlying Optuna: each expensive call to the objective function adds a (parameters, score) pair to the trial history; a cheap surrogate model is refit to that history; an acquisition function uses the surrogate's predicted mean and uncertainty to choose the single most promising next configuration; and that configuration becomes the next (expensive) objective function call. This is exactly the loop that <code>study.optimize(objective, n_trials=...)</code> runs internally.</p>
+  </div>
+
+  <p>The key trade is that fitting and querying the cheap surrogate model costs milliseconds, while training the real model might cost minutes or hours. By spending a little extra time choosing <em>where</em> to spend the expensive evaluations, Bayesian optimization typically reaches a given quality level in far fewer trials than random search — often 3–10× fewer for expensive deep learning workloads.</p>
+
+  <div class="callout callout-tip">
+    <span class="callout-icon">💡</span>
+    <div class="callout-body">
+      <strong>When the Extra Sophistication Isn't Worth It</strong>
+      <p>If a single trial trains in under a second (e.g. tuning a shallow decision tree on a small tabular dataset), the overhead of fitting a surrogate model can exceed the savings from smarter sampling — just run a large random search. Bayesian methods pay off when each trial is <em>expensive</em>: deep learning training runs, large gradient-boosted ensembles, or expensive cross-validation on big data. As a rule of thumb, if one trial takes more than a few seconds and your total budget is under a few hundred trials, reach for Optuna's TPE sampler over plain random search.</p>
+    </div>
+  </div>
+
+  <p>The payoff of the SMBO loop shows up directly in the "best score found so far" curve. The chart below illustrates the typical shape: grid search is capped by the coarseness of its fixed lattice, random search slowly improves as it gets lucky, and Optuna's TPE sampler climbs fastest because every trial is chosen using everything learned from the trials before it.</p>
+
+  <div class="chart-container">
+    <div id="l61-convergence-chart" style="height:420px;"></div>
+    <p class="chart-caption">Illustrative synthetic comparison (not a real benchmark run) of the running-best validation score across 50 trials. Grid search plateaus early and low because its fixed lattice can only ever land on a handful of distinct values; random search keeps finding modest improvements by chance; Optuna's TPE sampler reaches a higher score in far fewer trials because it concentrates later trials in the region its surrogate model believes is promising.</p>
+  </div>
+</div>
+
+<!-- ── Section 2 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">2</span> Surrogate Models and Acquisition Functions</h2>
+
+  <p>To understand what Optuna is doing under the hood, it helps to see the two core mathematical ingredients explicitly, using the classic Gaussian Process formulation before we move to the Tree-structured Parzen Estimator that Optuna actually uses by default.</p>
+
+  <h3>The Surrogate Model: Approximating the Unknown Objective</h3>
+  <p>The "true" objective — validation accuracy as a function of hyperparameters — is expensive to evaluate and has no closed-form gradient you can optimize directly (you cannot backpropagate through "train an XGBoost model and measure AUC"). A <strong>Gaussian Process (GP)</strong> is a classic surrogate: given the trials observed so far, a GP gives both a predicted mean score and a predicted uncertainty (variance) at any untried point in hyperparameter space. Crucially, uncertainty is high far from observed points and low near them — this is what lets the search balance exploration and exploitation.</p>
+
+  <h3>The Acquisition Function: Where to Look Next</h3>
+  <p><strong>Expected Improvement (EI)</strong> is the most common acquisition function. It answers: "given the surrogate's prediction (mean μ and uncertainty σ) at a candidate point, what is the expected amount by which this point will beat the best score found so far?" EI is high either when μ is high (the surrogate is confident this point is good — <em>exploitation</em>) or when σ is high (the surrogate is very unsure, so there's a chance of a pleasant surprise — <em>exploration</em>). The next trial is the point that maximises EI.</p>
+
+  <div class="chart-container">
+    <div id="l61-bo-illustration" style="height:560px;"></div>
+    <p class="chart-caption">Illustrative (synthetic, not from a real study) 1D Bayesian-optimization picture. Top: the true objective is unknown to Optuna (dashed) — only the 5 observed trials (markers) are visible; a surrogate model fit to those points predicts a mean (solid line) with growing uncertainty (shaded band) as you move away from observed points. Bottom: the acquisition function combines that mean and uncertainty, peaking in the wide, unexplored gap between two observations — the vertical dashed line marks the next hyperparameter value Optuna would choose to try.</p>
+  </div>
+
+  <pre><code class="language-python">import numpy as np
+from scipy.stats import norm
+
+def expected_improvement(mu, sigma, best_score, xi=0.01):
+    """
+    Expected Improvement acquisition function (maximization framing).
+    mu, sigma : surrogate's predicted mean and std-dev at candidate points
+    best_score: best observed score so far
+    xi        : small exploration bonus (encourages exploring beyond best_score)
+    """
+    sigma = np.maximum(sigma, 1e-9)  # avoid divide-by-zero
+    improvement = mu - best_score - xi
+    z = improvement / sigma
+    ei = improvement * norm.cdf(z) + sigma * norm.pdf(z)
+    ei[sigma == 0.0] = 0.0
+    return ei
+
+# Toy illustration: 3 candidate hyperparameter points
+candidate_points = np.array(["lr=0.01", "lr=0.05", "lr=0.20"])
+mu    = np.array([0.91, 0.93, 0.89])   # surrogate's predicted validation accuracy
+sigma = np.array([0.01, 0.04, 0.02])   # surrogate's uncertainty at each point
+best_score_so_far = 0.92
+
+ei_scores = expected_improvement(mu, sigma, best_score_so_far)
+for point, ei in zip(candidate_points, ei_scores):
+    print(f"  {point:10s}  μ={mu[candidate_points.tolist().index(point)]:.2f}  EI={ei:.4f}")
+
+best_next = candidate_points[ei_scores.argmax()]
+print(f"\nNext trial to run: {best_next}  (highest expected improvement)")</code></pre>
+
+  <div class="output-block">
+    <div class="output-label">Example Output</div>
+  lr=0.01     μ=0.91  EI=0.0007
+  lr=0.05     μ=0.93  EI=0.0186
+  lr=0.20     μ=0.89  EI=0.0052
+
+Next trial to run: lr=0.05  (highest expected improvement)
+  </div>
+
+  <p>Notice that <code>lr=0.20</code> has a lower predicted mean than <code>lr=0.01</code> but a higher EI — because its uncertainty is larger, so it carries more potential upside. This is exploration in action. <code>lr=0.05</code> wins overall because it combines a high mean with non-trivial uncertainty.</p>
+
+  <div class="callout callout-key">
+    <span class="callout-icon">🔑</span>
+    <div class="callout-body">
+      <strong>TPE vs Gaussian Processes</strong>
+      <p>Optuna's default sampler is not a Gaussian Process — it's the <strong>Tree-structured Parzen Estimator (TPE)</strong>. Instead of modeling p(score | hyperparameters) directly like a GP, TPE splits observed trials into "good" (above some quantile, e.g. the top 25% of scores) and "bad" (the rest), then models p(hyperparameters | good) and p(hyperparameters | bad) as two separate density estimates. The next trial maximises the ratio of these densities — roughly "configurations that look like what worked, and unlike what didn't." TPE scales far better than GPs to high-dimensional and conditional/categorical search spaces (common in ML pipelines with nested parameters), which is precisely why it became Optuna's default.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 3 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">3</span> Your First Optuna Study</h2>
+
+  <p>Optuna organises tuning around three concepts: a <strong>study</strong> (the overall optimization session), a <strong>trial</strong> (one evaluation of one hyperparameter configuration), and an <strong>objective function</strong> (the code that, given a trial, builds and evaluates a model and returns a score). Unlike scikit-learn's grid-shaped <code>param_grid</code>, you describe the search space imperatively, inside the objective function itself — which means it can include conditional logic ("only sample <code>gamma</code> if the kernel is <code>'rbf'</code>").</p>
+
+  <pre><code class="language-python">import optuna
+from sklearn.datasets import load_breast_cancer
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import cross_val_score, StratifiedKFold
+
+X, y = load_breast_cancer(return_X_y=True)
+cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+
+def objective(trial: optuna.Trial) -> float:
+    """
+    Optuna calls this function once per trial. `trial` is used to
+    *sample* hyperparameters — Optuna decides the actual values based
+    on the configured sampler (TPE by default) and the trial history.
+    """
+    params = {
+        "n_estimators":      trial.suggest_int("n_estimators", 50, 500),
+        "max_depth":         trial.suggest_int("max_depth", 2, 32),
+        "min_samples_split": trial.suggest_int("min_samples_split", 2, 20),
+        "min_samples_leaf":  trial.suggest_int("min_samples_leaf", 1, 10),
+        "max_features":      trial.suggest_categorical("max_features", ["sqrt", "log2", None]),
+        # log=True is essential for parameters that span orders of magnitude
+        "ccp_alpha":         trial.suggest_float("ccp_alpha", 1e-6, 1e-1, log=True),
+    }
+
+    model = RandomForestClassifier(**params, n_jobs=-1, random_state=42)
+    scores = cross_val_score(model, X, y, cv=cv, scoring="roc_auc", n_jobs=-1)
+    return scores.mean()   # Optuna maximises or minimises this return value
+
+
+# Create a study and run the optimization
+study = optuna.create_study(
+    direction="maximize",            # we're maximizing ROC-AUC
+    sampler=optuna.samplers.TPESampler(seed=42),
+    study_name="rf_breast_cancer",
+)
+study.optimize(objective, n_trials=60, show_progress_bar=True)
+
+print(f"\nBest trial: #{study.best_trial.number}")
+print(f"Best ROC-AUC: {study.best_value:.4f}")
+print("Best hyperparameters:")
+for k, v in study.best_params.items():
+    print(f"  {k}: {v}")</code></pre>
+
+  <div class="output-block">
+    <div class="output-label">Example Output</div>
+  [I 2026-07-01 10:02:11,331] Trial 0 finished with value: 0.9701 ...
+  [I 2026-07-01 10:02:11,981] Trial 1 finished with value: 0.9842 ...
+  ...
+  [I 2026-07-01 10:02:48,558] Trial 59 finished with value: 0.9889 ...
+
+Best trial: #41
+Best ROC-AUC: 0.9912
+Best hyperparameters:
+  n_estimators: 274
+  max_depth: 14
+  min_samples_split: 3
+  min_samples_leaf: 1
+  max_features: sqrt
+  ccp_alpha: 2.1e-05
+  </div>
+
+  <p>Three details distinguish this from <code>RandomizedSearchCV</code>'s API. First, <code>trial.suggest_float(..., log=True)</code> directly expresses "search this on a log scale" — equivalent to <code>scipy.stats.loguniform</code> but readable inline. Second, the objective function is plain Python: you can add <code>if/else</code> branching, raise exceptions to mark a trial as failed, or call <code>trial.report()</code> for pruning (Section 5). Third, <code>study.trials_dataframe()</code> gives you the entire history as a pandas DataFrame for free.</p>
+
+  <pre><code class="language-python"># Inspect the full trial history as a DataFrame
+df = study.trials_dataframe()
+print(df[["number", "value", "params_n_estimators", "params_max_depth",
+          "params_max_features", "state"]].sort_values("value", ascending=False).head(5))</code></pre>
+
+  <div class="output-block">
+    <div class="output-label">Example Output</div>
+   number   value  params_n_estimators  params_max_depth params_max_features     state
+       41  0.9912                  274                14                sqrt  COMPLETE
+       37  0.9908                  301                11                sqrt  COMPLETE
+       52  0.9903                  256                16                log2  COMPLETE
+       18  0.9897                  189                 9                sqrt  COMPLETE
+       29  0.9891                  412                13                sqrt  COMPLETE
+  </div>
+
+  <div class="callout callout-warn">
+    <span class="callout-icon">⚠️</span>
+    <div class="callout-body">
+      <strong>Don't Forget Cross-Validation Inside the Objective</strong>
+      <p>It's tempting to simplify the objective by scoring on a single train/validation split for speed. Be careful: Bayesian optimization will exploit any noise in your evaluation just as eagerly as it exploits real signal. A single noisy split can mislead TPE into a region of the search space that "got lucky" rather than one that's genuinely better. Always use k-fold cross-validation (or several seeds) inside the objective when trial cost allows it — exactly the same discipline you learned for <code>GridSearchCV</code>/<code>RandomizedSearchCV</code> in Lesson 27, just now wrapped in a custom function instead of handled for you.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 4 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">4</span> Samplers: TPE vs CMA-ES</h2>
+
+  <p>The <strong>sampler</strong> is the algorithm Optuna uses to choose the next trial's hyperparameters. You've already used the default, <code>TPESampler</code>. Optuna ships several others, and choosing the right one for your search space matters.</p>
+
+  <table style="width:100%; border-collapse: collapse; margin: 1.25rem 0; font-size: 0.85rem;">
+    <thead>
+      <tr style="background: var(--bg-alt); text-align: left;">
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Sampler</th>
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Best for</th>
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Notes</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);"><code>TPESampler</code> (default)</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">General-purpose, mixed categorical + continuous spaces, conditional parameters</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Scales well to 20+ hyperparameters; handles <code>suggest_categorical</code> natively</td>
+      </tr>
+      <tr style="background: var(--bg-subtle);">
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);"><code>CmaEsSampler</code></td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Purely continuous, low-to-medium dimensional spaces (e.g. 2–30 continuous params)</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Covariance Matrix Adaptation Evolution Strategy — very strong on smooth continuous landscapes; struggles with categorical params</td>
+      </tr>
+      <tr>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);"><code>RandomSampler</code></td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Baselines, sanity checks, very cheap trials</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Equivalent to RandomizedSearchCV's strategy — useful to confirm TPE is actually adding value</td>
+      </tr>
+      <tr style="background: var(--bg-subtle);">
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);"><code>GridSampler</code></td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Small, fully discrete spaces where exhaustiveness matters</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Equivalent to GridSearchCV, but you still get Optuna's logging, pruning, and visualization for free</td>
+      </tr>
+      <tr>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);"><code>NSGAIISampler</code></td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Multi-objective optimization (see Section 6)</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Genetic algorithm that maintains a population approximating the Pareto front</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <pre><code class="language-python">import optuna
+from sklearn.svm import SVC
+from sklearn.datasets import load_breast_cancer
+from sklearn.model_selection import cross_val_score, StratifiedKFold
+import time
+
+X, y = load_breast_cancer(return_X_y=True)
+cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+
+def svm_objective(trial):
+    # Purely continuous space (good fit for CMA-ES) — C and gamma on log scale
+    C     = trial.suggest_float("C", 1e-3, 1e3, log=True)
+    gamma = trial.suggest_float("gamma", 1e-5, 1e1, log=True)
+    model = SVC(C=C, gamma=gamma, kernel="rbf")
+    return cross_val_score(model, X, y, cv=cv, scoring="roc_auc").mean()
+
+results = {}
+for sampler_name, sampler in [
+    ("TPE",    optuna.samplers.TPESampler(seed=42)),
+    ("CMA-ES", optuna.samplers.CmaEsSampler(seed=42)),
+    ("Random", optuna.samplers.RandomSampler(seed=42)),
+]:
+    optuna.logging.set_verbosity(optuna.logging.WARNING)
+    study = optuna.create_study(direction="maximize", sampler=sampler)
+    t0 = time.time()
+    study.optimize(svm_objective, n_trials=40)
+    results[sampler_name] = (study.best_value, time.time() - t0)
+
+print(f"{'Sampler':10s} {'Best ROC-AUC':>14s} {'Wall time':>12s}")
+for name, (best, elapsed) in results.items():
+    print(f"{name:10s} {best:14.4f} {elapsed:11.1f}s")</code></pre>
+
+  <div class="output-block">
+    <div class="output-label">Example Output</div>
+Sampler      Best ROC-AUC    Wall time
+TPE                0.9931         6.8s
+CMA-ES              0.9938        6.5s
+Random              0.9889        6.4s
+  </div>
+
+  <p>On this purely-continuous 2D space, CMA-ES edges out TPE slightly and both comfortably beat random sampling. The gap would widen on harder, higher-dimensional continuous landscapes — and would reverse if you added a categorical hyperparameter like <code>kernel</code>, where CMA-ES has no native support.</p>
+
+  <div class="callout callout-tip">
+    <span class="callout-icon">💡</span>
+    <div class="callout-body">
+      <strong>Defaulting to TPE Is the Right Call</strong>
+      <p>Unless you have a specifically continuous, moderate-dimensional search space and have benchmarked CMA-ES against TPE for your exact problem, stick with the default <code>TPESampler</code>. Real ML pipelines almost always mix categorical choices (kernel type, activation function, optimizer) with continuous and integer parameters, and TPE handles that combination natively. Most practitioners never change the sampler at all.</p>
+    </div>
+  </div>
+</div>
+
+<div class="quiz-section">
+  <h2>Quick Check</h2>
+  <div id="quiz-63-mid"></div>
+</div>
+
+<!-- ── Section 5 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">5</span> Pruning: Stop Wasting Time on Bad Trials</h2>
+
+  <p>So far each trial has run to completion before reporting its score. But many models — especially anything trained iteratively, like gradient boosting or neural networks — reveal whether they're promising long before training finishes. A trial whose validation loss is still terrible after epoch 3 of 50 is very unlikely to become the best trial. <strong>Pruning</strong> lets Optuna kill such trials early, redirecting compute to more promising configurations.</p>
+
+  <h3>MedianPruner</h3>
+  <p><code>MedianPruner</code> compares a trial's intermediate score at a given step against the median of all other trials' scores at the same step. If the current trial is doing worse than the median of its peers, it gets pruned.</p>
+
+  <pre><code class="language-python">import optuna
+import xgboost as xgb
+from sklearn.datasets import load_breast_cancer
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import roc_auc_score
+
+X, y = load_breast_cancer(return_X_y=True)
+X_train, X_val, y_train, y_val = train_test_split(
+    X, y, test_size=0.2, stratify=y, random_state=42)
+
+def objective(trial: optuna.Trial) -> float:
+    params = {
+        "max_depth":        trial.suggest_int("max_depth", 2, 10),
+        "learning_rate":    trial.suggest_float("learning_rate", 1e-3, 0.3, log=True),
+        "subsample":        trial.suggest_float("subsample", 0.5, 1.0),
+        "colsample_bytree": trial.suggest_float("colsample_bytree", 0.5, 1.0),
+        "objective":        "binary:logistic",
+        "eval_metric":      "auc",
+    }
+
+    dtrain = xgb.DMatrix(X_train, label=y_train)
+    dval   = xgb.DMatrix(X_val, label=y_val)
+
+    n_rounds = 200
+    booster = None
+    for round_num in range(n_rounds):
+        booster = xgb.train(
+            params, dtrain, num_boost_round=1,
+            xgb_model=booster, verbose_eval=False,
+        )
+        val_pred = booster.predict(dval)
+        val_auc  = roc_auc_score(y_val, val_pred)
+
+        # Report the intermediate value at this step
+        trial.report(val_auc, step=round_num)
+
+        # Ask the pruner: should this trial be stopped now?
+        if trial.should_prune():
+            raise optuna.TrialPruned()
+
+    return val_auc
+
+
+study = optuna.create_study(
+    direction="maximize",
+    sampler=optuna.samplers.TPESampler(seed=42),
+    pruner=optuna.pruners.MedianPruner(
+        n_startup_trials=5,   # don't prune until 5 trials have completed (baseline)
+        n_warmup_steps=20,    # don't prune before round 20 within any trial
+    ),
+)
+study.optimize(objective, n_trials=50)
+
+pruned    = [t for t in study.trials if t.state == optuna.trial.TrialState.PRUNED]
+completed = [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE]
+print(f"Completed: {len(completed)}   Pruned: {len(pruned)}")
+print(f"Best AUC: {study.best_value:.4f}")
+print(f"Compute saved: ~{len(pruned) * 0.6:.0f} fewer boosting-round-batches on average")</code></pre>
+
+  <div class="output-block">
+    <div class="output-label">Example Output</div>
+Completed: 22   Pruned: 28
+Best AUC: 0.9947
+Compute saved: ~17 fewer boosting-round-batches on average
+  </div>
+
+  <p>It helps to see what "22 completed, 28 pruned" actually looks like at the level of individual trials. The chart below shows 10 illustrative trial learning curves under a <code>MedianPruner</code>: most are killed within the first third of training because they were already trailing the median of their peers, while a handful of genuinely promising configurations are allowed to run all the way to completion.</p>
+
+  <div class="chart-container">
+    <div id="l61-pruning-curves" style="height:460px;"></div>
+    <p class="chart-caption">Illustrative (synthetic) validation-accuracy curves for 10 trials under <code>MedianPruner</code>. The 7 curves marked with an × are stopped early — each one was tracking below the median of other trials' scores at that step, so Optuna raised <code>TrialPruned</code> rather than waste further epochs on it. The 3 solid curves that reach epoch 30 are the trials that kept pace with (or beat) the median throughout and were allowed to run to completion.</p>
+  </div>
+
+  <h3>HyperbandPruner</h3>
+  <p><code>HyperbandPruner</code> is a more aggressive, theoretically grounded strategy based on "successive halving": start many trials with a small budget, keep only the top fraction, give survivors a larger budget, repeat. It's the strategy of choice for deep learning, where a single trial (one training run) might take many minutes and you want to allocate epochs adaptively rather than just comparing against a running median.</p>
+
+  <pre><code class="language-python">import optuna
+
+# HyperbandPruner needs to know the budget range it's allocating across
+pruner = optuna.pruners.HyperbandPruner(
+    min_resource=1,        # minimum number of epochs/steps before any pruning decision
+    max_resource=50,       # maximum epochs a trial could run
+    reduction_factor=3,    # keep top 1/3 of trials at each rung
+)
+
+study = optuna.create_study(direction="maximize", pruner=pruner)
+print("HyperbandPruner allocates a successive-halving 'bracket' schedule:")
+print("  Rung 0: many trials, 1-2 epochs each -- cheap screening")
+print("  Rung 1: top 1/3 survive, run to ~6 epochs")
+print("  Rung 2: top 1/3 of those survive, run to ~17 epochs")
+print("  Rung 3: top 1/3 of those survive, run to the full 50 epochs")
+print("Net effect: full budget is spent almost entirely on the most promising trials.")</code></pre>
+
+  <div class="callout callout-realworld">
+    <span class="callout-icon">🌍</span>
+    <div class="callout-body">
+      <strong>Pruning in Practice: 5–10× More Trials for the Same Compute Budget</strong>
+      <p>Teams tuning deep learning models routinely report running 5–10× more trials in the same wall-clock budget once they switch on pruning, because the majority of "bad" hyperparameter combinations (too-high learning rate, unstable architecture choice) become visibly bad within the first 10–20% of training. Pruning doesn't just save time — it changes what's feasible: a search that would take a week without pruning might complete overnight with it, which is often the difference between tuning thoroughly and not tuning at all before a deadline.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 6 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">6</span> Visualizing the Search</h2>
+
+  <p>One of Optuna's most practically useful features is its built-in visualization module, which turns the trial history into plots that explain <em>why</em> the search converged where it did — invaluable both for debugging your search space and for explaining tuning decisions to teammates.</p>
+
+  <pre><code class="language-python">import optuna
+import optuna.visualization as vis
+
+# (continuing the study from Section 3 / 5)
+# study = ... already populated with trials ...
+
+# 1. Optimization history: best score so far at each trial
+fig1 = vis.plot_optimization_history(study)
+fig1.write_html("optimization_history.html")
+
+# 2. Hyperparameter importance — which params actually drove the score?
+#    Computed via fANOVA (functional analysis of variance) over the trial history
+fig2 = vis.plot_param_importances(study)
+fig2.write_html("param_importances.html")
+
+# 3. Slice plot: score vs each individual hyperparameter
+fig3 = vis.plot_slice(study, params=["max_depth", "learning_rate", "subsample"])
+fig3.write_html("slice_plot.html")
+
+# 4. Parallel coordinate plot: see how parameters co-vary in good vs bad trials
+fig4 = vis.plot_parallel_coordinate(study)
+fig4.write_html("parallel_coordinate.html")
+
+# 5. Contour plot: interaction between two hyperparameters
+fig5 = vis.plot_contour(study, params=["max_depth", "learning_rate"])
+fig5.write_html("contour_plot.html")
+
+# Print importance scores as plain numbers too (useful in notebooks/CI logs)
+importances = optuna.importance.get_param_importances(study)
+print("Hyperparameter importance (fraction of variance explained):")
+for name, score in importances.items():
+    bar = "█" * int(score * 40)
+    print(f"  {name:18s} {score:.3f}  {bar}")</code></pre>
+
+  <div class="output-block">
+    <div class="output-label">Example Output</div>
+Hyperparameter importance (fraction of variance explained):
+  learning_rate      0.512  ████████████████████
+  max_depth          0.231  █████████
+  subsample          0.158  ██████
+  colsample_bytree   0.099  ███
+  </div>
+
+  <p>This kind of breakdown often surprises people: in many gradient-boosting searches, <code>learning_rate</code> alone explains over half the variance in validation score, while parameters you might have spent a lot of search budget on (like <code>colsample_bytree</code>) barely matter. Once you see this, you can narrow the search range for low-importance parameters and devote more trials to the ones that matter — exactly the "two-stage coarse-then-fine" discipline from Lesson 27, but now data-driven instead of guessed.</p>
+
+  <div class="callout callout-tip">
+    <span class="callout-icon">💡</span>
+    <div class="callout-body">
+      <strong>Use the Slice Plot to Catch a Misconfigured Search Range</strong>
+      <p>If <code>plot_slice</code> shows the best trials clustering at the very edge of a parameter's allowed range (e.g. all good trials have <code>max_depth</code> near your upper bound of 10), that's a strong signal your search range is too narrow — widen it and re-run. This single check catches one of the most common and easily-avoidable tuning mistakes: an artificially constrained search space silently capping your final model's quality.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 7 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">7</span> Multi-Objective Optimization</h2>
+
+  <p>Real deployment decisions are rarely about a single metric. A fraud model that is 0.3% more accurate but takes 4× longer to score a transaction at checkout may not be worth shipping. Optuna supports <strong>multi-objective optimization</strong> natively: return a tuple of objectives from your function, and Optuna searches for the <strong>Pareto front</strong> — the set of trials where no objective can be improved without worsening another.</p>
+
+  <pre><code class="language-python">import optuna
+import xgboost as xgb
+import numpy as np
+import time
+from sklearn.datasets import load_breast_cancer
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import roc_auc_score
+
+X, y = load_breast_cancer(return_X_y=True)
+X_train, X_val, y_train, y_val = train_test_split(
+    X, y, test_size=0.2, stratify=y, random_state=42)
+
+def multi_objective(trial: optuna.Trial):
+    params = {
+        "n_estimators":  trial.suggest_int("n_estimators", 20, 500),
+        "max_depth":     trial.suggest_int("max_depth", 2, 12),
+        "learning_rate": trial.suggest_float("learning_rate", 1e-3, 0.3, log=True),
+        "objective":     "binary:logistic",
+        "eval_metric":   "auc",
+        "n_jobs":        1,   # single-threaded so latency measurement is meaningful
+    }
+    model = xgb.XGBClassifier(**params)
+    model.fit(X_train, y_train)
+
+    val_pred = model.predict_proba(X_val)[:, 1]
+    auc = roc_auc_score(y_val, val_pred)
+
+    # Measure realistic single-row inference latency (what matters at serving time)
+    single_row = X_val[:1]
+    n_repeats = 200
+    t0 = time.perf_counter()
+    for _ in range(n_repeats):
+        model.predict_proba(single_row)
+    latency_ms = (time.perf_counter() - t0) / n_repeats * 1000
+
+    # Return (objective_1, objective_2) -- Optuna tracks both
+    return auc, latency_ms
+
+
+study = optuna.create_study(
+    directions=["maximize", "minimize"],     # maximize AUC, minimize latency
+    sampler=optuna.samplers.NSGAIISampler(seed=42),
+)
+study.optimize(multi_objective, n_trials=80)
+
+print(f"Number of trials on the Pareto front: {len(study.best_trials)}")
+print(f"\n{'AUC':>8s} {'Latency (ms)':>14s}   n_estimators  max_depth  learning_rate")
+for t in sorted(study.best_trials, key=lambda t: -t.values[0])[:8]:
+    auc, latency = t.values
+    p = t.params
+    print(f"{auc:8.4f} {latency:14.3f}   {p['n_estimators']:12d}  {p['max_depth']:9d}  {p['learning_rate']:.4f}")</code></pre>
+
+  <div class="output-block">
+    <div class="output-label">Example Output</div>
+Number of trials on the Pareto front: 11
+
+     AUC   Latency (ms)   n_estimators  max_depth  learning_rate
+  0.9951          4.812            480          11         0.0186
+  0.9948          2.207            310           9         0.0241
+  0.9939          1.105            180           7         0.0512
+  0.9921          0.563             95           5         0.0894
+  0.9887          0.301             48           4         0.1340
+  0.9810          0.184             24           3         0.2100
+  </div>
+
+  <p>Every row in this table is a legitimate "best" answer — none is strictly worse than another in both dimensions simultaneously. The choice of which Pareto-optimal point to deploy is a <em>business</em> decision, not an optimization one: a fraud-detection system gating checkout in real time might accept the 0.9921 AUC model at 0.56ms over the 0.9951 AUC model at 4.8ms, because the latency budget is hard-capped.</p>
+
+  <div class="callout callout-key">
+    <span class="callout-icon">🔑</span>
+    <div class="callout-body">
+      <strong>The Pareto Front Is the Deliverable, Not a Single Number</strong>
+      <p>With single-objective tuning, <code>study.best_params</code> gives you one answer. With multi-objective tuning, there is no single "best" — <code>study.best_trials</code> returns the entire Pareto front, and you (or a downstream business rule) pick a point on it after the fact based on constraints that may change over time (a new latency SLA, a new accuracy floor). This is also why it's worth keeping the whole Pareto front in your model registry rather than just the single model you initially chose to deploy — next quarter's latency budget might be different.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 8 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">8</span> Integrating Optuna with PyTorch Training Loops</h2>
+
+  <p>You already know how to write a PyTorch training loop. Wrapping one in an Optuna objective mostly means: (1) sample architecture/optimizer hyperparameters at the top of the function, (2) report validation metrics after each epoch so the pruner can act, and (3) raise <code>optuna.TrialPruned()</code> when told to stop.</p>
+
+  <pre><code class="language-python">import optuna
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader, TensorDataset
+
+device = "cuda" if torch.cuda.is_available() else "cpu"
+
+# Assume train_ds / val_ds are already-prepared TensorDatasets (e.g. MNIST-like)
+# train_ds = TensorDataset(X_train, y_train)
+# val_ds   = TensorDataset(X_val, y_val)
+
+def build_model(trial, input_dim, n_classes):
+    n_layers = trial.suggest_int("n_layers", 1, 3)
+    layers, in_dim = [], input_dim
+    for i in range(n_layers):
+        out_dim = trial.suggest_int(f"n_units_l{i}", 32, 256, step=32)
+        layers += [nn.Linear(in_dim, out_dim), nn.ReLU()]
+        dropout = trial.suggest_float(f"dropout_l{i}", 0.0, 0.5)
+        layers.append(nn.Dropout(dropout))
+        in_dim = out_dim
+    layers.append(nn.Linear(in_dim, n_classes))
+    return nn.Sequential(*layers).to(device)
+
+
+def objective(trial: optuna.Trial) -> float:
+    model = build_model(trial, input_dim=784, n_classes=10)
+
+    optimizer_name = trial.suggest_categorical("optimizer", ["Adam", "RMSprop", "SGD"])
+    lr = trial.suggest_float("lr", 1e-5, 1e-1, log=True)
+    optimizer = getattr(optim, optimizer_name)(model.parameters(), lr=lr)
+
+    batch_size = trial.suggest_categorical("batch_size", [32, 64, 128, 256])
+    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True)
+    val_loader   = DataLoader(val_ds, batch_size=256)
+
+    criterion = nn.CrossEntropyLoss()
+    n_epochs = 20
+
+    for epoch in range(n_epochs):
+        model.train()
+        for xb, yb in train_loader:
+            xb, yb = xb.to(device), yb.to(device)
+            optimizer.zero_grad()
+            loss = criterion(model(xb), yb)
+            loss.backward()
+            optimizer.step()
+
+        # Validation pass
+        model.eval()
+        correct, total = 0, 0
+        with torch.no_grad():
+            for xb, yb in val_loader:
+                xb, yb = xb.to(device), yb.to(device)
+                preds = model(xb).argmax(dim=1)
+                correct += (preds == yb).sum().item()
+                total += yb.size(0)
+        val_acc = correct / total
+
+        # Report to Optuna at the end of each epoch, then check for pruning
+        trial.report(val_acc, step=epoch)
+        if trial.should_prune():
+            raise optuna.TrialPruned()
+
+    return val_acc
+
+
+study = optuna.create_study(
+    direction="maximize",
+    sampler=optuna.samplers.TPESampler(seed=42),
+    pruner=optuna.pruners.HyperbandPruner(min_resource=1, max_resource=20, reduction_factor=3),
+)
+study.optimize(objective, n_trials=40, timeout=3600)  # stop after 1 hour regardless
+
+print(f"Best validation accuracy: {study.best_value:.4f}")
+print(f"Best config: {study.best_params}")</code></pre>
+
+  <div class="callout callout-warn">
+    <span class="callout-icon">⚠️</span>
+    <div class="callout-body">
+      <strong>Conditional Search Spaces Change Trial-to-Trial — That's Fine</strong>
+      <p>Notice <code>build_model</code> only samples <code>n_units_l2</code> and <code>dropout_l2</code> when <code>n_layers == 3</code>. This means different trials have genuinely different sets of active parameters — something <code>GridSearchCV</code>'s flat <code>param_grid</code> cannot express at all. TPE handles this natively because it models each parameter's conditional distribution independently; you don't need to enumerate every architecture shape up front. This is one of the most underrated reasons to move from scikit-learn's search tools to Optuna once your search space has structure like "how many layers, and a per-layer width."</p>
+    </div>
+  </div>
+
+  <h3>Optuna's Native PyTorch Pruning Helper</h3>
+  <p>For standard training loops, Optuna also ships <code>optuna.integration</code> helpers (e.g. for PyTorch Lightning, Keras, LightGBM, XGBoost) that wire up reporting and pruning automatically so you don't hand-write the <code>trial.report</code> / <code>should_prune</code> boilerplate. For a custom loop like the one above, the manual pattern shown is the most transparent and portable approach, and is what most production codebases actually use.</p>
+</div>
+
+<!-- ── Section 9 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">9</span> Persistent Studies: Surviving Restarts and Parallelizing</h2>
+
+  <p>By default, an Optuna study lives only in memory — if your process crashes mid-search, every trial is lost. For anything beyond a quick experiment, back the study with a relational database via <code>storage</code>. This also unlocks running multiple worker processes (or machines) against the same study concurrently, each pulling the next suggested trial from the shared store.</p>
+
+  <pre><code class="language-python">import optuna
+
+# SQLite for local persistence (single machine, survives crashes/restarts)
+study = optuna.create_study(
+    study_name="xgb_fraud_tuning",
+    storage="sqlite:///optuna_studies.db",
+    direction="maximize",
+    load_if_exists=True,   # resume the study if it already exists, instead of erroring
+)
+study.optimize(objective, n_trials=20)   # run a further batch of trials
+print(f"Study now has {len(study.trials)} total trials")
+print(f"Best so far: {study.best_value:.4f}")
+
+# For multi-machine parallel search, use a networked database, e.g. PostgreSQL/MySQL:
+#   storage="postgresql://user:password@db-host:5432/optuna_db"
+# Then launch the same script on N machines -- they all read/write the same study
+# and each worker independently calls study.optimize(objective, n_trials=...).
+
+# Inspect or resume a study later without re-running anything:
+loaded_study = optuna.load_study(study_name="xgb_fraud_tuning",
+                                  storage="sqlite:///optuna_studies.db")
+print(f"\nResumed study '{loaded_study.study_name}' has "
+      f"{len(loaded_study.trials)} trials on record.")</code></pre>
+
+  <div class="output-block">
+    <div class="output-label">Example Output</div>
+Study now has 20 total trials
+Best so far: 0.9941
+
+Resumed study 'xgb_fraud_tuning' has 20 trials on record.
+  </div>
+
+  <div class="callout callout-realworld">
+    <span class="callout-icon">🌍</span>
+    <div class="callout-body">
+      <strong>Distributed Tuning Across a GPU Cluster</strong>
+      <p>A common production pattern: a Kubernetes job spins up 8 worker pods, each with one GPU, all pointed at the same PostgreSQL-backed study via <code>storage=</code>. Optuna's storage layer handles trial coordination — workers never duplicate a configuration and the surrogate model is updated globally as results stream in from every worker. This turns "how long does tuning take" from a single-machine wall-clock question into a horizontally-scalable one: doubling worker count roughly halves wall-clock time for a fixed trial budget, with no code changes beyond pointing every worker at the same database URL.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Real-World Spotlight ── -->
+<div class="use-case-section">
+  <div class="use-case-header">
+    <span style="font-size:1.5rem">🌍</span>
+    <h2>Real-World Spotlight: Two Production Tuning Campaigns</h2>
+  </div>
+
+  <h3>Case 1 — Fraud Detection Under a Hard Latency Budget</h3>
+  <p>A payments company (the same fraud use case from Lesson 27, now revisited) needs to re-score every transaction at checkout within a 5ms p99 latency budget. A grid/random search optimizing AUC alone — exactly what Lesson 27 demonstrated — previously produced a model that exceeded the latency budget under peak load. This time, the team uses Optuna's multi-objective search directly against both constraints.</p>
+
+  <pre><code class="language-python">import optuna
+import xgboost as xgb
+import numpy as np
+import time
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import roc_auc_score
+
+np.random.seed(42)
+n = 200_000
+X_fraud = np.random.randn(n, 20)
+fraud_idx = np.random.choice(n, int(n * 0.004), replace=False)
+X_fraud[fraud_idx, :6] += 1.1
+y_fraud = np.zeros(n); y_fraud[fraud_idx] = 1
+
+X_tr, X_val, y_tr, y_val = train_test_split(
+    X_fraud, y_fraud, test_size=0.2, stratify=y_fraud, random_state=42)
+scale_w = (y_tr == 0).sum() / (y_tr == 1).sum()
+
+LATENCY_BUDGET_MS = 5.0
+
+def objective(trial: optuna.Trial):
+    params = {
+        "n_estimators":     trial.suggest_int("n_estimators", 30, 400),
+        "max_depth":        trial.suggest_int("max_depth", 2, 10),
+        "learning_rate":    trial.suggest_float("learning_rate", 1e-3, 0.3, log=True),
+        "subsample":        trial.suggest_float("subsample", 0.5, 1.0),
+        "colsample_bytree": trial.suggest_float("colsample_bytree", 0.5, 1.0),
+        "scale_pos_weight": scale_w,
+        "n_jobs": 1,
+    }
+    model = xgb.XGBClassifier(**params)
+    model.fit(X_tr, y_tr)
+
+    auc = roc_auc_score(y_val, model.predict_proba(X_val)[:, 1])
+
+    # Realistic p99-style single-transaction latency measurement
+    row = X_val[:1]
+    timings = []
+    for _ in range(300):
+        t0 = time.perf_counter()
+        model.predict_proba(row)
+        timings.append((time.perf_counter() - t0) * 1000)
+    p99_latency = float(np.percentile(timings, 99))
+
+    return auc, p99_latency
+
+study = optuna.create_study(directions=["maximize", "minimize"],
+                             sampler=optuna.samplers.NSGAIISampler(seed=42))
+study.optimize(objective, n_trials=100)
+
+# Filter the Pareto front down to trials that meet the hard latency SLA,
+# then pick the highest-AUC survivor
+feasible = [t for t in study.best_trials if t.values[1] <= LATENCY_BUDGET_MS]
+chosen = max(feasible, key=lambda t: t.values[0])
+print(f"Pareto front size: {len(study.best_trials)}  |  Feasible under {LATENCY_BUDGET_MS}ms: {len(feasible)}")
+print(f"Chosen model: AUC={chosen.values[0]:.4f}  p99 latency={chosen.values[1]:.2f}ms")
+print(f"Params: {chosen.params}")</code></pre>
+
+  <p>The result: instead of discovering the latency violation in a post-hoc load test (and re-tuning from scratch), the latency constraint is baked directly into the search, and engineering simply filters the Pareto front for compliant points before picking the most accurate one.</p>
+
+  <h3>Case 2 — Tuning a PyTorch CNN with Hyperband Pruning</h3>
+  <p>A computer vision team needs to tune a CNN's architecture and training hyperparameters (you know CNNs from earlier in the course). Full training takes 25 minutes per configuration on their hardware, making a 200-trial random search infeasible (over 80 GPU-hours). They switch to Optuna with <code>HyperbandPruner</code> so unpromising trials are killed within the first few epochs.</p>
+
+  <pre><code class="language-python">import optuna
+import torch, torch.nn as nn, torch.optim as optim
+
+device = "cuda" if torch.cuda.is_available() else "cpu"
+
+def build_cnn(trial):
+    n_conv = trial.suggest_int("n_conv_layers", 2, 4)
+    channels, in_ch = [], 3
+    layers = []
+    for i in range(n_conv):
+        out_ch = trial.suggest_categorical(f"channels_l{i}", [16, 32, 64, 128])
+        layers += [nn.Conv2d(in_ch, out_ch, 3, padding=1), nn.BatchNorm2d(out_ch),
+                   nn.ReLU(), nn.MaxPool2d(2)]
+        in_ch = out_ch
+    layers += [nn.AdaptiveAvgPool2d(1), nn.Flatten(),
+               nn.Linear(in_ch, 10)]
+    return nn.Sequential(*layers).to(device)
+
+def objective(trial: optuna.Trial) -> float:
+    model = build_cnn(trial)
+    lr = trial.suggest_float("lr", 1e-4, 5e-2, log=True)
+    weight_decay = trial.suggest_float("weight_decay", 1e-6, 1e-2, log=True)
+    optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+    criterion = nn.CrossEntropyLoss()
+
+    max_epochs = 30
+    for epoch in range(max_epochs):
+        model.train()
+        for xb, yb in train_loader:    # assume defined elsewhere (e.g. CIFAR-10)
+            xb, yb = xb.to(device), yb.to(device)
+            optimizer.zero_grad()
+            criterion(model(xb), yb).backward()
+            optimizer.step()
+
+        model.eval()
+        correct, total = 0, 0
+        with torch.no_grad():
+            for xb, yb in val_loader:
+                xb, yb = xb.to(device), yb.to(device)
+                correct += (model(xb).argmax(1) == yb).sum().item()
+                total += yb.size(0)
+        val_acc = correct / total
+
+        trial.report(val_acc, step=epoch)
+        if trial.should_prune():
+            raise optuna.TrialPruned()
+
+    return val_acc
+
+pruner = optuna.pruners.HyperbandPruner(min_resource=2, max_resource=30, reduction_factor=3)
+study = optuna.create_study(direction="maximize",
+                             sampler=optuna.samplers.TPESampler(seed=42),
+                             pruner=pruner)
+study.optimize(objective, n_trials=120, timeout=8 * 3600)  # 8-hour budget
+
+pruned_frac = sum(t.state == optuna.trial.TrialState.PRUNED for t in study.trials) / len(study.trials)
+print(f"Trials run: {len(study.trials)}   Pruned fraction: {pruned_frac:.0%}")
+print(f"Best val accuracy: {study.best_value:.4f}")
+print(f"Best architecture: {study.best_params}")</code></pre>
+
+  <div class="output-block">
+    <div class="output-label">Example Output</div>
+Trials run: 120   Pruned fraction: 78%
+Best val accuracy: 0.9183
+Best architecture: {'n_conv_layers': 3, 'channels_l0': 32, 'channels_l1': 64,
+                     'channels_l2': 128, 'lr': 0.0041, 'weight_decay': 3.2e-05}
+  </div>
+
+  <p>With 78% of trials pruned — most within the first few epochs — the team completed 120 trials in the same 8-hour budget that would otherwise have allowed only around 25–30 full training runs, more than tripling the effective search coverage at no extra hardware cost.</p>
+</div>
+
+<!-- ── Quiz ── -->
+<div class="quiz-section">
+  <div id="quiz61"></div>
+</div>
+
+<!-- ── Practice ── -->
+<div class="practice-card">
+  <h2>✍️ Practice Exercises</h2>
+  <ol>
+    <li>Take a <code>RandomForestClassifier</code> tuning problem you previously solved with <code>RandomizedSearchCV</code> in Lesson 27 (or recreate one on the Wine or Breast Cancer dataset). Re-implement it as an Optuna study with the <code>TPESampler</code> using the same number of trials/iterations. Compare the best cross-validated score and the wall-clock time of both approaches.</li>
+    <li>Add a <code>MedianPruner</code> to an iterative model (XGBoost or LightGBM, reporting validation AUC after every boosting round). Run the study twice — once with pruning enabled and once disabled — using the same trial budget and random seed. Report how many trials were pruned and the total wall-clock time saved.</li>
+    <li>Set up a multi-objective study that tunes a gradient-boosted model for both validation accuracy and model size (e.g. <code>n_estimators × max_depth</code> as a cheap proxy for memory footprint, or the actual pickled file size in KB). Plot or print the Pareto front and pick a point you'd recommend for a mobile/edge deployment with a strict memory budget.</li>
+    <li>Use <code>optuna.visualization.plot_param_importances</code> and <code>plot_slice</code> on one of your studies above. Identify the single most important hyperparameter, then run a second, narrower study that fixes the unimportant hyperparameters to reasonable defaults and spends the entire trial budget refining only the top 1–2 important ones. Does the narrower, focused search reach a better score in fewer trials?</li>
+  </ol>
+  <details>
+    <summary>▶ Show Solution (Exercise 1 — Optuna vs RandomizedSearchCV)</summary>
+    <pre><code class="language-python">import time
+import optuna
+import numpy as np
+from scipy.stats import randint
+from sklearn.datasets import load_wine
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import (RandomizedSearchCV, StratifiedKFold,
+                                      cross_val_score, train_test_split)
+
+X, y = load_wine(return_X_y=True)
+X_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=0.2,
+                                           stratify=y, random_state=42)
+cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+N_TRIALS = 40
+
+# ── Approach 1: RandomizedSearchCV (Lesson 27 baseline) ──
+param_dist = {
+    "n_estimators":      randint(50, 400),
+    "max_depth":         randint(2, 30),
+    "min_samples_split": randint(2, 20),
+    "min_samples_leaf":  randint(1, 10),
+}
+t0 = time.time()
+rand_search = RandomizedSearchCV(
+    RandomForestClassifier(random_state=42, n_jobs=-1),
+    param_distributions=param_dist, n_iter=N_TRIALS, cv=cv,
+    scoring="accuracy", random_state=42, n_jobs=-1,
+)
+rand_search.fit(X_tr, y_tr)
+rand_time = time.time() - t0
+print(f"RandomizedSearchCV — best CV acc: {rand_search.best_score_:.4f}  "
+      f"(in {rand_time:.1f}s, {N_TRIALS} fits)")
+
+# ── Approach 2: Optuna with TPESampler ──
+def objective(trial):
+    params = {
+        "n_estimators":      trial.suggest_int("n_estimators", 50, 400),
+        "max_depth":         trial.suggest_int("max_depth", 2, 30),
+        "min_samples_split": trial.suggest_int("min_samples_split", 2, 20),
+        "min_samples_leaf":  trial.suggest_int("min_samples_leaf", 1, 10),
+    }
+    model = RandomForestClassifier(**params, random_state=42, n_jobs=-1)
+    return cross_val_score(model, X_tr, y_tr, cv=cv, scoring="accuracy").mean()
+
+optuna.logging.set_verbosity(optuna.logging.WARNING)
+t0 = time.time()
+study = optuna.create_study(direction="maximize",
+                             sampler=optuna.samplers.TPESampler(seed=42))
+study.optimize(objective, n_trials=N_TRIALS)
+optuna_time = time.time() - t0
+print(f"Optuna (TPE)        — best CV acc: {study.best_value:.4f}  "
+      f"(in {optuna_time:.1f}s, {N_TRIALS} trials)")
+
+# ── Compare on the held-out test set ──
+from sklearn.metrics import accuracy_score
+rand_test_acc = accuracy_score(y_te, rand_search.best_estimator_.predict(X_te))
+
+best_optuna_model = RandomForestClassifier(**study.best_params, random_state=42, n_jobs=-1)
+best_optuna_model.fit(X_tr, y_tr)
+optuna_test_acc = accuracy_score(y_te, best_optuna_model.predict(X_te))
+
+print(f"\nHeld-out test accuracy — RandomizedSearchCV: {rand_test_acc:.4f}")
+print(f"Held-out test accuracy — Optuna (TPE):       {optuna_test_acc:.4f}")</code></pre>
+  </details>
+</div>
+
+<!-- ── Primary Source ── -->
+<div class="primary-source">
+  <h2>📚 Primary Source for This Lesson</h2>
+  <p><a href="https://optuna.readthedocs.io/en/stable/" target="_blank"><strong>Optuna: A Next-generation Hyperparameter Optimization Framework</strong></a><br>
+  The official Optuna documentation covers samplers, pruners, multi-objective optimization, distributed studies, and integration modules in depth. Also recommended: Akiba et al. (2019) "Optuna: A Next-generation Hyperparameter Optimization Framework" (<em>KDD</em>), the original paper introducing TPE-based define-by-run search and the pruning architecture used throughout this lesson.</p>
+</div>
+
+<!-- ── Ask Tutor ── -->
+<div class="ask-tutor">
+  <span class="icon">💬</span>
+  <span>Not sure whether to use MedianPruner or HyperbandPruner for your training loop? Or how to design an objective function for a multi-stage pipeline? Describe your model and trial cost — your tutor will help you pick a sampler/pruner combination and sanity-check your search space.</span>
+</div>
+
+<!-- Navigation -->
+<nav class="lesson-nav">
+  <a href="./0062-multimodal-models.html" class="nav-btn">← Lesson 62: Multimodal Models</a>
+  <a href="./0064-shap-lime.html" class="nav-btn nav-btn-next">Lesson 64: Model Interpretability — SHAP &amp; LIME →</a>
+</nav>
+
+</div><!-- /content-wrapper -->
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-core.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/plugins/autoloader/prism-autoloader.min.js"></script>
+<script src="https://cdn.plot.ly/plotly-2.32.0.min.js"></script>
+<script src="../assets/charts.js"></script>
+<script src="../assets/quiz.js"></script>
+<script>
+/* ── Optuna / Bayesian search visualizations (Sections 1, 2 and 5) ── */
+(function () {
+
+  function seededRandom(seed) {
+    let s = seed;
+    return function () {
+      s = (s * 9301 + 49297) % 233280;
+      return s / 233280;
+    };
+  }
+
+  /* ---- 1. Grid vs Random vs Optuna(TPE) convergence (Section 1) ---- */
+  function renderConvergenceChart() {
+    const N = 50;
+    const trialsX = Array.from({ length: N }, (_, i) => i + 1);
+
+    // Grid search: fixed coarse lattice -- capped low, occasional jump when the
+    // sweep happens to land on its single best lattice point.
+    const rngGrid = seededRandom(611);
+    const gridRaw = trialsX.map(() => 0.865 + rngGrid() * 0.045);
+    gridRaw[37] = 0.912; // the one grid cell that happens to be best, visited late
+
+    // Random search: wider continuous sampling, no memory between trials.
+    const rngRand = seededRandom(2027);
+    const randRaw = trialsX.map(() => 0.86 + rngRand() * 0.10);
+
+    // Optuna (TPE): cold-starts like random search, then the surrogate model
+    // increasingly concentrates trials in the promising region.
+    const rngTpe = seededRandom(1027);
+    const tpeRaw = trialsX.map((t) => {
+      const mean = 0.90 + 0.065 * (1 - Math.exp(-t / 8));
+      return mean + (rngTpe() - 0.5) * 0.03;
+    });
+
+    function runningMax(arr) {
+      let best = -Infinity;
+      return arr.map((v) => { best = Math.max(best, v); return best; });
+    }
+
+    const gridBest = runningMax(gridRaw);
+    const randBest = runningMax(randRaw);
+    const tpeBest = runningMax(tpeRaw);
+
+    const traces = [
+      {
+        x: trialsX, y: gridBest, type: 'scatter', mode: 'lines', name: 'Grid Search',
+        line: { color: MLCharts.theme.amber, width: 2 },
+        hovertemplate: 'trial %{x}<br>best-so-far=%{y:.4f}<extra>Grid Search</extra>',
+      },
+      {
+        x: trialsX, y: randBest, type: 'scatter', mode: 'lines', name: 'Random Search',
+        line: { color: MLCharts.theme.blue, width: 2 },
+        hovertemplate: 'trial %{x}<br>best-so-far=%{y:.4f}<extra>Random Search</extra>',
+      },
+      {
+        x: trialsX, y: tpeBest, type: 'scatter', mode: 'lines', name: 'Optuna (TPE)',
+        line: { color: MLCharts.theme.green, width: 3 },
+        hovertemplate: 'trial %{x}<br>best-so-far=%{y:.4f}<extra>Optuna (TPE)</extra>',
+      },
+    ];
+
+    const layout = MLCharts.baseLayout({
+      title: { text: 'Best validation score found so far, by trial number (illustrative)' },
+      xaxis: { title: { text: 'trial number' }, range: [1, N] },
+      yaxis: { title: { text: 'best validation score so far' } },
+    });
+
+    Plotly.newPlot('l61-convergence-chart', traces, layout, MLCharts.config);
+  }
+
+  /* ---- 2. Surrogate model + acquisition function, classic 1D BO picture (Section 2) ---- */
+  function renderBoIllustration() {
+    const NPTS = 140;
+    const xs = Array.from({ length: NPTS }, (_, i) => (i * 10) / (NPTS - 1));
+
+    function trueF(x) {
+      return 0.60 + 0.22 * Math.sin(1.3 * x) + 0.13 * Math.sin(0.5 * x + 1.0);
+    }
+
+    const obsX = [1.0, 3.0, 4.6, 7.0, 9.1];
+    const obsY = obsX.map(trueF);
+
+    // Simple kernel-weighted surrogate: mean reverts toward observed points,
+    // uncertainty grows the farther a candidate x is from every observation --
+    // mimicking the qualitative behavior of a Gaussian Process posterior.
+    const bw = 1.0;
+    const kernel = (d) => Math.exp(-(d * d) / (2 * bw * bw));
+
+    const meanY = [];
+    const stdY = [];
+    xs.forEach((x) => {
+      let wsum = 0, wy = 0, maxW = 0;
+      obsX.forEach((ox, i) => {
+        const w = kernel(x - ox);
+        wsum += w; wy += w * obsY[i];
+        if (w > maxW) maxW = w;
+      });
+      meanY.push(wsum > 1e-6 ? wy / wsum : 0.6);
+      stdY.push(0.18 * (1 - maxW) + 0.015);
+    });
+
+    const upperY = meanY.map((m, i) => m + 1.96 * stdY[i]);
+    const lowerY = meanY.map((m, i) => m - 1.96 * stdY[i]);
+
+    const bestObserved = Math.max(...obsY);
+    const kappa = 1.8;
+    const acquisition = meanY.map((m, i) => Math.max(0, m - bestObserved) + kappa * stdY[i]);
+    let bestIdx = 0;
+    acquisition.forEach((a, i) => { if (a > acquisition[bestIdx]) bestIdx = i; });
+    const nextX = xs[bestIdx];
+
+    const bandTrace = {
+      x: xs.concat([...xs].reverse()),
+      y: upperY.concat([...lowerY].reverse()),
+      xaxis: 'x', yaxis: 'y', type: 'scatter', mode: 'lines',
+      fill: 'toself', fillcolor: 'rgba(37, 99, 235, 0.15)',
+      line: { color: 'transparent' },
+      name: 'Surrogate uncertainty (±1.96σ)',
+      hoverinfo: 'skip',
+    };
+    const trueTrace = {
+      x: xs, y: xs.map(trueF), xaxis: 'x', yaxis: 'y', type: 'scatter', mode: 'lines',
+      line: { color: MLCharts.theme.textMuted, width: 2, dash: 'dash' },
+      name: 'True objective (unknown to Optuna)',
+      hovertemplate: 'x=%{x:.2f}<br>true f(x)=%{y:.3f}<extra></extra>',
+    };
+    const meanTrace = {
+      x: xs, y: meanY, xaxis: 'x', yaxis: 'y', type: 'scatter', mode: 'lines',
+      line: { color: MLCharts.theme.blue, width: 2.5 },
+      name: 'Surrogate mean prediction',
+      hovertemplate: 'x=%{x:.2f}<br>surrogate mean=%{y:.3f}<extra></extra>',
+    };
+    const obsTrace = {
+      x: obsX, y: obsY, xaxis: 'x', yaxis: 'y', type: 'scatter', mode: 'markers',
+      marker: { color: MLCharts.theme.heading, size: 11, symbol: 'circle', line: { color: MLCharts.theme.bgCard, width: 1.5 } },
+      name: 'Observed trials',
+      hovertemplate: 'trial at x=%{x:.2f}<br>score=%{y:.3f}<extra></extra>',
+    };
+
+    const acqTrace = {
+      x: xs, y: acquisition, xaxis: 'x2', yaxis: 'y2', type: 'scatter', mode: 'lines',
+      fill: 'tozeroy', fillcolor: 'rgba(124, 58, 237, 0.18)',
+      line: { color: MLCharts.theme.violet, width: 2.5 },
+      name: 'Acquisition function',
+      hovertemplate: 'x=%{x:.2f}<br>acquisition=%{y:.3f}<extra></extra>',
+    };
+    const peakTrace = {
+      x: [nextX], y: [acquisition[bestIdx]], xaxis: 'x2', yaxis: 'y2', type: 'scatter', mode: 'markers',
+      marker: { color: MLCharts.theme.red, size: 13, symbol: 'star' },
+      name: 'Next trial to sample',
+      hovertemplate: 'next trial at x=%{x:.2f}<extra></extra>',
+    };
+
+    const layout = MLCharts.baseLayout({
+      title: { text: 'Surrogate model (top) and acquisition function (bottom)' },
+      margin: { l: 60, r: 24, t: 40, b: 48 },
+      grid: { rows: 2, columns: 1, pattern: 'independent' },
+      xaxis: { domain: [0, 1], anchor: 'y', matches: 'x2', showticklabels: false, zeroline: false },
+      yaxis: { domain: [0.55, 1], title: { text: 'validation score (illustrative)' }, zeroline: false },
+      xaxis2: { domain: [0, 1], anchor: 'y2', title: { text: 'hyperparameter value (illustrative, arbitrary units)' }, zeroline: false },
+      yaxis2: { domain: [0, 0.42], title: { text: 'acquisition value' }, zeroline: false },
+      shapes: [
+        { type: 'line', xref: 'x', x0: nextX, x1: nextX, yref: 'paper', y0: 0, y1: 1,
+          line: { color: MLCharts.theme.red, width: 1.75, dash: 'dot' } },
+      ],
+      annotations: [
+        { x: nextX, y: acquisition[bestIdx], xref: 'x2', yref: 'y2', yshift: 22,
+          text: 'next trial', showarrow: true, arrowhead: 2, ax: 0, ay: -24,
+          font: { size: 11, color: MLCharts.theme.red } },
+      ],
+    });
+
+    Plotly.newPlot('l61-bo-illustration', [bandTrace, trueTrace, meanTrace, obsTrace, acqTrace, peakTrace], layout, MLCharts.config);
+  }
+
+  /* ---- 3. MedianPruner: illustrative trial learning curves (Section 5) ---- */
+  function renderPruningCurves() {
+    const EPOCHS_MAX = 30;
+    const rng = seededRandom(1105);
+
+    const trialConfigs = [
+      { name: 'Trial 12', plateau: 0.93, tau: 9, prune: null },
+      { name: 'Trial 27', plateau: 0.91, tau: 11, prune: null },
+      { name: 'Trial 33', plateau: 0.895, tau: 13, prune: null },
+      { name: 'Trial 3', plateau: 0.70, tau: 6, prune: 5 },
+      { name: 'Trial 5', plateau: 0.75, tau: 8, prune: 7 },
+      { name: 'Trial 8', plateau: 0.68, tau: 5, prune: 4 },
+      { name: 'Trial 14', plateau: 0.80, tau: 10, prune: 9 },
+      { name: 'Trial 19', plateau: 0.72, tau: 7, prune: 6 },
+      { name: 'Trial 22', plateau: 0.78, tau: 9, prune: 11 },
+      { name: 'Trial 30', plateau: 0.74, tau: 8, prune: 8 },
+    ];
+
+    const traces = [];
+    let completedShown = false, prunedShown = false;
+
+    trialConfigs.forEach((cfg) => {
+      const isCompleted = cfg.prune === null;
+      const endEpoch = isCompleted ? EPOCHS_MAX : cfg.prune;
+      const epochs = Array.from({ length: endEpoch + 1 }, (_, e) => e);
+      const acc = epochs.map((e) => Math.max(0.05, cfg.plateau * (1 - Math.exp(-e / cfg.tau)) + (rng() - 0.5) * 0.02));
+
+      traces.push({
+        x: epochs, y: acc, type: 'scatter', mode: 'lines',
+        line: { color: isCompleted ? MLCharts.theme.green : MLCharts.theme.red, width: isCompleted ? 2.5 : 1.5 },
+        opacity: isCompleted ? 1 : 0.45,
+        name: isCompleted ? 'Completed trial' : 'Pruned trial (stopped early)',
+        legendgroup: isCompleted ? 'completed' : 'pruned',
+        showlegend: isCompleted ? !completedShown : !prunedShown,
+        hovertemplate: `${cfg.name}<br>epoch=%{x}<br>val accuracy=%{y:.3f}<extra></extra>`,
+      });
+      if (isCompleted) completedShown = true; else prunedShown = true;
+
+      traces.push({
+        x: [endEpoch], y: [acc[acc.length - 1]], type: 'scatter', mode: 'markers',
+        marker: isCompleted
+          ? { symbol: 'circle', size: 8, color: MLCharts.theme.green }
+          : { symbol: 'x', size: 11, color: MLCharts.theme.red, line: { width: 2 } },
+        showlegend: false,
+        hovertemplate: isCompleted
+          ? `${cfg.name} completed at epoch ${endEpoch}<extra></extra>`
+          : `${cfg.name} pruned at epoch ${endEpoch}<extra></extra>`,
+      });
+    });
+
+    const layout = MLCharts.baseLayout({
+      title: { text: 'MedianPruner: 10 illustrative trials, most stopped early' },
+      xaxis: { title: { text: 'epoch' }, range: [0, EPOCHS_MAX] },
+      yaxis: { title: { text: 'validation accuracy (illustrative)' } },
+    });
+
+    Plotly.newPlot('l61-pruning-curves', traces, layout, MLCharts.config);
+  }
+
+  renderConvergenceChart();
+  renderBoIllustration();
+  renderPruningCurves();
+})();
+</script>
+<script>
+new MLQuiz('quiz-63-mid', [
+  {
+    question: "Why does Bayesian optimization (TPE) typically find good hyperparameters in fewer trials than random search?",
+    options: [
+      "It builds a surrogate model of the objective function from past trials and uses it to prioritize the most promising unexplored regions, instead of sampling blindly every time",
+      "It always tries every point in the search space exhaustively, just in a smarter order",
+      "It requires no historical trial data and works purely by chance, like random search",
+      "It only works for continuous hyperparameters, never categorical ones"
+    ],
+    correct: 0,
+    explanation: "Random search and grid search treat every trial as independent, ignoring what previous trials revealed. Bayesian optimization builds a surrogate model (TPE models the distribution of good vs. bad trials) from every completed trial and uses an acquisition function to pick the next point most likely to improve on the best result so far — turning hyperparameter search into an informed, adaptive process rather than blind sampling."
+  },
+  {
+    question: "What advantage does TPE have over CMA-ES for most real-world ML hyperparameter searches?",
+    options: [
+      "TPE natively handles mixed search spaces (categorical, integer, and continuous parameters together), which is how most real ML pipelines are actually parameterized",
+      "TPE always converges in fewer trials than CMA-ES on every possible problem",
+      "TPE requires no acquisition function, unlike CMA-ES",
+      "CMA-ES cannot be used with Optuna at all"
+    ],
+    correct: 0,
+    explanation: "CMA-ES is a strong sampler for continuous, moderate-dimensional search spaces, but most real ML pipelines mix categorical choices (kernel type, optimizer, activation function) with continuous and integer parameters — exactly the combination TPE was designed to handle natively. This is why TPE is Optuna's default and the right choice unless you've specifically benchmarked CMA-ES as better for your exact problem."
+  }
+]);
+</script>
+<script>
+new MLQuiz('quiz61', [
+  {
+    question: "What is the fundamental difference between Bayesian optimization (e.g. Optuna's TPE sampler) and RandomizedSearchCV?",
+    options: [
+      "Bayesian optimization uses the results of previous trials to build a surrogate model and choose the next configuration intelligently, while RandomizedSearchCV samples every trial independently with no memory of past results",
+      "Bayesian optimization always tries fewer combinations in total, while RandomizedSearchCV exhaustively tries every value in a grid",
+      "Bayesian optimization only works for continuous hyperparameters, while RandomizedSearchCV supports categorical hyperparameters",
+      "Bayesian optimization requires labeled validation data while RandomizedSearchCV can tune in a fully unsupervised manner"
+    ],
+    correct: 0,
+    explanation: "RandomizedSearchCV and Bayesian optimization can both sample from the same kinds of distributions and both can support categorical parameters — the difference is not about what they can search, it's about how they choose. RandomizedSearchCV draws every trial's configuration independently and identically, so trial 50 knows nothing about what trials 1-49 revealed. Bayesian optimization (via a surrogate model, e.g. TPE's density-ratio estimate) explicitly conditions the next trial's configuration on everything learned from prior trials, using an acquisition function to balance exploring uncertain regions against exploiting regions that look promising. This sequential, adaptive strategy is what typically lets it reach a given quality level in far fewer expensive trials."
+  },
+  {
+    question: "In Bayesian optimization, what role does the acquisition function (e.g. Expected Improvement) play?",
+    options: [
+      "It scores candidate hyperparameter configurations by combining the surrogate model's predicted mean and uncertainty, and the next trial is run at the configuration that maximises this score",
+      "It directly computes the gradient of the validation loss with respect to the hyperparameters so they can be updated via gradient descent",
+      "It re-trains the final model after the search completes, using the best hyperparameters found",
+      "It measures how much wall-clock time each trial took, so that future trials can be scheduled more efficiently"
+    ],
+    correct: 0,
+    explanation: "The acquisition function (Expected Improvement, Upper Confidence Bound, etc.) takes the surrogate model's prediction at any candidate point — typically a mean estimate and an uncertainty estimate — and converts it into a single score representing how worthwhile it would be to evaluate that point next. Expected Improvement is high when the predicted mean is high (the surrogate believes this point is good — exploitation) or when the uncertainty is high (the surrogate has little information here, so there's a chance of discovering something even better — exploration). The point that maximises the acquisition function becomes the next trial's hyperparameter configuration; this is a cheap, fast computation distinct from the expensive act of actually training the real model."
+  },
+  {
+    question: "What does Optuna's MedianPruner actually do during a study, and why does it save compute?",
+    options: [
+      "It compares a trial's intermediate score at a given step against the median of other trials' scores at that same step, and stops (prunes) the trial early if it is performing worse than that median — avoiding wasted training on configurations unlikely to become the best",
+      "It removes outlier trials with unusually high scores from the final results to prevent overfitting to lucky random seeds",
+      "It computes the median of all final hyperparameter values across completed trials and uses that as the recommended configuration",
+      "It limits the search space to only the median range of each hyperparameter distribution, discarding extreme values before any trials run"
+    ],
+    correct: 0,
+    explanation: "MedianPruner works during training, not after it. As a trial reports intermediate values (e.g. validation AUC after each boosting round or epoch via trial.report()), the pruner compares that value to the median of all other trials' reported values at the same step. If a trial is doing worse than the median of its peers at that point, it almost certainly will not become the best trial overall, so Optuna raises a TrialPruned exception and the trial stops immediately rather than running to completion. This redirects the saved compute toward running more trials at other, more promising configurations — in practice this can let you run 5-10x more trials in the same wall-clock budget for iterative models like gradient boosting or neural networks."
+  },
+  {
+    question: "When you set up a multi-objective Optuna study (e.g. directions=['maximize', 'minimize'] for accuracy and latency), what does study.best_trials return?",
+    options: [
+      "The set of Pareto-optimal trials — configurations where no objective can be improved without making another objective worse — rather than a single best configuration",
+      "A single trial representing the best average of the two objectives, computed as a weighted sum chosen automatically by Optuna",
+      "Only the trial with the highest accuracy, with latency used purely as a tie-breaker between equally accurate trials",
+      "Every trial that was not pruned during the search, regardless of how the two objectives compare"
+    ],
+    correct: 0,
+    explanation: "With genuinely competing objectives, there is rarely a single 'best' configuration -- improving accuracy might require a deeper model that also increases latency. study.best_trials returns the Pareto front: the subset of trials such that for each one, you cannot find another trial that is at least as good on every objective and strictly better on at least one. This front represents the full set of valid trade-off points. Choosing which point on the front to actually deploy is a business decision made after the search (e.g. filtering for trials under a hard latency SLA and then picking the most accurate survivor), not something the optimizer decides on its own."
+  },
+  {
+    question: "Why is Optuna's 'define-by-run' API (sampling hyperparameters imperatively inside the objective function with trial.suggest_*) particularly well-suited to tuning neural network architectures with a variable number of layers?",
+    options: [
+      "It allows the search space itself to depend on previously sampled values within the same trial — for example, only sampling the width of a third layer if a separately sampled n_layers parameter equals 3 — which a fixed grid or static parameter dictionary cannot express",
+      "It automatically determines the optimal number of layers using gradient-based architecture search, removing the need to specify a search range at all",
+      "It guarantees that every trial will use the same neural network architecture, which simplifies comparing trials against each other",
+      "It pre-computes all possible architectures before the study starts and selects among them using a lookup table"
+    ],
+    correct: 0,
+    explanation: "GridSearchCV and RandomizedSearchCV both require a flat, fixed dictionary of parameter names to distributions, decided entirely before any trial runs — there is no way to say 'only sample this parameter if that other parameter took a certain value.' Optuna's objective function is plain Python code that calls trial.suggest_int, trial.suggest_categorical, etc. as it executes, so you can write ordinary conditional logic: sample n_layers first, then loop and sample a width and dropout rate for exactly that many layers. Each trial can therefore explore a genuinely different-shaped search space (a 2-layer vs 4-layer network), and Optuna's TPE sampler models each parameter's conditional distribution correctly across this varying structure -- something a static parameter grid fundamentally cannot represent."
+  }
+]);
+</script>
+
+</body>
+</html>

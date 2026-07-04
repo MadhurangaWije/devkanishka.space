@@ -1,0 +1,842 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lesson 30: Gaussian Mixture Models &amp; the EM Algorithm | ML Mastery</title>
+  <link rel="stylesheet" href="../assets/style.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
+</head>
+<body>
+
+<header class="lesson-header">
+  <div class="header-inner">
+    <nav class="breadcrumb">
+      <a href="../reference/curriculum-map.html">ML Mastery</a>
+      <span class="sep">›</span>
+      <span>Phase 3: Unsupervised Learning</span>
+    </nav>
+    <div class="lesson-badges">
+      <span class="phase-badge">Phase 3 · Unsupervised Learning</span>
+      <span class="lesson-num-badge">Lesson 30</span>
+    </div>
+    <h1 class="lesson-title">Gaussian Mixture Models &amp; the EM Algorithm</h1>
+    <p class="lesson-subtitle">K-Means forces every cluster to be round and every point into exactly one group. GMM replaces both assumptions with probability — soft, elliptical clusters fit by the algorithm that also trains HMMs, missing-data imputers, and half of classical statistics.</p>
+    <div class="meta-pills">
+      <span class="meta-pill">⏱ ~55 min</span>
+      <span class="meta-pill">🐍 scikit-learn</span>
+      <span class="meta-pill">🔵 Unsupervised Learning</span>
+      <span class="meta-pill">Requires Lesson 28</span>
+    </div>
+  </div>
+</header>
+
+<main class="lesson-main">
+<div class="content-wrapper">
+
+<div class="objectives-card">
+  <h2>🎯 What You'll Learn</h2>
+  <ul>
+    <li>Why K-Means' hard, equal-sized, spherical clusters break down on real data — and how a probabilistic model fixes it</li>
+    <li>The Gaussian Mixture Model as a generative story: data is produced by K weighted Gaussians, and clustering means inferring which one produced each point</li>
+    <li>The Expectation-Maximization (EM) algorithm: alternate between computing soft cluster "responsibilities" (E-step) and re-estimating each Gaussian's parameters (M-step)</li>
+    <li>The four covariance types — <code>full</code>, <code>tied</code>, <code>diag</code>, <code>spherical</code> — and the bias/flexibility trade-off each one makes</li>
+    <li>Choose the number of components with BIC/AIC instead of the elbow method, and know when GMM beats K-Means outright</li>
+  </ul>
+</div>
+
+<!-- ── Section 1 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">1</span> From Hard to Soft Clustering: Why K-Means Isn't Enough</h2>
+
+  <p>Lesson 28's limitations table ended with a specific promise: when clusters have <strong>different sizes, different shapes, or overlap</strong>, K-Means is the wrong tool. Look at what K-Means actually assumes, and the failure mode becomes obvious:</p>
+  <ul>
+    <li><strong>Hard assignment.</strong> Every point belongs to exactly one cluster, full stop. A point sitting exactly between two natural groups still gets shoved into whichever centroid is a fraction closer — there is no way to say "this point is 60% cluster A, 40% cluster B."</li>
+    <li><strong>Implicitly spherical clusters.</strong> Because K-Means assigns by raw Euclidean distance to a centroid, its decision boundaries are always the perpendicular bisectors between centroids — clusters are forced to look like circles (in 2D) or spheres (in higher dimensions), never ellipses.</li>
+    <li><strong>Implicitly equal-sized, equal-spread clusters.</strong> A tight, dense cluster of 50 points and a loose, spread-out cluster of 500 points get treated identically — K-Means has no notion of "this cluster is naturally wider than that one."</li>
+  </ul>
+
+  <p>A <strong>Gaussian Mixture Model (GMM)</strong> removes all three assumptions at once by replacing "nearest centroid" with "which probability distribution most likely generated this point?" Each cluster becomes its own Gaussian (bell-curve) distribution with its own mean, its own shape (covariance), and its own weight — and every point gets a soft <em>probability</em> of belonging to each cluster instead of a hard label.</p>
+
+  <pre><code class="language-python">import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.datasets import make_blobs
+from sklearn.cluster import KMeans
+
+# Two clusters with very different spreads and sizes -- K-Means' nightmare
+np.random.seed(42)
+cluster_a = np.random.randn(300, 2) * [0.4, 0.4] + [0, 0]     # tight, dense
+cluster_b = np.random.randn(300, 2) * [2.2, 0.6] + [4, 0]     # wide, elongated
+X = np.vstack([cluster_a, cluster_b])
+y_true = np.array([0] * 300 + [1] * 300)
+
+km = KMeans(n_clusters=2, n_init=10, random_state=42)
+km_labels = km.fit_predict(X)
+
+# K-Means splits by perpendicular-bisector distance, not by cluster shape --
+# it will steal points from the wide cluster's tail and hand them to the
+# tight cluster, because "nearest centroid" ignores how spread out each
+# cluster actually is.
+from sklearn.metrics import adjusted_rand_score
+print(f"K-Means ARI vs true clusters: {adjusted_rand_score(y_true, km_labels):.3f}")
+# Meaningfully below 1.0 -- K-Means mis-assigns points near the tight
+# cluster that actually belong to the wide one's near tail.</code></pre>
+
+  <div class="callout callout-key">
+    <span class="callout-icon">🔑</span>
+    <div class="callout-body">
+      <strong>GMM Is Clustering Reframed as Density Estimation</strong>
+      <p>K-Means asks "which centroid is closest?" GMM asks "which distribution was this point more likely sampled from?" That single reframing — geometry to probability — is what unlocks soft assignments, elliptical clusters, and clusters of different sizes, all for free.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 2 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">2</span> The Gaussian Mixture Model: A Generative View of Clustering</h2>
+
+  <p>A GMM assumes your data was generated by the following (imaginary, but useful) process, repeated for every data point:</p>
+  <ol>
+    <li>Pick one of K Gaussian components at random, with component <em>k</em> chosen with probability <em>π<sub>k</sub></em> (the <strong>mixing weight</strong> — how common that cluster is overall). The weights sum to 1.</li>
+    <li>Draw a point from that component's Gaussian distribution, <em>N(μ<sub>k</sub>, Σ<sub>k</sub>)</em> — its own mean vector <em>μ<sub>k</sub></em> and covariance matrix <em>Σ<sub>k</sub></em>.</li>
+  </ol>
+
+  <p>The overall probability of observing a point <em>x</em> is the weighted sum over all K components:</p>
+  <p style="text-align:center; font-style:italic; margin: 1.25rem 0; font-size: 1.1rem;">p(x) = Σₖ πₖ · N(x | μₖ, Σₖ)</p>
+
+  <p>Fitting a GMM means finding the parameters — the K weights <em>π<sub>k</sub></em>, means <em>μ<sub>k</sub></em>, and covariances <em>Σ<sub>k</sub></em> — that make the observed data most probable under this story. "Clustering" then becomes: for a given point, which component was most likely responsible for it?</p>
+
+  <pre><code class="language-python">import numpy as np
+from scipy.stats import multivariate_normal
+
+# A 2-component GMM's probability density is just a weighted sum of two
+# multivariate normal densities -- nothing more exotic than that.
+def gmm_pdf(x, weights, means, covariances):
+    density = 0.0
+    for pi_k, mu_k, sigma_k in zip(weights, means, covariances):
+        density += pi_k * multivariate_normal.pdf(x, mean=mu_k, cov=sigma_k)
+    return density
+
+weights = [0.5, 0.5]
+means = [np.array([0, 0]), np.array([4, 0])]
+covariances = [np.eye(2) * 0.3, np.array([[2.0, 0], [0, 0.5]])]
+
+point = np.array([2.0, 0.0])   # roughly halfway between the two components
+print(f"p(x=[2,0]) under this GMM: {gmm_pdf(point, weights, means, covariances):.5f}")
+
+# The "responsibility" of component k for a point is how much of that
+# total density came from component k -- this is the soft cluster
+# assignment, and it's the central quantity the EM algorithm computes.
+for k, (pi_k, mu_k, sigma_k) in enumerate(zip(weights, means, covariances)):
+    contribution = pi_k * multivariate_normal.pdf(point, mean=mu_k, cov=sigma_k)
+    responsibility = contribution / gmm_pdf(point, weights, means, covariances)
+    print(f"  Component {k}: responsibility = {responsibility:.3f}")</code></pre>
+
+  <div class="callout callout-tip">
+    <span class="callout-icon">💡</span>
+    <div class="callout-body">
+      <strong>K-Means Is a Special Case of GMM</strong>
+      <p>If you force every component's covariance to be spherical and identical (<em>Σ<sub>k</sub> = σ²I</em> for all k) and take the limit as σ→0, soft responsibilities collapse into hard 0/1 assignments and GMM's parameter updates become exactly K-Means' centroid updates. K-Means isn't a different algorithm from GMM — it's GMM with the flexibility deliberately switched off.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 3 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">3</span> The EM Algorithm: Expectation and Maximization</h2>
+
+  <p>There's a chicken-and-egg problem in fitting a GMM: if you knew which component generated each point, estimating each Gaussian's mean and covariance would be trivial (just compute the mean/covariance of its assigned points). And if you knew each Gaussian's parameters, computing each point's responsibilities would be trivial (Section 2's formula). But you know <em>neither</em> at the start.</p>
+
+  <p><strong>Expectation-Maximization (EM)</strong> breaks the deadlock by alternating between the two, exactly like K-Means alternates between assignment and update — just with soft probabilities instead of hard labels:</p>
+  <ol>
+    <li><strong>Initialize</strong> the K components' weights, means, and covariances (commonly by running K-Means first and using its clusters as a starting point).</li>
+    <li><strong>E-step (Expectation):</strong> With the current parameters fixed, compute every point's responsibility for every component — "given what I currently believe about the clusters, how likely is each cluster to have generated this point?"</li>
+    <li><strong>M-step (Maximization):</strong> With the responsibilities fixed, re-estimate each component's weight, mean, and covariance as a <em>responsibility-weighted</em> average over all points, instead of a hard-membership average over assigned points only.</li>
+    <li><strong>Repeat</strong> E and M until the total log-likelihood of the data stops improving (convergence).</li>
+  </ol>
+
+  <div class="callout callout-warn">
+    <span class="callout-icon">⚠️</span>
+    <div class="callout-body">
+      <strong>EM Converges — to a Local Optimum</strong>
+      <p>Just like K-Means, each EM iteration is guaranteed to never decrease the data's log-likelihood, so the algorithm always converges. But the likelihood surface has many local maxima, and a bad random initialization can strand you at a mediocre one. This is why <code>sklearn.mixture.GaussianMixture</code> exposes <code>n_init</code> — run the whole EM procedure several times from different starts and keep the run with the highest final log-likelihood, the same defense K-Means uses.</p>
+    </div>
+  </div>
+
+  <h3>Watch It Run: EM Step by Step</h3>
+  <p>The simulator below fits a 2-component GMM to the same "one tight cluster, one wide cluster" dataset from Section 1 — exactly the case where K-Means struggled. Each point's color is a <em>blend</em> of the two cluster colors, weighted by its current responsibilities (a point that's 70% likely to be from cluster A and 30% likely from cluster B is rendered as a 70/30 color mix). The ellipses show each component's current covariance — one standard deviation out. Click <strong>Step</strong> to alternate E-steps and M-steps, and watch the ellipses stretch to match the true cluster shapes while K-Means-style circles never could.</p>
+
+  <div class="diagram-btn-group" id="l30-step-buttons">
+    <button class="diagram-btn active" id="l30-btn-step">▶ Step (E then M)</button>
+    <button class="diagram-btn" id="l30-btn-run">⏭ Run to Convergence</button>
+    <button class="diagram-btn" id="l30-btn-reset">↺ Reset (new random init)</button>
+  </div>
+  <div class="chart-container">
+    <div id="l30-em-chart" style="height:440px;"></div>
+    <p class="chart-caption" id="l30-em-caption">Iteration 0 — components initialized from a K-Means warm start. Click Step to run the E-step and M-step.</p>
+  </div>
+</div>
+
+<!-- ── Section 4 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">4</span> E-Step: Computing Responsibilities</h2>
+
+  <p>The responsibility <em>γ(z<sub>nk</sub>)</em> — "how responsible is component k for point n" — is computed with exactly the Bayes'-theorem-flavored formula from Section 2, applied to every point against every component simultaneously:</p>
+
+  <p style="text-align:center; font-style:italic; margin: 1.25rem 0; font-size: 1.1rem;">γ(zₙₖ) = πₖ N(xₙ | μₖ, Σₖ) / Σⱼ πⱼ N(xₙ | μⱼ, Σⱼ)</p>
+
+  <p>The numerator is "how likely is component k, weighted by how common it is, to have produced this exact point." The denominator normalizes across all K components so that a single point's responsibilities always sum to 1 — every point's probability mass is fully accounted for, split across the components in proportion to how well each one explains it.</p>
+
+  <pre><code class="language-python">import numpy as np
+from scipy.stats import multivariate_normal
+
+def e_step(X, weights, means, covariances):
+    """Compute the (n_samples, n_components) responsibility matrix."""
+    n_samples, K = X.shape[0], len(weights)
+    resp = np.zeros((n_samples, K))
+    for k in range(K):
+        resp[:, k] = weights[k] * multivariate_normal.pdf(
+            X, mean=means[k], cov=covariances[k])
+    # Normalize each row to sum to 1 (Bayes' theorem denominator)
+    resp = resp / resp.sum(axis=1, keepdims=True)
+    return resp
+
+np.random.seed(42)
+X_demo = np.vstack([
+    np.random.randn(5, 2) * 0.3 + [0, 0],
+    np.random.randn(5, 2) * 0.3 + [4, 0],
+])
+weights = [0.5, 0.5]
+means = [np.array([0.2, 0.1]), np.array([3.8, -0.1])]
+covariances = [np.eye(2) * 0.4, np.eye(2) * 0.4]
+
+resp = e_step(X_demo, weights, means, covariances)
+print("Responsibilities (rows sum to 1):")
+print(resp.round(3))
+# Points near [0,0] get responsibility ~[0.99, 0.01] for component 0;
+# points near [4,0] get roughly the mirror image.</code></pre>
+
+  <div class="callout callout-key">
+    <span class="callout-icon">🔑</span>
+    <div class="callout-body">
+      <strong>Responsibilities Are Soft Cluster Assignments</strong>
+      <p>The responsibility matrix <em>is</em> the clustering result — a full probability distribution over components for every point, not a single label. <code>GaussianMixture.predict_proba(X)</code> returns exactly this matrix; <code>.predict(X)</code> just takes the argmax of it for you when you need a hard label.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 5 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">5</span> M-Step: Updating the Parameters</h2>
+
+  <p>The M-step re-estimates each component's parameters as a <em>weighted</em> version of ordinary maximum-likelihood estimates — every point contributes to every component's update, weighted by that point's responsibility for that component. Define <em>N<sub>k</sub> = Σ<sub>n</sub> γ(z<sub>nk</sub>)</em> — the "effective number of points" softly assigned to component k:</p>
+
+  <pre><code class="language-python">import numpy as np
+
+def m_step(X, resp):
+    """Re-estimate weights, means, and covariances from responsibilities."""
+    n_samples, K = resp.shape
+    N_k = resp.sum(axis=0)                       # effective count per component
+
+    weights = N_k / n_samples                     # new mixing weights: pi_k = N_k / n
+    means = (resp.T @ X) / N_k[:, None]            # responsibility-weighted mean
+
+    covariances = []
+    for k in range(K):
+        diff = X - means[k]                        # (n_samples, n_features)
+        # Responsibility-weighted outer product, summed over points
+        weighted_cov = (resp[:, k:k+1] * diff).T @ diff / N_k[k]
+        covariances.append(weighted_cov)
+
+    return weights, means, covariances
+
+# Continuing the E-step example: feed its responsibilities back through M
+from scipy.stats import multivariate_normal
+def e_step(X, weights, means, covariances):
+    n_samples, K = X.shape[0], len(weights)
+    resp = np.zeros((n_samples, K))
+    for k in range(K):
+        resp[:, k] = weights[k] * multivariate_normal.pdf(X, mean=means[k], cov=covariances[k])
+    return resp / resp.sum(axis=1, keepdims=True)
+
+np.random.seed(42)
+X_demo = np.vstack([np.random.randn(50, 2) * 0.4 + [0, 0], np.random.randn(50, 2) * 0.4 + [4, 0]])
+weights, means, covariances = [0.5, 0.5], [np.array([1.0, 0.0]), np.array([3.0, 0.0])], [np.eye(2), np.eye(2)]
+
+for iteration in range(10):
+    resp = e_step(X_demo, weights, means, covariances)
+    weights, means, covariances = m_step(X_demo, resp)
+
+print("Converged weights:", np.round(weights, 3))
+print("Converged means:\n", np.round(means, 3))
+# Should land close to pi=[0.5, 0.5], means near [0,0] and [4,0]</code></pre>
+
+  <p>Notice the parallel to K-Means' update step: K-Means recomputes each centroid as the mean of its <em>hard-assigned</em> points; GMM recomputes each component's mean (and now also its covariance) as the mean of <em>all</em> points, weighted by responsibility. Points far from a component barely move its estimate; points close to it dominate. The M-step is doing weighted maximum likelihood estimation, one component at a time.</p>
+</div>
+
+<!-- ── Section 6 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">6</span> Covariance Types: full, diag, tied, spherical</h2>
+
+  <p>The covariance matrix <em>Σ<sub>k</sub></em> is what lets a component be an ellipse instead of a circle — but a full covariance matrix has a lot of parameters (for d features, d(d+1)/2 per component), which can overfit on small datasets or high dimensions. scikit-learn's <code>GaussianMixture</code> exposes a <code>covariance_type</code> argument that trades flexibility for parameter count:</p>
+
+  <table style="width:100%; border-collapse: collapse; margin: 1.25rem 0; font-size: 0.88rem;">
+    <thead>
+      <tr style="background: var(--bg-alt); text-align: left;">
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">covariance_type</th>
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Shape it allows</th>
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Parameters per component</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);"><code>full</code> (default)</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Any ellipse — any size, shape, and orientation, independent per component</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">d(d+1)/2 — most flexible, most prone to overfitting</td>
+      </tr>
+      <tr style="background: var(--bg-subtle);">
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);"><code>tied</code></td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Any ellipse, but every component shares the <em>same</em> shape and orientation</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">d(d+1)/2 total (shared across all K)</td>
+      </tr>
+      <tr>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);"><code>diag</code></td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Axis-aligned ellipse (no tilt) — each feature has its own spread, independently per component</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">d per component</td>
+      </tr>
+      <tr style="background: var(--bg-subtle);">
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);"><code>spherical</code></td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">A circle/sphere — one radius per component, no elongation at all</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">1 per component (closest thing to K-Means)</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <pre><code class="language-python">import numpy as np
+from sklearn.mixture import GaussianMixture
+from sklearn.datasets import make_blobs
+
+X, y_true = make_blobs(n_samples=600, centers=3, cluster_std=[0.5, 1.5, 0.8], random_state=42)
+
+for cov_type in ['full', 'tied', 'diag', 'spherical']:
+    gmm = GaussianMixture(n_components=3, covariance_type=cov_type, n_init=5, random_state=42)
+    gmm.fit(X)
+    print(f"{cov_type:10s}  log-likelihood: {gmm.score(X) * len(X):10.1f}  "
+          f"BIC: {gmm.bic(X):8.1f}  n_params: {gmm._n_parameters()}")
+# 'full' usually gets the best (lowest) BIC when clusters genuinely differ in
+# shape, like this dataset -- but on small or high-dimensional data,
+# 'diag' or 'tied' can win by avoiding overfitting the extra parameters.</code></pre>
+
+  <div class="callout callout-tip">
+    <span class="callout-icon">💡</span>
+    <div class="callout-body">
+      <strong>Default to full, Then Check BIC</strong>
+      <p>Start with <code>covariance_type='full'</code> — it's the most expressive and sklearn's default. If you have very high-dimensional data or suspect overfitting (fit looks great on training data, unstable across re-runs), compare BIC across all four covariance types (Section 7) and let the data pick the right trade-off rather than guessing.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 7 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">7</span> Choosing K: BIC and AIC</h2>
+
+  <p>K-Means' elbow method doesn't transfer to GMM, because a GMM's log-likelihood — unlike WCSS — doesn't monotonically improve in a way that produces a clean elbow; it can also be pushed arbitrarily high by overfitting (imagine one tiny-variance Gaussian centered exactly on each point). Instead, GMM model selection uses <strong>information criteria</strong> that explicitly penalize complexity:</p>
+
+  <ul>
+    <li><strong>BIC (Bayesian Information Criterion):</strong> −2·log-likelihood + k·log(n), where k is the number of parameters and n is the number of samples. The log(n) penalty makes BIC increasingly strict about extra parameters as your dataset grows.</li>
+    <li><strong>AIC (Akaike Information Criterion):</strong> −2·log-likelihood + 2·k. A softer, constant penalty per parameter regardless of dataset size — tends to prefer slightly larger, more flexible models than BIC.</li>
+  </ul>
+
+  <p>For both, <strong>lower is better</strong> — you're looking for the number of components that best balances how well the model fits the data against how many parameters it took to get there.</p>
+
+  <pre><code class="language-python">import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.mixture import GaussianMixture
+from sklearn.datasets import make_blobs
+
+X, _ = make_blobs(n_samples=600, centers=4, cluster_std=0.9, random_state=42)
+
+n_components_range = range(1, 11)
+bic_scores, aic_scores = [], []
+
+for n in n_components_range:
+    gmm = GaussianMixture(n_components=n, covariance_type='full', n_init=5, random_state=42)
+    gmm.fit(X)
+    bic_scores.append(gmm.bic(X))
+    aic_scores.append(gmm.aic(X))
+    print(f"K={n:2d}  BIC={gmm.bic(X):9.1f}  AIC={gmm.aic(X):9.1f}")
+
+best_k_bic = list(n_components_range)[np.argmin(bic_scores)]
+best_k_aic = list(n_components_range)[np.argmin(aic_scores)]
+print(f"\nBest K by BIC: {best_k_bic}  (true K=4)")
+print(f"Best K by AIC: {best_k_aic}")
+
+plt.figure(figsize=(9, 5))
+plt.plot(n_components_range, bic_scores, 'o-', label='BIC', linewidth=2)
+plt.plot(n_components_range, aic_scores, 's-', label='AIC', linewidth=2)
+plt.axvline(x=best_k_bic, color='red', linestyle='--', alpha=0.6, label=f'BIC minimum (K={best_k_bic})')
+plt.xlabel('Number of Components (K)')
+plt.ylabel('Information Criterion (lower = better)')
+plt.title('Choosing K for a GMM with BIC / AIC')
+plt.legend()
+plt.tight_layout()
+plt.savefig('gmm_bic_aic.png', dpi=150)</code></pre>
+
+  <div class="callout callout-warn">
+    <span class="callout-icon">⚠️</span>
+    <div class="callout-body">
+      <strong>BIC/AIC Select the Best-Fitting Model — Not "The Truth"</strong>
+      <p>If your true data-generating process has 4 clusters but two of them overlap heavily, BIC may well prefer K=3 because a 3-component model explains the data almost as well with fewer parameters. Treat the BIC-optimal K as a strong statistical recommendation, then sanity-check it against domain knowledge before locking it in.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 8 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">8</span> GMM vs K-Means: When to Use Which</h2>
+
+  <pre><code class="language-python">import numpy as np
+from sklearn.cluster import KMeans
+from sklearn.mixture import GaussianMixture
+from sklearn.datasets import make_blobs
+from sklearn.metrics import adjusted_rand_score
+import time
+
+# Recreate the "tight cluster + wide cluster" scenario from Section 1
+np.random.seed(42)
+cluster_a = np.random.randn(300, 2) * [0.4, 0.4] + [0, 0]
+cluster_b = np.random.randn(300, 2) * [2.2, 0.6] + [4, 0]
+X = np.vstack([cluster_a, cluster_b])
+y_true = np.array([0] * 300 + [1] * 300)
+
+t0 = time.time()
+km_labels = KMeans(n_clusters=2, n_init=10, random_state=42).fit_predict(X)
+km_time = time.time() - t0
+
+t0 = time.time()
+gmm_labels = GaussianMixture(n_components=2, covariance_type='full', n_init=5, random_state=42).fit_predict(X)
+gmm_time = time.time() - t0
+
+print(f"K-Means  ARI: {adjusted_rand_score(y_true, km_labels):.3f}  ({km_time*1000:.1f} ms)")
+print(f"GMM      ARI: {adjusted_rand_score(y_true, gmm_labels):.3f}  ({gmm_time*1000:.1f} ms)")
+# GMM's ARI is noticeably higher here -- it correctly models the wide
+# cluster's larger footprint instead of splitting it against a same-size
+# assumption. The cost: GMM is doing more work per iteration (covariance
+# estimation and matrix inversion), so it's meaningfully slower per fit.</code></pre>
+
+  <table style="width:100%; border-collapse: collapse; margin: 1.25rem 0; font-size: 0.88rem;">
+    <thead>
+      <tr style="background: var(--bg-alt); text-align: left;">
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Use K-Means when...</th>
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Use GMM when...</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Clusters are roughly spherical and similar in size (common after good feature scaling)</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Clusters are elongated, differently sized, or overlap</td>
+      </tr>
+      <tr style="background: var(--bg-subtle);">
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">You need speed on very large datasets (millions of points) — use <code>MiniBatchKMeans</code></td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">You need calibrated probabilities, not just labels — e.g. "60% confident this transaction is fraud-cluster"</td>
+      </tr>
+      <tr>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">You just need a quick, interpretable baseline for segmentation</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">You want a generative model — e.g. to sample new synthetic points, or score how "typical" a new point is (anomaly detection, Lesson 33)</td>
+      </tr>
+      <tr style="background: var(--bg-subtle);">
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Data is high-dimensional and covariance estimation would be unstable</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">You want soft, principled model comparison via BIC/AIC instead of a heuristic elbow</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <p>In practice, a very common workflow is to run K-Means first — it's fast and gives a decent starting guess — and use its cluster assignments to <em>initialize</em> a GMM's means, letting EM refine the boundaries into whatever shapes the data actually has. <code>sklearn.mixture.GaussianMixture</code> does exactly this by default (<code>init_params='kmeans'</code>).</p>
+</div>
+
+<!-- ── Real-World Spotlight ── -->
+<div class="use-case-section">
+  <div class="use-case-header">
+    <span style="font-size:1.5rem">🌍</span>
+    <h2>Real-World Spotlight: Soft Fraud Segmentation with a GMM</h2>
+  </div>
+  <p>A payments company wants to segment transactions into behavioral clusters for downstream fraud modeling — but a hard K-Means label throws away useful information: a transaction sitting near the boundary between "normal spending" and "unusual burst" is exactly the kind of ambiguous case a fraud analyst wants flagged for review, not silently assigned to whichever cluster happens to win.</p>
+  <pre><code class="language-python">import numpy as np
+import pandas as pd
+from sklearn.mixture import GaussianMixture
+from sklearn.preprocessing import StandardScaler
+
+np.random.seed(42)
+n = 3000
+
+# Simulate transaction features: amount, velocity (txns/hour), merchant_risk_score
+df = pd.DataFrame({
+    'amount': np.concatenate([
+        np.random.lognormal(3.5, 0.6, 2600),   # typical spending
+        np.random.lognormal(6.0, 0.9, 400),    # unusual bursts
+    ]),
+    'velocity': np.concatenate([
+        np.random.poisson(1.2, 2600),
+        np.random.poisson(6.0, 400),
+    ]),
+    'merchant_risk_score': np.concatenate([
+        np.random.beta(2, 8, 2600),
+        np.random.beta(6, 3, 400),
+    ]),
+})
+
+features = ['amount', 'velocity', 'merchant_risk_score']
+X_scaled = StandardScaler().fit_transform(df[features])
+
+# ── Select K with BIC ──
+bic_scores = []
+for k in range(1, 6):
+    gmm = GaussianMixture(n_components=k, covariance_type='full', n_init=5, random_state=42)
+    gmm.fit(X_scaled)
+    bic_scores.append(gmm.bic(X_scaled))
+best_k = np.argmin(bic_scores) + 1
+print(f"Best K by BIC: {best_k}")
+
+# ── Fit final GMM and inspect soft assignments ──
+gmm = GaussianMixture(n_components=best_k, covariance_type='full', n_init=10, random_state=42)
+df['cluster'] = gmm.fit_predict(X_scaled)
+probs = gmm.predict_proba(X_scaled)
+
+# The key advantage over K-Means: flag ambiguous transactions for review
+# instead of silently hard-assigning them.
+df['max_prob'] = probs.max(axis=1)
+ambiguous = df[df['max_prob'] < 0.65]
+print(f"\nTransactions with no dominant cluster (max prob < 0.65): {len(ambiguous)} "
+      f"({len(ambiguous) / len(df):.1%})")
+print("These are prime candidates for manual fraud-analyst review --")
+print("a hard-labeling algorithm like K-Means would have silently picked one.")
+
+# ── Profile the clusters by their means (original scale) ──
+scaler = StandardScaler().fit(df[features])
+cluster_means = pd.DataFrame(
+    scaler.inverse_transform(gmm.means_), columns=features
+).round(2)
+cluster_means['weight'] = gmm.weights_.round(3)
+print("\nCluster profiles:")
+print(cluster_means)</code></pre>
+  <p>The GMM's soft probabilities do real work here: instead of a binary "fraud cluster / not fraud cluster" label, every transaction gets a full probability distribution over behavioral segments, and the ones with no dominant segment become a natural, principled review queue — a distinction K-Means' hard labels simply cannot express.</p>
+</div>
+
+<!-- ── Quiz ── -->
+<div class="quiz-section">
+  <div id="lesson-30-quiz"></div>
+</div>
+
+<!-- ── Practice ── -->
+<div class="practice-card">
+  <h2>✍️ Practice Exercises</h2>
+  <ol>
+    <li>Generate two overlapping 2D Gaussian clusters with <code>make_blobs</code> using different <code>cluster_std</code> values for each. Fit both <code>KMeans</code> and <code>GaussianMixture</code> with K=2. Compare their <code>adjusted_rand_score</code> against the true labels — by how much does GMM win, and why?</li>
+    <li>On the Iris dataset, fit a GMM with <code>covariance_type='full'</code> and K=3. Use <code>predict_proba</code> to find the 5 flowers with the lowest maximum responsibility (the most "ambiguous" cases). Are they near a species boundary?</li>
+    <li>Fit GMMs with K from 1 to 8 on a dataset of your choice, plotting BIC and AIC on the same axes. Do they agree on the best K? If not, which one matches your domain intuition better?</li>
+    <li>Compare all four <code>covariance_type</code> settings on a small (n=50), high-dimensional (10+ feature) synthetic dataset. Which one achieves the best BIC, and why does <code>full</code> tend to struggle here specifically?</li>
+  </ol>
+
+  <details>
+    <summary>▶ Hints</summary>
+    <pre><code class="language-python">from sklearn.datasets import load_iris
+from sklearn.mixture import GaussianMixture
+import numpy as np
+
+iris = load_iris()
+gmm = GaussianMixture(n_components=3, covariance_type='full', n_init=10, random_state=42)
+gmm.fit(iris.data)
+probs = gmm.predict_proba(iris.data)
+max_probs = probs.max(axis=1)
+most_ambiguous = np.argsort(max_probs)[:5]
+print(iris.data[most_ambiguous])
+print(iris.target[most_ambiguous])   # check which species these belong to</code></pre>
+  </details>
+</div>
+
+<!-- ── Primary Source ── -->
+<div class="primary-source">
+  <h2>📚 Primary Source for This Lesson</h2>
+  <p><a href="https://scikit-learn.org/stable/modules/mixture.html" target="_blank"><strong>scikit-learn: Gaussian Mixture Models</strong></a><br>
+  The official guide covers all four covariance types, model selection with BIC/AIC, and the Bayesian (Dirichlet Process) variant. For the original EM algorithm, see Dempster, Laird &amp; Rubin (1977) "Maximum Likelihood from Incomplete Data via the EM Algorithm" (<em>Journal of the Royal Statistical Society</em>) — the paper that gave the general E-step/M-step framework its name, of which GMM fitting is the most common special case.</p>
+</div>
+
+<!-- ── Ask Tutor ── -->
+<div class="ask-tutor">
+  <span class="icon">💬</span>
+  <span>Confused about why responsibilities need to be normalized, or when BIC and AIC disagree? Paste your GMM code and describe what you're seeing — your AI tutor can walk through the E-step/M-step math with your specific data.</span>
+</div>
+
+<!-- ── Navigation ── -->
+<nav class="lesson-nav">
+  <a href="./0029-hierarchical-dbscan-clustering.html" class="nav-btn">← Lesson 29: Hierarchical &amp; DBSCAN Clustering</a>
+  <a href="./0031-pca.html" class="nav-btn nav-btn-next">Lesson 31: Principal Component Analysis →</a>
+</nav>
+
+</div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-core.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/plugins/autoloader/prism-autoloader.min.js"></script>
+<script src="https://cdn.plot.ly/plotly-2.32.0.min.js"></script>
+<script src="../assets/charts.js"></script>
+<script src="../assets/quiz.js"></script>
+<script>
+/* ── Interactive EM simulator (Section 3) ── */
+(function () {
+  function mulberry32(seed) {
+    return function () {
+      seed |= 0; seed = (seed + 0x6D2B79F5) | 0;
+      let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+  function gaussian(rng) {
+    const u1 = Math.max(rng(), 1e-9), u2 = rng();
+    return Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
+  }
+
+  // ── Synthetic dataset: one tight blob, one wide/elongated blob ──
+  const rand = mulberry32(30030);
+  const DATA = [];
+  for (let i = 0; i < 60; i++) DATA.push([0 + gaussian(rand) * 0.5, 0 + gaussian(rand) * 0.5]);
+  for (let i = 0; i < 60; i++) DATA.push([4 + gaussian(rand) * 1.8, 0 + gaussian(rand) * 0.7]);
+
+  const COLORS = [MLCharts.theme.blue, MLCharts.theme.amber];
+
+  function mixColor(r) {
+    // Blend the two component colors by responsibility r = [r0, r1]
+    const c0 = hexToRgb(COLORS[0]), c1 = hexToRgb(COLORS[1]);
+    const mix = [0, 1, 2].map(i => Math.round(c0[i] * r[0] + c1[i] * r[1]));
+    return `rgb(${mix[0]},${mix[1]},${mix[2]})`;
+  }
+  function hexToRgb(hex) {
+    const h = hex.replace('#', '');
+    return [parseInt(h.substring(0, 2), 16), parseInt(h.substring(2, 4), 16), parseInt(h.substring(4, 6), 16)];
+  }
+
+  function gaussianPdf2D(x, mean, cov) {
+    const dx = x[0] - mean[0], dy = x[1] - mean[1];
+    const det = cov[0][0] * cov[1][1] - cov[0][1] * cov[1][0];
+    if (det <= 1e-10) return 1e-10;
+    const invDet = 1 / det;
+    const a = cov[1][1] * invDet, b = -cov[0][1] * invDet, d = cov[0][0] * invDet;
+    const exponent = -0.5 * (dx * (a * dx + b * dy) + dy * (b * dx + d * dy));
+    const norm = 1 / (2 * Math.PI * Math.sqrt(det));
+    return norm * Math.exp(exponent);
+  }
+
+  function eStep(points, weights, means, covs) {
+    return points.map(p => {
+      const dens = covs.map((cov, k) => weights[k] * gaussianPdf2D(p, means[k], cov));
+      const total = dens[0] + dens[1];
+      return [dens[0] / total, dens[1] / total];
+    });
+  }
+
+  function mStep(points, resp) {
+    const K = 2;
+    const Nk = [0, 0];
+    resp.forEach(r => { Nk[0] += r[0]; Nk[1] += r[1]; });
+    const weights = Nk.map(n => n / points.length);
+    const means = [[0, 0], [0, 0]];
+    points.forEach((p, i) => {
+      for (let k = 0; k < K; k++) {
+        means[k][0] += resp[i][k] * p[0];
+        means[k][1] += resp[i][k] * p[1];
+      }
+    });
+    for (let k = 0; k < K; k++) { means[k][0] /= Nk[k]; means[k][1] /= Nk[k]; }
+
+    const covs = [[[0, 0], [0, 0]], [[0, 0], [0, 0]]];
+    points.forEach((p, i) => {
+      for (let k = 0; k < K; k++) {
+        const dx = p[0] - means[k][0], dy = p[1] - means[k][1];
+        covs[k][0][0] += resp[i][k] * dx * dx;
+        covs[k][0][1] += resp[i][k] * dx * dy;
+        covs[k][1][0] += resp[i][k] * dx * dy;
+        covs[k][1][1] += resp[i][k] * dy * dy;
+      }
+    });
+    for (let k = 0; k < K; k++) {
+      covs[k][0][0] = covs[k][0][0] / Nk[k] + 1e-3;
+      covs[k][0][1] = covs[k][0][1] / Nk[k];
+      covs[k][1][0] = covs[k][1][0] / Nk[k];
+      covs[k][1][1] = covs[k][1][1] / Nk[k] + 1e-3;
+    }
+    return { weights, means, covs };
+  }
+
+  function logLikelihood(points, weights, means, covs) {
+    return points.reduce((acc, p) => {
+      const dens = covs.reduce((s, cov, k) => s + weights[k] * gaussianPdf2D(p, means[k], cov), 0);
+      return acc + Math.log(Math.max(dens, 1e-300));
+    }, 0);
+  }
+
+  // Ellipse outline (1 std-dev) via eigendecomposition of a 2x2 covariance
+  function ellipsePoints(mean, cov, nPts) {
+    const a = cov[0][0], b = cov[0][1], d = cov[1][1];
+    const trace = a + d, det = a * d - b * b;
+    const disc = Math.sqrt(Math.max(trace * trace / 4 - det, 0));
+    const l1 = trace / 2 + disc, l2 = trace / 2 - disc;
+    let angle;
+    if (Math.abs(b) > 1e-9) angle = Math.atan2(l1 - a, b);
+    else angle = a >= d ? 0 : Math.PI / 2;
+    const xs = [], ys = [];
+    for (let i = 0; i <= nPts; i++) {
+      const t = (i / nPts) * 2 * Math.PI;
+      const ex = Math.sqrt(Math.max(l1, 0)) * Math.cos(t);
+      const ey = Math.sqrt(Math.max(l2, 0)) * Math.sin(t);
+      xs.push(mean[0] + ex * Math.cos(angle) - ey * Math.sin(angle));
+      ys.push(mean[1] + ex * Math.sin(angle) + ey * Math.cos(angle));
+    }
+    return { xs, ys };
+  }
+
+  let state = {};
+  function resetState(seedOffset) {
+    const rng = mulberry32(30030 + seedOffset);
+    // K-Means-flavoured warm start: two random points as initial means
+    const means = [DATA[Math.floor(rng() * DATA.length)].slice(), DATA[Math.floor(rng() * DATA.length)].slice()];
+    state = {
+      weights: [0.5, 0.5],
+      means,
+      covs: [[[1, 0], [0, 1]], [[1, 0], [0, 1]]],
+      resp: DATA.map(() => [0.5, 0.5]),
+      iteration: 0,
+      converged: false,
+      prevLL: -Infinity,
+    };
+  }
+
+  function stepOnce() {
+    if (state.converged) return;
+    state.resp = eStep(DATA, state.weights, state.means, state.covs);
+    const updated = mStep(DATA, state.resp);
+    state.weights = updated.weights; state.means = updated.means; state.covs = updated.covs;
+    state.iteration += 1;
+    const ll = logLikelihood(DATA, state.weights, state.means, state.covs);
+    if (Math.abs(ll - state.prevLL) < 1e-4) state.converged = true;
+    state.prevLL = ll;
+  }
+
+  function render() {
+    const pointColors = DATA.map((_, i) => mixColor(state.resp[i]));
+    const traces = [{
+      x: DATA.map(p => p[0]), y: DATA.map(p => p[1]), type: 'scatter', mode: 'markers',
+      marker: { color: pointColors, size: 9, opacity: 0.85, line: { color: MLCharts.theme.bgCard, width: 0.5 } },
+      name: 'Points (color = responsibility blend)', hoverinfo: 'skip',
+    }];
+    state.means.forEach((mean, k) => {
+      const { xs, ys } = ellipsePoints(mean, state.covs[k], 60);
+      traces.push({
+        x: xs, y: ys, type: 'scatter', mode: 'lines',
+        line: { color: COLORS[k], width: 2.5 },
+        name: `Component ${k} (1σ)`, hoverinfo: 'skip',
+      });
+      traces.push({
+        x: [mean[0]], y: [mean[1]], type: 'scatter', mode: 'markers',
+        marker: { color: COLORS[k], size: 14, symbol: 'x', line: { color: MLCharts.theme.heading, width: 2.5 } },
+        name: `Mean ${k}`, hoverinfo: 'skip',
+      });
+    });
+
+    const layout = MLCharts.baseLayout({
+      xaxis: { title: { text: 'Feature 1' }, range: [-3, 9] },
+      yaxis: { title: { text: 'Feature 2' }, range: [-4, 4] },
+      showlegend: false,
+    });
+    Plotly.react('l30-em-chart', traces, layout, MLCharts.config);
+
+    const caption = document.getElementById('l30-em-caption');
+    if (caption) {
+      if (state.iteration === 0) {
+        caption.textContent = 'Iteration 0 — components initialized from a K-Means warm start. Click Step to run the E-step and M-step.';
+      } else if (state.converged) {
+        caption.textContent = `Converged after ${state.iteration} iteration${state.iteration === 1 ? '' : 's'} — log-likelihood stopped improving. Notice the amber ellipse stretched to match the wide cluster's true shape, something K-Means' circles cannot do.`;
+      } else {
+        caption.textContent = `Iteration ${state.iteration} — E-step recomputed responsibilities (point colors), M-step updated each component's mean and covariance (ellipses).`;
+      }
+    }
+  }
+
+  document.getElementById('l30-btn-step').addEventListener('click', () => { stepOnce(); render(); });
+  document.getElementById('l30-btn-run').addEventListener('click', () => {
+    let guard = 0;
+    while (!state.converged && guard < 200) { stepOnce(); guard++; }
+    render();
+  });
+  document.getElementById('l30-btn-reset').addEventListener('click', () => {
+    resetState((state._seedOffset || 0) + 1);
+    state._seedOffset = (state._seedOffset || 0) + 1;
+    render();
+  });
+
+  resetState(0);
+  render();
+})();
+</script>
+<script>
+new MLQuiz('lesson-30-quiz', [
+  {
+    question: "What is the fundamental difference between how K-Means and a GMM assign points to clusters?",
+    options: [
+      "K-Means gives each point one hard cluster label; a GMM gives each point a full probability distribution (responsibilities) over all components",
+      "K-Means uses probability; a GMM uses raw Euclidean distance",
+      "K-Means can only handle 2 clusters; a GMM handles any number",
+      "There is no real difference -- they always produce identical cluster boundaries"
+    ],
+    correct: 0,
+    explanation: "K-Means performs hard assignment: every point belongs to exactly one cluster (its nearest centroid). A GMM performs soft assignment: every point gets a responsibility for every component, summing to 1, reflecting genuine uncertainty about which distribution generated it. predict_proba() exposes this directly; predict() just takes the argmax."
+  },
+  {
+    question: "In the EM algorithm, what does the E-step compute, and what does the M-step compute?",
+    options: [
+      "E-step: responsibilities (probability each component generated each point) with parameters fixed. M-step: new weights/means/covariances with responsibilities fixed",
+      "E-step: the number of clusters K. M-step: the final cluster labels",
+      "E-step: eigenvalues of the covariance matrix. M-step: the mean of the data",
+      "E-step and M-step are two names for the same computation, run twice for stability"
+    ],
+    correct: 0,
+    explanation: "EM alternates between two conditional optimizations. E-step (Expectation): given the current parameters, compute each point's responsibility for each component via Bayes' theorem. M-step (Maximization): given the current responsibilities, re-estimate each component's weight, mean, and covariance as a responsibility-weighted average. Neither step alone can solve the problem; alternating them converges to a local optimum of the data's log-likelihood."
+  },
+  {
+    question: "Why can't you use the K-Means elbow method (plotting WCSS vs K) to choose the number of GMM components?",
+    options: [
+      "A GMM's log-likelihood can be pushed arbitrarily high by adding components (e.g. a near-zero-variance Gaussian on a single point), so raw likelihood doesn't produce a meaningful elbow -- you need a complexity-penalized criterion like BIC or AIC instead",
+      "GMMs cannot be evaluated numerically at all, only visually",
+      "The elbow method only works for exactly 2D data",
+      "GMMs always have exactly one correct number of components, so no selection method is needed"
+    ],
+    correct: 0,
+    explanation: "Unlike WCSS, which is bounded and eventually plateaus, a GMM's likelihood keeps improving as you add components -- taken to the extreme, K=n with each Gaussian centered on a single point achieves near-infinite likelihood by badly overfitting. BIC and AIC add an explicit penalty term for the number of parameters, so the criterion actually decreases again once you add components that aren't earning their complexity cost, producing a genuine minimum to select K from."
+  },
+  {
+    question: "Which covariance_type in scikit-learn's GaussianMixture is mathematically closest to what K-Means implicitly assumes?",
+    options: [
+      "spherical -- each component is a circle/sphere with a single radius, exactly K-Means' implicit assumption",
+      "full -- each component can be any ellipse, in any orientation",
+      "tied -- all components share one ellipse shape, but that shape can still be elongated",
+      "diag -- axis-aligned ellipses with independent per-feature spread"
+    ],
+    correct: 0,
+    explanation: "K-Means assigns points purely by Euclidean distance to a centroid, which is equivalent to assuming every cluster is a perfect circle (sphere in higher dimensions) of the same size. 'spherical' covariance -- one scalar variance per component, applied equally in every direction -- is the GMM setting that matches this assumption most closely. As covariance_type moves from spherical -> diag -> tied -> full, the model becomes progressively more flexible than K-Means' implicit geometry."
+  },
+  {
+    question: "A payments team wants not just a cluster label per transaction, but a way to flag transactions that don't clearly belong to any one behavioral segment for manual review. Why is a GMM better suited to this than K-Means?",
+    options: [
+      "GMM's predict_proba() gives a full probability distribution per point, so transactions with no dominant component (e.g. max probability under 0.65) can be identified directly -- K-Means only ever outputs a single hard label with no notion of ambiguity",
+      "GMM always runs faster than K-Means on large transaction datasets",
+      "K-Means cannot process more than two features at once, unlike GMM",
+      "GMM guarantees zero false positives in fraud detection by design"
+    ],
+    correct: 0,
+    explanation: "This is precisely the practical advantage of soft clustering: predict_proba() exposes each point's full responsibility vector, so 'ambiguous' isn't a judgment call bolted on afterward -- it's a number you already have (e.g., max responsibility below some threshold). K-Means' hard predict() collapses that same uncertainty into a single label and discards the information about how confident the assignment was."
+  }
+]);
+</script>
+
+</body>
+</html>

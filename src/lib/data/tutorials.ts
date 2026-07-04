@@ -49,10 +49,10 @@ export const tutorials: Tutorial[] = [
     slug: 'ml-and-dl-mastery',
     title: 'ML & DL Mastery',
     description:
-      'A structured, from-scratch path through machine learning and deep learning — built for engineers who want to understand the math and code, not just import sklearn. Six phases covering data science foundations, supervised and unsupervised ML, deep learning, NLP & LLMs, and production MLOps — 67 lessons in total.',
+      'A structured, from-scratch path through machine learning and deep learning — built for engineers who want to understand the math and code, not just import sklearn. Six phases covering data science foundations, supervised and unsupervised ML, deep learning, NLP & LLMs, and production MLOps — 69 lessons in total.',
     difficulty: 'intermediate',
     parts: 6,
-    estimatedHours: 75,
+    estimatedHours: 77,
     tags: ['python', 'numpy', 'pandas', 'machine-learning', 'deep-learning', 'pytorch'],
     featured: true,
     learningOutcomes: [
@@ -72,9 +72,9 @@ export const tutorials: Tutorial[] = [
     parts_list: [
       { title: 'Phase 1 — Data Science Foundations (8 lessons)', duration: 480 },
       { title: 'Phase 2 — Supervised Machine Learning (19 lessons)', duration: 1320 },
-      { title: 'Phase 3 — Unsupervised Learning & Time Series (8 lessons)', duration: 480 },
+      { title: 'Phase 3 — Unsupervised Learning & Time Series (9 lessons)', duration: 535 },
       { title: 'Phase 4 — Deep Learning Foundations (12 lessons)', duration: 840 },
-      { title: 'Phase 5 — Advanced Deep Learning & NLP (13 lessons)', duration: 900 },
+      { title: 'Phase 5 — Advanced Deep Learning & NLP (14 lessons)', duration: 965 },
       { title: 'Phase 6 — Production ML & MLOps (7 lessons)', duration: 480 },
     ],
   },

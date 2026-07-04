@@ -1,0 +1,1048 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lesson 67: Cloud ML — AWS SageMaker &amp; Managed Deployment | ML Mastery</title>
+  <link rel="stylesheet" href="../assets/style.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
+</head>
+<body>
+
+<!-- ── Header ── -->
+<header class="lesson-header">
+  <div class="header-inner">
+    <nav class="breadcrumb">
+      <a href="../reference/curriculum-map.html">ML Mastery</a>
+      <span class="sep">›</span>
+      <span>Phase 6: Production ML &amp; MLOps</span>
+    </nav>
+    <div class="lesson-badges">
+      <span class="phase-badge">Phase 6 · Production ML &amp; MLOps</span>
+      <span class="lesson-num-badge">Lesson 67</span>
+    </div>
+    <h1 class="lesson-title">Cloud ML: AWS SageMaker &amp; Managed Deployment</h1>
+    <p class="lesson-subtitle">When self-managed Docker deployments stop scaling — how a managed ML platform takes over training infrastructure, model versioning, endpoint scaling, and monitoring, and what that convenience costs.</p>
+    <div class="meta-pills">
+      <span class="meta-pill">⏱ ~65 min</span>
+      <span class="meta-pill">☁️ Managed Cloud ML</span>
+      <span class="meta-pill">🐍 Python + boto3 + sagemaker SDK</span>
+      <span class="meta-pill">Requires Lesson 66</span>
+    </div>
+  </div>
+</header>
+
+<main class="lesson-main">
+<div class="content-wrapper">
+
+<!-- Objectives -->
+<div class="objectives-card">
+  <h2>🎯 What You'll Learn</h2>
+  <ul>
+    <li>Articulate what a managed ML platform adds on top of a self-managed FastAPI + Docker deployment, and when that trade is worth it</li>
+    <li>Launch a managed training job with the SageMaker Python SDK's <code>Estimator</code>/<code>PyTorch</code> classes, including spot instances and distributed training</li>
+    <li>Decide between bringing your own Docker container ("BYOC") and using a built-in framework container</li>
+    <li>Register, version, and approve models with the SageMaker Model Registry</li>
+    <li>Choose between real-time endpoints, batch transform jobs, and serverless inference based on traffic shape</li>
+    <li>Deploy an auto-scaling real-time endpoint with <code>Model.deploy()</code> and configure scaling policies</li>
+    <li>Orchestrate a full train → evaluate → register → deploy workflow as a DAG with SageMaker Pipelines</li>
+    <li>Reason about instance selection (CPU vs GPU, spot vs on-demand) and avoid the most common cost pitfalls</li>
+  </ul>
+</div>
+
+<div class="callout callout-key">
+  <span class="callout-icon">💡</span>
+  <div class="callout-body">
+    <strong>The Big Intuition</strong>
+    <p>In Lesson 66 you packaged a model into a Docker container, wrote a FastAPI app around it, and deployed it yourself — you own the EC2 instance (or Kubernetes cluster), the load balancer, the autoscaling rules, the health checks, and the 3am pager when a node runs out of disk. That's completely viable, and plenty of production systems run exactly that way forever. SageMaker (and platforms like it — Vertex AI, Azure ML) sells you the same end state — a containerized model behind an endpoint — but takes over the undifferentiated heavy lifting: provisioning training compute, orchestrating distributed jobs, scaling endpoints up and down, versioning models, and wiring up monitoring. You trade direct control and a flat EC2 bill for a managed control plane, a different (often higher, but more predictable) cost structure, and AWS-specific APIs you can't easily port elsewhere. The skill this lesson teaches isn't "SageMaker is better" — it's recognizing which problem you actually have, because the two approaches solve different ones.</p>
+  </div>
+</div>
+
+<!-- ── Section 1 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">1</span> Why Move Off Self-Managed Docker?</h2>
+
+  <p>The FastAPI + Docker stack from Lesson 66 is minimal and transparent: you control every layer, there's no vendor abstraction between you and the kernel, and you pay only for the EC2 instances (or equivalent) you provision. It starts to strain in a few recognizable ways as a team or workload grows:</p>
+
+  <ul>
+    <li><strong>Training infrastructure churn.</strong> A single GPU box is fine for one experiment. A team running 30 training jobs a week, some needing 8x A100s for a few hours and most needing nothing, ends up either over-provisioning idle GPU boxes or hand-rolling a job queue and autoscaler — which is its own infrastructure project.</li>
+    <li><strong>Endpoint scaling under variable load.</strong> Hand-rolling autoscaling for a FastAPI container means wiring CloudWatch alarms, an Application Load Balancer, target tracking policies, and health checks yourself — solvable, but it's now infrastructure code you own and must maintain.</li>
+    <li><strong>Model lineage and governance.</strong> "Which container image, which weights file, and which training data produced the model currently serving production traffic?" is easy to lose track of with ad hoc S3 paths and Docker tags, especially across a team.</li>
+    <li><strong>Operational burden distributed across many small projects.</strong> A single ML team might own a dozen models. Re-deriving health checks, logging, scaling policies, and rollback procedures a dozen times is real, recurring cost — even if each instance is "simple."</li>
+  </ul>
+
+  <p>SageMaker addresses each of these with a managed service: <strong>Training Jobs</strong> for ephemeral, auto-provisioned training compute; <strong>Model Registry</strong> for lineage and versioning; <strong>Endpoints</strong> with built-in auto-scaling and monitoring; and <strong>Pipelines</strong> to wire the stages together. None of this is magic — under the hood it's still EC2 instances running containers — but AWS operates the orchestration layer so your team doesn't have to.</p>
+
+  <h3>What You Give Up</h3>
+  <p>The honest tradeoffs, not just the marketing version:</p>
+  <ul>
+    <li><strong>Vendor lock-in.</strong> Code written against the <code>sagemaker</code> SDK, Pipelines DAGs, and SageMaker-specific container conventions (e.g. <code>/opt/ml/model</code>, <code>SM_MODEL_DIR</code> environment variables) does not move to GCP or on-prem without rework.</li>
+    <li><strong>Cost opacity and floors.</strong> Real-time endpoints bill per-hour for the underlying instance whether or not it's serving traffic, on top of SageMaker's per-hour markup over raw EC2. A forgotten endpoint is a forgotten EC2 bill that doesn't stop until someone deletes it.</li>
+    <li><strong>Slower local iteration.</strong> Debugging a training job that fails after 20 minutes of provisioning + data download is slower than debugging the same script run locally in your container.</li>
+    <li><strong>Abstraction leakage.</strong> When something goes wrong inside the managed layer (a container that won't start, a networking misconfiguration in VPC mode), you're debugging AWS's orchestration as much as your own code.</li>
+  </ul>
+
+  <div class="callout callout-tip">
+    <span class="callout-icon">💡</span>
+    <div class="callout-body">
+      <strong>A Rule of Thumb</strong>
+      <p>If you have one or two models, predictable traffic, and a team comfortable owning infrastructure, the Lesson 66 approach is often cheaper and simpler — don't adopt SageMaker just because it's "the enterprise way." Reach for SageMaker when you have many models or experiments competing for compute, spiky/unpredictable training needs that benefit from spot instances and elastic provisioning, a compliance requirement for auditable model lineage, or an ML platform team whose job is specifically to amortize this orchestration cost across many product teams.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 2 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">2</span> SageMaker Studio and the Development Loop</h2>
+
+  <p><strong>SageMaker Studio</strong> is a managed JupyterLab-based IDE: notebooks run on managed compute instances (selectable per-notebook, including GPU instances), with direct access to S3, IAM-scoped permissions, and the rest of the SageMaker APIs already configured. The practical benefit over a local notebook is that the heavy compute (loading a large dataset, doing exploratory training on a GPU) happens on a rented instance you can resize or shut down independently of your laptop, and the notebook environment is reproducible across a team.</p>
+
+  <p>For day-to-day development, most teams don't write training logic <em>inside</em> a Studio notebook — they use the notebook as a control surface that submits jobs to the managed training and endpoint APIs, and write the actual model code as a standalone script that can run identically inside a SageMaker training container or on a laptop. That separation matters: it keeps your model code portable and testable outside of AWS, with only a thin "launch" layer depending on the <code>sagemaker</code> SDK.</p>
+
+  <pre><code class="language-python">import sagemaker
+import boto3
+
+# A SageMaker "session" wraps boto3 clients with SageMaker-aware helpers
+# (S3 upload conventions, default bucket naming, region resolution, etc.)
+session = sagemaker.Session()
+
+# The execution role: an IAM role SageMaker assumes to read training data
+# from S3, pull container images from ECR, and write model artifacts back to S3.
+# Inside Studio this is auto-detected; outside Studio you pass an explicit ARN.
+role = sagemaker.get_execution_role()  # or: "arn:aws:iam::123456789012:role/SageMakerExecutionRole"
+
+bucket = session.default_bucket()
+region = session.boto_region_name
+
+print(f"SageMaker session ready")
+print(f"  Execution role: {role}")
+print(f"  Default bucket: {bucket}")
+print(f"  Region:         {region}")</code></pre>
+
+  <div class="output-block">
+    <div class="output-label">Example Output</div>
+SageMaker session ready
+  Execution role: arn:aws:iam::123456789012:role/service-role/AmazonSageMaker-ExecutionRole-20260115T120000
+  Default bucket: sagemaker-us-east-1-123456789012
+  Region:         us-east-1
+  </div>
+
+  <p>Everything that follows — launching a training job, registering a model, deploying an endpoint — is driven through this <code>session</code> and <code>role</code>, whether you call it from Studio, a local terminal with AWS credentials configured, or a CI/CD pipeline.</p>
+</div>
+
+<!-- ── Section 3 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">3</span> Managed Training: The Estimator API</h2>
+
+  <p>The core abstraction for training is the <code>Estimator</code>: you describe what to run (a script, a container, hyperparameters), what compute to run it on (instance type, count, spot vs on-demand), and where the data and output artifacts live (S3 paths). Calling <code>.fit()</code> provisions ephemeral compute, runs your training script inside a container, uploads the resulting model artifact to S3, and tears the compute back down — you never SSH into a long-lived training box.</p>
+
+  <h3>Built-In Framework Containers vs Bring Your Own Container (BYOC)</h3>
+  <p>SageMaker maintains pre-built, AWS-optimized Docker images for the major frameworks (PyTorch, TensorFlow, Hugging Face, XGBoost, scikit-learn). Using <code>sagemaker.pytorch.PyTorch</code> means you supply only your training script and a <code>requirements.txt</code> — AWS handles the CUDA drivers, framework installation, and distributed-training plumbing. This is the path of least resistance and what most teams should default to.</p>
+
+  <p>Bringing your own container (the same Dockerfile pattern from Lesson 66, with a few SageMaker conventions added — reading hyperparameters from <code>SM_HP_*</code> environment variables, writing the model to <code>/opt/ml/model</code>, accepting an <code>SM_CHANNEL_TRAIN</code> data path) is the right call when your training stack has unusual system dependencies the built-in containers don't support (a custom compiled library, a non-standard CUDA version, a non-Python toolchain step) — essentially the same "do I need a custom container" judgment call you made in Lesson 66, just applied to training instead of serving.</p>
+
+  <pre><code class="language-python">from sagemaker.pytorch import PyTorch
+
+# Using a built-in PyTorch framework container — no Dockerfile needed.
+estimator = PyTorch(
+    entry_point="train.py",         # your training script (runs inside the container)
+    source_dir="src",               # local dir containing train.py + requirements.txt
+    role=role,
+    framework_version="2.3",
+    py_version="py311",
+    instance_type="ml.g5.xlarge",   # 1x NVIDIA A10G GPU
+    instance_count=1,
+    hyperparameters={
+        "epochs": 10,
+        "batch-size": 64,
+        "learning-rate": 3e-4,
+    },
+    output_path=f"s3://{bucket}/churn-model/output",
+    base_job_name="churn-classifier",
+
+    # Spot instances: up to ~70% cheaper than on-demand, at the cost of
+    # possible interruption. SageMaker automatically resumes from the
+    # last checkpoint if the spot instance is reclaimed.
+    use_spot_instances=True,
+    max_run=3600,            # hard ceiling: 1 hour of compute time
+    max_wait=7200,           # allow up to 2 hours of *wall clock* time waiting for spot capacity
+    checkpoint_s3_uri=f"s3://{bucket}/churn-model/checkpoints",
+)
+
+# Data channels: named S3 locations SageMaker mounts into the container
+# as local directories (e.g. /opt/ml/input/data/train).
+estimator.fit({
+    "train": f"s3://{bucket}/churn-data/train/",
+    "validation": f"s3://{bucket}/churn-data/validation/",
+})</code></pre>
+
+  <div class="output-block">
+    <div class="output-label">Training Job Logs (CloudWatch, streamed to notebook)</div>
+2026-07-01 09:14:02 Starting - Starting the training job...
+2026-07-01 09:14:18 Starting - Launching requested ML instances (spot)...
+2026-07-01 09:16:41 Starting - Insufficient capacity, retrying spot request...
+2026-07-01 09:18:09 Starting - Spot instance allocated (ml.g5.xlarge)
+2026-07-01 09:18:55 Downloading - Downloading input data from S3...
+2026-07-01 09:19:30 Training - Training image download completed.
+2026-07-01 09:19:31 Training - Training started.
+Epoch 1/10 - loss: 0.6123 - val_loss: 0.5887 - val_auc: 0.781
+Epoch 2/10 - loss: 0.4912 - val_loss: 0.4790 - val_auc: 0.829
+...
+Epoch 10/10 - loss: 0.2140 - val_loss: 0.2390 - val_auc: 0.911
+2026-07-01 09:34:02 Uploading - Uploading generated training model
+2026-07-01 09:34:48 Completed - Training job completed
+Managed spot training savings: 68.2%
+Billable seconds: 947 (vs 2980 wall-clock seconds)
+  </div>
+
+  <h3>Distributed Training</h3>
+  <p>For models too large or datasets too slow to train on one machine, the same <code>Estimator</code> scales out by increasing <code>instance_count</code> and specifying a <code>distribution</code> strategy — SageMaker handles inter-node networking (placement groups, EFA where available) and launches the appropriate distributed backend on each node.</p>
+
+  <pre><code class="language-python">from sagemaker.pytorch import PyTorch
+
+distributed_estimator = PyTorch(
+    entry_point="train_ddp.py",
+    source_dir="src",
+    role=role,
+    framework_version="2.3",
+    py_version="py311",
+    instance_type="ml.p4d.24xlarge",   # 8x A100 per node
+    instance_count=4,                  # 4 nodes = 32 GPUs total
+    hyperparameters={"epochs": 5, "batch-size": 32},
+    output_path=f"s3://{bucket}/large-model/output",
+    distribution={"torch_distributed": {"enabled": True}},  # PyTorch DDP across nodes
+)
+
+distributed_estimator.fit({"train": f"s3://{bucket}/large-dataset/train/"})</code></pre>
+
+  <div class="callout callout-warn">
+    <span class="callout-icon">⚠️</span>
+    <div class="callout-body">
+      <strong>Cost Pitfall: Oversized Training Instances</strong>
+      <p>It's easy to reflexively reach for <code>ml.p4d.24xlarge</code> ($30+/hour on-demand) for a model that trains fine on a single <code>ml.g5.xlarge</code> ($1.4/hour). Multi-GPU and multi-node instances only help if your training loop and data pipeline can actually saturate them — otherwise you're paying for idle GPUs while your dataloader is the bottleneck. Start with the smallest instance that fits the model and batch size in memory, profile GPU utilization (SageMaker emits this to CloudWatch automatically), and scale up only when utilization is consistently near 100% and wall-clock time is the binding constraint. Always set <code>max_run</code> as a safety ceiling — a training job stuck in an infinite loop with no time limit will happily bill you for days.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 4 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">4</span> SageMaker Model Registry</h2>
+
+  <p>Once <code>estimator.fit()</code> finishes, the resulting model artifact (weights + any preprocessing objects) lives at an S3 path under <code>estimator.model_data</code>. On its own that's just a file — the <strong>Model Registry</strong> turns it into a versioned, governed entity: a <strong>Model Package Group</strong> represents a logical model (e.g. "churn-classifier"), and each training run that produces a candidate is registered as a numbered <strong>Model Package version</strong> within that group, carrying metadata (metrics, the training job that produced it, an approval status).</p>
+
+  <p>This plays the same role MLflow's Model Registry played in Lesson 65 — the difference is that SageMaker's registry is wired directly into the deployment APIs: a model package's approval status can directly gate whether a downstream Pipeline step is allowed to deploy it.</p>
+
+  <pre><code class="language-python">import boto3
+
+sm_client = boto3.client("sagemaker")
+
+# Create (once) a Model Package Group — the logical "model" the versions belong to
+sm_client.create_model_package_group(
+    ModelPackageGroupName="churn-classifier",
+    ModelPackageGroupDescription="Customer churn classifier, retrained weekly",
+)
+
+# Register this training run's artifact as a new version in that group
+model_package = estimator.register(
+    content_types=["application/json"],
+    response_types=["application/json"],
+    inference_instances=["ml.m5.large", "ml.m5.xlarge"],
+    transform_instances=["ml.m5.large"],
+    model_package_group_name="churn-classifier",
+    approval_status="PendingManualApproval",   # require a human (or automated gate) to approve
+    model_metrics=None,   # in practice: attach a sagemaker.model_metrics.ModelMetrics object
+)
+
+print(f"Registered: {model_package.model_package_arn}")
+
+# Later — after a reviewer checks validation metrics — approve it for deployment
+sm_client.update_model_package(
+    ModelPackageArn=model_package.model_package_arn,
+    ModelApprovalStatus="Approved",
+)</code></pre>
+
+  <div class="output-block">
+    <div class="output-label">Example Output</div>
+Registered: arn:aws:sagemaker:us-east-1:123456789012:model-package/churn-classifier/7
+
+aws sagemaker list-model-packages --model-package-group-name churn-classifier
+  Version 7  | PendingManualApproval | val_auc=0.911 | 2026-07-01T09:34Z
+  Version 6  | Approved              | val_auc=0.897 | 2026-06-24T10:02Z
+  Version 5  | Rejected              | val_auc=0.844 | 2026-06-17T09:55Z
+  </div>
+
+  <div class="callout callout-tip">
+    <span class="callout-icon">💡</span>
+    <div class="callout-body">
+      <strong>Registry as a Deployment Gate</strong>
+      <p>The real value of the registry shows up in automation: a CI/CD pipeline (or a SageMaker Pipeline, covered in Section 7) can be configured to only deploy model packages with <code>ModelApprovalStatus = Approved</code>. That turns "did someone review this model before it went live" from a process you hope people follow into a condition the deployment code enforces — directly analogous to requiring a passing test suite before a merge.</p>
+    </div>
+  </div>
+</div>
+
+<div class="quiz-section">
+  <h2>Quick Check</h2>
+  <div id="quiz-67-mid"></div>
+</div>
+
+<!-- ── Section 5 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">5</span> Three Ways to Serve Predictions</h2>
+
+  <p>This is the section that maps most directly onto Lesson 66. There, you built one thing: a FastAPI process behind a REST endpoint, always running, serving requests synchronously. SageMaker splits "serving predictions" into three distinct products because real workloads don't all have the same traffic shape — using the wrong one is a common source of either overspending or excess latency.</p>
+
+  <div class="diagram-svg-wrap">
+    <svg viewBox="0 0 780 290" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Three ways to serve predictions from a trained SageMaker model: a real-time endpoint that is always on with the lowest latency, a batch transform job that runs on a schedule over a large dataset with no persistent endpoint, and a serverless endpoint that scales to zero between invocations at the cost of cold-start latency">
+      <defs>
+        <marker id="l65-serving-arrowhead" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+          <path d="M0,0 L8,4 L0,8 Z" fill="var(--text-muted)"></path>
+        </marker>
+      </defs>
+
+      <!-- Trained model -->
+      <rect class="diagram-node-alt" x="290" y="15" width="200" height="56" rx="8"></rect>
+      <text class="diagram-label" x="390" y="39">Trained Model</text>
+      <text class="diagram-sublabel" x="390" y="57">Model.deploy() / .transformer()</text>
+
+      <!-- Branches -->
+      <line class="diagram-arrow" style="marker-end:url(#l65-serving-arrowhead)" x1="390" y1="71" x2="150" y2="88"></line>
+      <line class="diagram-arrow" style="marker-end:url(#l65-serving-arrowhead)" x1="390" y1="71" x2="390" y2="88"></line>
+      <line class="diagram-arrow" style="marker-end:url(#l65-serving-arrowhead)" x1="390" y1="71" x2="630" y2="88"></line>
+
+      <!-- Column headers -->
+      <rect class="diagram-node" x="30" y="90" width="220" height="54" rx="8"></rect>
+      <text class="diagram-label" x="140" y="114">Real-Time Endpoint</text>
+      <text class="diagram-sublabel" x="140" y="132">always-on · synchronous</text>
+
+      <rect class="diagram-node-good" x="280" y="90" width="220" height="54" rx="8"></rect>
+      <text class="diagram-label" x="390" y="114">Batch Transform</text>
+      <text class="diagram-sublabel" x="390" y="132">scheduled bulk job</text>
+
+      <rect class="diagram-node-bad" x="530" y="90" width="220" height="54" rx="8"></rect>
+      <text class="diagram-label" x="640" y="114">Serverless Inference</text>
+      <text class="diagram-sublabel" x="640" y="132">scale-to-zero</text>
+
+      <!-- Column detail bodies -->
+      <rect class="diagram-node" x="30" y="154" width="220" height="118" rx="8"></rect>
+      <text class="diagram-sublabel" x="140" y="180">Latency: ~20–50ms, no cold start</text>
+      <text class="diagram-sublabel" x="140" y="204">Cost: per-hour, always-on instance</text>
+      <text class="diagram-sublabel" x="140" y="228">Best for: steady, latency-sensitive traffic</text>
+      <text class="diagram-sublabel" x="140" y="252">e.g. real-time fraud scoring</text>
+
+      <rect class="diagram-node-good" x="280" y="154" width="220" height="118" rx="8"></rect>
+      <text class="diagram-sublabel" x="390" y="180">Latency: N/A — not synchronous</text>
+      <text class="diagram-sublabel" x="390" y="204">Cost: per-job compute time only</text>
+      <text class="diagram-sublabel" x="390" y="228">Best for: large known dataset, offline</text>
+      <text class="diagram-sublabel" x="390" y="252">e.g. nightly demand forecast</text>
+
+      <rect class="diagram-node-bad" x="530" y="154" width="220" height="118" rx="8"></rect>
+      <text class="diagram-sublabel" x="640" y="180">Latency: cold-start penalty (~400ms+)</text>
+      <text class="diagram-sublabel" x="640" y="204">Cost: per-invocation + duration</text>
+      <text class="diagram-sublabel" x="640" y="228">Best for: spiky, intermittent traffic</text>
+      <text class="diagram-sublabel" x="640" y="252">e.g. bursty recommendation API</text>
+    </svg>
+    <p class="diagram-svg-caption">The three SageMaker serving options trade latency, cost model, and operational shape against each other rather than one strictly dominating: a real-time endpoint pays for always-on capacity to get the lowest latency, batch transform trades synchronous access for near-zero idle cost on large offline jobs, and serverless inference scales to zero between calls at the cost of cold-start latency on the first request after idle.</p>
+  </div>
+
+  <h3>5.1 Real-Time Inference Endpoints</h3>
+  <p>The closest analog to Lesson 66's FastAPI deployment: a persistent HTTPS endpoint backed by one or more always-on instances, for synchronous, low-latency, unpredictable-arrival-time requests. You get this from <code>Model.deploy()</code>, and — unlike your hand-rolled FastAPI container — auto-scaling, multi-model hosting, and request/response logging for monitoring are configuration, not code you write.</p>
+
+  <pre><code class="language-python">from sagemaker.model import Model
+from sagemaker.predictor import Predictor
+from sagemaker.serializers import JSONSerializer
+from sagemaker.deserializers import JSONDeserializer
+
+model = Model(
+    model_data=estimator.model_data,            # S3 path to the trained artifact
+    image_uri=estimator.training_image_uri(),    # matching inference container
+    role=role,
+    sagemaker_session=session,
+)
+
+predictor = model.deploy(
+    initial_instance_count=2,
+    instance_type="ml.m5.large",
+    endpoint_name="churn-classifier-rt",
+    serializer=JSONSerializer(),
+    deserializer=JSONDeserializer(),
+)
+
+# Synchronous prediction — just like calling your FastAPI endpoint in Lesson 66
+result = predictor.predict({"features": [0.42, 1.0, 0.0, 5.3, 12]})
+print(result)
+
+# Configure auto-scaling: target 70% average CPU utilization,
+# scale out within minutes of sustained load, scale back in during quiet periods.
+import boto3
+autoscaling = boto3.client("application-autoscaling")
+
+resource_id = f"endpoint/{predictor.endpoint_name}/variant/AllTraffic"
+autoscaling.register_scalable_target(
+    ServiceNamespace="sagemaker",
+    ResourceId=resource_id,
+    ScalableDimension="sagemaker:variant:DesiredInstanceCount",
+    MinCapacity=2,
+    MaxCapacity=10,
+)
+autoscaling.put_scaling_policy(
+    PolicyName="churn-endpoint-cpu-target",
+    ServiceNamespace="sagemaker",
+    ResourceId=resource_id,
+    ScalableDimension="sagemaker:variant:DesiredInstanceCount",
+    PolicyType="TargetTrackingScaling",
+    TargetTrackingScalingPolicyConfiguration={
+        "TargetValue": 70.0,
+        "PredefinedMetricSpecification": {
+            "PredefinedMetricType": "SageMakerVariantInvocationsPerInstance"
+        },
+        "ScaleInCooldown": 300,
+        "ScaleOutCooldown": 60,
+    },
+)</code></pre>
+
+  <div class="output-block">
+    <div class="output-label">Example Output</div>
+-----!
+{'prediction': 'churn', 'probability': 0.873}
+
+Endpoint: churn-classifier-rt | Status: InService
+Variant: AllTraffic | CurrentInstanceCount: 2 | DesiredInstanceCount: 2
+Auto-scaling registered: min=2, max=10, target=70% invocations/instance
+  </div>
+
+  <h3>5.2 Batch Transform</h3>
+  <p>When you need predictions for a large, known set of records all at once — no live endpoint, no per-request latency requirement — spinning up a persistent endpoint is wasted spend. <strong>Batch Transform</strong> provisions compute, reads input from S3, runs inference over the whole dataset, writes predictions back to S3, and tears the compute down. This is the natural fit for nightly or weekly scoring jobs.</p>
+
+  <pre><code class="language-python">transformer = model.transformer(
+    instance_count=4,
+    instance_type="ml.m5.xlarge",
+    output_path=f"s3://{bucket}/churn-scores/{run_date}/",
+    strategy="MultiRecord",     # batch multiple records per inference call
+    max_payload=6,              # MB per mini-batch sent to the container
+)
+
+transformer.transform(
+    data=f"s3://{bucket}/churn-data/full-customer-base/{run_date}/",
+    content_type="text/csv",
+    split_type="Line",
+)
+transformer.wait()
+
+print(f"Batch scoring complete: {transformer.output_path}")</code></pre>
+
+  <h3>5.3 Serverless Inference</h3>
+  <p>For endpoints with spiky, intermittent, or hard-to-predict traffic — a few requests an hour, then a burst — paying for always-on instances (real-time) is wasteful, but you still want a managed HTTPS endpoint rather than building a batch job. <strong>Serverless Inference</strong> scales to zero between requests and charges per invocation plus compute duration, at the cost of cold-start latency on the first request after idle.</p>
+
+  <pre><code class="language-python">from sagemaker.serverless import ServerlessInferenceConfig
+
+serverless_config = ServerlessInferenceConfig(
+    memory_size_in_mb=4096,   # 1024–6144 MB in 1024 MB increments
+    max_concurrency=10,       # max simultaneous invocations before throttling
+)
+
+serverless_predictor = model.deploy(
+    serverless_inference_config=serverless_config,
+    endpoint_name="recsys-serverless",
+    serializer=JSONSerializer(),
+    deserializer=JSONDeserializer(),
+)
+
+result = serverless_predictor.predict({"user_id": 48213, "context": "homepage"})
+print(result)</code></pre>
+
+  <table style="width:100%; border-collapse: collapse; margin: 1.25rem 0; font-size: 0.85rem;">
+    <thead>
+      <tr style="background: var(--bg-alt); text-align: left;">
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Option</th>
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Traffic shape</th>
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Cost model</th>
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Latency</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Real-time endpoint</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Steady, latency-sensitive</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Per-hour, always-on</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Lowest, no cold start</td>
+      </tr>
+      <tr style="background: var(--bg-subtle);">
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Batch transform</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Large known dataset, offline</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Per-job compute time only</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">N/A (not synchronous)</td>
+      </tr>
+      <tr>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Serverless inference</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Spiky / intermittent</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Per-invocation + duration</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Cold-start penalty after idle</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+<!-- ── Section 6 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">6</span> Instance Selection and Cost Control</h2>
+
+  <p>Every job and endpoint in SageMaker runs on an explicit EC2 instance type, and choosing well is most of what determines your bill. A few practical guidelines:</p>
+
+  <ul>
+    <li><strong>CPU instances</strong> (the <code>ml.m5</code>, <code>ml.c5</code> families) are the default for classical ML (XGBoost, scikit-learn, small tabular neural nets) and for inference on small-to-medium deep learning models where latency tolerance is moderate. They are dramatically cheaper per hour than GPU instances.</li>
+    <li><strong>GPU instances</strong> (<code>ml.g5</code> for cost-effective inference and light training, <code>ml.p4d</code>/<code>ml.p5</code> for serious large-model training) are worth the premium when a CPU instance would make training intractably slow or push real-time inference latency past your SLA — not by default.</li>
+    <li><strong>Spot instances</strong> for training can cut costs 60–90%, with the caveat that the instance can be reclaimed with a two-minute warning. Always pair <code>use_spot_instances=True</code> with checkpointing (as in Section 3) so an interruption loses minutes, not hours, of progress.</li>
+    <li><strong>Inference Recommender</strong> (a SageMaker tool, not covered in depth here) will load-test your model artifact across candidate instance types and report cost/latency tradeoffs automatically — worth running before committing to an instance type for a production endpoint.</li>
+  </ul>
+
+  <div class="chart-container">
+    <div id="l65-cost-latency-bubble" style="height:460px;"></div>
+    <p class="chart-caption">Illustrative cost / latency / throughput tradeoff across serving options — not official AWS pricing. Bubble size represents typical throughput for that option. Compute-optimized real-time instances and batch transform sit toward the cheaper, higher-throughput end; serverless inference's per-invocation pricing carries a premium <em>at sustained volume</em>, even though — as in Section 6's monthly cost comparison below — it is far cheaper than an always-on endpoint at low, spiky traffic. Batch transform's "latency" reflects typical per-record turnaround inside an offline job rather than a live response time, plotted on a log scale purely to make the comparison visible.</p>
+  </div>
+
+  <pre><code class="language-python"># Rough mental model for back-of-envelope cost comparisons (illustrative
+# on-demand us-east-1 pricing — always check current AWS pricing pages,
+# rates change and vary by region).
+hourly_rates_usd = {
+    "ml.t3.medium":     0.0582,   # CPU, dev/test only
+    "ml.m5.xlarge":     0.230,    # CPU, general purpose
+    "ml.c5.2xlarge":    0.408,    # CPU, compute-optimized
+    "ml.g5.xlarge":     1.408,    # 1x A10G GPU
+    "ml.p4d.24xlarge":  37.688,   # 8x A100 GPU
+}
+
+def estimate_realtime_endpoint_cost(instance_type, instance_count, hours_per_month=730):
+    rate = hourly_rates_usd[instance_type]
+    return rate * instance_count * hours_per_month
+
+# A 2-instance ml.m5.large real-time endpoint, running 24/7 all month:
+monthly = estimate_realtime_endpoint_cost("ml.m5.xlarge", instance_count=2)
+print(f"Always-on 2x ml.m5.xlarge endpoint: ${monthly:,.2f}/month")
+
+# The same endpoint serverless, assuming light traffic (~50 invocations/day,
+# 2s avg duration, 4GB memory) — pay-per-use instead of pay-per-hour:
+invocations_per_month = 50 * 30
+serverless_cost = invocations_per_month * 0.0000166667 * 4 * 2  # approx GB-second pricing
+print(f"Equivalent low-traffic serverless endpoint: ${serverless_cost:,.2f}/month")</code></pre>
+
+  <div class="output-block">
+    <div class="output-label">Example Output</div>
+Always-on 2x ml.m5.xlarge endpoint: $335.80/month
+Equivalent low-traffic serverless endpoint: $0.20/month
+  </div>
+
+  <div class="callout callout-warn">
+    <span class="callout-icon">⚠️</span>
+    <div class="callout-body">
+      <strong>Cost Pitfall: The Endpoint Nobody Deleted</strong>
+      <p>Unlike a training job, which has a natural end, a real-time endpoint runs — and bills — forever until you explicitly delete it. The single most common SageMaker cost surprise is a forgotten endpoint from a demo, a hyperparameter sweep, or an old project still running months later at $300–$1,000+/month. Treat <code>predictor.delete_endpoint()</code> (or <code>aws sagemaker delete-endpoint</code>) as a required cleanup step, not an optional one, and set up a CloudWatch billing alarm or a scheduled script that lists and flags endpoints with zero invocations over the trailing 14 days. The same applies to leftover SageMaker Studio notebook instances left running outside of business hours.</p>
+    </div>
+  </div>
+
+  <pre><code class="language-python"># Always clean up real-time endpoints when you're done with them.
+predictor.delete_endpoint()
+serverless_predictor.delete_endpoint()
+
+# Or, to audit for orphaned endpoints across an account:
+import boto3
+from datetime import datetime, timezone
+
+sm = boto3.client("sagemaker")
+for ep in sm.list_endpoints()["Endpoints"]:
+    age_days = (datetime.now(timezone.utc) - ep["CreationTime"]).days
+    print(f"  {ep['EndpointName']:30s} status={ep['EndpointStatus']:10s} age={age_days}d")</code></pre>
+</div>
+
+<!-- ── Section 7 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">7</span> SageMaker Pipelines: Orchestrating the Full Workflow</h2>
+
+  <p>Sections 3–4 showed training and registration as separate, manually-triggered steps. In production you want this wired into a single, repeatable, versioned workflow that runs on a schedule or a trigger (new data lands, a retraining cadence fires) without a human manually re-running notebook cells. <strong>SageMaker Pipelines</strong> defines this as a DAG of steps — train, evaluate, conditionally register, conditionally deploy — expressed in Python and executed by the managed Pipelines service.</p>
+
+  <div class="diagram-svg-wrap">
+    <svg viewBox="0 0 960 360" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="End-to-end SageMaker pipeline: raw data in S3 flows through a Processing Job, then a Training Job using either a built-in framework container or a bring-your-own-container, into the Model Registry as a versioned, approval-gated model package, which then branches into three possible serving paths — a real-time endpoint, a batch transform job, or a serverless endpoint">
+      <defs>
+        <marker id="l65-pipeline-arrowhead" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+          <path d="M0,0 L8,4 L0,8 Z" fill="var(--text-muted)"></path>
+        </marker>
+      </defs>
+
+      <!-- S3 -->
+      <rect class="diagram-node" x="15" y="135" width="100" height="70" rx="8"></rect>
+      <text class="diagram-label" x="65" y="164">Amazon S3</text>
+      <text class="diagram-sublabel" x="65" y="184">raw training data</text>
+
+      <line class="diagram-arrow" style="marker-end:url(#l65-pipeline-arrowhead)" x1="115" y1="170" x2="153" y2="170"></line>
+
+      <!-- Processing Job -->
+      <rect class="diagram-node-alt" x="155" y="125" width="150" height="90" rx="8"></rect>
+      <text class="diagram-label" x="230" y="151">Processing Job</text>
+      <text class="diagram-sublabel" x="230" y="171">ScriptProcessor</text>
+      <text class="diagram-sublabel" x="230" y="189">feature engineering</text>
+
+      <line class="diagram-arrow" style="marker-end:url(#l65-pipeline-arrowhead)" x1="305" y1="170" x2="343" y2="170"></line>
+
+      <!-- Training Job -->
+      <rect class="diagram-node-good" x="345" y="120" width="180" height="100" rx="8"></rect>
+      <text class="diagram-label" x="435" y="146">Training Job (Estimator)</text>
+      <text class="diagram-sublabel" x="435" y="166">built-in framework container</text>
+      <text class="diagram-sublabel" x="435" y="184">or Bring-Your-Own-Container</text>
+
+      <line class="diagram-arrow" style="marker-end:url(#l65-pipeline-arrowhead)" x1="525" y1="170" x2="563" y2="170"></line>
+
+      <!-- Model Registry -->
+      <rect class="diagram-node-bad" x="565" y="125" width="170" height="90" rx="8"></rect>
+      <text class="diagram-label" x="650" y="151">Model Registry</text>
+      <text class="diagram-sublabel" x="650" y="171">versioned model packages</text>
+      <text class="diagram-sublabel" x="650" y="189">approval: Pending → Approved</text>
+
+      <!-- Branches -->
+      <line class="diagram-arrow" style="marker-end:url(#l65-pipeline-arrowhead)" x1="735" y1="170" x2="788" y2="55"></line>
+      <line class="diagram-arrow" style="marker-end:url(#l65-pipeline-arrowhead)" x1="735" y1="170" x2="788" y2="180"></line>
+      <line class="diagram-arrow" style="marker-end:url(#l65-pipeline-arrowhead)" x1="735" y1="170" x2="788" y2="305"></line>
+
+      <!-- Real-Time Endpoint -->
+      <rect class="diagram-node" x="790" y="20" width="155" height="70" rx="8"></rect>
+      <text class="diagram-label" x="867" y="49">Real-Time Endpoint</text>
+      <text class="diagram-sublabel" x="867" y="69">always-on endpoint</text>
+
+      <!-- Batch Transform -->
+      <rect class="diagram-node-good" x="790" y="145" width="155" height="70" rx="8"></rect>
+      <text class="diagram-label" x="867" y="174">Batch Transform</text>
+      <text class="diagram-sublabel" x="867" y="194">scheduled S3 → S3 job</text>
+
+      <!-- Serverless Inference -->
+      <rect class="diagram-node-alt" x="790" y="270" width="155" height="70" rx="8"></rect>
+      <text class="diagram-label" x="867" y="299">Serverless Inference</text>
+      <text class="diagram-sublabel" x="867" y="319">scale-to-zero, pay per call</text>
+    </svg>
+    <p class="diagram-svg-caption">The full SageMaker Pipelines DAG from this section: raw data in S3 is processed, trained (via a built-in container or BYOC), and registered as a versioned, approval-gated model package — which can then be deployed down any of the three serving paths from Section 5, depending on the traffic shape of the consuming application.</p>
+  </div>
+
+  <pre><code class="language-python">from sagemaker.workflow.pipeline import Pipeline
+from sagemaker.workflow.steps import TrainingStep, ProcessingStep
+from sagemaker.workflow.condition_step import ConditionStep
+from sagemaker.workflow.conditions import ConditionGreaterThanOrEqualTo
+from sagemaker.workflow.functions import JsonGet
+from sagemaker.workflow.model_step import ModelStep
+from sagemaker.workflow.parameters import ParameterString
+from sagemaker.processing import ScriptProcessor, ProcessingInput, ProcessingOutput
+from sagemaker.workflow.pipeline_context import PipelineSession
+
+pipeline_session = PipelineSession()
+
+# Parameterize so the same pipeline definition can be reused across runs
+training_data_uri = ParameterString(
+    name="TrainingDataUri", default_value=f"s3://{bucket}/churn-data/train/"
+)
+
+# Step 1: Train (reuses the same Estimator config from Section 3)
+estimator.sagemaker_session = pipeline_session
+step_train = TrainingStep(
+    name="TrainChurnModel",
+    estimator=estimator,
+    inputs={"train": training_data_uri},
+)
+
+# Step 2: Evaluate the trained model against a held-out test set
+eval_processor = ScriptProcessor(
+    image_uri=estimator.training_image_uri(),
+    command=["python3"],
+    role=role,
+    instance_type="ml.m5.large",
+    instance_count=1,
+    sagemaker_session=pipeline_session,
+)
+step_evaluate = ProcessingStep(
+    name="EvaluateChurnModel",
+    processor=eval_processor,
+    code="src/evaluate.py",
+    inputs=[
+        ProcessingInput(
+            source=step_train.properties.ModelArtifacts.S3ModelArtifacts,
+            destination="/opt/ml/processing/model",
+        ),
+    ],
+    outputs=[ProcessingOutput(output_name="evaluation", source="/opt/ml/processing/evaluation")],
+)
+
+# Step 3: Register the model — but only if it clears a quality bar
+step_register = ModelStep(
+    name="RegisterChurnModel",
+    step_args=estimator.register(
+        content_types=["application/json"],
+        response_types=["application/json"],
+        model_package_group_name="churn-classifier",
+        approval_status="PendingManualApproval",
+    ),
+)
+
+step_conditional_register = ConditionStep(
+    name="CheckAUCThreshold",
+    conditions=[
+        ConditionGreaterThanOrEqualTo(
+            left=JsonGet(
+                step_name=step_evaluate.name,
+                property_file="evaluation_report",
+                json_path="metrics.auc.value",
+            ),
+            right=0.85,   # only register models that beat this AUC bar
+        )
+    ],
+    if_steps=[step_register],
+    else_steps=[],
+)
+
+pipeline = Pipeline(
+    name="churn-train-eval-register-pipeline",
+    parameters=[training_data_uri],
+    steps=[step_train, step_evaluate, step_conditional_register],
+    sagemaker_session=pipeline_session,
+)
+
+pipeline.upsert(role_arn=role)
+execution = pipeline.start()
+execution.wait()</code></pre>
+
+  <div class="output-block">
+    <div class="output-label">Pipeline Execution Status</div>
+Pipeline: churn-train-eval-register-pipeline | Execution: execution-1719829800123
+  Step: TrainChurnModel        | Status: Succeeded  | Duration: 15m 23s
+  Step: EvaluateChurnModel     | Status: Succeeded  | Duration: 2m 41s
+  Step: CheckAUCThreshold      | Status: Succeeded  | Condition: 0.911 >= 0.85 → True
+  Step: RegisterChurnModel     | Status: Succeeded  | ModelPackage version: 8
+
+Pipeline execution: Succeeded (total: 18m 47s)
+  </div>
+
+  <p>This is the SageMaker analog of the CI/CD pipeline you might build around the Lesson 66 Docker image (lint → test → build → push → deploy), except the "compute" for each stage is itself managed cloud infrastructure rather than a CI runner, and the steps are ML-specific (training jobs, evaluation against held-out data, conditional registration based on a metric threshold) rather than generic build steps.</p>
+
+  <div class="callout callout-realworld">
+    <span class="callout-icon">🌍</span>
+    <div class="callout-body">
+      <strong>Why Conditional Steps Matter</strong>
+      <p>The <code>ConditionStep</code> in this pipeline is doing real governance work: a retraining run that produces a worse model than the current production version is automatically prevented from reaching the registry's "pending approval" queue at all, rather than relying on a human noticing a metrics regression in a dashboard. Teams running weekly or daily automated retraining lean heavily on this pattern — the pipeline can run unattended, and a human is only pulled in when a candidate model clears the automated bar and needs a final sign-off before taking production traffic.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Real-World ── -->
+<div class="use-case-section">
+  <div class="use-case-header">
+    <span style="font-size:1.5rem">🌍</span>
+    <h2>Real-World Spotlight: Batch Forecasting and Serverless Recommendations</h2>
+  </div>
+
+  <h3>Retail: Nightly Demand Forecasting Across 50,000 SKUs</h3>
+  <p>A mid-size retailer forecasts next-day demand for roughly 50,000 SKUs across its store and warehouse network, feeding replenishment and staffing decisions. The workload is the textbook case for <strong>batch transform</strong>: every prediction is needed by 5am the next morning, none of them are needed synchronously in response to a user action, and the full input (yesterday's sales, inventory levels, upcoming promotions, weather forecasts) is known and assembled into S3 well before the job runs. Running a persistent real-time endpoint for this would mean paying for idle GPU or CPU capacity 23 hours a day for a workload that only needs to execute once.</p>
+
+  <pre><code class="language-python">from sagemaker.model import Model
+
+forecast_model = Model(
+    model_data="s3://retailer-ml/demand-forecast/model-v14/model.tar.gz",
+    image_uri=estimator.training_image_uri(),
+    role=role,
+    sagemaker_session=session,
+)
+
+# Scheduled nightly (e.g. via EventBridge -> Lambda -> this script,
+# or as the final step of a SageMaker Pipeline triggered on a cron schedule)
+transformer = forecast_model.transformer(
+    instance_count=8,                 # parallelize across the 50k-SKU input
+    instance_type="ml.c5.2xlarge",    # CPU is sufficient for this gradient-boosted model
+    output_path="s3://retailer-ml/demand-forecast/scores/2026-07-02/",
+    strategy="MultiRecord",
+    max_concurrent_transforms=4,
+)
+
+transformer.transform(
+    data="s3://retailer-ml/demand-forecast/inputs/2026-07-02/",
+    content_type="text/csv",
+    split_type="Line",
+)
+transformer.wait()
+
+print(f"Scored 50,000 SKUs in batch job: {transformer.latest_transform_job.job_name}")
+print(f"Output: {transformer.output_path}")
+print("Job billed for ~22 minutes of 8x ml.c5.2xlarge — no idle endpoint cost overnight")</code></pre>
+
+  <h3>Startup: Serverless Inference for a Spiky Recommendation API</h3>
+  <p>A small startup serves product recommendations on its marketing site. Traffic is extremely uneven: near zero overnight, modest during the day, and bursts 10–20x during a flash sale or a newsletter send. Provisioning a real-time endpoint sized for the burst would leave expensive capacity idle the rest of the time; sizing for the average would cause timeouts during bursts. <strong>Serverless Inference</strong> fits this shape directly — it scales transparently with the burst (up to the configured concurrency) and costs nothing during the long idle stretches.</p>
+
+  <pre><code class="language-python">from sagemaker.model import Model
+from sagemaker.serverless import ServerlessInferenceConfig
+from sagemaker.serializers import JSONSerializer
+from sagemaker.deserializers import JSONDeserializer
+
+recsys_model = Model(
+    model_data="s3://startup-ml/recsys/model-v3/model.tar.gz",
+    image_uri=estimator.training_image_uri(),
+    role=role,
+    sagemaker_session=session,
+)
+
+serverless_config = ServerlessInferenceConfig(
+    memory_size_in_mb=3072,
+    max_concurrency=20,   # headroom for newsletter-send traffic bursts
+)
+
+recsys_predictor = recsys_model.deploy(
+    serverless_inference_config=serverless_config,
+    endpoint_name="recsys-prod-serverless",
+    serializer=JSONSerializer(),
+    deserializer=JSONDeserializer(),
+)
+
+response = recsys_predictor.predict({
+    "user_id": "u-88421",
+    "page": "product/sku-4471",
+    "k": 5,
+})
+print(response)</code></pre>
+
+  <div class="output-block">
+    <div class="output-label">Example Output</div>
+{'recommendations': ['sku-1182', 'sku-7734', 'sku-2290', 'sku-9981', 'sku-0456'],
+ 'latency_ms': 412}   # cold start; ~45ms on subsequent warm invocations
+
+Monthly cost comparison (startup's actual traffic pattern):
+  Real-time ml.m5.large x1, always-on:  $67.16/month
+  Serverless (3GB, ~9,000 invocations/month, mostly idle): $4.80/month
+  </div>
+
+  <p>Both spotlights share the same underlying lesson: matching the serving option to the traffic shape, not defaulting to "stand up an endpoint," is where most of the cost difference between a thoughtful SageMaker deployment and a wasteful one comes from.</p>
+</div>
+
+<!-- ── Quiz ── -->
+<div class="quiz-section">
+  <div id="quiz65"></div>
+</div>
+
+<!-- ── Practice ── -->
+<div class="practice-card">
+  <h2>✍️ Practice Exercises</h2>
+  <ol>
+    <li>Using the SageMaker Python SDK (or a written-out plan if you don't have an AWS account handy), configure a <code>PyTorch</code> <code>Estimator</code> to train a small classifier with <code>use_spot_instances=True</code>, a checkpoint S3 URI, and a <code>max_run</code>/<code>max_wait</code> pair. Explain what happens if the spot instance is reclaimed 80% of the way through training.</li>
+    <li>You have a model that needs to serve 200 requests/second at p99 latency under 100ms, 24/7, with traffic that doesn't vary much by time of day. Decide which of the three serving options (real-time endpoint, batch transform, serverless) fits, and justify rejecting the other two for this specific traffic shape.</li>
+    <li>Sketch a SageMaker Pipeline (in words or code) for a fraud-detection model that must never be deployed if its precision on a fixed validation set drops below 0.95. Identify which step would contain that check and what should happen to the pipeline execution if the check fails.</li>
+    <li>Write a boto3 script (or describe the API calls) that lists every SageMaker real-time endpoint in an account, checks each one's CloudWatch <code>Invocations</code> metric over the trailing 14 days, and prints a warning for any endpoint with zero invocations — the audit script referenced in Section 6's cost-pitfall callout.</li>
+  </ol>
+  <details>
+    <summary>▶ Show Solution (Exercise 4 — Orphaned Endpoint Audit Script)</summary>
+    <pre><code class="language-python">import boto3
+from datetime import datetime, timedelta, timezone
+
+sm = boto3.client("sagemaker")
+cw = boto3.client("cloudwatch")
+
+def find_idle_endpoints(idle_days=14, min_invocations=1):
+    """
+    List SageMaker endpoints with near-zero traffic over the trailing
+    `idle_days` days — candidates for deletion to avoid silent cost leakage.
+    """
+    end_time = datetime.now(timezone.utc)
+    start_time = end_time - timedelta(days=idle_days)
+
+    idle_endpoints = []
+
+    paginator = sm.get_paginator("list_endpoints")
+    for page in paginator.paginate():
+        for ep in page["Endpoints"]:
+            name = ep["EndpointName"]
+            if ep["EndpointStatus"] != "InService":
+                continue
+
+            # Sum invocations across the window from CloudWatch
+            metrics = cw.get_metric_statistics(
+                Namespace="AWS/SageMaker",
+                MetricName="Invocations",
+                Dimensions=[{"Name": "EndpointName", "Value": name}],
+                StartTime=start_time,
+                EndTime=end_time,
+                Period=86400,
+                Statistics=["Sum"],
+            )
+            total_invocations = sum(dp["Sum"] for dp in metrics["Datapoints"])
+
+            if total_invocations < min_invocations:
+                age_days = (end_time - ep["CreationTime"]).days
+                idle_endpoints.append({
+                    "name": name,
+                    "age_days": age_days,
+                    "invocations_last_14d": total_invocations,
+                })
+
+    return idle_endpoints
+
+
+idle = find_idle_endpoints()
+if idle:
+    print(f"⚠ Found {len(idle)} idle endpoint(s) — review for deletion:")
+    for ep in idle:
+        print(f"  {ep['name']:30s} age={ep['age_days']}d  invocations(14d)={ep['invocations_last_14d']:.0f}")
+else:
+    print("No idle endpoints found.")</code></pre>
+  </details>
+</div>
+
+<!-- ── Primary Source ── -->
+<div class="primary-source">
+  <h2>📚 Primary Source for This Lesson</h2>
+  <p><a href="https://docs.aws.amazon.com/sagemaker/latest/dg/whatis.html" target="_blank"><strong>AWS SageMaker Developer Guide</strong></a><br>
+  The official reference for the Estimator API, Model Registry, endpoint types, and SageMaker Pipelines covered throughout this lesson, including detailed instance-type and pricing guidance for the cost-control discussion in Section 6.</p>
+</div>
+
+<!-- ── Ask Tutor ── -->
+<div class="ask-tutor">
+  <span class="icon">💬</span>
+  <span>Not sure whether to use a real-time, batch transform, or serverless endpoint for your workload? Describe your traffic pattern and your AI tutor can help you pick the right SageMaker serving option.</span>
+</div>
+
+<!-- Navigation -->
+<nav class="lesson-nav">
+  <a href="./0066-fastapi-docker-deployment.html" class="nav-btn">← Lesson 66: FastAPI &amp; Docker Deployment</a>
+  <a href="./0068-data-drift-psi-csi.html" class="nav-btn nav-btn-next">Lesson 68: Monitoring in Production — PSI &amp; CSI →</a>
+</nav>
+
+</div><!-- /content-wrapper -->
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-core.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/plugins/autoloader/prism-autoloader.min.js"></script>
+<script src="https://cdn.plot.ly/plotly-2.32.0.min.js"></script>
+<script src="../assets/charts.js"></script>
+<script src="../assets/quiz.js"></script>
+<script>
+/* ── AWS SageMaker lesson visualization (Section 6 cost/latency/throughput bubble chart) ── */
+(function () {
+
+  function renderCostLatencyBubble() {
+    const points = [
+      { label: 'Real-Time ml.c5.large',              cost: 0.09, latency: 48,    throughput: 25,  color: MLCharts.theme.blue },
+      { label: 'Real-Time ml.m5.xlarge',              cost: 0.15, latency: 24,    throughput: 60,  color: MLCharts.theme.violet },
+      { label: 'Batch Transform (ml.c5.2xlarge ×N)',  cost: 0.02, latency: 45000, throughput: 400, color: MLCharts.theme.green },
+      { label: 'Serverless Inference',                cost: 0.35, latency: 410,   throughput: 15,  color: MLCharts.theme.amber },
+    ];
+
+    const maxThroughput = Math.max(...points.map(p => p.throughput));
+
+    const trace = {
+      x: points.map(p => p.cost),
+      y: points.map(p => p.latency),
+      text: points.map(p => p.label),
+      mode: 'markers+text',
+      type: 'scatter',
+      textposition: 'top center',
+      textfont: { size: 11, color: MLCharts.theme.heading },
+      marker: {
+        size: points.map(p => p.throughput),
+        sizemode: 'area',
+        sizeref: 2 * maxThroughput / (50 ** 2),
+        sizemin: 10,
+        color: points.map(p => p.color),
+        line: { color: MLCharts.theme.bgCard, width: 1.5 },
+      },
+      hovertemplate: '%{text}<br>cost: $%{x:.2f} / 1,000 inferences<br>p99 latency: %{y} ms<extra></extra>',
+    };
+
+    const layout = MLCharts.baseLayout({
+      xaxis: { title: { text: 'Cost per 1,000 inferences (USD, illustrative)' }, zeroline: false, range: [-0.05, 0.45] },
+      yaxis: { title: { text: 'p99 latency (ms, log scale)' }, type: 'log', zeroline: false },
+      margin: { l: 64, r: 24, t: 30, b: 56 },
+      showlegend: false,
+    });
+
+    Plotly.newPlot('l65-cost-latency-bubble', [trace], layout, MLCharts.config);
+  }
+
+  renderCostLatencyBubble();
+})();
+</script>
+<script>
+new MLQuiz('quiz-67-mid', [
+  {
+    question: "What is the main advantage of SageMaker's managed Estimator API over running training in a self-managed Docker container on your own EC2 instance?",
+    options: [
+      "SageMaker automatically provisions the requested training instance(s), runs the job, and tears the infrastructure down afterward, so you pay only for the exact training duration and never manage the underlying servers yourself",
+      "The Estimator API always produces a more accurate model than identical code run outside of SageMaker",
+      "Estimators eliminate the need to write any training code at all",
+      "Self-managed Docker containers cannot use GPUs, unlike SageMaker"
+    ],
+    correct: 0,
+    explanation: "The core value of a managed training API is infrastructure lifecycle management: you specify the instance type, count, and your training script/container, and SageMaker provisions exactly that infrastructure, runs the job, uploads results to S3, and terminates the instances when done. You never provision, patch, or tear down a server yourself, and you're billed only for the seconds the training job actually ran -- not for idle infrastructure sitting around before or after."
+  },
+  {
+    question: "Why does gating deployment on ModelApprovalStatus = Approved in the SageMaker Model Registry matter operationally?",
+    options: [
+      "It turns 'did a human review this model before it went live' from a hoped-for process into a condition enforced by the deployment pipeline itself, the same way a passing test suite gates a code merge",
+      "It automatically improves the model's accuracy before deployment",
+      "It is a purely cosmetic label with no effect on any automated pipeline",
+      "It only applies to models trained outside of SageMaker"
+    ],
+    correct: 0,
+    explanation: "Without an enforced gate, 'someone reviewed this model before it shipped' is a process people are supposed to follow -- easy to skip under deadline pressure. Configuring a CI/CD pipeline (or a SageMaker Pipeline) to only deploy packages with ModelApprovalStatus = Approved makes that review a hard precondition the deployment code checks, not a norm people might forget -- directly analogous to a CI pipeline refusing to merge code with failing tests."
+  }
+]);
+</script>
+<script>
+new MLQuiz('quiz65', [
+  {
+    question: "A team has one model, predictable steady traffic, and is comfortable owning infrastructure. According to this lesson, what is the most reasonable default choice?",
+    options: [
+      "Stick with the self-managed FastAPI + Docker approach from Lesson 66 — SageMaker's managed orchestration mainly pays off when you have many models, variable training/traffic demands, or governance needs that justify the added cost and vendor lock-in",
+      "Always migrate to SageMaker regardless of scale, since managed infrastructure is strictly superior to self-managed deployments in every case",
+      "Use SageMaker Studio notebooks only, and avoid all other SageMaker components since notebooks are the only free tier service",
+      "Use SageMaker Pipelines only, since pipelines are required for any model to be considered production-grade"
+    ],
+    correct: 0,
+    explanation: "The lesson's central framing is that SageMaker and self-managed Docker solve overlapping but different problems. A single model with steady traffic and a team willing to own infrastructure often does fine — and more cheaply and simply — on the Lesson 66 stack. SageMaker's value shows up at a different point: many competing models/experiments, spiky compute needs that benefit from elastic provisioning and spot instances, or governance/audit requirements that make the Model Registry and Pipelines worth their added complexity and AWS-specific lock-in. Choosing a managed platform should be a response to a real organizational pain point, not a default."
+  },
+  {
+    question: "What is the key functional difference between using a SageMaker built-in framework container (e.g. the PyTorch estimator) versus bringing your own container (BYOC) for training?",
+    options: [
+      "Built-in containers require only your training script and dependencies, with AWS handling the framework/CUDA installation and distributed-training plumbing; BYOC is needed when your stack has system dependencies the built-in images don't support",
+      "Built-in containers can only run on CPU instances, while BYOC is required for any GPU-based training job",
+      "BYOC is always faster to set up because it skips SageMaker's container validation step entirely",
+      "Built-in containers do not support hyperparameters, so any job using hyperparameters must use BYOC"
+    ],
+    correct: 0,
+    explanation: "Built-in framework containers (PyTorch, TensorFlow, Hugging Face, XGBoost, scikit-learn) are AWS-maintained images with the framework, CUDA drivers, and distributed training support already configured — you supply only entry_point/source_dir and hyperparameters. This is the path of least resistance for most training jobs. BYOC — packaging your own Dockerfile, following SageMaker's container conventions (SM_MODEL_DIR, SM_CHANNEL_* env vars) — is the right call specifically when your training stack needs something the built-in images don't provide: an unusual compiled dependency, a non-standard toolchain, or a non-Python pipeline step. It is not about GPU support, hyperparameters, or speed of setup — built-in containers fully support both GPU instances and hyperparameters and are generally faster to get running."
+  },
+  {
+    question: "A retail company needs to forecast demand for 50,000 SKUs once per night, with no requirement for synchronous, on-demand predictions. Which SageMaker serving option fits, and why?",
+    options: [
+      "Batch transform — it provisions compute, scores the entire known dataset, writes results to S3, and tears compute down, avoiding the cost of an idle always-on endpoint for a workload that only runs once a day",
+      "A real-time endpoint with auto-scaling configured to scale to zero overnight, since this is functionally identical to batch transform",
+      "Serverless inference, since 50,000 predictions per night counts as 'spiky' traffic by definition",
+      "SageMaker Studio notebooks, since notebooks are the appropriate tool for any large offline scoring job"
+    ],
+    correct: 0,
+    explanation: "Batch transform is purpose-built for exactly this shape of workload: a large, fully-known input set that needs to be scored without any synchronous request/response requirement. It provisions instances, processes the whole dataset (parallelized across instance_count), writes predictions to S3, and shuts the compute down — so the retailer pays only for the ~20-30 minutes of compute the job actually takes, not for 24 hours of an idle endpoint. A real-time endpoint does not 'scale to zero' the way serverless inference does (it bills per-hour for provisioned instances), so a real-time endpoint left running overnight for a once-a-day job wastes most of that spend. Serverless inference is designed for unpredictable per-request traffic with cold-start tolerance, not for a single large, scheduled bulk job."
+  },
+  {
+    question: "Why does the SageMaker Model Registry matter beyond simply storing a model file in S3?",
+    options: [
+      "It adds versioning, approval-status governance, and metadata (like training job lineage and metrics) on top of the raw artifact, and that approval status can directly gate whether downstream deployment steps (e.g. in a Pipeline) are allowed to run",
+      "It is required because S3 cannot store files larger than 5MB, so large model artifacts must use the Model Registry instead",
+      "It automatically retrains the model on a schedule without any pipeline or scheduling configuration needed",
+      "It replaces the need for any evaluation step, since registering a model automatically verifies its accuracy against a held-out test set"
+    ],
+    correct: 0,
+    explanation: "A model artifact sitting at an S3 path is just a file — it has no inherent versioning, no record of which training job and hyperparameters produced it, and no governance gate. The Model Registry organizes related model artifacts into a Model Package Group (the logical model) with numbered versions, each carrying metadata such as evaluation metrics and an approval status (PendingManualApproval, Approved, Rejected). The practical payoff shown in this lesson is that SageMaker Pipelines and CI/CD automation can be configured to only deploy model packages with an Approved status — turning manual review from a hoped-for process step into something the deployment mechanics actually enforce. It does not replace evaluation, does not retrain automatically, and has nothing to do with S3 file size limits."
+  },
+  {
+    question: "According to the lesson's cost-pitfall warnings, what is one of the most common and costly SageMaker mistakes, and how should it be mitigated?",
+    options: [
+      "Leaving a real-time endpoint running indefinitely after it's no longer needed, since endpoints bill per-hour for their underlying instances until explicitly deleted — mitigated by treating endpoint deletion as a required step and auditing for endpoints with no recent invocations",
+      "Using too many data channels when calling estimator.fit(), which the lesson states is the leading cause of unexpected SageMaker charges",
+      "Registering too many model package versions in the Model Registry, since each version incurs an ongoing hourly storage charge similar to a running endpoint",
+      "Running SageMaker Pipelines more than once per day, which the lesson identifies as the primary driver of excess cost in production ML systems"
+    ],
+    correct: 0,
+    explanation: "Unlike a training job or batch transform job, which has a natural end and stops billing when it completes, a real-time (or serverless, though serverless scales to zero when idle) endpoint backed by persistent instances keeps running — and billing — until someone explicitly deletes it. The lesson calls out forgotten endpoints from demos, experiments, or finished projects as the most common SageMaker cost surprise, sometimes running up hundreds or thousands of dollars before anyone notices. The recommended mitigations are treating predictor.delete_endpoint() as mandatory cleanup and proactively auditing endpoints for low/zero invocation counts (as built in the Exercise 4 solution), plus setting CloudWatch billing alarms. The other options describe mechanisms (data channels, registry versions, pipeline run frequency) that do not carry this kind of open-ended, easily-forgotten billing risk."
+  }
+]);
+</script>
+
+</body>
+</html>

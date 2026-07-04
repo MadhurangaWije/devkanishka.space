@@ -42,6 +42,8 @@
     <li>Understand AUC as the probability that the model ranks a random positive higher than a random negative</li>
     <li>Perform cost-benefit analysis on the ROC curve to find the optimal business threshold</li>
     <li>Implement Stratified K-Fold cross-validation to prevent data leakage and unreliable estimates</li>
+    <li>Test whether one model's cross-validation score is <em>really</em> better than another's with a paired t-test and confidence interval, not just eyeballing the averages</li>
+    <li>Check whether a model's predicted probabilities are calibrated — and fix them with <code>CalibratedClassifierCV</code> when they aren't</li>
   </ul>
 </div>
 
@@ -357,7 +359,7 @@ n_negatives = n_test - n_positives
 
 cost_fp = 10     # cost per false positive (blocked legit transaction)
 cost_fn = 500    # cost per false negative (fraud loss)
-benefit_tp = 0   # we're minimising cost, so TP avoidance is implicit in FN cost
+benefit_tp = 0   # we're minimizing cost, so TP avoidance is implicit in FN cost
 
 # Compute expected total cost at each threshold
 def expected_cost(tpr, fpr, n_pos, n_neg, cost_fn, cost_fp):
@@ -411,7 +413,7 @@ plt.show()</code></pre>
 
   <p>A single train/test split is noisy. The test set might be unusually easy or unusually hard by chance. <strong>K-fold cross-validation</strong> solves this by evaluating the model K times on different subsets of the data and averaging the results.</p>
 
-  <p>The procedure: divide the dataset into K equal-sized folds. For each fold i: train on all K-1 folds, evaluate on fold i. Average the K evaluation scores. This gives a more stable and unbiased estimate of generalisation performance.</p>
+  <p>The procedure: divide the dataset into K equal-sized folds. For each fold i: train on all K-1 folds, evaluate on fold i. Average the K evaluation scores. This gives a more stable and unbiased estimate of generalization performance.</p>
 
   <pre><code class="language-python">from sklearn.model_selection import cross_val_score, KFold
 from sklearn.linear_model import LogisticRegression
@@ -684,6 +686,144 @@ for metric in metrics:
     <div class="callout-body">
       <strong>Pipeline = The Right Way to Cross-Validate</strong>
       <p>Every preprocessing step that looks at data to compute statistics — StandardScaler, MinMaxScaler, SimpleImputer, SelectKBest, PCA — must be inside a Pipeline when used with cross-validation. Steps that apply a fixed transformation (like adding a polynomial feature) don't need to be in a Pipeline, but it's good practice to always use one anyway.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 9 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">9</span> Is Model B Actually Better? Statistical Significance</h2>
+
+  <p>Section 6 gave you K-Fold cross-validation scores — say, Model A averages 0.842 accuracy and Model B averages 0.851. Model B looks better. But is an 0.9-point gap a real, reproducible improvement, or could it just as easily be noise from which rows happened to land in which fold? This is exactly the question the Central Limit Theorem (Lesson 7, Section 9) was building toward: comparing two averages requires knowing how much those averages would wobble on a different random split.</p>
+
+  <p>The standard tool is a <strong>paired t-test</strong> on the per-fold scores — "paired" because both models were evaluated on the <em>same</em> folds, so you're testing whether the fold-by-fold <em>differences</em> are consistently positive, not just comparing two unrelated averages:</p>
+
+  <pre><code class="language-python">import numpy as np
+from scipy import stats
+from sklearn.model_selection import StratifiedKFold, cross_val_score
+from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.datasets import make_classification
+
+X, y = make_classification(n_samples=500, n_features=20, n_informative=8, random_state=42)
+skf = StratifiedKFold(n_splits=10, shuffle=True, random_state=42)
+
+# Evaluate BOTH models on the exact same 10 folds -- this is what makes
+# the comparison "paired" rather than two independent experiments.
+scores_a = cross_val_score(LogisticRegression(max_iter=1000), X, y, cv=skf, scoring='accuracy')
+scores_b = cross_val_score(RandomForestClassifier(n_estimators=200, random_state=42), X, y, cv=skf, scoring='accuracy')
+
+print(f"Model A (Logistic Regression): {scores_a.mean():.4f} ± {scores_a.std():.4f}")
+print(f"Model B (Random Forest):       {scores_b.mean():.4f} ± {scores_b.std():.4f}")
+print(f"Per-fold differences (B - A):  {(scores_b - scores_a).round(4)}")
+
+# Paired t-test: is the mean of (scores_b - scores_a) significantly != 0?
+t_stat, p_value = stats.ttest_rel(scores_b, scores_a)
+print(f"\nPaired t-test: t={t_stat:.3f}, p={p_value:.4f}")
+
+alpha = 0.05
+if p_value < alpha:
+    print(f"p < {alpha} -- the difference is statistically significant. Model B is reliably better.")
+else:
+    print(f"p >= {alpha} -- cannot reject the null hypothesis that A and B perform equally.")
+    print("The observed gap may just be fold-to-fold noise, not a real improvement.")</code></pre>
+
+  <p>The <strong>p-value</strong> answers a precise question: "if the two models truly performed identically, how likely would we be to see a difference this large (or larger) by chance alone?" A small p-value (conventionally below 0.05) means the observed gap would be unusual under pure chance — evidence the difference is real. It is <em>not</em> the probability that Model B is better, a common and important misreading.</p>
+
+  <p>A <strong>confidence interval</strong> complements the p-value by quantifying the gap itself, not just whether it's non-zero:</p>
+
+  <pre><code class="language-python">import numpy as np
+from scipy import stats
+
+diffs = scores_b - scores_a
+n = len(diffs)
+mean_diff = diffs.mean()
+se_diff = diffs.std(ddof=1) / np.sqrt(n)   # standard error, per the CLT
+
+# 95% confidence interval for the true mean difference
+ci_low, ci_high = stats.t.interval(0.95, df=n-1, loc=mean_diff, scale=se_diff)
+print(f"Mean improvement: {mean_diff:.4f}")
+print(f"95% CI: [{ci_low:.4f}, {ci_high:.4f}]")
+# If the interval excludes 0, that agrees with a significant p-value --
+# and the WIDTH of the interval tells you how precisely you've pinned down
+# the improvement, which a p-value alone never communicates.</code></pre>
+
+  <div class="callout callout-warn">
+    <span class="callout-icon">⚠️</span>
+    <div class="callout-body">
+      <strong>Statistically Significant ≠ Practically Significant</strong>
+      <p>With enough folds or enough data, even a genuinely tiny, operationally meaningless improvement (0.851 vs 0.850) can become "statistically significant." Always report the confidence interval alongside the p-value, and ask whether the <em>size</em> of the improvement — not just its existence — justifies the cost of shipping a more complex or expensive model. This same logic scales up directly into A/B testing a model change in production (Lesson 69), where "statistically significant" and "worth shipping" are explicitly treated as two separate questions.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 10 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">10</span> Probability Calibration: Can You Trust the Score Itself?</h2>
+
+  <p>Section 1 introduced probability scores and Section 3–4 used them to sweep a threshold and trace an ROC curve — but nothing so far checked whether a predicted probability of 0.8 actually means "80% of the time, this really is the positive class." A model can rank examples perfectly (great AUC) while its raw probability outputs are systematically over- or under-confident. That property — do the numbers mean what they claim to mean — is called <strong>calibration</strong>, and it's a separate axis of quality from everything measured so far in this lesson.</p>
+
+  <pre><code class="language-python">import numpy as np
+from sklearn.calibration import calibration_curve
+from sklearn.svm import SVC
+from sklearn.linear_model import LogisticRegression
+from sklearn.datasets import make_classification
+from sklearn.model_selection import train_test_split
+
+X, y = make_classification(n_samples=3000, n_features=20, n_informative=10,
+                            weights=[0.5, 0.5], random_state=42)
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=42)
+
+models = {
+    'Logistic Regression': LogisticRegression(max_iter=1000),
+    'SVM (decision_function-based)': SVC(probability=True, random_state=42),
+}
+
+for name, model in models.items():
+    model.fit(X_train, y_train)
+    probs = model.predict_proba(X_test)[:, 1]
+
+    # Bin predictions into 10 buckets by predicted probability, compare each
+    # bucket's AVERAGE predicted probability to its ACTUAL fraction positive
+    frac_positive, mean_predicted = calibration_curve(y_test, probs, n_bins=10)
+    print(f"\n{name}:")
+    for mp, fp in zip(mean_predicted, frac_positive):
+        gap = fp - mp
+        flag = " <- overconfident" if gap < -0.05 else (" <- underconfident" if gap > 0.05 else "")
+        print(f"  predicted~{mp:.2f}  actual={fp:.2f}{flag}")</code></pre>
+
+  <p>A perfectly calibrated model's points would sit exactly on the diagonal: among all the times it said "70% confident," the positive class should show up roughly 70% of the time. Some model families are calibrated well out of the box (logistic regression, by construction, since it directly optimizes log loss); others systematically distort their scores — SVMs push probabilities away from the boundary (overconfident), and boosted trees are frequently underconfident near the extremes.</p>
+
+  <pre><code class="language-python">import numpy as np
+from sklearn.calibration import CalibratedClassifierCV
+from sklearn.svm import SVC
+from sklearn.metrics import brier_score_loss
+
+# Wrap an uncalibrated model with CalibratedClassifierCV -- it internally
+# cross-validates, fitting a correction (Platt scaling / sigmoid, or
+# isotonic regression) mapping raw scores to calibrated probabilities.
+raw_svm = SVC(probability=True, random_state=42)
+calibrated_svm = CalibratedClassifierCV(raw_svm, method='sigmoid', cv=5)
+
+raw_svm.fit(X_train, y_train)
+calibrated_svm.fit(X_train, y_train)
+
+raw_probs = raw_svm.predict_proba(X_test)[:, 1]
+calibrated_probs = calibrated_svm.predict_proba(X_test)[:, 1]
+
+# Brier score: mean squared error between predicted probability and the
+# actual 0/1 outcome -- lower is better, and unlike AUC it directly
+# penalizes miscalibration, not just ranking mistakes.
+print(f"Raw SVM Brier score:        {brier_score_loss(y_test, raw_probs):.4f}")
+print(f"Calibrated SVM Brier score: {brier_score_loss(y_test, calibrated_probs):.4f}")
+# Calibration typically leaves AUC nearly unchanged (ranking is preserved)
+# while meaningfully improving the Brier score (the numbers become trustworthy).</code></pre>
+
+  <div class="callout callout-key">
+    <span class="callout-icon">🔑</span>
+    <div class="callout-body">
+      <strong>When Calibration Actually Matters</strong>
+      <p>If you only ever threshold a model's output to get a hard label, miscalibration is often harmless — Section 5's cost-benefit threshold search still finds the right cutoff even if the raw numbers are distorted. But the moment you <em>use the probability value itself</em> — displaying "73% risk of default" to a loan officer, feeding a score into a downstream expected-value calculation, or combining probabilities from multiple models — calibration becomes essential. Two of the clearest use cases: risk scoring shown to a human decision-maker, and Lesson 30's GMM responsibilities, which are only meaningful as genuine probabilities in the first place.</p>
     </div>
   </div>
 </div>
@@ -1027,12 +1167,34 @@ new MLQuiz('quiz1', [
     question: "Why is data leakage a risk when using cross-validation with preprocessing?",
     options: [
       "If scaling or imputation is fit on the full dataset before cross-validation, test fold statistics contaminate the preprocessing fit, inflating validation scores",
-      "Cross-validation automatically shares data between folds, which causes the model to memorise test data",
+      "Cross-validation automatically shares data between folds, which causes the model to memorize test data",
       "Preprocessing changes the feature names, making cross-validation unable to match train and test features",
       "Data leakage only occurs with neural networks, not with traditional sklearn models"
     ],
     correct: 0,
     explanation: "When you call scaler.fit_transform(X_full) before cross-validation, the scaler learns the mean and std from the entire dataset — including what will become test folds. During CV, the 'test' fold was already used to compute scaling parameters. The model has indirectly 'seen' the test data through the scaler, giving it an unfair advantage. Fix: put the scaler inside a Pipeline so it only fits on training folds."
+  },
+  {
+    question: "Model A scores 0.842 accuracy and Model B scores 0.851 accuracy on the same 10-fold cross-validation split. A paired t-test on the per-fold scores gives p=0.31. What is the correct conclusion?",
+    options: [
+      "You cannot reject the null hypothesis of equal performance -- the observed gap is plausibly just fold-to-fold noise, not a reliable improvement",
+      "Model B is definitely better, since 0.851 > 0.842 regardless of the p-value",
+      "p=0.31 proves the two models perform identically in all cases",
+      "The p-value is irrelevant here because both models were evaluated with cross-validation"
+    ],
+    correct: 0,
+    explanation: "A p-value of 0.31 is well above the conventional 0.05 threshold, meaning: if the two models truly performed identically, you'd see a fold-to-fold gap this large or larger about 31% of the time purely by chance. That's not rare enough to conclude the difference is real. The raw comparison (0.851 > 0.842) ignores the variance across folds entirely -- exactly the trap the paired t-test exists to catch."
+  },
+  {
+    question: "A model has excellent AUC (0.94) but poor calibration -- its 'predicted 80% confident' bucket is actually correct only 55% of the time. In which situation does this miscalibration matter most?",
+    options: [
+      "When the raw probability value itself is used directly -- shown to a human decision-maker, fed into an expected-value calculation, or combined with other models' probabilities",
+      "When the model is only ever used to produce a hard 0/1 label via a fixed threshold",
+      "Calibration never matters if AUC is already high",
+      "Miscalibration only affects regression models, not classifiers"
+    ],
+    correct: 0,
+    explanation: "High AUC means the model ranks positive examples above negative ones well -- which is exactly what a threshold-based hard-label decision relies on, so poor calibration can be largely harmless there. But the moment the raw probability number itself is used as a number -- displayed as '80% risk' to a person, plugged into a cost-benefit formula, or averaged with another model's scores -- miscalibration directly corrupts the result, even though the underlying ranking (and AUC) never changed."
   }
 ]);
 </script>

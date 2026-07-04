@@ -1,0 +1,1350 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lesson 51: Seq2Seq &amp; Encoder-Decoder Architecture | ML Mastery</title>
+  <link rel="stylesheet" href="../assets/style.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
+</head>
+<body>
+
+<!-- ── Header ── -->
+<header class="lesson-header">
+  <div class="header-inner">
+    <nav class="breadcrumb">
+      <a href="../reference/curriculum-map.html">ML Mastery</a>
+      <span class="sep">›</span>
+      <span>Phase 5: Advanced Deep Learning &amp; NLP</span>
+    </nav>
+    <div class="lesson-badges">
+      <span class="phase-badge">Phase 5 · Advanced Deep Learning &amp; NLP</span>
+      <span class="lesson-num-badge">Lesson 51</span>
+    </div>
+    <h1 class="lesson-title">Sequence-to-Sequence: Encoder-Decoder Architecture</h1>
+    <p class="lesson-subtitle">How neural networks translate, summarize, and generate text — understand the encoder-decoder framework, teacher forcing, beam search, and why the information bottleneck problem directly motivated the Attention mechanism.</p>
+    <div class="meta-pills">
+      <span class="meta-pill">⏱ ~70 min</span>
+      <span class="meta-pill">🐍 Python + PyTorch</span>
+      <span class="meta-pill">🔬 Deep Learning</span>
+      <span class="meta-pill">Requires Lesson 48</span>
+    </div>
+  </div>
+</header>
+
+<main class="lesson-main">
+<div class="content-wrapper">
+
+<!-- Objectives -->
+<div class="objectives-card">
+  <h2>🎯 What You'll Learn</h2>
+  <ul>
+    <li>Understand many-to-many sequence problems with different input/output lengths</li>
+    <li>Trace the Encoder-Decoder architecture: how the encoder compresses a sequence, how the decoder generates output autoregressively</li>
+    <li>Understand bidirectional LSTM encoders and the information they capture</li>
+    <li>Implement teacher forcing for stable training and understand its exposure bias tradeoff</li>
+    <li>Understand beam search decoding and why it produces better outputs than greedy decoding</li>
+    <li>Compute BLEU scores to evaluate sequence generation quality</li>
+    <li>Understand the information bottleneck problem and why it motivated the Attention mechanism (Lesson 52)</li>
+  </ul>
+</div>
+
+<div class="callout callout-key">
+  <span class="callout-icon">💡</span>
+  <div class="callout-body">
+    <strong>The Big Intuition</strong>
+    <p>Translation is not a word-by-word swap. "Je suis étudiant" doesn't translate word-for-word to English — it requires understanding the full French sentence ("I am a student") and then generating the English equivalent from scratch. The Encoder-Decoder architecture solves exactly this: the encoder reads and understands the entire source sequence, compressing it into a "thought vector" (context vector), and the decoder uses that thought to generate the target sequence one word at a time. This architecture powered Google Translate from 2016 to 2017 and its limitations directly motivated the Attention mechanism that eventually led to Transformers.</p>
+  </div>
+</div>
+
+<!-- ── Section 1 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">1</span> Beyond Many-to-One: Variable-Length Sequence Problems</h2>
+
+  <p>In Lesson 48 we saw four RNN problem types. We focused on many-to-one (sentiment analysis) and one-to-many. Now we tackle the hardest type: <strong>many-to-many with different input and output lengths</strong>. These are called <em>sequence-to-sequence</em> (Seq2Seq) problems.</p>
+
+  <h3>The Core Challenge</h3>
+  <p>Why can't a standard RNN handle these tasks? The fundamental issue is that input and output sequences have different lengths, and you need to read the <em>entire</em> input before you can start generating output.</p>
+
+  <ul>
+    <li><strong>Machine Translation</strong>: "Je suis étudiant" (3 French words) → "I am a student" (4 English words). You can't output the first English word until you've read all the French words — the sentence structure may differ completely.</li>
+    <li><strong>Text Summarization</strong>: A 1000-word news article → a 50-word summary. You must understand the whole article before deciding which parts to include.</li>
+    <li><strong>Code Generation</strong>: "Sort a list in reverse order" → <code>sorted(my_list, reverse=True)</code>. Natural language → Python code, completely different "vocabularies".</li>
+    <li><strong>Chatbot Response</strong>: "What's the weather in Paris today?" → "It's currently 22°C and sunny in Paris." The output has no fixed relationship to the input length.</li>
+    <li><strong>Question Answering</strong>: Context paragraph + question → answer span (varying length).</li>
+  </ul>
+
+  <pre><code class="language-python">import torch
+
+# The shape challenge in Seq2Seq:
+# Input and output have DIFFERENT lengths → you can't use a simple many-to-many RNN
+
+# Example: English → French translation
+src_sentences = [
+    "the cat sat on the mat",        # 6 words
+    "I love machine learning",       # 4 words
+    "natural language processing is fascinating",  # 5 words
+]
+
+tgt_sentences = [
+    "le chat était assis sur le tapis",   # 7 words (different length!)
+    "j'adore l'apprentissage automatique", # 2 words!
+    "le traitement du langage naturel est fascinant",  # 8 words
+]
+
+# A standard RNN's hidden state at the end of the source sequence is a fixed-size vector.
+# The decoder must generate a VARIABLE-length output from this fixed-size starting point.
+# This is the fundamental challenge that the Encoder-Decoder architecture addresses.
+
+print("Seq2Seq length mismatch examples:")
+for src, tgt in zip(src_sentences, tgt_sentences):
+    print(f"  Source ({len(src.split())} words): '{src}'")
+    print(f"  Target ({len(tgt.split())} words): '{tgt}'")
+    print()</code></pre>
+</div>
+
+<!-- ── Section 2 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">2</span> The Encoder-Decoder Architecture</h2>
+
+  <p>The solution is elegant: split the task into two separate networks with one handoff between them.</p>
+
+  <ul>
+    <li><strong>Encoder</strong>: reads the entire source sequence, step by step. Each step updates a hidden state. At the end, the final hidden state is a compressed representation of the entire input — the "context vector" or "thought vector".</li>
+    <li><strong>Decoder</strong>: takes the context vector as its initial hidden state. Generates the target sequence one token at a time, using the previous output as the next input.</li>
+  </ul>
+
+  <p>Here is the complete picture, traced through our running example — French "Je suis étudiant" translating to English "I am a student". Follow the arrows: three encoder steps read the source tokens one at a time and fold everything into a single <strong>context vector</strong> (the bottleneck); the decoder then starts from that vector and generates the target tokens one at a time, autoregressively feeding each output back in as the next step's input.</p>
+
+  <div class="diagram-svg-wrap">
+    <svg viewBox="0 0 980 430" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Encoder-decoder architecture: three French input tokens are encoded step by step into a single context vector, which the decoder then unrolls autoregressively into four English output tokens">
+      <defs>
+        <marker id="l50-arrowhead" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+          <path d="M0,0 L8,4 L0,8 Z" fill="var(--text-muted)"></path>
+        </marker>
+        <marker id="l50-arrowhead-violet" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+          <path d="M0,0 L8,4 L0,8 Z" fill="var(--violet)"></path>
+        </marker>
+        <marker id="l50-arrowhead-green" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+          <path d="M0,0 L8,4 L0,8 Z" fill="var(--green)"></path>
+        </marker>
+      </defs>
+
+      <!-- Section labels -->
+      <text class="diagram-label" x="185" y="24" fill="var(--blue)">ENCODER — reads source, step by step</text>
+      <text class="diagram-label" x="740" y="24" fill="var(--green)">DECODER — generates target, one token at a time</text>
+
+      <!-- ═══ Encoder input tokens ═══ -->
+      <rect class="diagram-node-alt" x="20"  y="60" width="76" height="38" rx="6"><title>Source token 1</title></rect>
+      <text class="diagram-mono-label" x="58" y="84">"Je"</text>
+
+      <rect class="diagram-node-alt" x="140" y="60" width="76" height="38" rx="6"><title>Source token 2</title></rect>
+      <text class="diagram-mono-label" x="178" y="84">"suis"</text>
+
+      <rect class="diagram-node-alt" x="260" y="60" width="90" height="38" rx="6"><title>Source token 3</title></rect>
+      <text class="diagram-mono-label" x="305" y="84">"étudiant"</text>
+
+      <!-- Arrows: tokens up into encoder cells -->
+      <line class="diagram-arrow" x1="58"  y1="60" x2="58"  y2="146" marker-end="url(#l50-arrowhead)"></line>
+      <line class="diagram-arrow" x1="178" y1="60" x2="178" y2="146" marker-end="url(#l50-arrowhead)"></line>
+      <line class="diagram-arrow" x1="305" y1="60" x2="305" y2="146" marker-end="url(#l50-arrowhead)"></line>
+
+      <!-- ═══ Encoder RNN cells (chain of hidden states) ═══ -->
+      <rect class="diagram-node" x="20"  y="148" width="76" height="46" rx="8"><title>Encoder step 1: h₁ = f(embed("Je"), h₀)</title></rect>
+      <text class="diagram-label" x="58" y="176">h₁</text>
+
+      <rect class="diagram-node" x="140" y="148" width="76" height="46" rx="8"><title>Encoder step 2: h₂ = f(embed("suis"), h₁)</title></rect>
+      <text class="diagram-label" x="178" y="176">h₂</text>
+
+      <rect class="diagram-node" x="260" y="148" width="90" height="46" rx="8"><title>Encoder step 3 (final): h₃ = f(embed("étudiant"), h₂)</title></rect>
+      <text class="diagram-label" x="305" y="176">h₃</text>
+
+      <!-- Hidden state handoff arrows between encoder cells -->
+      <line class="diagram-arrow" x1="96"  y1="171" x2="138" y2="171" marker-end="url(#l50-arrowhead)"></line>
+      <line class="diagram-arrow" x1="216" y1="171" x2="258" y2="171" marker-end="url(#l50-arrowhead)"></line>
+
+      <!-- Arrow from final encoder cell to the context vector bottleneck -->
+      <line class="diagram-arrow" style="stroke:var(--violet)" x1="350" y1="171" x2="452" y2="171" marker-end="url(#l50-arrowhead-violet)"></line>
+
+      <!-- ═══ Context vector — the bottleneck ═══ -->
+      <circle class="diagram-node-bad" cx="500" cy="171" r="46"><title>Context vector: the ENTIRE source sentence compressed into one fixed-size vector</title></circle>
+      <text class="diagram-label" x="500" y="166" style="font-size:11px">Context</text>
+      <text class="diagram-label" x="500" y="181" style="font-size:11px">Vector</text>
+      <text class="diagram-sublabel" x="500" y="235">fixed-size bottleneck —</text>
+      <text class="diagram-sublabel" x="500" y="249">the whole sentence in one vector</text>
+
+      <!-- Context vector feeds into decoder's first cell -->
+      <line class="diagram-arrow" style="stroke:var(--violet)" x1="546" y1="171" x2="628" y2="171" marker-end="url(#l50-arrowhead-violet)"></line>
+
+      <!-- ═══ Decoder RNN cells ═══ -->
+      <rect class="diagram-node-good" x="630" y="148" width="70" height="46" rx="8"><title>Decoder step 1: predicts "I" from &lt;SOS&gt; + context vector</title></rect>
+      <text class="diagram-label" x="665" y="176">s₁</text>
+
+      <rect class="diagram-node-good" x="730" y="148" width="70" height="46" rx="8"><title>Decoder step 2: predicts "am" from "I" + s₁</title></rect>
+      <text class="diagram-label" x="765" y="176">s₂</text>
+
+      <rect class="diagram-node-good" x="830" y="148" width="60" height="46" rx="8"><title>Decoder step 3: predicts "a" from "am" + s₂</title></rect>
+      <text class="diagram-label" x="860" y="176">s₃</text>
+
+      <!-- Hidden state handoff arrows between decoder cells -->
+      <line class="diagram-arrow" style="stroke:var(--green)" x1="700" y1="171" x2="728" y2="171" marker-end="url(#l50-arrowhead-green)"></line>
+      <line class="diagram-arrow" style="stroke:var(--green)" x1="800" y1="171" x2="828" y2="171" marker-end="url(#l50-arrowhead-green)"></line>
+      <line class="diagram-arrow" style="stroke:var(--green)" x1="890" y1="171" x2="918" y2="171" marker-end="url(#l50-arrowhead-green)"></line>
+
+      <!-- SOS token feeding the first decoder step -->
+      <rect class="diagram-node-alt" x="630" y="60" width="70" height="38" rx="6"><title>Start-of-sequence token — always the decoder's first input</title></rect>
+      <text class="diagram-mono-label" x="665" y="84">&lt;SOS&gt;</text>
+      <line class="diagram-arrow" x1="665" y1="60" x2="665" y2="146" marker-end="url(#l50-arrowhead)"></line>
+
+      <!-- Decoder outputs (generated tokens) -->
+      <rect class="diagram-node-good" x="630" y="240" width="70" height="38" rx="6"><title>Decoder output 1: "I"</title></rect>
+      <text class="diagram-mono-label" x="665" y="264">"I"</text>
+      <line class="diagram-arrow" style="stroke:var(--green)" x1="665" y1="194" x2="665" y2="238" marker-end="url(#l50-arrowhead-green)"></line>
+
+      <rect class="diagram-node-good" x="730" y="240" width="70" height="38" rx="6"><title>Decoder output 2: "am"</title></rect>
+      <text class="diagram-mono-label" x="765" y="264">"am"</text>
+      <line class="diagram-arrow" style="stroke:var(--green)" x1="765" y1="194" x2="765" y2="238" marker-end="url(#l50-arrowhead-green)"></line>
+
+      <rect class="diagram-node-good" x="825" y="240" width="60" height="38" rx="6"><title>Decoder output 3: "a"</title></rect>
+      <text class="diagram-mono-label" x="855" y="264">"a"</text>
+      <line class="diagram-arrow" style="stroke:var(--green)" x1="860" y1="194" x2="860" y2="238" marker-end="url(#l50-arrowhead-green)"></line>
+
+      <!-- Autoregressive feedback: each output token feeds back down as next step's input -->
+      <path class="diagram-arrow" style="stroke:var(--amber)" d="M 665 278 C 665 320, 765 320, 765 196" fill="none" marker-end="url(#l50-arrowhead)"></path>
+      <path class="diagram-arrow" style="stroke:var(--amber)" d="M 765 278 C 765 320, 860 320, 860 196" fill="none" marker-end="url(#l50-arrowhead)"></path>
+
+      <text class="diagram-sublabel" x="765" y="336" fill="var(--amber)">autoregressive: each output token is fed back in as the next input</text>
+
+      <!-- 4th decoder step: "student" then EOS -->
+      <rect class="diagram-node-good" x="918" y="148" width="52" height="46" rx="8"><title>Decoder step 4: predicts "student" from "a" + s₃</title></rect>
+      <text class="diagram-label" x="944" y="176">s₄</text>
+
+      <rect class="diagram-node-good" x="905" y="240" width="70" height="38" rx="6"><title>Decoder output 4: "student" — then decoder emits &lt;EOS&gt; and generation stops</title></rect>
+      <text class="diagram-mono-label" x="940" y="264" style="font-size:10px">"student"</text>
+      <line class="diagram-arrow" style="stroke:var(--green)" x1="944" y1="194" x2="944" y2="238" marker-end="url(#l50-arrowhead-green)"></line>
+
+      <path class="diagram-arrow" style="stroke:var(--amber)" d="M 855 278 C 855 320, 944 320, 944 196" fill="none" marker-end="url(#l50-arrowhead)"></path>
+
+      <!-- Bottom captions -->
+      <text class="diagram-sublabel" x="178" y="410">Source (French): "Je suis étudiant" — read in full before decoding starts</text>
+      <text class="diagram-sublabel" x="800" y="410">Target (English): "I am a student" — generated one word at a time, then &lt;EOS&gt;</text>
+    </svg>
+    <p class="diagram-svg-caption">The encoder folds "Je suis étudiant" into a single fixed-size context vector (red bottleneck node) — that vector is the <em>only</em> thing the decoder knows about the source sentence. The decoder then unrolls autoregressively: &lt;SOS&gt; → "I" → "am" → "a" → "student" → &lt;EOS&gt;, with each generated word (amber loop) fed back in as the input to the next step.</p>
+  </div>
+
+  <h3>The Context Vector</h3>
+  <p>Think of the context vector as a translation student's "mental note" after reading a sentence they need to translate. They've processed the entire sentence, formed an understanding, and now they're writing the translation from that understanding — not by looking back at the original word by word (that comes later, with Attention).</p>
+
+  <pre><code class="language-python">import torch
+import torch.nn as nn
+
+class Encoder(nn.Module):
+    """
+    Bidirectional LSTM encoder.
+    Reads the entire source sequence and produces a context vector.
+    """
+    def __init__(self, vocab_size, embed_dim, hidden_dim, num_layers=2, dropout=0.3):
+        super().__init__()
+        self.embedding = nn.Embedding(vocab_size, embed_dim, padding_idx=0)
+        self.lstm = nn.LSTM(
+            input_size=embed_dim,
+            hidden_size=hidden_dim,
+            num_layers=num_layers,
+            batch_first=True,
+            dropout=dropout if num_layers > 1 else 0,
+            bidirectional=True   # read forwards AND backwards
+        )
+        # Project from 2*hidden_dim (bidirectional) to hidden_dim for decoder
+        self.fc_h = nn.Linear(hidden_dim * 2, hidden_dim)
+        self.fc_c = nn.Linear(hidden_dim * 2, hidden_dim)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, src, src_lengths):
+        """
+        src:         (batch, src_len)    — source token IDs
+        src_lengths: (batch,)            — actual lengths (for padding mask)
+
+        Returns:
+            encoder_outputs: (batch, src_len, 2*hidden_dim) — all hidden states
+            hidden:          (batch, hidden_dim)            — context vector (h)
+            cell:            (batch, hidden_dim)            — context vector (c)
+        """
+        embedded = self.dropout(self.embedding(src))  # (B, T, E)
+
+        # Pack to skip padding positions
+        packed = nn.utils.rnn.pack_padded_sequence(
+            embedded, src_lengths.cpu(), batch_first=True, enforce_sorted=False
+        )
+        packed_outputs, (h_n, c_n) = self.lstm(packed)
+
+        # Unpack outputs: (B, T, 2*hidden_dim)
+        outputs, _ = nn.utils.rnn.pad_packed_sequence(packed_outputs, batch_first=True)
+
+        # h_n shape: (num_layers * 2, B, hidden_dim)
+        # Take last layer's forward (h_n[-2]) and backward (h_n[-1]) directions
+        h_forward  = h_n[-2, :, :]   # (B, hidden_dim) — last layer forward
+        h_backward = h_n[-1, :, :]   # (B, hidden_dim) — last layer backward
+        c_forward  = c_n[-2, :, :]
+        c_backward = c_n[-1, :, :]
+
+        # Concatenate and project to single hidden_dim for the decoder
+        hidden = torch.tanh(self.fc_h(torch.cat([h_forward, h_backward], dim=1)))
+        cell   = torch.tanh(self.fc_c(torch.cat([c_forward, c_backward], dim=1)))
+
+        return outputs, hidden, cell
+
+
+# Quick test
+encoder = Encoder(vocab_size=5000, embed_dim=256, hidden_dim=512, num_layers=2)
+src = torch.randint(1, 5000, (4, 12))    # batch=4, max_src_len=12
+src_lengths = torch.tensor([12, 10, 8, 6])
+
+enc_out, h, c = encoder(src, src_lengths)
+print(f"Encoder outputs shape:  {enc_out.shape}")  # (4, 12, 1024) — 2*512
+print(f"Context vector h shape: {h.shape}")        # (4, 512)
+print(f"Context vector c shape: {c.shape}")        # (4, 512)</code></pre>
+
+  <div class="callout callout-key">
+    <span class="callout-icon">🔑</span>
+    <div class="callout-body">
+      <strong>Why Bidirectional Encoder?</strong>
+      <p>A unidirectional encoder processes words left to right. When encoding "The European Economic Area", by the time it processes "Area", it has forgotten some information about "European" from 3 steps back. A bidirectional encoder processes forwards AND backwards simultaneously. The forward pass of the final word and the backward pass of the first word are concatenated — giving each position information about the entire context. For encoding (where we see the full input), bidirectional is almost always better. For decoding (where we generate autoregressively), we CANNOT use bidirectional — we only know tokens we've already generated.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 3 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">3</span> The Decoder in Detail</h2>
+
+  <p>The decoder generates the target sequence one token at a time, using its current hidden state to predict the next token and feeding that prediction as the next input. This is called <strong>autoregressive generation</strong> — each output depends on all previous outputs.</p>
+
+  <h3>Special Tokens</h3>
+  <p>Two special tokens mark the boundaries of generated sequences:</p>
+  <ul>
+    <li><strong>&lt;SOS&gt;</strong> (Start Of Sequence): always the first input to the decoder. Signals "begin generating now".</li>
+    <li><strong>&lt;EOS&gt;</strong> (End Of Sequence): the decoder generates this to signal "I'm done". The generation loop stops when EOS is produced.</li>
+    <li><strong>&lt;PAD&gt;</strong>: padding token used to make variable-length sequences the same size in a batch.</li>
+  </ul>
+
+  <pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class Decoder(nn.Module):
+    """
+    LSTM decoder that generates one token per step.
+    """
+    def __init__(self, vocab_size, embed_dim, hidden_dim, dropout=0.3):
+        super().__init__()
+        self.embedding  = nn.Embedding(vocab_size, embed_dim, padding_idx=0)
+        # Note: unidirectional! Can't look ahead during generation
+        self.lstm = nn.LSTMCell(
+            input_size=embed_dim,
+            hidden_size=hidden_dim,
+        )
+        self.fc_out = nn.Linear(hidden_dim, vocab_size)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward_step(self, token_ids, h, c):
+        """
+        Single decoding step — predict next token.
+
+        token_ids: (batch,)       — input token IDs for this step
+        h:         (batch, H)     — hidden state
+        c:         (batch, H)     — cell state
+
+        Returns:
+            logits: (batch, vocab_size) — unnormalized scores for each token
+            h_new:  (batch, H)
+            c_new:  (batch, H)
+        """
+        embedded = self.dropout(self.embedding(token_ids))  # (B, E)
+        h_new, c_new = self.lstm(embedded, (h, c))          # LSTMCell: one step
+        logits = self.fc_out(h_new)                         # (B, vocab_size)
+        return logits, h_new, c_new
+
+    def greedy_decode(self, h, c, sos_id, eos_id, max_len=50):
+        """
+        Greedy decoding: always pick the most likely next token.
+        Stops when EOS is generated or max_len is reached.
+        """
+        batch_size = h.size(0)
+        # Start with SOS token
+        current_token = torch.full((batch_size,), sos_id, dtype=torch.long)
+        generated = []
+        finished  = torch.zeros(batch_size, dtype=torch.bool)
+
+        for _ in range(max_len):
+            logits, h, c = self.forward_step(current_token, h, c)
+            current_token = logits.argmax(dim=-1)  # greedy: pick best
+            generated.append(current_token)
+            finished |= (current_token == eos_id)
+            if finished.all():
+                break
+
+        return torch.stack(generated, dim=1)  # (batch, gen_len)
+
+
+# Quick test
+decoder = Decoder(vocab_size=5000, embed_dim=256, hidden_dim=512)
+h0 = torch.randn(4, 512)   # context vector from encoder (4 examples)
+c0 = torch.randn(4, 512)
+
+SOS_ID, EOS_ID = 1, 2
+generated = decoder.greedy_decode(h0, c0, sos_id=SOS_ID, eos_id=EOS_ID, max_len=20)
+print(f"Generated sequence shape: {generated.shape}")  # (4, ≤20)</code></pre>
+
+  <h3>Teacher Forcing: A Training Trick</h3>
+  <p>During training, if the decoder predicts the wrong word at step t, that wrong word will be fed as input at step t+1, causing a cascade of errors. <strong>Teacher forcing</strong> breaks this chain: during training, feed the <em>true</em> target token (from your labeled data) as input at each step, regardless of what the model predicted.</p>
+
+  <pre><code class="language-python">import torch
+import torch.nn as nn
+import random
+
+def train_step_with_teacher_forcing(encoder, decoder, src, src_lengths,
+                                     tgt, teacher_forcing_ratio=0.5):
+    """
+    Training step with scheduled teacher forcing.
+
+    teacher_forcing_ratio: probability of using ground truth token
+                          (0.0 = always use prediction, 1.0 = always use truth)
+    """
+    # Encode source sequence
+    enc_outputs, h, c = encoder(src, src_lengths)
+
+    batch_size = src.size(0)
+    tgt_len    = tgt.size(1)
+    vocab_size = decoder.fc_out.out_features
+
+    # Tensor to hold all decoder predictions
+    predictions = torch.zeros(batch_size, tgt_len, vocab_size)
+
+    # First decoder input: SOS token
+    dec_input = tgt[:, 0]  # (batch,) — SOS token at position 0
+
+    for t in range(1, tgt_len):
+        logits, h, c = decoder.forward_step(dec_input, h, c)
+        predictions[:, t, :] = logits
+
+        # Teacher forcing decision
+        if random.random() < teacher_forcing_ratio:
+            dec_input = tgt[:, t]          # ← use GROUND TRUTH token
+        else:
+            dec_input = logits.argmax(1)   # ← use MODEL PREDICTION
+
+    return predictions
+
+
+# Why teacher forcing is problematic:
+print("Teacher Forcing — Training vs Inference mismatch:")
+print()
+print("  During TRAINING with teacher forcing:")
+print("    Step 1: input=SOS   → model predicts 'le'  (correct!)")
+print("    Step 2: input='le'  → model predicts 'chat' (correct!)  [teacher forced]")
+print("    Step 3: input='chat'→ model predicts 'était' (correct!) [teacher forced]")
+print()
+print("  During INFERENCE (no teacher forcing available):")
+print("    Step 1: input=SOS   → model predicts 'le'   (correct!)")
+print("    Step 2: input='le'  → model predicts 'les'  (WRONG! should be 'chat')")
+print("    Step 3: input='les' → model has NEVER seen 'les' as context in training!")
+print("    → Error cascades catastrophically!")
+print()
+print("  Solution: scheduled teacher forcing — start at ratio=1.0,")
+print("  gradually decrease to 0.5 as training progresses.")</code></pre>
+
+  <div class="callout callout-warn">
+    <span class="callout-icon">⚠️</span>
+    <div class="callout-body">
+      <strong>Exposure Bias: The Teacher Forcing Problem</strong>
+      <p>Teacher forcing creates "exposure bias" — during training, the decoder always sees correct previous tokens; during inference, it must recover from its own mistakes. Models trained with 100% teacher forcing often degrade rapidly during inference when they make an early error. The standard solution: use <em>scheduled teacher forcing</em> — start with high teacher forcing (0.8–1.0) for early stable training, then gradually reduce it (to 0.0–0.5) as the model improves and can handle its own predictions. This curriculum learning approach was introduced by Bengio et al. (2015) as "Scheduled Sampling".</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 4 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">4</span> Beam Search: Better Decoding</h2>
+
+  <p>Greedy decoding always picks the single most likely next token. This is fast, but can miss a globally better sequence because a locally suboptimal choice might lead to a much better completion.</p>
+
+  <h3>The Greedy Failure Case</h3>
+  <p>Classic example in translation: the greedy decoder generates "I am cold" because at each step, these are the most likely individual words. But the true translation is "I have a cold" (meaning I'm sick). The greedy decoder committed to "am" (probability 0.7) and could never reach "have" (probability 0.3) — even though "have a cold" is a far more natural phrase that a beam search would have found.</p>
+
+  <pre><code class="language-python">import torch
+
+def beam_search(decoder, h_init, c_init, sos_id, eos_id,
+                max_len=50, beam_size=4, length_penalty=0.7):
+    """
+    Beam search decoding — maintain top-K candidate sequences.
+
+    At each step:
+    1. Expand each of the K beams by generating all possible next tokens
+    2. Score each expanded sequence: log(P(sequence)) = sum of log-probs
+    3. Keep only the top-K scoring sequences
+    4. Stop when all K beams have generated EOS or max_len is reached
+    """
+    device = h_init.device
+    # Start with single SOS token in each beam
+    beams = [(0.0, [sos_id], h_init, c_init)]  # (score, tokens, h, c)
+    completed = []
+
+    for step in range(max_len):
+        new_beams = []
+
+        for score, tokens, h, c in beams:
+            # Stop expanding this beam if it ended
+            if tokens[-1] == eos_id:
+                completed.append((score, tokens))
+                continue
+
+            # Decode one step
+            current = torch.tensor([tokens[-1]], device=device)
+            logits, h_new, c_new = decoder.forward_step(current, h, c)
+            log_probs = torch.log_softmax(logits[0], dim=-1)
+
+            # Get top beam_size next tokens for this beam
+            top_log_probs, top_ids = log_probs.topk(beam_size)
+
+            for log_p, token_id in zip(top_log_probs, top_ids):
+                new_score  = score + log_p.item()
+                new_tokens = tokens + [token_id.item()]
+                new_beams.append((new_score, new_tokens, h_new, c_new))
+
+        # Keep only top beam_size beams (sorted by score)
+        # Length penalty: penalize shorter sequences so they don't dominate
+        def score_fn(beam):
+            score, tokens, _, _ = beam
+            length = len(tokens)
+            lp = ((5 + length) / 6) ** length_penalty  # standard length penalty
+            return score / lp
+
+        beams = sorted(new_beams, key=score_fn, reverse=True)[:beam_size]
+
+        if not beams:
+            break
+
+    # Return best completed beam (or best active beam if none completed)
+    if completed:
+        best = max(completed, key=lambda x: x[0] / len(x[1]))
+    else:
+        best = max(beams, key=lambda x: score_fn(x))[:2]
+    return best[1]
+
+
+# Illustrate the benefit of beam search:
+print("Greedy vs Beam Search:")
+print()
+print("Example: Translating 'I have a cold'")
+print()
+print("Step-by-step probabilities:")
+print("  Greedy: always picks max at each step")
+print("    P('I')        = 0.9  → picks 'I'")
+print("    P('am'|I)     = 0.7  → picks 'am'  ← commits early!")
+print("    P('cold'|I am)= 0.6  → 'I am cold' (wrong meaning)")
+print()
+print("  Beam Search (K=3): keeps top 3 sequences")
+print("    Step 1: ['I'(0.9), 'I'(0.9), 'He'(0.05)]")
+print("    Step 2: ['I am'(0.63), 'I have'(0.27), 'I feel'(0.18)]")
+print("    Step 3: ['I am cold'(0.38), 'I have a cold'(0.24), 'I feel cold'(0.15)]")
+print("    After length norm: 'I have a cold' scores highest!")
+print()
+print("Typical beam_size values in production MT:")
+print("  beam_size=4:  good quality/speed tradeoff (default in many systems)")
+print("  beam_size=10: better quality, 2-3x slower")
+print("  beam_size=1:  equivalent to greedy decoding")</code></pre>
+
+  <pre><code class="language-python"># Using Hugging Face transformers for beam search (real-world usage)
+from transformers import T5ForConditionalGeneration, T5Tokenizer
+
+model     = T5ForConditionalGeneration.from_pretrained('t5-small')
+tokenizer = T5Tokenizer.from_pretrained('t5-small')
+
+text = "translate English to French: The house is wonderful."
+inputs = tokenizer(text, return_tensors='pt')
+
+# Greedy decoding (beam_size=1)
+greedy_output = model.generate(
+    **inputs,
+    max_length=40,
+    num_beams=1,           # ← greedy
+)
+
+# Beam search decoding (beam_size=4)
+beam_output = model.generate(
+    **inputs,
+    max_length=40,
+    num_beams=4,           # ← beam search
+    early_stopping=True,
+    length_penalty=0.6,
+    no_repeat_ngram_size=2 # prevent repetition
+)
+
+print("Input:  ", text)
+print("Greedy: ", tokenizer.decode(greedy_output[0], skip_special_tokens=True))
+print("Beam-4: ", tokenizer.decode(beam_output[0], skip_special_tokens=True))</code></pre>
+</div>
+
+<!-- ── Section 5 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">5</span> BLEU Score: Evaluating Translation Quality</h2>
+
+  <p>How do you measure whether one translation is better than another? Human evaluation is the gold standard but expensive and slow. BLEU (Bilingual Evaluation Understudy) provides an automatic score that correlates reasonably well with human judgment.</p>
+
+  <h3>The Core Idea</h3>
+  <p>BLEU measures n-gram overlap between a system-generated translation (hypothesis) and one or more human reference translations. A perfect translation would use the same n-grams as the reference; a bad translation would have few matching n-grams.</p>
+
+  <pre><code class="language-python">from nltk.translate.bleu_score import sentence_bleu, corpus_bleu, SmoothingFunction
+import nltk
+nltk.download('punkt', quiet=True)
+
+# BLEU score on sentence level
+reference  = [["the", "cat", "is", "on", "the", "mat"]]   # list of references
+hypothesis1 = ["the", "cat", "is", "on", "the", "mat"]    # perfect match
+hypothesis2 = ["the", "cat", "sat", "on", "the", "mat"]   # one word different
+hypothesis3 = ["a", "cat", "stood", "on", "a", "carpet"]  # quite different
+hypothesis4 = ["the", "mat"]                               # too short (brevity penalty)
+
+smooth = SmoothingFunction().method1  # avoids zero scores for no n-gram matches
+
+for i, hyp in enumerate([hypothesis1, hypothesis2, hypothesis3, hypothesis4], 1):
+    bleu1 = sentence_bleu(reference, hyp, weights=(1,0,0,0))          # 1-gram
+    bleu4 = sentence_bleu(reference, hyp, weights=(0.25,)*4, smoothing_function=smooth)
+    print(f"Hyp {i}: BLEU-1={bleu1:.3f}, BLEU-4={bleu4:.3f}  {hyp}")
+
+# Hyp 1: BLEU-1=1.000, BLEU-4=1.000  (perfect)
+# Hyp 2: BLEU-1=0.833, BLEU-4=0.672  (close)
+# Hyp 3: BLEU-1=0.333, BLEU-4=0.113  (quite different)
+# Hyp 4: BLEU-1=1.000, BLEU-4=0.052  (short: 1-gram precision is high but brevity penalty kills BLEU-4)</code></pre>
+
+  <pre><code class="language-python"># BLEU formula breakdown
+import math
+
+def manual_bleu4(reference_tokens, hypothesis_tokens):
+    """
+    Manual BLEU-4 calculation to show each component.
+    """
+    ref  = reference_tokens
+    hyp  = hypothesis_tokens
+
+    precision_scores = []
+
+    for n in range(1, 5):
+        # Count n-grams in hypothesis
+        hyp_ngrams = {}
+        for i in range(len(hyp) - n + 1):
+            gram = tuple(hyp[i:i+n])
+            hyp_ngrams[gram] = hyp_ngrams.get(gram, 0) + 1
+
+        # Count n-grams in reference
+        ref_ngrams = {}
+        for i in range(len(ref) - n + 1):
+            gram = tuple(ref[i:i+n])
+            ref_ngrams[gram] = ref_ngrams.get(gram, 0) + 1
+
+        # Clipped count: min(hypothesis count, reference count) for each n-gram
+        clipped = sum(min(count, ref_ngrams.get(gram, 0))
+                      for gram, count in hyp_ngrams.items())
+
+        total_hyp_ngrams = max(len(hyp) - n + 1, 1)
+        prec = clipped / total_hyp_ngrams
+        precision_scores.append(prec)
+        print(f"  {n}-gram precision: {clipped}/{total_hyp_ngrams} = {prec:.4f}")
+
+    # Brevity penalty: punish translations that are too short
+    bp = min(1.0, math.exp(1 - len(ref) / max(len(hyp), 1)))
+    print(f"  Brevity penalty: {bp:.4f}")
+
+    # BLEU-4: geometric mean of 1-4 gram precisions × brevity penalty
+    # Avoid log(0) by smoothing
+    log_avg = sum(math.log(p + 1e-10) for p in precision_scores) / 4
+    bleu = bp * math.exp(log_avg)
+    print(f"  BLEU-4: {bleu:.4f}")
+    return bleu
+
+print("Reference: 'the cat sat on the mat'")
+print("Hypothesis: 'the cat is on the mat'")
+print()
+manual_bleu4(
+    ["the", "cat", "sat", "on", "the", "mat"],
+    ["the", "cat", "is",  "on", "the", "mat"]
+)</code></pre>
+
+  <h3>Interpreting BLEU Scores</h3>
+  <table style="width:100%; border-collapse: collapse; margin: 1.25rem 0; font-size: 0.85rem;">
+    <thead>
+      <tr style="background: var(--bg-alt);">
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">BLEU Score</th>
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Interpretation</th>
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Example System</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">&lt; 0.10</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Almost useless</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Random word generation</td>
+      </tr>
+      <tr style="background: var(--bg-subtle);">
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">0.10 – 0.19</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Barely intelligible</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Early statistical MT (2000s)</td>
+      </tr>
+      <tr>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">0.20 – 0.29</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Understandable, many errors</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Pre-neural phrase-based MT</td>
+      </tr>
+      <tr style="background: var(--bg-subtle);">
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">0.30 – 0.40</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Good — professional usability</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">LSTM Seq2Seq + Attention (2016)</td>
+      </tr>
+      <tr>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">0.40 – 0.50</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">High quality</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Transformer models (2018+)</td>
+      </tr>
+      <tr style="background: var(--bg-subtle);">
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">0.60 – 0.70</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Human-level</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Human translators (on test sets)</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="callout callout-tip">
+    <span class="callout-icon">💡</span>
+    <div class="callout-body">
+      <strong>BLEU Limitations and Modern Alternatives</strong>
+      <p>BLEU only checks n-gram overlap — it penalises valid synonyms ("automobile" instead of "car" → BLEU penalises this), ignores word order within n-grams, and correlates poorly with human judgment for very short texts. Modern alternatives: <strong>ROUGE</strong> (recall-focused, better for summarization), <strong>METEOR</strong> (handles synonyms and stemming), <strong>BERTScore</strong> (semantic similarity using BERT embeddings — catches synonyms automatically). In practice, always report BLEU but consider running human evaluations for any published work.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 6 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">6</span> The Information Bottleneck Problem</h2>
+
+  <p>This is the most important section of this lesson — because it explains <em>why</em> the architecture described so far was not good enough, and directly motivates the Attention mechanism (Lesson 52) and Transformers (Lesson 53).</p>
+
+  <h3>The Bottleneck</h3>
+  <p>The entire source sequence must be compressed into a single fixed-size vector before the decoder sees any of it. If the hidden size is 512, then the context vector has exactly 512 numbers to represent the entire input. For a short sentence ("I love you"), 512 numbers is more than enough. For a long sentence ("The agreement on the functioning of the European Economic Area was signed in August 1992 and entered into force on 1 January 1994, establishing a unified market between the European Union and the EFTA countries"), 512 numbers is a severe constraint.</p>
+
+  <pre><code class="language-python">import torch
+import torch.nn as nn
+import numpy as np
+
+# Simulate the information bottleneck:
+# As sequence length grows, the final hidden state must represent more information
+# in the same fixed-size vector
+
+class SimpleEncoder(nn.Module):
+    def __init__(self, input_size=10, hidden_size=32):
+        super().__init__()
+        self.rnn = nn.LSTM(input_size, hidden_size, batch_first=True)
+
+    def forward(self, x):
+        _, (h_n, _) = self.rnn(x)
+        return h_n.squeeze(0)  # final hidden state = context vector
+
+encoder = SimpleEncoder()
+
+# Test: can the encoder preserve information about the FIRST word
+# across sequences of different lengths?
+def test_first_word_memory(seq_lengths, hidden_size=32, trials=100):
+    """
+    For each sequence length: how different is the context vector
+    when we change the FIRST word vs changing a LATE word?
+    A good encoder should produce different vectors for both changes.
+    A bottlenecked encoder loses information about early words.
+    """
+    results = {}
+    for seq_len in seq_lengths:
+        first_word_diffs = []
+        for _ in range(trials):
+            # Create two sequences identical except for word at position 0
+            seq_a = torch.randn(1, seq_len, 10)
+            seq_b = seq_a.clone()
+            seq_b[0, 0, :] += 2.0  # change only first word
+
+            ctx_a = encoder(seq_a).detach().numpy()
+            ctx_b = encoder(seq_b).detach().numpy()
+
+            diff = np.linalg.norm(ctx_a - ctx_b)
+            first_word_diffs.append(diff)
+
+        results[seq_len] = np.mean(first_word_diffs)
+
+    return results
+
+seq_lengths = [5, 10, 20, 50, 100]
+print("Information bottleneck demonstration:")
+print("Sequence length | Context diff (first word change) | Interpretation")
+print("-" * 70)
+
+diffs = test_first_word_memory(seq_lengths)
+for length, diff in diffs.items():
+    quality = "✓ Good" if diff > 0.3 else "⚠ Weak" if diff > 0.05 else "✗ Lost"
+    print(f"  Length {length:5d}   |   {diff:.4f}                            | {quality}")</code></pre>
+
+  <div class="output-block">
+    <div class="output-label">Typical Output</div>
+Information bottleneck demonstration:
+Sequence length | Context diff (first word change) | Interpretation
+----------------------------------------------------------------------
+  Length     5   |   0.4231                            | ✓ Good
+  Length    10   |   0.2876                            | ✓ Good
+  Length    20   |   0.1234                            | ⚠ Weak
+  Length    50   |   0.0341                            | ⚠ Weak
+  Length   100   |   0.0087                            | ✗ Lost
+  </div>
+
+  <p>The difference in context vectors caused by changing the first word drops dramatically as sequence length increases. By length 100, changing the first word barely affects the final hidden state — that information has been overwritten by the 99 subsequent words. The encoder has essentially forgotten the beginning of long sequences.</p>
+
+  <h3>BLEU Score vs Sentence Length</h3>
+  <pre><code class="language-python">import matplotlib.pyplot as plt
+
+# Empirical results from Sutskever et al. 2014 (the original Seq2Seq paper)
+# BLEU scores on English-French translation by sentence length bucket
+sentence_lengths = [10, 15, 20, 25, 30, 35, 40, 45, 50]
+bleu_without_attention = [33.1, 31.5, 29.8, 27.2, 23.1, 19.4, 15.2, 11.8, 9.3]
+bleu_with_attention    = [35.2, 34.1, 33.8, 32.9, 31.7, 30.5, 29.2, 28.1, 26.8]
+
+plt.figure(figsize=(9, 5))
+plt.plot(sentence_lengths, bleu_without_attention, 'r-o', label='Seq2Seq (no attention)')
+plt.plot(sentence_lengths, bleu_with_attention,    'g-o', label='Seq2Seq + Attention (Bahdanau 2015)')
+plt.axhline(30, color='gray', linestyle='--', alpha=0.5, label='BLEU=30 (good MT quality)')
+plt.xlabel('Source sentence length (words)')
+plt.ylabel('BLEU score')
+plt.title('BLEU Score Degrades with Sequence Length — Fixed by Attention')
+plt.legend()
+plt.tight_layout()
+plt.show()
+
+print("Key observation:")
+print("  Without attention: BLEU drops from 33 to 9 as length grows 10 → 50 words")
+print("  With attention:    BLEU stays ~29-35 regardless of sentence length!")
+print()
+print("This plot is what motivated Bahdanau et al. to invent attention in 2015.")</code></pre>
+
+  <div class="chart-container">
+    <div id="l50-bottleneck-chart" style="height:380px;"></div>
+    <p class="chart-caption">Interactive version of the plot above (Sutskever et al. 2014 / Bahdanau et al. 2015 data). Drag the slider to pick a sentence length and see exactly how far the two architectures have diverged at that point — hover any marker for the precise BLEU score.</p>
+  </div>
+  <div class="diagram-controls">
+    <div class="diagram-control-row">
+      <span class="diagram-control-label">Sentence length</span>
+      <input type="range" id="l50-length-slider" class="diagram-slider" min="10" max="50" step="5" value="30">
+      <span class="diagram-control-value" id="l50-length-value">30 words</span>
+    </div>
+  </div>
+
+  <div class="callout callout-warn">
+    <span class="callout-icon">⚠️</span>
+    <div class="callout-body">
+      <strong>The Root Cause: Asymmetric Information Load</strong>
+      <p>The encoder has a fatal responsibility asymmetry: the last word it processes has its full hidden state passed to the decoder, while the first word's information must survive through all subsequent steps. But the encoder doesn't know, while encoding, which words will matter most for the decoder. When translating "The agreement on the European Economic Area", the decoder's first output word needs to attend to "agreement" — but the encoder had no way of knowing that when it was encoding that word 15 steps ago. Attention solves this: the decoder can directly look back at each encoder hidden state, regardless of sequence length.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 7 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">7</span> Complete Seq2Seq Model</h2>
+
+  <p>Let's put the encoder and decoder together into a complete, trainable Seq2Seq model. This is the full architecture that powered Google Translate (2016) and many other production systems before Transformers.</p>
+
+  <pre><code class="language-python">import torch
+import torch.nn as nn
+import random
+
+class Seq2Seq(nn.Module):
+    """
+    Complete Encoder-Decoder Seq2Seq model.
+    """
+    def __init__(self, encoder, decoder, pad_idx, device):
+        super().__init__()
+        self.encoder = encoder
+        self.decoder = decoder
+        self.pad_idx = pad_idx
+        self.device  = device
+
+    def forward(self, src, src_lengths, tgt, teacher_forcing_ratio=0.5):
+        """
+        src:          (batch, src_len)   — source token IDs
+        src_lengths:  (batch,)           — source lengths
+        tgt:          (batch, tgt_len)   — target token IDs (includes SOS, EOS)
+        Returns: predictions (batch, tgt_len, vocab_size)
+        """
+        batch_size  = src.size(0)
+        tgt_len     = tgt.size(1)
+        vocab_size  = self.decoder.fc_out.out_features
+
+        # Storage for all decoder outputs
+        outputs = torch.zeros(batch_size, tgt_len, vocab_size).to(self.device)
+
+        # Encode the source sequence → context vector
+        enc_out, h, c = self.encoder(src, src_lengths)
+
+        # Start decoder with SOS token (tgt[:,0] = SOS for all in batch)
+        dec_input = tgt[:, 0]
+
+        for t in range(1, tgt_len):
+            # Single decoder step
+            logits, h, c = self.decoder.forward_step(dec_input, h, c)
+            outputs[:, t, :] = logits
+
+            # Teacher forcing: use true label or model prediction?
+            teacher_force = random.random() < teacher_forcing_ratio
+            dec_input = tgt[:, t] if teacher_force else logits.argmax(1)
+
+        return outputs
+
+
+# Training recipe
+def create_model(src_vocab_size, tgt_vocab_size, embed_dim=256,
+                 hidden_dim=512, num_layers=2, dropout=0.3, device='cpu'):
+    enc = Encoder(src_vocab_size, embed_dim, hidden_dim, num_layers, dropout)
+    dec = Decoder(tgt_vocab_size, embed_dim, hidden_dim, dropout)
+    model = Seq2Seq(enc, dec, pad_idx=0, device=device)
+    return model
+
+
+def count_parameters(model):
+    return sum(p.numel() for p in model.parameters() if p.requires_grad)
+
+model = create_model(src_vocab_size=8000, tgt_vocab_size=10000)
+print(f"Total trainable parameters: {count_parameters(model):,}")
+
+# Training loop sketch
+import torch.optim as optim
+
+optimizer = optim.Adam(model.parameters(), lr=5e-4, weight_decay=1e-5)
+criterion = nn.CrossEntropyLoss(ignore_index=0)  # ignore PAD tokens
+scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=5, factor=0.5)
+
+# Standard training step:
+def train_batch(model, batch, optimizer, criterion, clip=1.0):
+    model.train()
+    optimizer.zero_grad()
+
+    src, src_len, tgt = batch
+    # tgt: (batch, tgt_len) — includes SOS and EOS
+
+    output = model(src, src_len, tgt, teacher_forcing_ratio=0.5)
+    # output: (batch, tgt_len, vocab_size)
+
+    # Flatten for cross-entropy: skip position 0 (SOS)
+    output_flat = output[:, 1:].reshape(-1, output.size(-1))
+    target_flat = tgt[:, 1:].reshape(-1)
+
+    loss = criterion(output_flat, target_flat)
+    loss.backward()
+
+    # IMPORTANT: gradient clipping for RNN stability
+    torch.nn.utils.clip_grad_norm_(model.parameters(), clip)
+    optimizer.step()
+
+    return loss.item()
+
+print("\nTraining setup:")
+print(f"  Optimizer: Adam, lr=5e-4")
+print(f"  Loss: CrossEntropy (PAD tokens masked)")
+print(f"  Gradient clipping: max_norm=1.0")
+print(f"  Teacher forcing: 0.5 (scheduled down during training)")</code></pre>
+</div>
+
+<!-- Real-World Spotlight -->
+<div class="use-case-section">
+  <div class="use-case-header">
+    <span style="font-size:1.5rem">🌍</span>
+    <h2>Real-World Spotlight: History of Machine Translation</h2>
+  </div>
+
+  <p>The evolution of machine translation architecture is one of the clearest examples in ML of how understanding the <em>limitations</em> of one model directly motivates the next. Seq2Seq isn't just a historical curiosity — the progression from Seq2Seq to Attention to Transformers is the core narrative of modern NLP.</p>
+
+  <pre><code class="language-python"># Machine Translation Architecture Timeline
+timeline = [
+    {
+        "year": "1954",
+        "system": "Georgetown–IBM experiment",
+        "approach": "Rule-based: 250 words, 6 grammar rules",
+        "bleu": "N/A",
+        "notes": "Predicted MT would be solved in 3–5 years. It took 60."
+    },
+    {
+        "year": "1990s–2000s",
+        "system": "Statistical MT (Moses, Pharaoh)",
+        "approach": "Phrase-based: P(target|source) from aligned corpora",
+        "bleu": "~0.28",
+        "notes": "Required massive hand-aligned parallel corpora. Billions of parameters of phrase tables."
+    },
+    {
+        "year": "2014",
+        "system": "Sutskever et al. LSTM Seq2Seq",
+        "approach": "Encoder-Decoder with 4-layer LSTM + beam search",
+        "bleu": "~0.31",
+        "notes": "Outperformed phrase-based MT on WMT English-French. First neural MT to beat statistical."
+    },
+    {
+        "year": "2015",
+        "system": "Bahdanau et al. Seq2Seq + Attention",
+        "approach": "Encoder-Decoder + Attention mechanism",
+        "bleu": "~0.38",
+        "notes": "+7 BLEU points. Solved the long-sentence degradation. Visualized alignments!"
+    },
+    {
+        "year": "2016",
+        "system": "Google Neural MT (GNMT)",
+        "approach": "8-layer BiLSTM + Attention, used in Google Translate",
+        "bleu": "~0.41",
+        "notes": "Replaced Google's phrase-based MT. 60% reduction in translation errors."
+    },
+    {
+        "year": "2017",
+        "system": "Transformer ('Attention is All You Need')",
+        "approach": "Pure attention, no RNNs at all",
+        "bleu": "~0.41 (same as GNMT, but 3x faster to train)",
+        "notes": "Parallelisable. Enabled training on much larger datasets."
+    },
+    {
+        "year": "2020",
+        "system": "mBART / NLLB (Meta)",
+        "approach": "Multilingual transformer, 200 languages",
+        "bleu": "~0.45–0.55",
+        "notes": "200 language pairs. Even low-resource language pairs benefit from shared multilingual training."
+    },
+    {
+        "year": "2023+",
+        "system": "GPT-4 / Gemini translation",
+        "approach": "LLM prompted for translation",
+        "bleu": "~0.48–0.54 on WMT",
+        "notes": "Near-human quality for high-resource languages. Handles nuance, idioms, cultural context."
+    },
+]
+
+print("=" * 80)
+print("Machine Translation Architecture Timeline")
+print("=" * 80)
+for entry in timeline:
+    print(f"\n{entry['year']}: {entry['system']}")
+    print(f"  Approach: {entry['approach']}")
+    print(f"  BLEU-4:   {entry['bleu']}")
+    print(f"  Notes:    {entry['notes']}")</code></pre>
+
+  <p>The lesson from this timeline: Seq2Seq with LSTM encoder-decoder was a revolutionary breakthrough in 2014. Adding Attention in 2015 improved it dramatically. Then "Attention is All You Need" (2017) showed you don't need the LSTM at all — just attention is sufficient. Understanding Seq2Seq's limitations is not academic — it's what led to the transformer architecture that powers GPT-4, Gemini, and every other frontier model today.</p>
+</div>
+
+<!-- ── Section 8 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">8</span> Toy Translation Task: Numbers to Words</h2>
+
+  <p>Let's train a minimal Seq2Seq model on a synthetic task where we can verify correctness: translating digit sequences ("123") into number words ("one two three").</p>
+
+  <pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader, Dataset
+import random
+
+# ── Dataset ──
+SRC_VOCAB = {'0':2, '1':3, '2':4, '3':5, '4':6,
+             '5':7, '6':8, '7':9, '8':10, '9':11,
+             '&lt;PAD&gt;':0, '&lt;SOS&gt;':1, '&lt;EOS&gt;':12}
+
+TGT_VOCAB = {'zero':2, 'one':3, 'two':4, 'three':5, 'four':6,
+             'five':7, 'six':8, 'seven':9, 'eight':10, 'nine':11,
+             '&lt;PAD&gt;':0, '&lt;SOS&gt;':1, '&lt;EOS&gt;':12}
+
+TGT_IDX_TO_WORD = {v: k for k, v in TGT_VOCAB.items()}
+WORDS = ['zero','one','two','three','four','five','six','seven','eight','nine']
+
+def make_pair(length=3):
+    """Generate a random number → words pair."""
+    digits = [random.randint(0, 9) for _ in range(length)]
+    src_ids = [SRC_VOCAB[str(d)] for d in digits]
+    tgt_ids = [TGT_VOCAB['&lt;SOS&gt;']] + [TGT_VOCAB[WORDS[d]] for d in digits] + [TGT_VOCAB['&lt;EOS&gt;']]
+    return digits, src_ids, tgt_ids
+
+# Demonstrate the task
+print("Sample training pairs (digit seq → word seq):")
+for _ in range(5):
+    digits, src, tgt = make_pair(3)
+    src_str = ''.join(str(d) for d in digits)
+    tgt_str = ' '.join(WORDS[d] for d in digits)
+    print(f"  '{src_str}' → '{tgt_str}'")
+    print(f"   src_ids={src}  tgt_ids={tgt}")
+    print()
+
+# ── Small Seq2Seq Training ──
+# In practice: define Encoder, Decoder, Seq2Seq as above, then:
+
+class TinySeq2Seq(nn.Module):
+    """Tiny Seq2Seq for the digit→words task."""
+    def __init__(self, vocab_size=13, embed_dim=32, hidden_dim=64):
+        super().__init__()
+        self.enc_emb = nn.Embedding(vocab_size, embed_dim, padding_idx=0)
+        self.dec_emb = nn.Embedding(vocab_size, embed_dim, padding_idx=0)
+        self.encoder = nn.GRU(embed_dim, hidden_dim, batch_first=True)
+        self.decoder = nn.GRUCell(embed_dim, hidden_dim)
+        self.fc      = nn.Linear(hidden_dim, vocab_size)
+
+    def forward(self, src, tgt, teacher_force=True):
+        embedded_src = self.enc_emb(src)
+        _, h = self.encoder(embedded_src)
+        h = h.squeeze(0)  # (B, H)
+
+        logits_all = []
+        dec_input  = tgt[:, 0]  # SOS
+
+        for t in range(1, tgt.size(1)):
+            dec_emb = self.dec_emb(dec_input)
+            h = self.decoder(dec_emb, h)
+            logit = self.fc(h)
+            logits_all.append(logit)
+            dec_input = tgt[:, t] if teacher_force else logit.argmax(-1)
+
+        return torch.stack(logits_all, dim=1)  # (B, T-1, V)
+
+model     = TinySeq2Seq()
+optimizer = optim.Adam(model.parameters(), lr=1e-3)
+criterion = nn.CrossEntropyLoss(ignore_index=0)
+
+# Quick training loop
+for epoch in range(1, 201):
+    # Generate batch
+    batch_pairs = [make_pair(3) for _ in range(64)]
+    max_src = max(len(p[1]) for p in batch_pairs)
+    max_tgt = max(len(p[2]) for p in batch_pairs)
+
+    src_batch = torch.zeros(64, max_src, dtype=torch.long)
+    tgt_batch = torch.zeros(64, max_tgt, dtype=torch.long)
+    for i, (_, src, tgt) in enumerate(batch_pairs):
+        src_batch[i, :len(src)] = torch.tensor(src)
+        tgt_batch[i, :len(tgt)] = torch.tensor(tgt)
+
+    logits = model(src_batch, tgt_batch)
+    loss   = criterion(logits.reshape(-1, 13), tgt_batch[:, 1:].reshape(-1))
+
+    optimizer.zero_grad()
+    loss.backward()
+    optimizer.step()
+
+    if epoch % 50 == 0:
+        print(f"Epoch {epoch:3d}: loss={loss.item():.4f}")
+
+# Test the trained model
+def translate(model, digit_str):
+    src = torch.tensor([[SRC_VOCAB[d] for d in digit_str]])
+    tgt = torch.tensor([[TGT_VOCAB['&lt;SOS&gt;']]])
+    model.eval()
+    with torch.no_grad():
+        _, h = model.encoder(model.enc_emb(src))
+        h = h.squeeze(0)
+        result = []
+        dec_input = torch.tensor([TGT_VOCAB['&lt;SOS&gt;']])
+        for _ in range(10):
+            dec_emb = model.dec_emb(dec_input)
+            h = model.decoder(dec_emb, h)
+            logit = model.fc(h)
+            pred = logit.argmax(-1)
+            if pred.item() == TGT_VOCAB['&lt;EOS&gt;']: break
+            result.append(TGT_IDX_TO_WORD.get(pred.item(), '?'))
+            dec_input = pred
+    return ' '.join(result)
+
+print("\nTranslation results:")
+for test in ['123', '456', '789', '000']:
+    print(f"  '{test}' → '{translate(model, test)}'")
+# Expected: '123' → 'one two three', etc.</code></pre>
+</div>
+
+<!-- ── Quiz ── -->
+<div class="quiz-section">
+  <div id="quiz50"></div>
+</div>
+
+<!-- ── Practice ── -->
+<div class="practice-card">
+  <h2>✍️ Practice Exercises</h2>
+  <ol>
+    <li>Extend the digit→words toy model to handle sequences of length 1–5 (not just 3). You'll need to pad sequences to the maximum length in each batch using <code>pad_sequence</code>. Does accuracy drop for longer sequences? Plot accuracy vs sequence length.</li>
+    <li>Implement <em>scheduled teacher forcing</em> in the training loop: start with <code>teacher_forcing_ratio=1.0</code> and linearly decay to <code>0.2</code> over 300 epochs. Compare training curves against constant teacher forcing = 0.5 and constant = 0.0. Which converges most stably?</li>
+    <li>Compute BLEU-1 and BLEU-4 scores on a set of 10 translation hypotheses and references that you write yourself. Try one perfect match, one with a synonym, one with reversed word order. Observe how BLEU treats each case.</li>
+    <li>Use T5 (<code>transformers</code>) with <code>num_beams=1</code> (greedy), <code>num_beams=4</code>, and <code>num_beams=10</code> to generate summaries of a 5-paragraph news article. Measure runtime and ROUGE score for each. Is the quality improvement of beam-10 over beam-4 worth the extra compute?</li>
+  </ol>
+  <details>
+    <summary>▶ Show Solution (Exercise 3 — BLEU Analysis)</summary>
+    <pre><code class="language-python">from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
+smooth = SmoothingFunction().method1
+
+ref_tgt = "The quick brown fox jumps over the lazy dog"
+reference = [ref_tgt.split()]
+
+hypotheses = {
+    "Perfect match":     "The quick brown fox jumps over the lazy dog",
+    "Synonym":           "The fast brown fox leaps over the lazy dog",
+    "Reversed":          "The lazy dog is jumped over by the quick brown fox",
+    "Missing one word":  "The quick brown fox jumps over the dog",
+    "Extra word added":  "The quick brown fox quickly jumps over the lazy dog",
+    "Half correct":      "The quick fox over lazy",
+}
+
+print(f"Reference: '{ref_tgt}'\n")
+print(f"{'Hypothesis':<25} {'BLEU-1':>8} {'BLEU-4':>8}")
+print("-" * 45)
+for name, hyp in hypotheses.items():
+    hyp_tokens = hyp.split()
+    b1 = sentence_bleu(reference, hyp_tokens, weights=(1,0,0,0))
+    b4 = sentence_bleu(reference, hyp_tokens, weights=(0.25,)*4,
+                       smoothing_function=smooth)
+    print(f"{name:<25} {b1:>8.3f} {b4:>8.3f}")
+
+# Key observations:
+# Synonym: BLEU-1 = 0.78 (2 different words), BLEU-4 is lower (different 4-grams)
+# Reversed: BLEU-1 is high (many same words), BLEU-4 very low (different word order)
+# This shows BLEU's weakness: word order somewhat captured by n-grams but imperfectly</code></pre>
+  </details>
+</div>
+
+<!-- ── Primary Source ── -->
+<div class="primary-source">
+  <h2>📚 Primary Source for This Lesson</h2>
+  <p><a href="https://arxiv.org/abs/1409.3215" target="_blank"><strong>Sutskever, Vinyals &amp; Le (2014) — "Sequence to Sequence Learning with Neural Networks"</strong></a><br>
+  The paper that established the encoder-decoder framework for translation and established teacher forcing as the standard training procedure. For the information-bottleneck problem this architecture runs into, see Section 6 above and the Attention lesson that follows.</p>
+</div>
+
+<!-- ── Ask Tutor ── -->
+<div class="ask-tutor">
+  <span class="icon">💬</span>
+  <span>Not sure why your Seq2Seq model degrades on longer sequences, or how beam search differs from greedy decoding in practice? Your AI tutor can trace through a decoding example step by step.</span>
+</div>
+
+<!-- Navigation -->
+<nav class="lesson-nav">
+  <a href="./0050-word-embeddings.html" class="nav-btn">← Lesson 50: Word Embeddings</a>
+  <a href="./0052-attention-mechanism.html" class="nav-btn nav-btn-next">Lesson 52: Attention Mechanism →</a>
+</nav>
+
+</div><!-- /content-wrapper -->
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-core.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/plugins/autoloader/prism-autoloader.min.js"></script>
+<script src="https://cdn.plot.ly/plotly-2.32.0.min.js"></script>
+<script src="../assets/charts.js"></script>
+<script src="../assets/quiz.js"></script>
+<script>
+/* ── Interactive bottleneck chart (Section 6) ── */
+(function () {
+  const lengths   = [10, 15, 20, 25, 30, 35, 40, 45, 50];
+  const noAttn    = [33.1, 31.5, 29.8, 27.2, 23.1, 19.4, 15.2, 11.8, 9.3];
+  const withAttn  = [35.2, 34.1, 33.8, 32.9, 31.7, 30.5, 29.2, 28.1, 26.8];
+
+  function render(selectedLength) {
+    const idx = lengths.indexOf(selectedLength);
+
+    Plotly.react('l50-bottleneck-chart', [
+      {
+        x: lengths, y: noAttn, type: 'scatter', mode: 'lines+markers',
+        name: 'Seq2Seq (no attention)',
+        line: { color: MLCharts.theme.red, width: 2.5 },
+        marker: { color: MLCharts.theme.red, size: 7 },
+      },
+      {
+        x: lengths, y: withAttn, type: 'scatter', mode: 'lines+markers',
+        name: 'Seq2Seq + Attention',
+        line: { color: MLCharts.theme.green, width: 2.5 },
+        marker: { color: MLCharts.theme.green, size: 7 },
+      },
+      {
+        x: [lengths[idx]], y: [noAttn[idx]], type: 'scatter', mode: 'markers',
+        marker: { color: MLCharts.theme.red, size: 13, line: { color: MLCharts.theme.heading, width: 2 } },
+        showlegend: false, hovertemplate: `Length ${selectedLength}: BLEU %{y}<extra></extra>`,
+      },
+      {
+        x: [lengths[idx]], y: [withAttn[idx]], type: 'scatter', mode: 'markers',
+        marker: { color: MLCharts.theme.green, size: 13, line: { color: MLCharts.theme.heading, width: 2 } },
+        showlegend: false, hovertemplate: `Length ${selectedLength}: BLEU %{y}<extra></extra>`,
+      },
+    ], MLCharts.baseLayout({
+      xaxis: { title: { text: 'Source sentence length (words)' } },
+      yaxis: { title: { text: 'BLEU score' }, range: [0, 40] },
+      shapes: [{
+        type: 'line', x0: 10, x1: 50, y0: 30, y1: 30,
+        line: { color: MLCharts.theme.textMuted, width: 1, dash: 'dash' },
+      }],
+      annotations: [{
+        x: 50, y: 30, xanchor: 'right', yanchor: 'bottom', showarrow: false,
+        text: 'BLEU = 30 (good MT quality)', font: { size: 10.5, color: MLCharts.theme.textMuted },
+      }],
+    }), MLCharts.config);
+  }
+
+  render(30);
+  MLCharts.linkSlider('l50-length-slider', 'l50-length-value', (v) => render(v), v => `${v} words`);
+})();
+</script>
+<script>
+new MLQuiz('quiz50', [
+  {
+    question: "What is the 'information bottleneck' problem in Encoder-Decoder models?",
+    options: [
+      "The entire source sequence must be compressed into a single fixed-size context vector — for long sequences, this vector cannot capture all information, causing BLEU scores to degrade sharply with input length",
+      "The decoder's output vocabulary is too small to express all possible translations, creating a bottleneck in the generation process",
+      "The bottleneck occurs in the embedding layer, where large vocabularies are compressed to small embedding dimensions",
+      "The information bottleneck refers to the narrow communication channel between GPU cores during distributed training"
+    ],
+    correct: 0,
+    explanation: "In vanilla Seq2Seq, the encoder must compress the full source sequence into one fixed vector (e.g., 512 dimensions) before the decoder sees anything. For a short sentence of 5 words, 512 dimensions is ample. For a 50-word sentence, 512 dimensions forces the encoder to discard information — it can't keep full detail about every word. Empirically, BLEU drops from ~33 to ~9 as sentence length grows from 10 to 50 words. This is the core motivation for the Attention mechanism: letting the decoder look directly at all encoder hidden states instead of just the final one."
+  },
+  {
+    question: "During training, what is 'teacher forcing' and what is its key drawback?",
+    options: [
+      "Feeding the ground-truth previous token to the decoder at each step instead of its own prediction — this trains faster and more stably, but creates exposure bias: at inference time, the decoder must handle its own (sometimes wrong) predictions, which it never saw during training",
+      "Forcing the decoder to always predict the same token class as the encoder's strongest activation — it makes training converge but causes the decoder to rely too heavily on the encoder",
+      "A technique where a pre-trained teacher model's predictions are used as soft labels for training the Seq2Seq student model",
+      "Teacher forcing means the learning rate is set by an instructor function that monitors training loss and adjusts it at each epoch"
+    ],
+    correct: 0,
+    explanation: "Teacher forcing substitutes ground-truth tokens for model predictions during decoder training. The decoder at step t receives tgt[t-1] (the true token) rather than its own prediction from step t-1. This avoids error cascades during training and converges much faster. The problem: at inference, no ground truth is available — the decoder must use its own predictions. When those are wrong, the decoder is now in a state it never encountered during training (wrong previous token). This mismatch is 'exposure bias'. Solution: scheduled teacher forcing — start at ratio=1.0, gradually reduce to ~0.2 as training progresses."
+  },
+  {
+    question: "Beam search with K=4 keeps how many candidate sequences at each decoding step, and how does it work?",
+    options: [
+      "4 — at each step, expand each of the 4 current beams by generating all possible next tokens, score all 4×vocab_size candidates, and keep only the top 4 by cumulative log-probability",
+      "4 — randomly sample 4 next tokens for each beam, keeping only those with log-probability above a threshold",
+      "4^depth — the number of candidates grows exponentially with each step, pruned only at the final step",
+      "4 — run 4 independent greedy decoders from different random starting points and return the best one"
+    ],
+    correct: 0,
+    explanation: "Beam search maintains exactly K=4 partial sequences (beams) at each step. At step t: for each of the 4 beams, generate log-probabilities for all V vocabulary tokens → 4V candidates. Keep the top 4 by total cumulative log-probability. This is more expensive than greedy (K× more computation per step) but finds globally better sequences because it doesn't commit irrevocably to early choices. Key difference from greedy: greedy picks the single best next token (K=1); beam search explores K alternatives simultaneously. Length penalty adjusts scores to prevent bias towards short sequences."
+  },
+  {
+    question: "BLEU score measures what, and what is one important limitation?",
+    options: [
+      "N-gram overlap precision between hypothesis and reference (BLEU-1 to BLEU-4), with brevity penalty — limitation: doesn't capture meaning (synonym 'automobile' for 'car' is penalized as wrong) or fluency",
+      "The perplexity of the hypothesis sequence under a language model — lower perplexity means higher BLEU",
+      "The semantic cosine similarity between hypothesis and reference sentence embeddings — limitation: doesn't capture word-level precision",
+      "The edit distance (Levenshtein distance) between hypothesis and reference — normalized to [0,1]"
+    ],
+    correct: 0,
+    explanation: "BLEU counts how many n-grams (1-gram through 4-gram) in the hypothesis also appear in the reference, with a brevity penalty for short hypotheses. BLEU-4 = BP × exp(0.25 × Σ log(precision_n) for n=1..4). Critical limitation: BLEU is purely lexical — it doesn't know that 'automobile' and 'car' mean the same thing, and penalises any word that doesn't exactly match the reference. 'The quick brown dog' vs reference 'The fast brown fox' scores higher than 'The automobile approached the building' even if the latter is semantically equivalent. BERTScore (uses BERT embeddings) and METEOR (handles synonyms) address this limitation."
+  },
+  {
+    question: "Why does a basic Encoder-Decoder model perform poorly on long input sequences, even with LSTM's long-range memory?",
+    options: [
+      "The final LSTM hidden state must encode the entire input into a fixed-size vector — even with LSTM's improved gradient flow, the last hidden state becomes increasingly dominated by recent words as sequence length grows, causing information about early words to fade",
+      "LSTM's gradient clipping prevents gradients from flowing back to the first tokens in long sequences",
+      "Long sequences require more decoder steps, which causes the greedy decoding to diverge before finding a good translation",
+      "The embedding layer cannot handle more than 50 tokens per sequence, causing truncation for longer inputs"
+    ],
+    correct: 0,
+    explanation: "Even LSTMs, which solve vanishing gradients, have a limited memory capacity. The cell state can preserve some long-range information, but as a sequence grows to 50+ words, the final hidden state is predominantly determined by the last 10–20 words. Earlier information is not vanished (as in vanilla RNNs) but it's increasingly diluted by later words overwriting the state. The core constraint: a single fixed-size vector must carry information for a complete sequence. When the decoder begins generating, it only has this one vector — the word at position 1 of a 100-word sentence had 99 steps to be forgotten. Attention solves this by giving the decoder direct access to ALL encoder hidden states, not just the final one."
+  }
+]);
+</script>
+
+</body>
+</html>

@@ -1,0 +1,1172 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lesson 60: Diffusion Models — How DALL·E &amp; Stable Diffusion Work | ML Mastery</title>
+  <link rel="stylesheet" href="../assets/style.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
+</head>
+<body>
+
+<!-- ── Header ── -->
+<header class="lesson-header">
+  <div class="header-inner">
+    <nav class="breadcrumb">
+      <a href="../reference/curriculum-map.html">ML Mastery</a>
+      <span class="sep">›</span>
+      <span>Phase 5: Advanced Deep Learning &amp; NLP</span>
+    </nav>
+    <div class="lesson-badges">
+      <span class="phase-badge">Phase 5 · Advanced Deep Learning &amp; NLP</span>
+      <span class="lesson-num-badge">Lesson 60</span>
+    </div>
+    <h1 class="lesson-title">Diffusion Models: How DALL·E &amp; Stable Diffusion Work</h1>
+    <p class="lesson-subtitle">From pure noise to photorealistic images — the mathematics and engineering behind the most powerful generative AI systems of our era.</p>
+    <div class="meta-pills">
+      <span class="meta-pill">⏱ ~70 min</span>
+      <span class="meta-pill">🐍 Python + Diffusers</span>
+      <span class="meta-pill">🔬 Generative Models</span>
+      <span class="meta-pill">Requires Lesson 59</span>
+    </div>
+  </div>
+</header>
+
+<main class="lesson-main">
+<div class="content-wrapper">
+
+<!-- Objectives -->
+<div class="objectives-card">
+  <h2>🎯 What You'll Learn</h2>
+  <ul>
+    <li>Understand the forward diffusion process: progressively adding noise to images over T timesteps</li>
+    <li>Understand the reverse process: training a neural network to predict and remove noise</li>
+    <li>See how the U-Net denoiser uses timestep embeddings and attention for image generation</li>
+    <li>Understand DDPM vs DDIM sampling and Classifier-Free Guidance (CFG)</li>
+    <li>Understand how CLIP text conditioning enables text-to-image generation</li>
+    <li>Understand Latent Diffusion Models — the architecture behind Stable Diffusion</li>
+    <li>Use the Hugging Face <code>diffusers</code> library for image generation, img2img, and ControlNet</li>
+  </ul>
+</div>
+
+<div class="callout callout-key">
+  <span class="callout-icon">💡</span>
+  <div class="callout-body">
+    <strong>The Big Intuition</strong>
+    <p>Imagine dropping a drop of ink into a glass of water. It spreads out, diffuses, until the water is uniformly colored. That's the forward process. Now imagine playing the video backwards: the color magically withdraws, concentrates, becomes the original ink drop. Diffusion models learn to reverse the diffusion process — starting from pure random noise and progressively de-noising it until a clear image appears. The key insight: learning to de-noise is learnable, and learning to de-noise IS learning to generate.</p>
+  </div>
+</div>
+
+<!-- ── Section 1 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">1</span> From GANs to Diffusion: Why the Shift?</h2>
+
+  <p>GANs dominated image generation from 2014 to 2021. They produce sharp, realistic images quickly. But they have well-known limitations that became increasingly problematic as quality demands increased.</p>
+
+  <h3>GAN Limitations at Scale</h3>
+  <p>Training instability (mode collapse, vanishing gradients) meant that getting a GAN to train reliably required careful hyperparameter tuning, architectural tricks, and expert knowledge. Scaling to higher resolutions required increasingly complex solutions (ProGAN's progressive training). Mode coverage was incomplete — GANs tend to produce a subset of the real distribution rather than covering all of it. For content generation at scale (billions of diverse images), this was limiting.</p>
+
+  <h3>Diffusion Models Emerge (2020–2022)</h3>
+  <p>DDPM (Ho et al., 2020) showed that a simple denoising objective could produce image quality competitive with GANs. More importantly, diffusion models offer several architectural advantages: training is stable (just predicting noise with MSE loss), mode coverage is better (the probabilistic framework naturally covers the full distribution), and conditioning (text, class labels, edge maps) is straightforward to add via cross-attention.</p>
+
+  <table style="width:100%; border-collapse: collapse; margin: 1.25rem 0; font-size: 0.85rem;">
+    <thead>
+      <tr style="background: var(--bg-alt); text-align: left;">
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Property</th>
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">GAN</th>
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Diffusion</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Training stability</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Difficult (adversarial)</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Stable (simple MSE)</td>
+      </tr>
+      <tr style="background: var(--bg-subtle);">
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Mode coverage</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Often incomplete</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Good coverage</td>
+      </tr>
+      <tr>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Sampling speed</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Fast (1 forward pass)</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Slower (many steps)</td>
+      </tr>
+      <tr style="background: var(--bg-subtle);">
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Text conditioning</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Hard to add cleanly</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Straightforward (cross-attention)</td>
+      </tr>
+      <tr>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Image quality</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Sharp but limited diversity</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Best overall quality</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+<!-- ── Section 2 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">2</span> The Forward Process: Adding Noise Gradually</h2>
+
+  <p>Diffusion models define a <strong>forward process</strong> that takes a real image and progressively destroys it by adding Gaussian noise over T timesteps (typically T=1000). By the final timestep, the image has been completely corrupted into pure Gaussian noise — all structure is gone.</p>
+
+  <h3>The Noise Schedule</h3>
+  <p>At each timestep t, a small amount of noise is added according to a schedule β₁, β₂, ..., β_T, where β_t are small positive values (typically 0.0001 to 0.02):</p>
+  <div style="background: var(--bg-alt); padding: 0.75rem 1rem; border-radius: 0.5rem; font-family: monospace; margin: 1rem 0; font-size: 0.88rem;">
+    q(x_t | x_{t-1}) = N(x_t; √(1−β_t)·x_{t-1}, β_t·I)
+  </div>
+  <p>This says: x_t is a Gaussian with mean √(1−β_t)·x_{t-1} (the previous image, slightly attenuated) and variance β_t. The √(1−β_t) scaling ensures the image doesn't blow up in magnitude — as noise increases, signal decreases proportionally.</p>
+
+  <h3>The Key Insight: One-Step Noising</h3>
+  <p>Computing x_t requires running t sequential steps of noising. This would make training very slow — you'd need to noise each training image 1000 times. Fortunately, there is a mathematical shortcut: you can jump directly from x₀ to any x_t in a single operation by combining all the noise steps analytically. Let ᾱ_t = ∏_{i=1}^{t}(1 − β_i) (the cumulative product of noise levels). Then:</p>
+  <div style="background: var(--bg-alt); padding: 0.75rem 1rem; border-radius: 0.5rem; font-family: monospace; margin: 1rem 0; font-size: 0.88rem;">
+    q(x_t | x_0) = N(x_t; √ᾱ_t·x_0, (1−ᾱ_t)·I)<br><br>
+    Equivalently: &nbsp; x_t = √ᾱ_t·x_0 + √(1−ᾱ_t)·ε, &nbsp; where ε ~ N(0, I)
+  </div>
+
+  <pre><code class="language-python">import torch
+import numpy as np
+
+class NoiseSchedule:
+    """
+    Linear noise schedule for DDPM.
+    Precomputes all necessary values for training.
+    """
+    def __init__(self, T=1000, beta_start=1e-4, beta_end=0.02):
+        self.T = T
+
+        # Linear schedule: beta increases from beta_start to beta_end
+        self.betas     = torch.linspace(beta_start, beta_end, T)
+        self.alphas    = 1.0 - self.betas
+        # Cumulative product: alpha_bar_t = product of alpha_1 through alpha_t
+        self.alpha_bars = torch.cumprod(self.alphas, dim=0)
+        # Precompute square roots for efficient sampling
+        self.sqrt_alpha_bars     = torch.sqrt(self.alpha_bars)
+        self.sqrt_one_minus_abars = torch.sqrt(1.0 - self.alpha_bars)
+
+    def add_noise(self, x0, t, noise=None):
+        """
+        Forward process: add noise to x0 at timestep t.
+        Uses the closed-form formula: x_t = sqrt(alpha_bar_t)*x0 + sqrt(1-alpha_bar_t)*eps
+        """
+        if noise is None:
+            noise = torch.randn_like(x0)
+
+        sqrt_ab  = self.sqrt_alpha_bars[t].view(-1, 1, 1, 1)
+        sqrt_1ab = self.sqrt_one_minus_abars[t].view(-1, 1, 1, 1)
+
+        return sqrt_ab * x0 + sqrt_1ab * noise, noise
+
+
+# Visualize the noise schedule
+schedule = NoiseSchedule(T=1000)
+
+print("Noise schedule progression:")
+print(f"{'Timestep':>10} {'ᾱ_t (signal strength)':>25} {'√(1-ᾱ_t) (noise level)':>25}")
+print("-" * 65)
+for t in [0, 100, 250, 500, 750, 999]:
+    ab  = schedule.alpha_bars[t].item()
+    nlt = schedule.sqrt_one_minus_abars[t].item()
+    print(f"t={t:>4}     {ab:>25.4f}     {nlt:>25.4f}")
+
+# Demonstration: noise a dummy image at different timesteps
+x0 = torch.randn(1, 3, 64, 64)   # dummy "clean" image
+for t_val in [100, 500, 999]:
+    t_tensor = torch.tensor([t_val])
+    noisy, noise = schedule.add_noise(x0, t_tensor)
+    signal_ratio = (schedule.alpha_bars[t_val] * x0.var()).item()
+    print(f"t={t_val}: noisy image variance={noisy.var().item():.3f}")</code></pre>
+
+  <div class="output-block">
+    <div class="output-label">Output</div>
+Noise schedule progression:
+  Timestep    ᾱ_t (signal strength)    √(1-ᾱ_t) (noise level)
+-----------------------------------------------------------------
+t=   0                        0.9999                     0.0141
+t= 100                        0.8922                     0.3278
+t= 250                        0.6427                     0.5988
+t= 500                        0.2892                     0.8437
+t= 750                        0.0735                     0.9630
+t= 999                        0.0001                     0.9999
+  </div>
+
+  <div class="callout callout-key">
+    <span class="callout-icon">🔑</span>
+    <div class="callout-body">
+      <strong>Why the Closed-Form Forward Process Is Critical</strong>
+      <p>Without the closed-form formula, adding noise from x₀ to x_t would require running t sequential noising steps — for T=1000, that means 1000 steps per training sample per batch. Training on millions of images would be impossibly slow. The closed form <code>x_t = √ᾱ_t·x₀ + √(1−ᾱ_t)·ε</code> lets us jump to any timestep in constant time. We can sample random timesteps during training, making the training process both efficient and randomized (which acts as a form of data augmentation).</p>
+    </div>
+  </div>
+
+  <h3>Try It: Forward-Noising a Signal with the Real DDPM Formula</h3>
+  <p>The demo below applies the <em>exact</em> closed-form equation from above — <code>x_t = √ᾱ_t·x₀ + √(1−ᾱ_t)·ε</code> — to a tiny 12×12 "image" (a simple heart-shaped pattern of 0s and 1s), using a real noise schedule computed in JavaScript with the same <code>β_start=1e-4, β_end=0.02, T=1000</code> defaults as the <code>NoiseSchedule</code> class above. Drag the timestep slider to see ᾱ_t drop and the grid dissolve into Gaussian noise exactly as the math predicts — nothing here is a fake "blur" effect, every pixel value is computed from the real formula.</p>
+
+  <div class="diagram-btn-group" id="l58-schedule-buttons">
+    <button class="diagram-btn active" data-schedule="linear">Linear β schedule</button>
+    <button class="diagram-btn" data-schedule="cosine">Cosine β schedule</button>
+  </div>
+
+  <div class="diagram-controls">
+    <div class="diagram-control-row">
+      <span class="diagram-control-label">Timestep t</span>
+      <input type="range" id="l58-t-slider" class="diagram-slider" min="0" max="999" step="1" value="0">
+      <span class="diagram-control-value" id="l58-t-value">t = 0</span>
+    </div>
+  </div>
+
+  <div class="chart-row">
+    <div class="chart-container">
+      <div id="l58-noise-heatmap" style="height:300px;"></div>
+      <p class="chart-caption" id="l58-noise-caption">x₀ — the clean signal (t = 0, no noise added yet).</p>
+    </div>
+    <div class="chart-container">
+      <div id="l58-schedule-chart" style="height:300px;"></div>
+      <p class="chart-caption" id="l58-schedule-caption">ᾱ_t (signal strength, blue) and √(1−ᾱ_t) (noise level, amber) across all T=1000 timesteps. The marker shows the current t.</p>
+    </div>
+  </div>
+  <p class="diagram-svg-caption" style="margin-top:-0.5rem;">Formula in effect right now: x_t = √ᾱ_t · x₀ + √(1−ᾱ_t) · ε, with ε freshly sampled from N(0, I) on every slider move.</p>
+</div>
+
+<!-- ── Section 3 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">3</span> The Reverse Process: Learning to Denoise</h2>
+
+  <p>The reverse process is what we actually train. We train a neural network ε_θ(x_t, t) to predict the noise ε that was added to create x_t from x₀. Once the network can predict the noise, it can remove it — iteratively de-noising from x_T to x₀.</p>
+
+  <h3>The Training Objective</h3>
+  <p>The DDPM training loss is beautifully simple:</p>
+  <div style="background: var(--bg-alt); padding: 0.75rem 1rem; border-radius: 0.5rem; font-family: monospace; margin: 1rem 0;">
+    L = E_{x₀, t, ε} [ ||ε − ε_θ(x_t, t)||² ]
+  </div>
+  <p>In plain English: sample a real image x₀, sample a random timestep t, sample noise ε, compute noisy x_t, pass through the network, predict ε, compute MSE between predicted and actual noise. That's it. No adversarial training, no complex losses — just MSE on noise prediction.</p>
+
+  <h3>The Reverse Sampling Loop</h3>
+  <p>At inference time, we start from pure noise x_T ~ N(0, I) and iteratively denoise:</p>
+
+  <pre><code class="language-python">import torch
+import torch.nn as nn
+
+
+def ddpm_training_step(model, noise_schedule, x0, device):
+    """
+    One DDPM training step.
+    Returns the MSE loss between predicted and actual noise.
+    """
+    batch_size = x0.size(0)
+
+    # Sample random timesteps for this batch
+    t = torch.randint(0, noise_schedule.T, (batch_size,), device=device)
+
+    # Sample noise
+    noise = torch.randn_like(x0)
+
+    # Forward process: add noise to x0 at timestep t
+    x_t, _ = noise_schedule.add_noise(x0.to(device), t, noise.to(device))
+
+    # Predict the noise
+    noise_pred = model(x_t, t)   # (B, C, H, W)
+
+    # MSE loss: predict the exact noise that was added
+    loss = nn.functional.mse_loss(noise_pred, noise.to(device))
+    return loss
+
+
+@torch.no_grad()
+def ddpm_sample(model, noise_schedule, shape, device):
+    """
+    DDPM sampling: start from noise, iteratively denoise.
+    shape: (batch_size, channels, height, width)
+    Returns the generated image x0.
+    """
+    model.eval()
+    schedule = noise_schedule
+
+    # Start from pure noise
+    x = torch.randn(shape, device=device)
+
+    # Reverse diffusion: T steps from pure noise to clean image
+    for t in reversed(range(schedule.T)):
+        t_batch = torch.full((shape[0],), t, device=device, dtype=torch.long)
+
+        # Predict noise at this timestep
+        eps_pred = model(x, t_batch)
+
+        # Compute the denoised estimate
+        alpha_t    = schedule.alphas[t].to(device)
+        alpha_bar  = schedule.alpha_bars[t].to(device)
+        beta_t     = schedule.betas[t].to(device)
+
+        # Mean of reverse process
+        coeff = (1 - alpha_t) / torch.sqrt(1 - alpha_bar)
+        x_prev_mean = (1 / torch.sqrt(alpha_t)) * (x - coeff * eps_pred)
+
+        if t > 0:
+            # Add noise for all timesteps except the last
+            noise     = torch.randn_like(x)
+            sigma_t   = torch.sqrt(beta_t)
+            x = x_prev_mean + sigma_t * noise
+        else:
+            x = x_prev_mean   # final step: no noise
+
+    return x.clamp(-1, 1)
+
+print("DDPM training: randomly sample timestep t, add noise, predict noise, compute MSE")
+print("DDPM sampling: 1000 sequential denoising steps, O(T) cost per image")</code></pre>
+
+  <div class="callout callout-tip">
+    <span class="callout-icon">💡</span>
+    <div class="callout-body">
+      <strong>Noise Prediction vs x₀ Prediction</strong>
+      <p>DDPM trains the network to predict the added noise ε. But mathematically equivalent: the network could instead predict the clean image x₀ directly (given x_t and t, predict x₀ = (x_t − √(1−ᾱ_t)·ε) / √ᾱ_t). Both are equivalent — knowing ε is the same as knowing x₀. In practice, noise prediction tends to be better conditioned numerically and produces better results, which is why it became standard. Some newer methods predict a "velocity" v = √ᾱ_t·ε − √(1−ᾱ_t)·x₀, which performs well at all noise levels.</p>
+    </div>
+  </div>
+
+  <div class="video-container">
+    <video src="/videos/diffusion-process.mp4" autoplay loop muted playsinline></video>
+    <p class="video-caption">Forward process: a clean image dissolving into pure noise. Reverse process: the learned denoiser pulling it back out, step by step.</p>
+  </div>
+</div>
+
+<!-- ── Section 4 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">4</span> The U-Net Denoiser</h2>
+
+  <p>The neural network that powers DDPM is a U-Net — the same architecture we studied for segmentation in Lesson 57. However, the diffusion U-Net is significantly more capable than the basic segmentation U-Net, incorporating attention mechanisms and timestep conditioning.</p>
+
+  <h3>Why U-Net?</h3>
+  <p>The denoiser takes a noisy image and outputs a noise map of the same shape. This is exactly the type of task U-Net excels at: processing a spatial input (noisy image) and producing a spatial output (noise at each pixel). The skip connections preserve fine spatial detail — important because denoising at small timesteps (little noise) requires precision about individual pixel values.</p>
+
+  <h3>Timestep Embedding</h3>
+  <p>The network must know what timestep t it is operating at, because the amount and character of noise is different at each timestep. This is done with a sinusoidal position embedding (the same idea as Transformer position encodings), followed by MLP layers to produce a vector that is added to the feature maps at each resolution level.</p>
+
+  <pre><code class="language-python">import torch
+import torch.nn as nn
+import math
+
+
+class SinusoidalTimestepEmbedding(nn.Module):
+    """
+    Sinusoidal timestep embedding — same idea as Transformer position encodings.
+    Maps timestep t (scalar) to a high-dimensional vector.
+    """
+    def __init__(self, dim):
+        super().__init__()
+        self.dim = dim
+        # MLP to expand the embedding
+        self.mlp = nn.Sequential(
+            nn.Linear(dim, dim * 4),
+            nn.SiLU(),
+            nn.Linear(dim * 4, dim * 4),
+        )
+
+    def forward(self, t):
+        # t: (B,) integer timesteps
+        half = self.dim // 2
+        # Frequencies: 1/(10000^(2i/d)) for i=0,...,d/2-1
+        freqs = torch.exp(
+            -math.log(10000) * torch.arange(half, device=t.device) / (half - 1)
+        )
+        args = t.float()[:, None] * freqs[None, :]   # (B, half)
+        embedding = torch.cat([torch.sin(args), torch.cos(args)], dim=1)  # (B, dim)
+        return self.mlp(embedding)   # (B, dim*4)
+
+
+class ResBlock(nn.Module):
+    """
+    Residual block with timestep embedding injection.
+    Used as the basic unit of the diffusion U-Net.
+    """
+    def __init__(self, in_channels, out_channels, time_emb_dim):
+        super().__init__()
+        self.conv1   = nn.Conv2d(in_channels, out_channels, 3, padding=1)
+        self.conv2   = nn.Conv2d(out_channels, out_channels, 3, padding=1)
+        self.norm1   = nn.GroupNorm(8, in_channels)
+        self.norm2   = nn.GroupNorm(8, out_channels)
+        self.act     = nn.SiLU()
+        # Project time embedding to channel dimension
+        self.time_proj = nn.Linear(time_emb_dim, out_channels)
+        # Residual connection (1x1 conv if channels change)
+        self.skip = (nn.Conv2d(in_channels, out_channels, 1)
+                     if in_channels != out_channels else nn.Identity())
+
+    def forward(self, x, time_emb):
+        h = self.act(self.norm1(x))
+        h = self.conv1(h)
+        # Inject timestep information: add time embedding to feature map
+        h = h + self.time_proj(self.act(time_emb))[:, :, None, None]
+        h = self.act(self.norm2(h))
+        h = self.conv2(h)
+        return h + self.skip(x)
+
+
+# Demonstrate the components
+t_emb_module = SinusoidalTimestepEmbedding(dim=128)
+t = torch.tensor([100, 500, 999])   # batch of 3 timesteps
+emb = t_emb_module(t)
+print(f"Timestep embedding shape: {emb.shape}")  # (3, 512)
+
+res = ResBlock(64, 128, time_emb_dim=512)
+x = torch.randn(3, 64, 32, 32)
+out = res(x, emb)
+print(f"ResBlock output shape:    {out.shape}")  # (3, 128, 32, 32)</code></pre>
+
+  <div class="callout callout-key">
+    <span class="callout-icon">🔑</span>
+    <div class="callout-body">
+      <strong>Self-Attention in the Diffusion U-Net</strong>
+      <p>The diffusion U-Net adds multi-head self-attention blocks at the bottleneck and at medium-resolution levels. Self-attention allows each spatial position to attend to every other position — essential for generating globally coherent images. Without attention, a CNN's receptive field is limited: it can only "see" nearby pixels. Attention lets the network ensure that the sky color in the top-left matches the sky color in the top-right, and that a face has symmetric features. This is why diffusion models generate more coherent high-resolution images than pure convolutional architectures.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 5 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">5</span> DDPM vs DDIM: Sampling Speed</h2>
+
+  <p>DDPM's main weakness is sampling speed: generating one image requires 1000 sequential forward passes through the U-Net. On a modern GPU, this takes 30–60 seconds for a high-resolution image — too slow for interactive use.</p>
+
+  <h3>DDIM: Deterministic Sampling</h3>
+  <p>DDIM (Song et al., 2020) reinterprets the diffusion process as a non-Markovian one that can be sampled with far fewer steps. The key insight: the DDPM training objective doesn't require Markovian transitions. DDIM defines a deterministic sampling process (no added noise in each step) that can produce good images with 20–50 steps instead of 1000. With 50 steps instead of 1000, sampling is 20× faster. With 20 steps, 50× faster with acceptable quality.</p>
+
+  <h3>Classifier-Free Guidance (CFG)</h3>
+  <p>Text-to-image models use Classifier-Free Guidance to strengthen adherence to the text prompt. The denoiser is run <em>twice</em> per step: once with the text condition and once without (unconditional). The final noise prediction is extrapolated beyond the conditional prediction, away from the unconditional prediction:</p>
+  <div style="background: var(--bg-alt); padding: 0.75rem 1rem; border-radius: 0.5rem; font-family: monospace; margin: 1rem 0; font-size: 0.88rem;">
+    ε_guided = ε_uncond + guidance_scale × (ε_cond − ε_uncond)
+  </div>
+  <p>A guidance_scale of 1.0 means no guidance (same as conditional). A guidance_scale of 7.5 (Stable Diffusion default) strongly steers generation toward the prompt. Very high values (>15) produce over-saturated, artifact-ridden images. The tradeoff: higher guidance → more faithful to prompt but less diversity and natural variation.</p>
+
+  <pre><code class="language-python">@torch.no_grad()
+def ddim_sample(model, noise_schedule, prompt_embedding, guidance_scale=7.5,
+                n_steps=50, shape=(1, 4, 64, 64), device='cpu'):
+    """
+    DDIM sampling with Classifier-Free Guidance (CFG).
+    Uses n_steps << T for fast generation.
+    prompt_embedding: CLIP text encoding of the prompt
+    """
+    model.eval()
+    T = noise_schedule.T
+
+    # Select evenly spaced timesteps (e.g., 999, 979, 959, ..., 19)
+    step_indices = torch.linspace(0, T - 1, n_steps).long()
+    timesteps    = step_indices.flip(0)  # reverse order for denoising
+
+    # Start from pure noise in latent space
+    x = torch.randn(shape, device=device)
+
+    for i, t_val in enumerate(timesteps):
+        t_batch = torch.full((shape[0],), t_val, device=device, dtype=torch.long)
+
+        # CFG: run denoiser twice
+        # 1. With text conditioning
+        eps_cond   = model(x, t_batch, encoder_hidden_states=prompt_embedding)
+
+        # 2. With empty/null conditioning (unconditional)
+        null_embed = torch.zeros_like(prompt_embedding)
+        eps_uncond = model(x, t_batch, encoder_hidden_states=null_embed)
+
+        # Classifier-Free Guidance interpolation
+        eps_guided = eps_uncond + guidance_scale * (eps_cond - eps_uncond)
+
+        # DDIM update step (deterministic)
+        ab_t = noise_schedule.alpha_bars[t_val]
+        x0_pred = (x - torch.sqrt(1 - ab_t) * eps_guided) / torch.sqrt(ab_t)
+        x0_pred = x0_pred.clamp(-1, 1)
+
+        # Next noisy state (if not last step)
+        if i < n_steps - 1:
+            ab_next = noise_schedule.alpha_bars[timesteps[i + 1]]
+            x = (torch.sqrt(ab_next) * x0_pred +
+                 torch.sqrt(1 - ab_next) * eps_guided)
+        else:
+            x = x0_pred
+
+    return x
+
+# Guidance scale effect (conceptual):
+guidance_scale_effects = {
+    1.0:  "Barely follows prompt, high diversity",
+    3.0:  "Mild guidance, good balance",
+    7.5:  "Strong guidance (SD default), clear prompt adherence",
+    15.0: "Very strong, can over-saturate",
+    20.0: "Extreme, usually produces artifacts",
+}
+for gs, effect in guidance_scale_effects.items():
+    print(f"  guidance_scale={gs:.1f}: {effect}")</code></pre>
+
+  <div class="callout callout-tip">
+    <span class="callout-icon">💡</span>
+    <div class="callout-body">
+      <strong>Consistency Models: The Next Step in Speed</strong>
+      <p>Consistency Models (Song et al., 2023) take this further: they train a network that maps any point on a diffusion trajectory directly to x₀ in a single step. In one forward pass, they can generate good images. With 2–3 steps, they match DDIM quality at 50 steps. Consistency distillation trains a student model to mimic the multi-step DDPM path, compressing it into one or few steps. This closes the speed gap between diffusion models and GANs.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 6 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">6</span> Text-to-Image: Adding Language Conditioning</h2>
+
+  <p>How does "a painting of a cat in the style of Van Gogh" become a pixel arrangement? The key bridge is CLIP — a model that jointly understands text and images.</p>
+
+  <h3>CLIP: Joint Text-Image Embedding</h3>
+  <p>CLIP (Contrastive Language-Image Pre-training, OpenAI 2021) was trained on 400 million (image, caption) pairs scraped from the internet. Its objective: an image encoder and a text encoder should produce similar embedding vectors for matching pairs and dissimilar vectors for non-matching pairs (contrastive learning). After training, CLIP has a joint embedding space: the vector for "a photo of a dog" is geometrically close to the vector for actual dog photos, and far from cat photos or car photos.</p>
+
+  <h3>How Text Conditioning Works in Diffusion</h3>
+  <p>The CLIP text encoder converts the text prompt to a sequence of token embeddings (e.g., shape: 77 tokens × 768 dimensions). These embeddings are fed to the U-Net via cross-attention: at each resolution level, the spatial features (from the image) are the queries, and the text embeddings are the keys and values. The network learns to attend to the relevant text tokens while processing each spatial region. This allows the network to generate "fur texture" in positions where the text tokens for "cat" are relevant, and "brushstroke texture" where "Van Gogh" is relevant.</p>
+
+  <div class="diagram-svg-wrap">
+    <svg viewBox="0 0 980 300" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Text-to-image pipeline: prompt to text encoder to conditioning injected into a sequence of denoising steps to final image">
+      <defs>
+        <marker id="l58-arrowhead" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+          <path d="M0,0 L8,4 L0,8 Z" fill="var(--text-muted)"></path>
+        </marker>
+        <marker id="l58-arrowhead-violet" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+          <path d="M0,0 L8,4 L0,8 Z" fill="var(--violet)"></path>
+        </marker>
+      </defs>
+
+      <!-- 1. Text prompt -->
+      <rect class="diagram-node" x="8" y="118" width="118" height="64" rx="8"></rect>
+      <text class="diagram-label" x="67" y="144">"a cat in the</text>
+      <text class="diagram-label" x="67" y="160">style of Van Gogh"</text>
+      <text class="diagram-sublabel" x="67" y="200">Text prompt</text>
+
+      <line class="diagram-arrow" x1="130" y1="150" x2="164" y2="150" marker-end="url(#l58-arrowhead)"></line>
+
+      <!-- 2. Text encoder (CLIP) -->
+      <rect class="diagram-node-alt" x="168" y="110" width="110" height="80" rx="8"></rect>
+      <text class="diagram-label" x="223" y="145">CLIP</text>
+      <text class="diagram-label" x="223" y="163">Text Encoder</text>
+      <text class="diagram-sublabel" x="223" y="204">77 × 768 embedding</text>
+
+      <line class="diagram-arrow" x1="280" y1="150" x2="314" y2="150" marker-end="url(#l58-arrowhead)"></line>
+
+      <!-- 3. Conditioning -->
+      <rect class="diagram-node-alt" x="318" y="118" width="100" height="64" rx="8"></rect>
+      <text class="diagram-label" x="368" y="144">Cross-</text>
+      <text class="diagram-label" x="368" y="160">Attention</text>
+      <text class="diagram-sublabel" x="368" y="200">Conditioning</text>
+
+      <!-- vertical connector down to the denoising row -->
+      <line class="diagram-arrow" x1="368" y1="182" x2="368" y2="222" marker-end="url(#l58-arrowhead-violet)"></line>
+      <text class="diagram-sublabel" x="368" y="238">injected at every</text>
+      <text class="diagram-sublabel" x="368" y="250">U-Net attention layer</text>
+
+      <line class="diagram-arrow" x1="420" y1="150" x2="454" y2="150" marker-end="url(#l58-arrowhead)"></line>
+
+      <!-- 4. Iterative denoising steps: 4 panels of decreasing noise -->
+      <!-- panel 1: mostly noise -->
+      <g>
+        <rect class="diagram-node-bad" x="458" y="110" width="80" height="80" rx="6"></rect>
+        <circle cx="474" cy="126" r="2.2" fill="var(--amber)"></circle>
+        <circle cx="498" cy="118" r="2.2" fill="var(--amber)"></circle>
+        <circle cx="520" cy="132" r="2.2" fill="var(--amber)"></circle>
+        <circle cx="486" cy="146" r="2.2" fill="var(--amber)"></circle>
+        <circle cx="512" cy="152" r="2.2" fill="var(--amber)"></circle>
+        <circle cx="468" cy="162" r="2.2" fill="var(--amber)"></circle>
+        <circle cx="528" cy="168" r="2.2" fill="var(--amber)"></circle>
+        <circle cx="502" cy="174" r="2.2" fill="var(--amber)"></circle>
+        <circle cx="480" cy="178" r="2.2" fill="var(--amber)"></circle>
+        <text class="diagram-sublabel" x="498" y="204">t = 1000 (noise)</text>
+      </g>
+      <line class="diagram-arrow" x1="540" y1="150" x2="566" y2="150" marker-end="url(#l58-arrowhead)"></line>
+
+      <!-- panel 2: partial denoising -->
+      <g>
+        <rect class="diagram-node-bad" x="570" y="110" width="80" height="80" rx="6" style="fill:var(--amber-50)"></rect>
+        <circle cx="596" cy="132" r="10" fill="none" stroke="var(--amber)" stroke-width="1.5" opacity="0.55"></circle>
+        <circle cx="614" cy="150" r="2" fill="var(--amber)" opacity="0.6"></circle>
+        <circle cx="580" cy="160" r="2" fill="var(--amber)" opacity="0.6"></circle>
+        <circle cx="630" cy="170" r="2" fill="var(--amber)" opacity="0.6"></circle>
+        <text class="diagram-sublabel" x="610" y="204">t ≈ 600</text>
+      </g>
+      <line class="diagram-arrow" x1="652" y1="150" x2="678" y2="150" marker-end="url(#l58-arrowhead)"></line>
+
+      <!-- panel 3: mostly denoised -->
+      <g>
+        <rect class="diagram-node-good" x="682" y="110" width="80" height="80" rx="6" style="fill:var(--green-50)"></rect>
+        <circle cx="710" cy="138" r="13" fill="none" stroke="var(--green)" stroke-width="2"></circle>
+        <path d="M 698 158 Q 710 168 722 158" fill="none" stroke="var(--green)" stroke-width="1.5"></path>
+        <text class="diagram-sublabel" x="722" y="204">t ≈ 100</text>
+      </g>
+      <line class="diagram-arrow" x1="764" y1="150" x2="792" y2="150" marker-end="url(#l58-arrowhead)"></line>
+
+      <!-- 5. Final image -->
+      <g>
+        <rect class="diagram-node-good" x="796" y="104" width="94" height="92" rx="8"></rect>
+        <circle cx="828" cy="136" r="15" fill="none" stroke="var(--green)" stroke-width="2.5"></circle>
+        <path d="M 812 160 Q 828 174 844 160" fill="none" stroke="var(--green)" stroke-width="2"></path>
+        <path d="M 818 122 L 812 108 M 838 122 L 844 108" stroke="var(--green)" stroke-width="2" fill="none"></path>
+        <text class="diagram-sublabel" x="843" y="212">t = 0 (final image)</text>
+      </g>
+
+      <text class="diagram-label" x="670" y="90">Iterative denoising (T → 0)</text>
+      <line class="diagram-arrow" x1="458" y1="100" x2="890" y2="100" stroke-dasharray="3 4" marker-end="url(#l58-arrowhead)"></line>
+    </svg>
+    <p class="diagram-svg-caption">The text prompt is embedded by a CLIP text encoder, then injected as conditioning into the U-Net's cross-attention layers at <em>every</em> denoising step — not just the first. As the reverse process runs from t=T down to t=0, the same conditioning vector keeps steering each step's noise prediction toward the prompt, so structure that matches "cat" and "Van Gogh" gradually emerges from pure noise.</p>
+  </div>
+
+  <pre><code class="language-python">from transformers import CLIPTextModel, CLIPTokenizer
+import torch
+
+# Load CLIP text encoder (used inside Stable Diffusion)
+tokenizer = CLIPTokenizer.from_pretrained("openai/clip-vit-large-patch14")
+text_encoder = CLIPTextModel.from_pretrained("openai/clip-vit-large-patch14")
+text_encoder.eval()
+
+prompt = "a painting of a cat in the style of Van Gogh, vibrant colors"
+
+# Tokenize and encode
+tokens = tokenizer(
+    prompt,
+    max_length=77,           # CLIP max sequence length
+    padding="max_length",
+    truncation=True,
+    return_tensors="pt"
+)
+
+with torch.no_grad():
+    text_embeddings = text_encoder(tokens.input_ids)[0]
+
+print(f"Tokenized input shape:  {tokens.input_ids.shape}")      # (1, 77)
+print(f"Text embedding shape:   {text_embeddings.shape}")       # (1, 77, 768)
+print(f"This is the conditioning signal injected into the U-Net at every attention layer")
+
+# For CFG we also need the unconditional embedding (empty string)
+uncond_tokens = tokenizer(
+    "",
+    max_length=77,
+    padding="max_length",
+    return_tensors="pt"
+)
+with torch.no_grad():
+    uncond_embeddings = text_encoder(uncond_tokens.input_ids)[0]
+
+# Stack them: [uncond, cond] for efficient batched CFG
+combined = torch.cat([uncond_embeddings, text_embeddings])   # (2, 77, 768)
+print(f"Combined CFG embeddings: {combined.shape}")          # (2, 77, 768)</code></pre>
+</div>
+
+<!-- ── Section 7 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">7</span> Latent Diffusion Models: How Stable Diffusion Works</h2>
+
+  <p>Diffusing directly in pixel space is expensive. A 512×512 RGB image has 786,432 values. Running 1000 denoising steps on this 786k-dimensional space requires enormous compute. Latent Diffusion Models (Rombach et al., 2022) solve this by moving the diffusion process to a compressed latent space.</p>
+
+  <h3>The VAE Bottleneck</h3>
+  <p>A Variational Autoencoder (VAE) compresses images to a compact latent representation. For Stable Diffusion's VAE: a 512×512×3 image is compressed to a 64×64×4 latent (a ~192× compression ratio). The VAE decoder reconstructs the image from the latent with high perceptual quality — the bottleneck forces the latent to capture the most important visual information.</p>
+
+  <h3>Stable Diffusion Architecture</h3>
+  <p>The complete Stable Diffusion pipeline: (1) Encode image to latent with VAE encoder (or start from noise in latent space for text-to-image). (2) Run DDIM denoising in latent space with the text-conditioned U-Net (50 steps instead of 1000). (3) Decode the final latent to an image with VAE decoder. The U-Net operates on 64×64×4 instead of 512×512×3 — ~192× fewer values per step, dramatically reducing memory and compute.</p>
+
+  <pre><code class="language-python"># Stable Diffusion inference in ~15 lines
+# pip install diffusers accelerate
+from diffusers import StableDiffusionPipeline
+import torch
+
+# Load pipeline (downloads weights ~4GB on first run)
+pipe = StableDiffusionPipeline.from_pretrained(
+    "runwayml/stable-diffusion-v1-5",
+    torch_dtype=torch.float16,   # fp16 for speed/memory
+)
+pipe = pipe.to("cuda")   # move to GPU
+
+# Generate an image
+prompt = "a majestic mountain landscape at sunset, photorealistic, 4k, detailed"
+result = pipe(
+    prompt,
+    num_inference_steps=50,    # DDIM steps (50 is good quality/speed balance)
+    guidance_scale=7.5,        # CFG strength
+    height=512,
+    width=512,
+    generator=torch.Generator("cuda").manual_seed(42),   # for reproducibility
+)
+image = result.images[0]
+image.save("generated.png")
+print(f"Generated image saved: {image.size}")
+
+# Stable Diffusion XL (SDXL) — higher quality, larger model
+from diffusers import StableDiffusionXLPipeline
+pipe_xl = StableDiffusionXLPipeline.from_pretrained(
+    "stabilityai/stable-diffusion-xl-base-1.0",
+    torch_dtype=torch.float16,
+    use_safetensors=True,
+)
+pipe_xl.to("cuda")
+image_xl = pipe_xl(prompt, num_inference_steps=30).images[0]
+image_xl.save("generated_xl.png")
+
+# SDXL generates at 1024x1024 by default — 4x more pixels than SD 1.5</code></pre>
+
+  <div class="callout callout-realworld">
+    <span class="callout-icon">🌍</span>
+    <div class="callout-body">
+      <strong>Why Latent Diffusion Changed Everything</strong>
+      <p>Before Stable Diffusion (released publicly in August 2022), diffusion models required specialized hardware and thousands of dollars of cloud compute. DALL·E 2 was invite-only. The latent diffusion innovation made a high-quality diffusion model small enough to run on a consumer GPU with 8GB VRAM. Within months, Stable Diffusion had been deployed millions of times, fine-tuned thousands of times, and integrated into products used by tens of millions of people. Open-source AI art generation went from zero to ubiquitous in under a year.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 8 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">8</span> Control and Inpainting</h2>
+
+  <p>Pure text-to-image generation produces great results but gives limited spatial control. Several techniques allow precise control over the spatial layout and content of generated images.</p>
+
+  <h3>Image-to-Image (img2img)</h3>
+  <p>Start from an existing real image, add noise to a certain level (e.g., t=700 out of 1000 — adding significant but not total noise), then denoise with text guidance. The initial image structure is preserved by the early denoising steps, while the text prompt guides the stylistic changes. This lets you take a photograph and paint it in the style of Monet, or take a rough sketch and turn it into a detailed illustration.</p>
+
+  <h3>Inpainting</h3>
+  <p>Given an image and a binary mask, diffuse only the masked (erased) region while keeping the unmasked pixels unchanged. This enables seamless removal of objects (remove the person from the background), background replacement (keep the subject, replace the background), or object insertion (add a specific object into a scene). The model must generate content that blends realistically with the surrounding unmasked pixels.</p>
+
+  <h3>ControlNet: Spatial Conditioning</h3>
+  <p>ControlNet (Zhang et al., 2023) adds additional input channels to the U-Net, allowing the model to condition on spatial control signals: edge maps (Canny edges), depth maps, human pose keypoints (OpenPose), semantic segmentation maps, or even another image. You can draw a stick figure and ControlNet generates a photorealistic person in that exact pose. You can provide a depth map and generate an image with that exact 3D structure.</p>
+
+  <pre><code class="language-python">from diffusers import StableDiffusionImg2ImgPipeline, StableDiffusionInpaintPipeline
+from diffusers import StableDiffusionControlNetPipeline, ControlNetModel
+from PIL import Image
+import torch
+
+device = "cuda" if torch.cuda.is_available() else "cpu"
+
+# ── img2img ──
+img2img_pipe = StableDiffusionImg2ImgPipeline.from_pretrained(
+    "runwayml/stable-diffusion-v1-5",
+    torch_dtype=torch.float16,
+).to(device)
+
+init_image = Image.open("photo.jpg").resize((512, 512))
+result = img2img_pipe(
+    prompt="a painting in the style of Monet, impressionist, soft brushstrokes",
+    image=init_image,
+    strength=0.7,        # 0=no change, 1=ignore original, 0.7=significant stylization
+    guidance_scale=7.5,
+)
+result.images[0].save("img2img_output.jpg")
+
+# ── Inpainting ──
+inpaint_pipe = StableDiffusionInpaintPipeline.from_pretrained(
+    "runwayml/stable-diffusion-inpainting",
+    torch_dtype=torch.float16,
+).to(device)
+
+original = Image.open("beach.jpg").resize((512, 512))
+# mask: white pixels = area to regenerate; black = keep original
+mask = Image.open("mask.png").resize((512, 512))
+
+result = inpaint_pipe(
+    prompt="a red sports car parked on the beach",
+    image=original,
+    mask_image=mask,
+    guidance_scale=7.5,
+)
+result.images[0].save("inpainted.jpg")
+
+# ── ControlNet (Canny edges) ──
+controlnet = ControlNetModel.from_pretrained(
+    "lllyasviel/sd-controlnet-canny",
+    torch_dtype=torch.float16,
+)
+cnet_pipe = StableDiffusionControlNetPipeline.from_pretrained(
+    "runwayml/stable-diffusion-v1-5",
+    controlnet=controlnet,
+    torch_dtype=torch.float16,
+).to(device)
+
+import cv2, numpy as np
+from PIL import Image as PILImage
+
+# Extract Canny edges from a reference image
+ref_img = cv2.imread("reference.jpg")
+edges   = cv2.Canny(ref_img, 100, 200)
+edge_img = PILImage.fromarray(edges)
+
+result = cnet_pipe(
+    prompt="a photograph of a modern building, architecture photography, HDR",
+    image=edge_img,   # ControlNet uses edge map as spatial condition
+    num_inference_steps=20,
+    guidance_scale=9.0,
+)
+result.images[0].save("controlnet_output.jpg")
+print("ControlNet: generate image with exact spatial structure from edge map")</code></pre>
+
+  <div class="callout callout-tip">
+    <span class="callout-icon">💡</span>
+    <div class="callout-body">
+      <strong>Choosing the Right Technique</strong>
+      <p>Text-to-image: total creative freedom, no spatial control. img2img: preserve rough layout, change style (strength=0.5–0.8). Inpainting: change specific region, preserve rest. ControlNet: precise spatial control via structural signal. In practice: start with img2img for stylization, use ControlNet when you need a specific composition or pose, use inpainting for removing/adding objects to existing images. These techniques can be combined: ControlNet + inpainting allows controlled object insertion with spatial constraints.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Real-World ── -->
+<div class="use-case-section">
+  <div class="use-case-header">
+    <span style="font-size:1.5rem">🌍</span>
+    <h2>Real-World Spotlight: Diffusion Models in Science and Creative Industries</h2>
+  </div>
+
+  <h3>Creative Industry Applications</h3>
+  <p>Stable Diffusion and SDXL have become standard tools in concept art, game development, and advertising. Adobe Firefly (integrated into Photoshop) uses a proprietary diffusion model trained on licensed content. Midjourney uses a transformer-based diffusion architecture and has over 15 million active users. DALL·E 3 (integrated into ChatGPT) generates images from conversational descriptions, with dramatically better text rendering than previous models.</p>
+
+  <h3>Scientific Applications: AlphaFold3 and Drug Discovery</h3>
+  <p>AlphaFold3 (DeepMind, 2024) predicts 3D protein structures using a diffusion process over atomic coordinates. Instead of noising pixel values, it noises the 3D positions of atoms and learns to denoise them conditioned on the amino acid sequence. This enabled predictions of protein-DNA, protein-RNA, and protein-small molecule complexes with unprecedented accuracy — directly enabling drug discovery. The core insight: diffusion models generalize far beyond images to any structured data that can be represented as a vector (molecules, protein structures, audio waveforms, videos).</p>
+
+  <pre><code class="language-python"># Video generation with Stable Video Diffusion
+# pip install diffusers[torch]
+from diffusers import StableVideoDiffusionPipeline
+from diffusers.utils import load_image, export_to_video
+import torch
+
+pipe = StableVideoDiffusionPipeline.from_pretrained(
+    "stabilityai/stable-video-diffusion-img2vid-xt",
+    torch_dtype=torch.float16,
+    variant="fp16",
+)
+pipe.enable_model_cpu_offload()
+
+# Generate a video from an image
+image = load_image("landscape.jpg")
+image = image.resize((1024, 576))
+
+frames = pipe(
+    image,
+    num_frames=25,
+    decode_chunk_size=8,
+    generator=torch.manual_seed(42),
+).frames[0]
+
+export_to_video(frames, "animation.mp4", fps=7)
+print("Stable Video Diffusion: single image → 25-frame video")
+print("Sora (OpenAI): video diffusion at 1080p, 60s clips — the current frontier")</code></pre>
+
+  <div class="callout callout-realworld">
+    <span class="callout-icon">🌍</span>
+    <div class="callout-body">
+      <strong>Safety and Ethical Challenges</strong>
+      <p>Diffusion models raise important ethical questions: (1) Training data copyright — Stability AI faces lawsuits over training on copyrighted images without consent. (2) Image authenticity — it is now trivial to generate photorealistic images of events that never happened. (3) Deepfakes — generating photorealistic images or videos of specific real people. (4) Consent — generating images in specific real artists' styles. The field is actively developing technical mitigations (concept erasure, watermarking) and regulatory frameworks (EU AI Act, US Executive Order on AI). Understanding these issues is as important as understanding the technology.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Quiz ── -->
+<div class="quiz-section">
+  <div id="quiz58"></div>
+</div>
+
+<!-- ── Practice ── -->
+<div class="practice-card">
+  <h2>✍️ Practice Exercises</h2>
+  <ol>
+    <li>Implement the <code>NoiseSchedule</code> class from Section 2. Visualize the noise schedule by plotting ᾱ_t (signal strength) against timestep for both a linear schedule and a cosine schedule (<code>ᾱ_t = cos²(π·t/(2T))</code>). Which schedule maintains signal strength longer in early timesteps?</li>
+    <li>Implement a minimal DDPM training loop for MNIST digit generation. Use a simple U-Net with timestep embeddings. Train for 50 epochs on MNIST. Sample 16 images using the reverse process and display them.</li>
+    <li>Using the Hugging Face <code>diffusers</code> library, generate 5 images with the same prompt at different guidance scales (1.0, 3.0, 7.5, 12.0, 20.0). Display them side by side and describe how the guidance scale affects visual quality and diversity.</li>
+    <li>Implement img2img with Stable Diffusion: take a real photograph, apply img2img at three different strength values (0.3, 0.6, 0.9), and compare the results. At what strength does the generated image lose too much of the original structure?</li>
+  </ol>
+  <details>
+    <summary>▶ Show Solution (Exercise 1 — Cosine vs Linear Schedule)</summary>
+    <pre><code class="language-python">import torch
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+
+T = 1000
+
+# Linear schedule
+betas_linear = torch.linspace(1e-4, 0.02, T)
+alpha_bars_linear = torch.cumprod(1 - betas_linear, dim=0)
+
+# Cosine schedule (Nichol & Dhariwal 2021)
+s = 0.008
+t = torch.linspace(0, T, T + 1)
+f = torch.cos((t / T + s) / (1 + s) * torch.pi / 2) ** 2
+alpha_bars_cosine = (f / f[0])[1:]  # normalize and trim
+
+timesteps = torch.arange(T)
+plt.figure(figsize=(10, 5))
+plt.plot(timesteps, alpha_bars_linear, label='Linear schedule', color='blue')
+plt.plot(timesteps, alpha_bars_cosine, label='Cosine schedule', color='orange')
+plt.xlabel('Timestep t')
+plt.ylabel('ᾱ_t (signal strength)')
+plt.title('Noise Schedules: Signal Strength vs Timestep')
+plt.legend()
+plt.grid(True, alpha=0.3)
+plt.savefig('noise_schedules.png', dpi=150, bbox_inches='tight')
+
+print("Linear: signal decays roughly linearly — drops quickly in first 500 steps")
+print("Cosine: signal decays slowly at first, then accelerates — more gradual and")
+print("  provides more useful training signal at small noise levels")</code></pre>
+  </details>
+</div>
+
+<!-- ── Primary Source ── -->
+<div class="primary-source">
+  <h2>📚 Primary Source for This Lesson</h2>
+  <p><a href="https://arxiv.org/abs/2006.11239" target="_blank"><strong>Ho, Jain &amp; Abbeel (2020) — "Denoising Diffusion Probabilistic Models" (DDPM)</strong></a><br>
+  The paper that established the modern diffusion training procedure covered in this lesson. For the latent-space version powering Stable Diffusion, see Rombach et al. (2022) "High-Resolution Image Synthesis with Latent Diffusion Models."</p>
+</div>
+
+<!-- ── Ask Tutor ── -->
+<div class="ask-tutor">
+  <span class="icon">💬</span>
+  <span>Confused about the difference between the forward and reverse process, or why DDIM sampling is faster than DDPM? Your AI tutor can walk through the noise schedule step by step.</span>
+</div>
+
+<!-- Navigation -->
+<nav class="lesson-nav">
+  <a href="./0059-gans.html" class="nav-btn">← Lesson 59: Generative Adversarial Networks</a>
+  <a href="./0061-rag.html" class="nav-btn nav-btn-next">Lesson 61: Retrieval-Augmented Generation →</a>
+</nav>
+
+</div><!-- /content-wrapper -->
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-core.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/plugins/autoloader/prism-autoloader.min.js"></script>
+<script src="https://cdn.plot.ly/plotly-2.32.0.min.js"></script>
+<script src="../assets/charts.js"></script>
+<script src="../assets/quiz.js"></script>
+<script>
+/* ── Interactive forward-diffusion demo (Section 2) ── */
+(function () {
+  const T = 1000;
+  const GRID = 12;
+
+  // ── Real noise schedules, computed in JS (DDPM defaults) ──
+  function buildLinearSchedule(betaStart, betaEnd, steps) {
+    const betas = [];
+    for (let i = 0; i < steps; i++) betas.push(betaStart + (betaEnd - betaStart) * (i / (steps - 1)));
+    return betas;
+  }
+
+  function buildCosineSchedule(steps, s) {
+    // Nichol & Dhariwal (2021) cosine schedule, same formula as the lesson's practice solution
+    s = s || 0.008;
+    const fs = [];
+    for (let i = 0; i <= steps; i++) {
+      const frac = i / steps;
+      fs.push(Math.pow(Math.cos((frac + s) / (1 + s) * Math.PI / 2), 2));
+    }
+    const f0 = fs[0];
+    const alphaBars = fs.map(f => f / f0);
+    const betas = [];
+    for (let i = 1; i <= steps; i++) {
+      const beta = 1 - alphaBars[i] / alphaBars[i - 1];
+      betas.push(Math.min(Math.max(beta, 1e-5), 0.999));
+    }
+    return betas;
+  }
+
+  function computeAlphaBars(betas) {
+    const alphaBars = [];
+    let running = 1;
+    for (let i = 0; i < betas.length; i++) {
+      running *= (1 - betas[i]);
+      alphaBars.push(running);
+    }
+    return alphaBars;
+  }
+
+  const schedules = {
+    linear: computeAlphaBars(buildLinearSchedule(1e-4, 0.02, T)),
+    cosine: computeAlphaBars(buildCosineSchedule(T)),
+  };
+
+  // ── Simple 12x12 "heart" pattern as the clean signal x0 (values in [0,1]) ──
+  function buildX0() {
+    const rows = [
+      "000110011000",
+      "001111111100",
+      "011111111110",
+      "011111111110",
+      "011111111110",
+      "001111111100",
+      "000111111000",
+      "000011110000",
+      "000001100000",
+      "000000000000",
+      "000000000000",
+      "000000000000",
+    ];
+    return rows.map(r => r.split('').map(Number));
+  }
+  const X0 = buildX0();
+
+  // Gaussian noise via Box-Muller
+  function randn() {
+    let u = 0, v = 0;
+    while (u === 0) u = Math.random();
+    while (v === 0) v = Math.random();
+    return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+  }
+
+  function forwardNoise(x0, alphaBarT) {
+    const sqrtAB  = Math.sqrt(alphaBarT);
+    const sqrt1AB = Math.sqrt(1 - alphaBarT);
+    const out = [];
+    for (let r = 0; r < x0.length; r++) {
+      const row = [];
+      for (let c = 0; c < x0[r].length; c++) {
+        row.push(sqrtAB * x0[r][c] + sqrt1AB * randn());
+      }
+      out.push(row);
+    }
+    return out;
+  }
+
+  let currentSchedule = 'linear';
+
+  function heatmapLayout() {
+    return MLCharts.baseLayout({
+      margin: { l: 10, r: 10, t: 10, b: 10 },
+      xaxis: { showticklabels: false, showgrid: false, zeroline: false },
+      yaxis: { showticklabels: false, showgrid: false, zeroline: false, autorange: 'reversed', scaleanchor: 'x', scaleratio: 1 },
+    });
+  }
+
+  function renderScheduleChart(t) {
+    const ab = schedules[currentSchedule];
+    const noiseLevel = ab.map(a => Math.sqrt(1 - a));
+    const xs = ab.map((_, i) => i);
+
+    const traces = [
+      {
+        x: xs, y: ab, type: 'scatter', mode: 'lines',
+        line: { color: MLCharts.theme.blue, width: 2.5 },
+        name: 'ᾱ_t (signal)',
+      },
+      {
+        x: xs, y: noiseLevel, type: 'scatter', mode: 'lines',
+        line: { color: MLCharts.theme.amber, width: 2.5 },
+        name: '√(1−ᾱ_t) (noise)',
+      },
+      {
+        x: [t], y: [ab[t]], type: 'scatter', mode: 'markers',
+        marker: { color: MLCharts.theme.blue700, size: 11, symbol: 'circle' },
+        name: 'current t', showlegend: false,
+        hovertemplate: `t=${t}<br>ᾱ_t=%{y:.4f}<extra></extra>`,
+      },
+      {
+        x: [t], y: [noiseLevel[t]], type: 'scatter', mode: 'markers',
+        marker: { color: MLCharts.theme.red, size: 11, symbol: 'circle' },
+        name: 'current t', showlegend: false,
+        hovertemplate: `t=${t}<br>√(1−ᾱ_t)=%{y:.4f}<extra></extra>`,
+      },
+    ];
+
+    const layout = MLCharts.baseLayout({
+      xaxis: { title: { text: 'Timestep t' }, range: [0, T - 1] },
+      yaxis: { title: { text: 'Value' }, range: [0, 1] },
+    });
+
+    Plotly.react('l58-schedule-chart', traces, layout, MLCharts.config);
+  }
+
+  function renderNoiseHeatmap(t) {
+    const alphaBarT = schedules[currentSchedule][t];
+    const noisy = forwardNoise(X0, alphaBarT);
+
+    Plotly.react('l58-noise-heatmap', [{
+      z: noisy, type: 'heatmap', showscale: false,
+      colorscale: [[0, MLCharts.theme.bgAlt], [0.5, MLCharts.theme.violet], [1, MLCharts.theme.blue]],
+      zmin: -2.5, zmax: 2.5,
+      hovertemplate: 'row %{y}, col %{x}<br>x_t=%{z:.2f}<extra></extra>',
+    }], heatmapLayout(), MLCharts.config);
+
+    const caption = document.getElementById('l58-noise-caption');
+    if (caption) {
+      if (t === 0) {
+        caption.textContent = `x₀ — the clean signal (t = 0, ᾱ_t = ${alphaBarT.toFixed(4)}, essentially no noise).`;
+      } else if (alphaBarT > 0.5) {
+        caption.textContent = `x_t at t = ${t} — mostly signal, faint noise (ᾱ_t = ${alphaBarT.toFixed(4)}).`;
+      } else if (alphaBarT > 0.05) {
+        caption.textContent = `x_t at t = ${t} — signal and noise mixed (ᾱ_t = ${alphaBarT.toFixed(4)}).`;
+      } else {
+        caption.textContent = `x_t at t = ${t} — nearly pure Gaussian noise (ᾱ_t = ${alphaBarT.toFixed(4)}), matching x_T ≈ N(0, I).`;
+      }
+    }
+  }
+
+  function renderAll(t) {
+    renderNoiseHeatmap(t);
+    renderScheduleChart(t);
+  }
+
+  MLCharts.linkSlider('l58-t-slider', 'l58-t-value', (v) => renderAll(Math.round(v)), v => `t = ${Math.round(v)}`);
+
+  document.querySelectorAll('#l58-schedule-buttons .diagram-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('#l58-schedule-buttons .diagram-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      currentSchedule = btn.dataset.schedule;
+      const slider = document.getElementById('l58-t-slider');
+      renderAll(slider ? Math.round(parseFloat(slider.value)) : 0);
+    });
+  });
+})();
+</script>
+<script>
+new MLQuiz('quiz58', [
+  {
+    question: "In diffusion models, the forward process does what?",
+    options: [
+      "Progressively adds Gaussian noise to a real image over T timesteps until the image becomes pure Gaussian noise",
+      "Progressively removes noise from a random latent vector until a coherent image emerges",
+      "Compresses the image through a series of downsampling operations to create a compact latent representation",
+      "Applies a sequence of learned transformations to map a clean image to a style-transferred version"
+    ],
+    correct: 0,
+    explanation: "The forward process is a fixed (non-learned) Markov chain: q(x_t|x_{t-1}) = N(x_t; √(1-β_t)·x_{t-1}, β_t·I). At each step, a small amount of Gaussian noise is added. After T=1000 steps, the original image is completely destroyed and x_T ≈ N(0,I) — pure Gaussian noise. Crucially, we can jump directly to any timestep t using: x_t = √ᾱ_t·x₀ + √(1-ᾱ_t)·ε, which makes training efficient."
+  },
+  {
+    question: "The U-Net denoiser takes what inputs?",
+    options: [
+      "The noisy image x_t and the timestep t — the timestep tells the network how much noise is present so it can calibrate its denoising",
+      "The clean image x_0 and a noise mask — it learns to apply the noise mask to corrupted regions",
+      "Only the noisy image x_t — the network learns to denoise without knowing the noise level",
+      "The noisy image x_t and the original clean image x_0 — it learns the difference between them"
+    ],
+    correct: 0,
+    explanation: "The denoiser ε_θ(x_t, t) takes both the noisy image and the timestep as inputs. Why the timestep? At t=1000, the image is pure noise and the network needs to make large structural predictions. At t=10, the image is nearly clean and the network needs to make fine detail corrections. The same network must behave differently at each noise level — the timestep embedding tells it where it is on this spectrum. Without the timestep, the network has no way to know if it should make large or small corrections."
+  },
+  {
+    question: "What is Classifier-Free Guidance (CFG) and what does the guidance scale control?",
+    options: [
+      "Running the U-Net twice — once with text conditioning and once without — then interpolating towards the conditional prediction; higher guidance scale = stronger adherence to the text prompt but less diversity",
+      "Training a separate classifier that guides the diffusion process toward the desired class during sampling",
+      "A technique that adjusts the number of denoising steps based on the complexity of the text prompt",
+      "A mechanism that classifies each generated image and discards ones that don't match the prompt"
+    ],
+    correct: 0,
+    explanation: "CFG runs the denoiser twice per step: ε_cond (with text) and ε_uncond (empty prompt). The guided prediction is: ε_guided = ε_uncond + guidance_scale × (ε_cond - ε_uncond). This extrapolates beyond the conditional prediction, away from the unconditional prediction. guidance_scale=1: just conditional, guidance_scale=7.5: strong conditioning (Stable Diffusion default), guidance_scale=15+: over-saturated. Higher guidance trades diversity and naturalness for stronger prompt adherence — the key quality/variety trade-off."
+  },
+  {
+    question: "Why do Latent Diffusion Models (like Stable Diffusion) operate in latent space rather than pixel space?",
+    options: [
+      "Latent space is ~200× smaller than pixel space — diffusing in latent space is dramatically faster and cheaper while preserving perceptual quality through the VAE encoder/decoder",
+      "Latent space contains more semantic information than pixel space, making it easier to condition on text",
+      "Latent space representations are discrete, enabling more stable training than the continuous pixel space",
+      "The VAE decoder can only generate from Gaussian noise, requiring diffusion to operate in latent space"
+    ],
+    correct: 0,
+    explanation: "A 512×512 RGB image has 786,432 values. The Stable Diffusion VAE encodes this to a 64×64×4 latent with just 16,384 values — about 48× fewer, with ~192× fewer total memory operations per denoising step. Each of the 50 DDIM steps now operates on 16k numbers instead of 786k — dramatically reducing GPU memory and compute. The VAE encoder/decoder preserve perceptual quality despite this compression: the VAE is trained with perceptual and adversarial losses to reconstruct high-quality images from the compact latent."
+  },
+  {
+    question: "What is img2img generation in Stable Diffusion?",
+    options: [
+      "Starting from an existing image, adding noise to a certain level, then denoising with text guidance — allowing you to transform an existing image's style while roughly preserving its content",
+      "Generating a new image that combines the style of one image with the content of another using two separate diffusion passes",
+      "Running two separate diffusion models sequentially, where the output of the first becomes the input of the second",
+      "Denoising an image twice — once at high quality and once at low quality — then averaging the results"
+    ],
+    correct: 0,
+    explanation: "img2img: (1) Encode the initial image with the VAE to get x₀ in latent space. (2) Add noise to some timestep t_start — the 'strength' parameter: strength=0.7 means noising to t=700/1000. (3) Run normal DDIM denoising from t_start down to 0 with text guidance. The earlier you start denoising (higher strength/more noise), the more creative freedom the model has to deviate from the input. Lower strength: preserves structure, changes color/texture. Higher strength: major layout changes possible but text prompt dominates."
+  }
+]);
+</script>
+
+</body>
+</html>

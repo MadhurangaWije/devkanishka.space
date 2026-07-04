@@ -1,0 +1,1431 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lesson 52: Attention Mechanism — Queries, Keys &amp; Values | ML Mastery</title>
+  <link rel="stylesheet" href="../assets/style.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
+</head>
+<body>
+
+<!-- ── Header ── -->
+<header class="lesson-header">
+  <div class="header-inner">
+    <nav class="breadcrumb">
+      <a href="../reference/curriculum-map.html">ML Mastery</a>
+      <span class="sep">›</span>
+      <span>Phase 5: Advanced Deep Learning &amp; NLP</span>
+    </nav>
+    <div class="lesson-badges">
+      <span class="phase-badge">Phase 5 · Advanced Deep Learning &amp; NLP</span>
+      <span class="lesson-num-badge">Lesson 52</span>
+    </div>
+    <h1 class="lesson-title">Attention Mechanism: Queries, Keys &amp; Values</h1>
+    <p class="lesson-subtitle">The single insight that transformed NLP — learn how attention lets networks focus on what matters, the elegant Query-Key-Value formulation, self-attention, multi-head attention, and why this leads directly to the Transformer.</p>
+    <div class="meta-pills">
+      <span class="meta-pill">⏱ ~75 min</span>
+      <span class="meta-pill">🐍 Python + PyTorch</span>
+      <span class="meta-pill">🔬 Deep Learning</span>
+      <span class="meta-pill">Requires Lesson 51</span>
+    </div>
+  </div>
+</header>
+
+<main class="lesson-main">
+<div class="content-wrapper">
+
+<!-- Objectives -->
+<div class="objectives-card">
+  <h2>🎯 What You'll Learn</h2>
+  <ul>
+    <li>Understand the bottleneck problem in Seq2Seq and exactly how Bahdanau attention solves it</li>
+    <li>Implement Bahdanau (additive) attention from scratch, step by step</li>
+    <li>Master the Query-Key-Value (QKV) framework as a generalized, database-like soft lookup</li>
+    <li>Implement scaled dot-product attention in 10 lines of PyTorch — the formula inside every Transformer</li>
+    <li>Understand self-attention: how words attend to each other within the same sequence</li>
+    <li>Understand multi-head attention and why multiple parallel attention heads capture richer representations</li>
+    <li>Understand causal (masked) self-attention used in GPT and other decoder-only models</li>
+    <li>Read attention weights as a form of interpretability — and understand the important caveats</li>
+  </ul>
+</div>
+
+<div class="callout callout-key">
+  <span class="callout-icon">💡</span>
+  <div class="callout-body">
+    <strong>The Big Intuition</strong>
+    <p>When you read a sentence to answer a question, you don't re-read every word with equal focus. If the question is "What color was the car?", you scan for "color" and "car" — you focus there. The attention mechanism gives neural networks exactly this ability: the decoder can "look back" at all encoder states and decide which parts of the input are most relevant for generating each output word. For "The agreement on the European Economic Area", when the decoder generates "accord" (French for agreement), it should focus on "agreement" — not "Economic" or "Area". This selective focus was the single insight that transformed NLP and kicked off the Transformer revolution.</p>
+  </div>
+</div>
+
+<!-- ── Section 1 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">1</span> The Problem Attention Solves</h2>
+
+  <p>In Lesson 51 we showed that Seq2Seq with a fixed context vector degrades badly on long sequences. The cause: the decoder can only see one vector — the final encoder hidden state. All the rich information in intermediate encoder states is inaccessible.</p>
+
+  <h3>The Missing Information</h3>
+  <p>Let's make this concrete. Consider translating "The agreement on the European Economic Area was signed in August 1992."</p>
+
+  <pre><code class="language-python"># Source sentence structure
+src = ["The", "agreement", "on", "the", "European", "Economic",
+       "Area", "was", "signed", "in", "August", "1992", "."]
+
+# French translation target
+tgt = ["L'", "accord", "sur", "la", "zone", "économique",
+       "européenne", "a", "été", "signé", "en", "août", "1992", "."]
+
+# The decoder generating "accord" (position 1) needs "agreement" (position 1)
+# The decoder generating "zone"  (position 4) needs "Area" (position 6)
+# The decoder generating "économique" needs "Economic" (position 5)
+
+# Problem: in vanilla Seq2Seq, at decoder step t, the decoder ONLY sees
+# the single final encoder hidden state h_T — it cannot directly access
+# h_1 (the state that best captured "agreement") or h_5 (captured "Economic")
+
+# The encoder has ALL this information in its hidden states h_1, h_2, ..., h_13
+# But vanilla Seq2Seq throws away h_1 through h_12 and only keeps h_13!
+
+print("Information the decoder NEEDS vs. what it CAN ACCESS (vanilla Seq2Seq):")
+print()
+for dec_step, (tgt_word, src_focus) in enumerate([
+    ("L'",         "The"),
+    ("accord",     "agreement"),
+    ("sur",        "on"),
+    ("la",         "the"),
+    ("zone",       "Area"),
+    ("économique", "Economic"),
+    ("européenne", "European"),
+]):
+    src_idx = src.index(src_focus) if src_focus in src else -1
+    print(f"  Decoder step {dec_step+1} (generating '{tgt_word}'):")
+    print(f"    Needs to focus on: '{src_focus}' (encoder state h_{src_idx+1})")
+    print(f"    Vanilla Seq2Seq: only has h_13 (final state)  ← BOTTLENECK")
+    print(f"    Attention:       directly reads h_{src_idx+1} ← SOLVED")</code></pre>
+
+  <h3>The Attention Solution</h3>
+  <p>Instead of discarding all intermediate encoder hidden states, attention <em>keeps</em> them all and lets the decoder perform a dynamic, weighted lookup at each decoding step. At step t, the decoder "votes" on how relevant each encoder state is, then takes a weighted average of all encoder states. This weighted average becomes the context vector for step t — it's different for every decoder step.</p>
+</div>
+
+<!-- ── Section 2 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">2</span> Bahdanau Attention: The Original</h2>
+
+  <p>Bahdanau et al. (2015) — "Neural Machine Translation by Jointly Learning to Align and Translate" — introduced the first practical attention mechanism for NLP. It's sometimes called "additive attention" because it uses a small feed-forward network (addition + tanh) to compute attention scores.</p>
+
+  <h3>The Three-Step Computation</h3>
+
+  <p><strong>Step 1: Compute attention scores</strong> — how much does decoder state s<sub>t-1</sub> "want" encoder state h<sub>s</sub>?</p>
+  <p style="text-align:center; background: var(--bg-alt); padding: 0.75rem; border-radius: 0.5rem; font-family: monospace; margin: 1rem 0;">
+    e<sub>t,s</sub> = V<sup>T</sup> · tanh(W<sub>1</sub> · s<sub>t-1</sub> + W<sub>2</sub> · h<sub>s</sub>)
+  </p>
+
+  <p><strong>Step 2: Normalize scores to attention weights</strong> via softmax:</p>
+  <p style="text-align:center; background: var(--bg-alt); padding: 0.75rem; border-radius: 0.5rem; font-family: monospace; margin: 1rem 0;">
+    α<sub>t,s</sub> = exp(e<sub>t,s</sub>) / Σ<sub>s'</sub> exp(e<sub>t,s'</sub>)
+  </p>
+
+  <p><strong>Step 3: Compute context vector</strong> — weighted sum of encoder states:</p>
+  <p style="text-align:center; background: var(--bg-alt); padding: 0.75rem; border-radius: 0.5rem; font-family: monospace; margin: 1rem 0;">
+    c<sub>t</sub> = Σ<sub>s</sub> α<sub>t,s</sub> · h<sub>s</sub>
+  </p>
+
+  <pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class BahdanauAttention(nn.Module):
+    """
+    Bahdanau (additive) attention.
+    Computes a soft alignment between decoder query and encoder hidden states.
+    """
+    def __init__(self, query_dim, key_dim, attn_dim):
+        """
+        query_dim: dimension of decoder hidden state (s_{t-1})
+        key_dim:   dimension of encoder hidden states (h_s)
+        attn_dim:  dimension of the internal alignment model
+        """
+        super().__init__()
+        # W1 projects decoder query to attention dim
+        self.W1 = nn.Linear(query_dim, attn_dim, bias=False)
+        # W2 projects encoder keys to attention dim (can be precomputed!)
+        self.W2 = nn.Linear(key_dim, attn_dim, bias=False)
+        # V projects to scalar score
+        self.V  = nn.Linear(attn_dim, 1, bias=False)
+
+    def forward(self, query, keys):
+        """
+        query: (batch, query_dim)          — decoder hidden state s_{t-1}
+        keys:  (batch, src_len, key_dim)   — all encoder hidden states
+
+        Returns:
+            context:      (batch, key_dim)         — weighted sum of encoder states
+            attn_weights: (batch, src_len)          — attention distribution α_{t,s}
+        """
+        # Project query: (batch, 1, attn_dim) — add time dimension for broadcasting
+        q_proj = self.W1(query).unsqueeze(1)      # (B, 1, A)
+
+        # Project keys: (batch, src_len, attn_dim)
+        k_proj = self.W2(keys)                    # (B, T, A)
+
+        # Compute attention energies e_{t,s} = V^T · tanh(W1·q + W2·k)
+        # Broadcasting: q_proj (B,1,A) + k_proj (B,T,A) → (B,T,A)
+        energy = self.V(torch.tanh(q_proj + k_proj)).squeeze(2)  # (B, T)
+
+        # Normalize to attention weights via softmax
+        attn_weights = F.softmax(energy, dim=1)   # (B, T) — sums to 1 along src_len
+
+        # Compute context vector: weighted sum of encoder states
+        # attn_weights: (B, T) → (B, 1, T) for bmm
+        # keys:         (B, T, key_dim)
+        context = torch.bmm(attn_weights.unsqueeze(1), keys)  # (B, 1, key_dim)
+        context = context.squeeze(1)                            # (B, key_dim)
+
+        return context, attn_weights
+
+
+# Test the attention module
+BATCH     = 4
+SRC_LEN   = 12
+DEC_DIM   = 512
+ENC_DIM   = 1024   # bidirectional → 2 * 512
+ATTN_DIM  = 256
+
+attn = BahdanauAttention(query_dim=DEC_DIM, key_dim=ENC_DIM, attn_dim=ATTN_DIM)
+
+query = torch.randn(BATCH, DEC_DIM)                 # decoder hidden state
+keys  = torch.randn(BATCH, SRC_LEN, ENC_DIM)        # all encoder states
+
+context, weights = attn(query, keys)
+
+print(f"Query shape:      {query.shape}")       # (4, 512)
+print(f"Keys shape:       {keys.shape}")        # (4, 12, 1024)
+print(f"Context shape:    {context.shape}")     # (4, 1024)
+print(f"Weights shape:    {weights.shape}")     # (4, 12) — attention over 12 src tokens
+print(f"Weights sum to 1: {weights.sum(1).allclose(torch.ones(BATCH))}")  # True
+
+# What attention weights look like:
+print(f"\nSample attention weights (first example in batch):")
+print(f"  {[f'{w:.3f}' for w in weights[0].detach().numpy()]}")
+# Should sum to 1.0; initially uniform since untrained</code></pre>
+
+  <h3>Using Attention in the Decoder</h3>
+  <pre><code class="language-python">class AttentionDecoder(nn.Module):
+    """
+    LSTM decoder augmented with Bahdanau attention.
+    At each step: computes attention-weighted context → concatenates with embedding.
+    """
+    def __init__(self, vocab_size, embed_dim, dec_hidden, enc_hidden, attn_dim, dropout=0.3):
+        super().__init__()
+        self.embedding  = nn.Embedding(vocab_size, embed_dim, padding_idx=0)
+        self.attention  = BahdanauAttention(dec_hidden, enc_hidden, attn_dim)
+
+        # Decoder LSTM: input = embedding + context vector
+        self.lstm = nn.LSTMCell(embed_dim + enc_hidden, dec_hidden)
+
+        self.fc_out  = nn.Linear(dec_hidden + enc_hidden + embed_dim, vocab_size)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward_step(self, token_ids, h, c, encoder_outputs):
+        """
+        token_ids:       (batch,)               — current input token
+        h, c:            (batch, dec_hidden)     — decoder state
+        encoder_outputs: (batch, src_len, enc_H) — all encoder hidden states
+
+        Returns: logits (batch, vocab), h_new, c_new, attn_weights (batch, src_len)
+        """
+        # 1. Embed current token
+        embedded = self.dropout(self.embedding(token_ids))  # (B, E)
+
+        # 2. Compute attention using PREVIOUS hidden state as query
+        context, attn_weights = self.attention(h, encoder_outputs)  # (B, enc_H)
+
+        # 3. Concatenate embedding + context → LSTM input
+        lstm_input = torch.cat([embedded, context], dim=1)  # (B, E + enc_H)
+
+        # 4. LSTM step
+        h_new, c_new = self.lstm(lstm_input, (h, c))
+
+        # 5. Predict next token from all available information
+        prediction_input = torch.cat([h_new, context, embedded], dim=1)
+        logits = self.fc_out(self.dropout(prediction_input))
+
+        return logits, h_new, c_new, attn_weights
+
+
+print("Attention-augmented decoder flow:")
+print("  1. Embed current token")
+print("  2. Query all encoder states with current decoder state")
+print("  3. Form context = weighted sum of relevant encoder states")
+print("  4. Feed [embedding + context] to LSTM")
+print("  5. Predict next token from [hidden state + context + embedding]")
+print()
+print("Key insight: the context vector is DIFFERENT at each decoder step!")
+print("  Step t=1 (generating 'accord'):     context ≈ h_encoder['agreement']")
+print("  Step t=4 (generating 'zone'):       context ≈ h_encoder['Area']")
+print("  Step t=5 (generating 'économique'): context ≈ h_encoder['Economic']")</code></pre>
+
+  <div class="callout callout-key">
+    <span class="callout-icon">🔑</span>
+    <div class="callout-body">
+      <strong>The Alignment Matrix: Free Interpretability</strong>
+      <p>The attention weights α<sub>t,s</sub> form a matrix of shape (target_length × source_length). Plotting this as a heatmap shows <em>which source word the decoder is looking at when generating each target word</em>. For English→French translation, this matrix should be roughly diagonal (word-aligned). For SOV→SVO reordering (Japanese→English), you'll see interesting cross-diagonal patterns. This alignment emerges with NO supervision — the model is only trained on translation pairs, never told explicitly which source word corresponds to which target word. This interpretability is a remarkable bonus of the attention mechanism.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 3 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">3</span> Queries, Keys, and Values: The Database Analogy</h2>
+
+  <p>Bahdanau attention works well, but its computation requires a feed-forward network (W1, W2, V) at every step. Vaswani et al. (2017) reformulated attention using a cleaner, more parallelisable framework: <strong>Query-Key-Value (QKV)</strong>.</p>
+
+  <h3>The Soft Database Lookup</h3>
+  <p>Think of attention as a database lookup, but "soft" — instead of exactly matching a query to one key (like SQL), you get a weighted mixture of all values based on how well the query matches each key:</p>
+
+  <ul>
+    <li><strong>Keys (K)</strong>: what each encoder state "advertises" about itself — "I represent the word 'agreement', which is a noun about a formal pact"</li>
+    <li><strong>Query (Q)</strong>: what the decoder state is "searching for" — "I need a noun that describes a formal commitment"</li>
+    <li><strong>Values (V)</strong>: the actual information content to retrieve — the encoder hidden state itself</li>
+    <li><strong>Attention score</strong>: dot product Q · Kᵀ → how well query matches each key</li>
+    <li><strong>Output</strong>: softmax(scores) × V — weighted average of values, weighted by similarity</li>
+  </ul>
+
+  <pre><code class="language-python">import torch
+import torch.nn.functional as F
+
+# SQL analogy (hard lookup):
+# SELECT value FROM database WHERE key = query  ← returns exactly one result
+
+# Soft attention analogy:
+# RETURN SUM(similarity(query, key_i) * value_i for all i)  ← weighted blend
+
+# Illustrative example: 3 "database entries" (encoder states)
+# Keys and values are the same here (common in cross-attention)
+
+keys   = torch.tensor([[1.0, 0.0, 0.0],   # h_agreement: "noun, formal, contract"
+                        [0.0, 1.0, 0.0],   # h_Economic:  "adj, financial, trade"
+                        [0.0, 0.0, 1.0]])  # h_signed:    "verb, past, action"
+
+values = keys.clone()  # in cross-attention, keys ≈ values
+
+# Query: decoder wants to find "a noun about formal agreement"
+query_for_accord  = torch.tensor([[0.9, 0.05, 0.05]])  # mostly key-0-like
+query_for_zone    = torch.tensor([[0.05, 0.9, 0.05]])  # mostly key-1-like
+
+for q_name, q in [("decoder wants 'accord' → looks for agreement", query_for_accord),
+                  ("decoder wants 'zone'   → looks for Economic",  query_for_zone)]:
+    scores  = (q @ keys.T)                      # (1, 3) — raw dot products
+    weights = F.softmax(scores, dim=-1)          # (1, 3) — attention weights
+    context = (weights @ values)                 # (1, 3) — weighted sum
+
+    print(f"\n{q_name}:")
+    print(f"  Query:   {q.numpy()}")
+    print(f"  Scores:  {scores.detach().numpy()}")
+    print(f"  Weights: {weights.detach().numpy()} (sums to {weights.sum():.1f})")
+    print(f"  Context: {context.detach().numpy()}")
+    print(f"  ↑ Context is mostly key_{weights.argmax().item()} — correct alignment!")</code></pre>
+
+  <div class="diagram-svg-wrap">
+    <svg viewBox="0 0 700 330" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="One query compared against three keys via dot product, producing scores that become weights through softmax, then used to compute a weighted sum of the values">
+      <defs>
+        <marker id="l51-arrowhead" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+          <path d="M0,0 L8,4 L0,8 Z" fill="var(--text-muted)"></path>
+        </marker>
+      </defs>
+
+      <!-- Query -->
+      <circle class="diagram-node-alt" cx="55" cy="165" r="26"></circle>
+      <text class="diagram-mono-label" x="55" y="169">Q</text>
+      <text class="diagram-label" x="55" y="205">Query</text>
+      <text class="diagram-sublabel" x="55" y="219">"looks for agreement"</text>
+
+      <!-- Dot product arrows Q -> K1,K2,K3 -->
+      <line class="diagram-arrow" x1="81" y1="150" x2="168" y2="60" marker-end="url(#l51-arrowhead)"></line>
+      <line class="diagram-arrow" x1="81" y1="165" x2="168" y2="165" marker-end="url(#l51-arrowhead)"></line>
+      <line class="diagram-arrow" x1="81" y1="180" x2="168" y2="270" marker-end="url(#l51-arrowhead)"></line>
+
+      <!-- Keys -->
+      <circle class="diagram-node" cx="195" cy="55" r="24"></circle>
+      <text class="diagram-mono-label" x="195" y="59">K₁</text>
+      <text class="diagram-sublabel" x="195" y="90">"agreement"</text>
+
+      <circle class="diagram-node" cx="195" cy="165" r="24"></circle>
+      <text class="diagram-mono-label" x="195" y="169">K₂</text>
+      <text class="diagram-sublabel" x="195" y="200">"Economic"</text>
+
+      <circle class="diagram-node" cx="195" cy="275" r="24"></circle>
+      <text class="diagram-mono-label" x="195" y="279">K₃</text>
+      <text class="diagram-sublabel" x="195" y="310">"signed"</text>
+
+      <!-- Scores -->
+      <text class="diagram-label" x="290" y="30">Q·Kᵀ</text>
+      <rect class="diagram-node-good" x="255" y="42" width="70" height="26" rx="4"></rect>
+      <text class="diagram-mono-label" x="290" y="60">score₁ = 8.2</text>
+
+      <rect class="diagram-node" x="255" y="152" width="70" height="26" rx="4"></rect>
+      <text class="diagram-mono-label" x="290" y="170">score₂ = 1.1</text>
+
+      <rect class="diagram-node" x="255" y="262" width="70" height="26" rx="4"></rect>
+      <text class="diagram-mono-label" x="290" y="280">score₃ = 0.4</text>
+
+      <line class="diagram-arrow" x1="325" y1="55" x2="380" y2="55" marker-end="url(#l51-arrowhead)"></line>
+      <line class="diagram-arrow" x1="325" y1="165" x2="380" y2="165" marker-end="url(#l51-arrowhead)"></line>
+      <line class="diagram-arrow" x1="325" y1="275" x2="380" y2="275" marker-end="url(#l51-arrowhead)"></line>
+
+      <!-- Softmax -->
+      <text class="diagram-label" x="420" y="30">softmax</text>
+      <rect class="diagram-node-good" x="385" y="42" width="70" height="26" rx="4"></rect>
+      <text class="diagram-mono-label" x="420" y="60">α₁ = 0.85</text>
+
+      <rect class="diagram-node" x="385" y="152" width="70" height="26" rx="4"></rect>
+      <text class="diagram-mono-label" x="420" y="170">α₂ = 0.10</text>
+
+      <rect class="diagram-node" x="385" y="262" width="70" height="26" rx="4"></rect>
+      <text class="diagram-mono-label" x="420" y="280">α₃ = 0.05</text>
+
+      <!-- Values -->
+      <circle class="diagram-node" cx="530" cy="55" r="24"></circle>
+      <text class="diagram-mono-label" x="530" y="59">V₁</text>
+
+      <circle class="diagram-node" cx="530" cy="165" r="24"></circle>
+      <text class="diagram-mono-label" x="530" y="169">V₂</text>
+
+      <circle class="diagram-node" cx="530" cy="275" r="24"></circle>
+      <text class="diagram-mono-label" x="530" y="279">V₃</text>
+
+      <line class="diagram-arrow" x1="455" y1="55" x2="502" y2="55" marker-end="url(#l51-arrowhead)"></line>
+      <line class="diagram-arrow" x1="455" y1="165" x2="502" y2="165" marker-end="url(#l51-arrowhead)"></line>
+      <line class="diagram-arrow" x1="455" y1="275" x2="502" y2="275" marker-end="url(#l51-arrowhead)"></line>
+
+      <!-- weighted sum -->
+      <line class="diagram-arrow" x1="554" y1="65" x2="628" y2="150" marker-end="url(#l51-arrowhead)"></line>
+      <line class="diagram-arrow" x1="554" y1="165" x2="628" y2="165" marker-end="url(#l51-arrowhead)"></line>
+      <line class="diagram-arrow" x1="554" y1="265" x2="628" y2="180" marker-end="url(#l51-arrowhead)"></line>
+
+      <circle class="diagram-node-good" cx="655" cy="165" r="28"></circle>
+      <text class="diagram-mono-label" x="655" y="163" style="font-size:10px">0.85·V₁</text>
+      <text class="diagram-mono-label" x="655" y="174" style="font-size:10px">+0.10·V₂+…</text>
+      <text class="diagram-label" x="655" y="215">Context</text>
+      <text class="diagram-sublabel" x="655" y="229">weighted sum of V</text>
+    </svg>
+    <p class="diagram-svg-caption">The full Q/K/V computation for one query: the query is dot-producted against every key to get raw scores, softmax turns those scores into weights that sum to 1, and the output is the weighted sum of the values using those weights. Because score₁ (query vs. "agreement") is far larger than the others, softmax assigns it almost all the weight (α₁ = 0.85) — the context vector ends up dominated by V₁.</p>
+  </div>
+
+  <h3>Why QKV Is More Powerful Than Bahdanau</h3>
+  <p>The QKV formulation has three advantages:</p>
+  <ol>
+    <li><strong>Fully parallelisable</strong>: Q, K, V are just matrix multiplications — can be computed for all positions simultaneously on GPU</li>
+    <li><strong>Flexible roles</strong>: Q, K, and V can come from different sequences (cross-attention) or the same sequence (self-attention) — the same formula handles both</li>
+    <li><strong>Scaling to multiple heads</strong>: run multiple QKV triplets in parallel, each learning to attend to different aspects of the input</li>
+  </ol>
+</div>
+
+<!-- ── Section 4 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">4</span> Scaled Dot-Product Attention</h2>
+
+  <p>The core formula of the Transformer — used inside every attention layer in every modern language model:</p>
+
+  <p style="text-align:center; background: var(--bg-alt); padding: 0.75rem 1rem; border-radius: 0.5rem; font-family: monospace; margin: 1rem 0;">
+    Attention(Q, K, V) = softmax(QK<sup>T</sup> / √d<sub>k</sub>) · V
+  </p>
+
+  <h3>Why the √dₖ Scaling?</h3>
+  <p>If you multiply two random vectors of dimension d, the expected magnitude of their dot product grows as √d. For d=64: expected dot product ≈ √64 = 8. For d=512: expected dot product ≈ √512 ≈ 22.6. When the dot products are large, softmax saturates — the maximum entry is pushed to near 1 and all others are near 0. In this "peaked" softmax regime, the gradients of the softmax are nearly zero (the function is flat). Training becomes extremely slow. Dividing by √d<sub>k</sub> keeps dot products at a consistent scale regardless of dimension.</p>
+
+  <pre><code class="language-python">import torch
+import torch.nn.functional as F
+import math
+
+def scaled_dot_product_attention(Q, K, V, mask=None):
+    """
+    Scaled Dot-Product Attention — the fundamental building block of Transformers.
+
+    Q: (batch, heads, seq_len_q, d_k)   — queries
+    K: (batch, heads, seq_len_k, d_k)   — keys
+    V: (batch, heads, seq_len_v, d_v)   — values  (seq_len_k == seq_len_v)
+    mask: (batch, 1, seq_len_q, seq_len_k) — optional mask (e.g., causal or padding)
+
+    Returns:
+        output:  (batch, heads, seq_len_q, d_v)  — attention-weighted values
+        weights: (batch, heads, seq_len_q, seq_len_k)  — attention weights
+    """
+    d_k = Q.size(-1)
+
+    # Step 1: Compute raw attention scores QK^T
+    # Q: (B, H, T_q, d_k) × K^T: (B, H, d_k, T_k) → (B, H, T_q, T_k)
+    scores = torch.matmul(Q, K.transpose(-2, -1))   # (B, H, T_q, T_k)
+
+    # Step 2: Scale by 1/√d_k to prevent softmax saturation
+    scores = scores / math.sqrt(d_k)
+
+    # Step 3: Apply mask (set masked positions to -∞ → 0 after softmax)
+    if mask is not None:
+        scores = scores.masked_fill(mask == 0, float('-inf'))
+
+    # Step 4: Softmax to get attention weights
+    weights = F.softmax(scores, dim=-1)   # (B, H, T_q, T_k) — rows sum to 1
+
+    # Step 5: Weighted sum of values
+    output = torch.matmul(weights, V)     # (B, H, T_q, d_v)
+
+    return output, weights
+
+
+# Demonstrate the scaling effect
+print("Scaling effect on softmax distribution:")
+print()
+d_k = 64
+q = torch.randn(1, 1, 1, d_k)
+k = torch.randn(1, 1, 5, d_k)
+
+scores_unscaled = torch.matmul(q, k.transpose(-2, -1))
+scores_scaled   = scores_unscaled / math.sqrt(d_k)
+
+weights_unscaled = F.softmax(scores_unscaled, dim=-1)
+weights_scaled   = F.softmax(scores_scaled,   dim=-1)
+
+print(f"Unscaled scores magnitude: {scores_unscaled.abs().mean():.2f}")
+print(f"Scaled   scores magnitude: {scores_scaled.abs().mean():.2f}")
+print()
+print(f"Unscaled weights: {weights_unscaled[0,0,0].detach().numpy().round(3)}")
+print(f"Scaled   weights: {weights_scaled[0,0,0].detach().numpy().round(3)}")
+print()
+print("Unscaled: one weight ≈ 1.0 (softmax peaked → vanishing gradients)")
+print("Scaled:   weights more distributed (healthier gradients)")</code></pre>
+
+  <pre><code class="language-python"># Full example: attention on a 5-word sentence
+batch_size, num_heads, seq_len, d_k = 2, 1, 5, 64
+d_v = 64
+
+Q = torch.randn(batch_size, num_heads, seq_len, d_k)
+K = torch.randn(batch_size, num_heads, seq_len, d_k)
+V = torch.randn(batch_size, num_heads, seq_len, d_v)
+
+output, weights = scaled_dot_product_attention(Q, K, V)
+
+print("Scaled Dot-Product Attention shapes:")
+print(f"  Q, K: {Q.shape}")           # (2, 1, 5, 64)
+print(f"  V:    {V.shape}")           # (2, 1, 5, 64)
+print(f"  Output:  {output.shape}")   # (2, 1, 5, 64)
+print(f"  Weights: {weights.shape}")  # (2, 1, 5, 5) — 5×5 attention matrix
+
+print(f"\nAttention weights for first example (5×5 matrix):")
+print(f"  {weights[0,0].detach().numpy().round(3)}")
+print(f"\nRow sums (should all be 1.0): {weights[0,0].sum(1).detach().numpy().round(3)}")</code></pre>
+
+  <div class="callout callout-tip">
+    <span class="callout-icon">💡</span>
+    <div class="callout-body">
+      <strong>This 10-Line Function Is Inside Every Transformer</strong>
+      <p>The <code>scaled_dot_product_attention</code> function above is literally the core computation inside GPT-4, BERT, T5, and every other transformer model. The entire complexity of modern NLP models comes from: (1) learning good Q, K, V projection matrices, (2) running this attention in multiple parallel heads, (3) stacking many layers of this attention, and (4) careful training at scale. The fundamental operation has been unchanged since the 2017 "Attention is All You Need" paper. PyTorch 2.0+ even has a built-in optimized version: <code>F.scaled_dot_product_attention(Q, K, V)</code>.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 5 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">5</span> Self-Attention: Words Attending to Each Other</h2>
+
+  <p>So far, attention has been between a decoder (query) and an encoder (keys/values) — called <em>cross-attention</em>. Self-attention is different: <strong>Q, K, and V all come from the same sequence</strong>. Each word in a sentence attends to all other words in the same sentence.</p>
+
+  <h3>Why Self-Attention Is Powerful</h3>
+  <p>Consider: "The animal didn't cross the street because <strong>it</strong> was too tired."</p>
+  <p>What does "it" refer to? The animal, not the street. With self-attention, the representation of "it" is computed by attending to all other words. The model learns to attend strongly to "animal" when computing "it"'s representation, solving coreference resolution <em>within</em> the representation itself.</p>
+
+  <pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import math
+
+class SelfAttention(nn.Module):
+    """
+    Single-head self-attention layer.
+    Q, K, V all come from the same input sequence.
+    """
+    def __init__(self, embed_dim, d_k=None):
+        super().__init__()
+        self.d_k = d_k or embed_dim
+
+        # Three separate learned linear projections
+        self.W_Q = nn.Linear(embed_dim, self.d_k, bias=False)
+        self.W_K = nn.Linear(embed_dim, self.d_k, bias=False)
+        self.W_V = nn.Linear(embed_dim, self.d_k, bias=False)
+
+        self.out_proj = nn.Linear(self.d_k, embed_dim, bias=False)
+
+    def forward(self, x, mask=None):
+        """
+        x: (batch, seq_len, embed_dim) — the INPUT sequence
+        All of Q, K, V derived from x.
+        """
+        # Project x to Q, K, V — three DIFFERENT linear projections
+        Q = self.W_Q(x)   # (B, T, d_k) — "what am I looking for?"
+        K = self.W_K(x)   # (B, T, d_k) — "what do I contain?"
+        V = self.W_V(x)   # (B, T, d_k) — "what will I contribute if attended to?"
+
+        # Add head dimension (single head here)
+        Q = Q.unsqueeze(1)   # (B, 1, T, d_k)
+        K = K.unsqueeze(1)
+        V = V.unsqueeze(1)
+
+        # Scaled dot-product attention
+        output, attn_weights = scaled_dot_product_attention(Q, K, V, mask)
+
+        # Remove head dimension, project back to embed_dim
+        output = output.squeeze(1)           # (B, T, d_k)
+        output = self.out_proj(output)       # (B, T, embed_dim)
+
+        return output, attn_weights.squeeze(1)   # attn_weights: (B, T, T)
+
+
+# Example: self-attention on a 6-word sentence
+BATCH, SEQ_LEN, EMBED_DIM = 2, 6, 64
+
+x = torch.randn(BATCH, SEQ_LEN, EMBED_DIM)  # (2, 6, 64)
+
+self_attn = SelfAttention(embed_dim=EMBED_DIM, d_k=64)
+output, weights = self_attn(x)
+
+print(f"Input shape:   {x.shape}")        # (2, 6, 64)
+print(f"Output shape:  {output.shape}")   # (2, 6, 64) — same!
+print(f"Weights shape: {weights.shape}")  # (2, 6, 6) — each position attends to all others
+print()
+
+# Interpret the attention matrix:
+# weights[b, i, j] = how much position i attends to position j
+print("Attention weight matrix for batch 0 (6×6):")
+print("  Rows = query positions, Columns = key positions")
+print("  Each row sums to 1.0")
+print(f"  {weights[0].detach().numpy().round(2)}")</code></pre>
+
+  <h3>Self-Attention Solves Long-Range Dependencies</h3>
+  <pre><code class="language-python">print("Self-attention vs. RNN for long-range dependencies:")
+print()
+print("RNN (LSTM):")
+print("  To connect position 1 to position T: must pass through T-1 hidden states")
+print("  Information can decay even in LSTM for very long sequences")
+print("  Maximum path length: O(T)")
+print()
+print("Self-Attention:")
+print("  Any position can directly attend to any other position in ONE step")
+print("  Position 1 can attend to position T directly: one dot product!")
+print("  Maximum path length: O(1) — constant regardless of sequence length")
+print()
+print("This is why transformers MASSIVELY outperform LSTMs on long documents,")
+print("code understanding, and cross-sentence reasoning tasks.")
+print()
+
+# Sentence: "The animal didn't cross the street because it was too tired."
+# Indices:   0     1      2      3     4   5       7      8  9   10  11
+# When computing representation of "it" (position 7):
+# Self-attention can directly attend to "animal" (position 1) in ONE operation.
+# LSTM would need to pass the "animal" information forward through 6 hidden states.</code></pre>
+
+  <div class="video-container">
+    <video src="/videos/self-attention-flow.mp4" autoplay loop muted playsinline></video>
+    <p class="video-caption">Query/Key/Value vectors, attention weights, and the resulting weighted blend — the full self-attention computation for one token, in motion.</p>
+  </div>
+</div>
+
+<!-- ── Section 6 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">6</span> Multi-Head Attention</h2>
+
+  <p>Single-head attention can only focus on one "type" of relationship at a time. The attention weights form a single distribution — the model must choose whether to attend based on syntax, semantics, or some other relationship. Multi-head attention runs several attention operations in parallel, each learning to focus on a different aspect.</p>
+
+  <h3>The Intuition: Parallel Specialists</h3>
+  <p>Think of a language model trying to understand "The pilot who flew the plane landed it safely." A single attention head can't simultaneously track that "who" refers to "pilot", "it" refers to "plane", and "landed" is the main predicate. Multiple heads can specialize: Head 1 tracks coreference ("it" → "plane"), Head 2 tracks syntactic structure (subject-verb), Head 3 tracks semantic roles (agent, theme).</p>
+
+  <pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import math
+
+class MultiHeadAttention(nn.Module):
+    """
+    Multi-Head Attention as in 'Attention is All You Need' (Vaswani et al., 2017).
+
+    Runs h independent attention heads in parallel, each with different
+    linear projections of Q, K, V. Concatenates the outputs and projects back.
+    """
+    def __init__(self, embed_dim, num_heads, dropout=0.1):
+        super().__init__()
+        assert embed_dim % num_heads == 0, "embed_dim must be divisible by num_heads"
+
+        self.embed_dim = embed_dim
+        self.num_heads = num_heads
+        self.d_k = embed_dim // num_heads   # dimension per head
+
+        # Single large linear layers — more efficient than separate per head
+        self.W_Q = nn.Linear(embed_dim, embed_dim, bias=False)
+        self.W_K = nn.Linear(embed_dim, embed_dim, bias=False)
+        self.W_V = nn.Linear(embed_dim, embed_dim, bias=False)
+
+        # Final projection after concatenating all heads
+        self.W_O = nn.Linear(embed_dim, embed_dim)
+
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, query, key, value, mask=None):
+        """
+        query: (batch, T_q, embed_dim)
+        key:   (batch, T_k, embed_dim)
+        value: (batch, T_v, embed_dim)   [T_k == T_v]
+        mask:  (batch, 1, T_q, T_k)     optional
+
+        When query==key==value: this is self-attention.
+        When query from decoder, key/value from encoder: this is cross-attention.
+        """
+        B = query.size(0)
+        H = self.num_heads
+        d_k = self.d_k
+
+        # Project Q, K, V all at once
+        Q = self.W_Q(query)   # (B, T_q, embed_dim)
+        K = self.W_K(key)     # (B, T_k, embed_dim)
+        V = self.W_V(value)   # (B, T_v, embed_dim)
+
+        # Reshape into (B, H, T, d_k) — split embed_dim into H heads
+        Q = Q.view(B, -1, H, d_k).transpose(1, 2)  # (B, H, T_q, d_k)
+        K = K.view(B, -1, H, d_k).transpose(1, 2)  # (B, H, T_k, d_k)
+        V = V.view(B, -1, H, d_k).transpose(1, 2)  # (B, H, T_v, d_k)
+
+        # Compute attention for all heads in parallel
+        attn_output, attn_weights = scaled_dot_product_attention(Q, K, V, mask)
+        # attn_output: (B, H, T_q, d_k)
+        # attn_weights: (B, H, T_q, T_k)
+
+        # Concatenate heads: (B, H, T_q, d_k) → (B, T_q, H*d_k) = (B, T_q, embed_dim)
+        attn_output = attn_output.transpose(1, 2).contiguous()   # (B, T_q, H, d_k)
+        attn_output = attn_output.view(B, -1, self.embed_dim)     # (B, T_q, embed_dim)
+
+        # Final linear projection
+        output = self.W_O(self.dropout(attn_output))  # (B, T_q, embed_dim)
+
+        return output, attn_weights
+
+
+# Test with standard Transformer hyperparameters
+EMBED_DIM = 512
+NUM_HEADS = 8       # d_k = 512 / 8 = 64 per head
+SEQ_LEN   = 10
+BATCH     = 4
+
+mha = MultiHeadAttention(embed_dim=EMBED_DIM, num_heads=NUM_HEADS)
+
+x = torch.randn(BATCH, SEQ_LEN, EMBED_DIM)
+
+# Self-attention: query = key = value = x
+output, weights = mha(x, x, x)
+
+print(f"Multi-Head Attention:")
+print(f"  embed_dim={EMBED_DIM}, num_heads={NUM_HEADS}, d_k={EMBED_DIM//NUM_HEADS}")
+print(f"  Input:   {x.shape}")       # (4, 10, 512)
+print(f"  Output:  {output.shape}")  # (4, 10, 512) — same shape as input!
+print(f"  Weights: {weights.shape}") # (4, 8, 10, 10) — 8 heads, 10×10 attention each
+print(f"\nParameter count:")
+total = sum(p.numel() for p in mha.parameters())
+print(f"  {total:,} parameters")</code></pre>
+
+  <pre><code class="language-python"># Using PyTorch's built-in MultiheadAttention (preferred for production)
+import torch
+import torch.nn as nn
+
+mha_builtin = nn.MultiheadAttention(
+    embed_dim=512,
+    num_heads=8,
+    dropout=0.1,
+    batch_first=True   # input shape: (batch, seq, embed_dim)
+)
+
+x = torch.randn(4, 10, 512)
+
+# Self-attention
+output, attn_weights = mha_builtin(x, x, x)   # (query, key, value)
+print(f"PyTorch MHA output:  {output.shape}")    # (4, 10, 512)
+print(f"PyTorch MHA weights: {attn_weights.shape}")  # (4, 10, 10) — averaged over heads
+
+# Cross-attention (decoder attending to encoder)
+decoder_query = torch.randn(4, 7, 512)   # decoder: 7 tokens
+encoder_kvs   = torch.randn(4, 12, 512) # encoder: 12 tokens
+cross_out, cross_w = mha_builtin(decoder_query, encoder_kvs, encoder_kvs)
+print(f"\nCross-attention output:  {cross_out.shape}")   # (4, 7, 512)
+print(f"Cross-attention weights: {cross_w.shape}")      # (4, 7, 12) — 7 decoder × 12 encoder</code></pre>
+
+  <div class="callout callout-key">
+    <span class="callout-icon">🔑</span>
+    <div class="callout-body">
+      <strong>Parameter Count Does Not Increase with Heads</strong>
+      <p>Going from 1 head to 8 heads doesn't increase the number of parameters! With 1 head and embed_dim=512: W_Q, W_K, W_V are each 512×512. With 8 heads: W_Q is still 512×512 (it's the same projection matrix — you just interpret it as 8 heads of 64 dimensions each). The total parameters for Q, K, V projections = 3 × 512² = 786,432 regardless of num_heads. Multi-head attention is a way to get more expressive attention at no additional parameter cost.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 7 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">7</span> Masked Attention in the Decoder</h2>
+
+  <p>In the Transformer decoder (and in GPT-style models), you must prevent each position from attending to future positions. During training, you provide the entire target sequence at once — but the model must only use tokens up to position t when predicting position t+1. This is enforced by <strong>causal masking</strong>.</p>
+
+  <h3>Why Masking Is Essential</h3>
+  <p>Imagine training GPT to predict the next word. If GPT's attention at position 5 could attend to position 6, 7, 8... it could simply look up the answer and memorize it instead of learning language patterns. Causal masking enforces that at position t, attention weights are zero for all positions t+1, t+2, .... This is also called "autoregressive" or "causal" attention.</p>
+
+  <pre><code class="language-python">import torch
+
+def create_causal_mask(seq_len, device='cpu'):
+    """
+    Creates a causal (lower-triangular) mask for decoder self-attention.
+    Position i can attend to positions 0, 1, ..., i (but NOT i+1, i+2, ...)
+    """
+    # Lower triangular matrix: 1 where attending is allowed, 0 where not
+    mask = torch.tril(torch.ones(seq_len, seq_len, device=device))
+    # Shape: (seq_len, seq_len)
+    # We'll expand to (1, 1, seq_len, seq_len) for broadcast with (B, H, T, T)
+    return mask.unsqueeze(0).unsqueeze(0)
+
+# Visualize the causal mask for a 5-token sequence
+mask = create_causal_mask(5)
+print("Causal mask for seq_len=5:")
+print("  (1 = can attend, 0 = cannot attend / blocked)")
+print()
+for i, row in enumerate(mask[0, 0].numpy().astype(int)):
+    attention_to = [f"pos{j}" for j, v in enumerate(row) if v == 1]
+    blocked      = [f"pos{j}" for j, v in enumerate(row) if v == 0]
+    print(f"  pos{i} can attend to: {attention_to}")
+    if blocked:
+        print(f"  pos{i}    BLOCKED from: {blocked}")
+    print()
+
+print(mask[0, 0].numpy().astype(int))</code></pre>
+
+  <pre><code class="language-python">import torch
+import torch.nn.functional as F
+import math
+
+def masked_self_attention(x, mask=None):
+    """
+    Demonstrate causal masking in action.
+    Shows how -inf scores become 0 after softmax (blocked positions contribute nothing).
+    """
+    B, T, D = x.shape
+    d_k = D
+
+    # Simplified: Q = K = V = x for illustration
+    scores = (x @ x.transpose(-2, -1)) / math.sqrt(d_k)  # (B, T, T)
+
+    print(f"Attention scores (before masking), seq_len={T}:")
+    print(scores[0].detach().numpy().round(2))
+    print()
+
+    if mask is not None:
+        # Set masked positions to -inf → after softmax they become 0
+        scores = scores.masked_fill(mask[0, 0] == 0, float('-inf'))
+        print(f"Attention scores (after causal masking):")
+        print(scores[0].detach().numpy().round(2))
+        print("  (-inf becomes 0 after softmax — future tokens completely blocked)")
+        print()
+
+    weights = F.softmax(scores, dim=-1)  # NaN-safe: -inf → 0 via softmax
+    print(f"Attention weights (after softmax):")
+    print(weights[0].detach().numpy().round(3))
+
+    return weights
+
+x = torch.randn(1, 4, 8)  # batch=1, seq_len=4, embed_dim=8
+mask = create_causal_mask(4)
+_ = masked_self_attention(x, mask)</code></pre>
+
+  <h3>Cross-Attention vs Self-Attention in Transformer Decoder</h3>
+  <pre><code class="language-python">print("Transformer Decoder has THREE attention sub-layers:")
+print()
+print("1. Masked Self-Attention:")
+print("   Q, K, V = decoder input (target sequence)")
+print("   Mask: causal — can only see past positions")
+print("   Purpose: each target position attends to all previous target positions")
+print()
+print("2. Cross-Attention (Encoder-Decoder Attention):")
+print("   Q  = decoder hidden states")
+print("   K, V = encoder output (the encoded source sequence)")
+print("   Mask: padding mask only (no causal mask — full encoder is known)")
+print("   Purpose: decoder attends to relevant parts of the source")
+print("   This is where the translation alignment happens!")
+print()
+print("3. Feed-Forward Network:")
+print("   Applied independently to each position")
+print("   No attention — just two linear transformations + ReLU")
+print("   Purpose: additional non-linear transformation of attended representations")
+print()
+print("All three sub-layers have residual connections and layer normalization.")</code></pre>
+</div>
+
+<!-- ── Section 8 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">8</span> Attention Visualization and Interpretability</h2>
+
+  <p>One unexpected benefit of the attention mechanism is interpretability. Attention weights tell you which positions the model is "focusing on" when computing each output representation. This provides insight into the model's reasoning — useful for debugging, bias detection, and research.</p>
+
+  <h3>Visualizing the Alignment Matrix</h3>
+  <pre><code class="language-python">import matplotlib.pyplot as plt
+import numpy as np
+
+def plot_attention_heatmap(attention_weights, src_tokens, tgt_tokens,
+                            title="Attention Alignment", figsize=(8, 6)):
+    """
+    Plot attention weights as a heatmap (alignment matrix).
+    Rows = target tokens, Columns = source tokens.
+    Bright = high attention, dark = low attention.
+    """
+    fig, ax = plt.subplots(figsize=figsize)
+
+    im = ax.imshow(attention_weights, cmap='Blues', aspect='auto', vmin=0, vmax=1)
+    plt.colorbar(im, ax=ax, label='Attention weight')
+
+    ax.set_xticks(range(len(src_tokens)))
+    ax.set_yticks(range(len(tgt_tokens)))
+    ax.set_xticklabels(src_tokens, rotation=45, ha='right')
+    ax.set_yticklabels(tgt_tokens)
+    ax.set_xlabel('Source (encoder positions)')
+    ax.set_ylabel('Target (decoder steps)')
+    ax.set_title(title)
+
+    # Add weight values in each cell
+    for i in range(len(tgt_tokens)):
+        for j in range(len(src_tokens)):
+            text = ax.text(j, i, f'{attention_weights[i, j]:.2f}',
+                          ha='center', va='center', fontsize=7,
+                          color='white' if attention_weights[i, j] > 0.5 else 'black')
+
+    plt.tight_layout()
+    plt.show()
+
+
+# Simulated attention weights for English → French translation
+# In practice: save attn_weights from BahdanauAttention during inference
+
+src_tokens = ["The", "agreement", "was", "signed", "in", "August", "1992", "."]
+tgt_tokens = ["L'", "accord",     "a",   "été",    "signé", "en",  "août", "1992", "."]
+
+# This is what a well-trained attention model actually produces!
+# Near-diagonal pattern for well-aligned language pairs
+synthetic_attn = np.array([
+    [0.85, 0.05, 0.04, 0.02, 0.01, 0.01, 0.01, 0.01],  # L' → The
+    [0.03, 0.90, 0.03, 0.02, 0.01, 0.00, 0.00, 0.01],  # accord → agreement
+    [0.02, 0.02, 0.82, 0.06, 0.04, 0.02, 0.01, 0.01],  # a → was
+    [0.01, 0.02, 0.05, 0.82, 0.05, 0.03, 0.01, 0.01],  # été → (part of "was signed")
+    [0.01, 0.01, 0.04, 0.05, 0.80, 0.05, 0.03, 0.01],  # signé → signed
+    [0.01, 0.01, 0.02, 0.03, 0.04, 0.82, 0.05, 0.02],  # en → in
+    [0.01, 0.01, 0.01, 0.02, 0.02, 0.04, 0.85, 0.04],  # août → August
+    [0.01, 0.01, 0.01, 0.01, 0.02, 0.02, 0.04, 0.88],  # 1992 → 1992
+    [0.03, 0.01, 0.01, 0.01, 0.02, 0.01, 0.02, 0.89],  # . → .
+])
+
+plot_attention_heatmap(synthetic_attn, src_tokens, tgt_tokens,
+                        "English → French Alignment (Bahdanau Attention)")</code></pre>
+
+  <h3>Try It: Temperature Controls How Sharp Attention Is</h3>
+  <p>The softmax step in attention isn't just a normalization trick — its "temperature" controls how <em>peaked</em> or <em>spread out</em> the resulting weights are. Formally, we can write the normalization as <code>softmax(logits / T)</code>. The scaled dot-product formula uses a fixed <code>T = √d<sub>k</sub></code>, but it's instructive to see what happens as T varies freely. Below are the raw alignment scores for the decoder generating <strong>"accord"</strong> (French for "agreement") against every source word in "The agreement on the European Economic Area was signed in August 1992." Drag the slider to change the temperature and watch the attention distribution reshape in real time:</p>
+
+  <div class="diagram-controls">
+    <div class="diagram-control-row">
+      <span class="diagram-control-label">Softmax Temperature (T)</span>
+      <input type="range" id="l51-temp-slider" class="diagram-slider" min="0.2" max="3.0" step="0.05" value="1.0">
+      <span class="diagram-control-value" id="l51-temp-value">1.00</span>
+    </div>
+  </div>
+  <div class="chart-container">
+    <div id="l51-temp-heatmap" style="height:230px;"></div>
+    <p class="chart-caption" id="l51-temp-caption">T = 1.00 — attention is concentrated mostly on "agreement", with a little spillover onto neighboring words.</p>
+  </div>
+
+  <pre><code class="language-python">import numpy as np
+
+# Raw alignment scores e_{t,s} for the decoder generating "accord",
+# BEFORE softmax — these come from the Bahdanau/QKV scoring function.
+# "agreement" scores far higher because it is the true aligned word.
+src_tokens = ["The", "agreement", "on", "the", "European", "Economic", "Area"]
+raw_scores = np.array([0.8, 4.5, 0.3, 0.5, 1.2, 1.6, 0.6])
+
+def softmax_with_temperature(scores, T):
+    """softmax(scores / T) — lower T sharpens the distribution, higher T flattens it."""
+    scaled = scores / T
+    scaled = scaled - scaled.max()          # numerical stability
+    exp = np.exp(scaled)
+    return exp / exp.sum()
+
+for T in [0.2, 1.0, 3.0]:
+    weights = softmax_with_temperature(raw_scores, T)
+    print(f"T={T:.1f}: {np.round(weights, 3)}  (max weight: {weights.max():.2f})")
+
+# T=0.2: attention collapses almost entirely onto "agreement" (near one-hot)
+# T=1.0: "agreement" dominates but other words retain some weight
+# T=3.0: distribution is nearly uniform across all source words</code></pre>
+
+  <div class="callout callout-tip">
+    <span class="callout-icon">💡</span>
+    <div class="callout-body">
+      <strong>Why This Matters for √dₖ Scaling</strong>
+      <p>This is exactly the mechanism behind the √d<sub>k</sub> scaling from Section 4, viewed from the opposite direction. Dividing the raw dot products by √d<sub>k</sub> is equivalent to running softmax at a higher, well-calibrated temperature — it keeps the distribution from collapsing into a near one-hot vector too early, which would zero out the gradient almost everywhere. Low temperature (or, equivalently, unscaled large-magnitude scores) gives sharp, confident, low-entropy attention; high temperature gives soft, diffuse, high-entropy attention that blends many positions together.</p>
+    </div>
+  </div>
+
+  <pre><code class="language-python">from transformers import BertTokenizer, BertModel
+import torch
+
+# BERT Attention Visualization with BertViz (pip install bertviz)
+# from bertviz import head_view, model_view
+
+# BERT has 12 layers, each with 12 attention heads = 144 total attention matrices
+# Each head specialises in different linguistic phenomena
+
+print("Attention head specialization in BERT (from research papers):")
+print()
+print("Layer 1, Head 1:  Direct object tracking (verb → its object)")
+print("Layer 2, Head 3:  Separator token [SEP] — mostly attends to [SEP]")
+print("Layer 3, Head 7:  Coreference — pronoun to antecedent")
+print("Layer 5, Head 2:  Subject-verb agreement")
+print("Layer 9, Head 6:  Preposition attachment")
+print("Layer 11, Head 8: Semantic role labeling")
+print()
+print("This analysis shows attention has learned real linguistic structure!")
+
+# Load BERT and extract attention weights
+tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
+model = BertModel.from_pretrained('bert-base-uncased', output_attentions=True)
+
+text = "The animal didn't cross the street because it was too tired"
+inputs = tokenizer(text, return_tensors='pt')
+with torch.no_grad():
+    outputs = model(**inputs)
+
+all_attention = outputs.attentions  # Tuple of 12 tensors, one per layer
+print(f"\nBERT attention structure:")
+print(f"  Number of layers: {len(all_attention)}")
+print(f"  Shape per layer:  {all_attention[0].shape}")
+# Each layer: (batch=1, num_heads=12, seq_len, seq_len)
+
+# Find which head in layer 3 attends from "it" to "animal"
+layer3_attn = all_attention[3][0]  # (12, seq_len, seq_len)
+tokens = tokenizer.convert_ids_to_tokens(inputs['input_ids'][0])
+print(f"  Tokens: {tokens}")
+
+it_idx = tokens.index('it')
+animal_idx = tokens.index('animal')
+print(f"\n  Head attention scores from 'it' to 'animal' (layer 4):")
+for head_idx in range(12):
+    score = layer3_attn[head_idx, it_idx, animal_idx].item()
+    if score > 0.05:
+        print(f"    Head {head_idx+1:2d}: {score:.4f} {'← HIGH' if score > 0.2 else ''}")</code></pre>
+
+  <div class="callout callout-warn">
+    <span class="callout-icon">⚠️</span>
+    <div class="callout-body">
+      <strong>Attention ≠ Explanation</strong>
+      <p>It's tempting to treat attention weights as explanations: "the model made this prediction because it attended to these words". Research has shown this interpretation is often misleading. Jain &amp; Wallace (2019) showed you can change attention weights significantly without changing model predictions — attention is a mechanism for information routing, not a faithful explanation of decisions. Gradient-based attribution methods (Integrated Gradients, SHAP) are generally more reliable for interpretability. Attention visualisations are useful for debugging and building intuition, but should not be used as the primary evidence in high-stakes explanations.</p>
+    </div>
+  </div>
+</div>
+
+<!-- Real-World Spotlight -->
+<div class="use-case-section">
+  <div class="use-case-header">
+    <span style="font-size:1.5rem">🌍</span>
+    <h2>Real-World Spotlight: Translation Alignment via Attention</h2>
+  </div>
+
+  <p>The most compelling demonstration of attention's power is the alignment matrix it produces during machine translation. The model learns which source word each target word comes from — with zero explicit supervision. This is a linguistically meaningful structure that emerges purely from training on translation pairs.</p>
+
+  <pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.optim as optim
+import numpy as np
+import matplotlib.pyplot as plt
+
+# ── Toy Translation with Attention ──
+# Task: translate digit sequences to word sequences + visualize alignment
+
+class ToySeq2SeqWithAttention(nn.Module):
+    """
+    Minimal Seq2Seq with Bahdanau attention for visualization.
+    Source: digit sequences [1, 3, 5] → Target: ['one', 'three', 'five']
+    """
+    def __init__(self, vocab_size=15, embed_dim=32, hidden_dim=64):
+        super().__init__()
+        self.enc_emb = nn.Embedding(vocab_size, embed_dim, padding_idx=0)
+        self.dec_emb = nn.Embedding(vocab_size, embed_dim, padding_idx=0)
+        self.encoder = nn.GRU(embed_dim, hidden_dim, batch_first=True, bidirectional=True)
+        self.enc_proj = nn.Linear(hidden_dim * 2, hidden_dim)
+
+        # Attention components
+        self.attn_W1 = nn.Linear(hidden_dim, hidden_dim, bias=False)
+        self.attn_W2 = nn.Linear(hidden_dim * 2, hidden_dim, bias=False)
+        self.attn_V  = nn.Linear(hidden_dim, 1, bias=False)
+
+        self.decoder = nn.GRUCell(embed_dim + hidden_dim * 2, hidden_dim)
+        self.fc      = nn.Linear(hidden_dim, vocab_size)
+
+    def attend(self, query, encoder_states):
+        """Bahdanau attention."""
+        q_proj = self.attn_W1(query).unsqueeze(1)  # (B,1,H)
+        k_proj = self.attn_W2(encoder_states)       # (B,T,H)
+        energy = self.attn_V(torch.tanh(q_proj + k_proj)).squeeze(-1)  # (B,T)
+        weights = torch.softmax(energy, dim=-1)     # (B,T)
+        context = (weights.unsqueeze(2) * encoder_states).sum(1)  # (B,2H)
+        return context, weights
+
+    def forward(self, src, tgt, teacher_force=True):
+        enc_emb = self.enc_emb(src)
+        enc_out, h = self.encoder(enc_emb)
+        h = torch.tanh(self.enc_proj(
+            torch.cat([h[-2], h[-1]], dim=1)
+        ))
+
+        all_logits, all_weights = [], []
+        dec_in = tgt[:, 0]
+
+        for t in range(1, tgt.size(1)):
+            context, weights = self.attend(h, enc_out)
+            dec_emb = self.dec_emb(dec_in)
+            h = self.decoder(torch.cat([dec_emb, context], dim=1), h)
+            logit = self.fc(h)
+            all_logits.append(logit)
+            all_weights.append(weights)
+            dec_in = tgt[:, t] if teacher_force else logit.argmax(-1)
+
+        return torch.stack(all_logits, dim=1), torch.stack(all_weights, dim=1)
+
+
+# Vocabulary: 0=PAD, 1=SOS, 2=EOS, 3-12=digits 0-9, 13-22=words
+DIGIT_TO_ID = {d: d + 3 for d in range(10)}
+WORD_TO_ID  = {w: i + 13 for i, w in enumerate(
+    ['zero','one','two','three','four','five','six','seven','eight','nine']
+)}
+ID_TO_WORD = {v: k for k, v in WORD_TO_ID.items()}
+
+SOS_ID, EOS_ID = 1, 2
+
+def make_pair(digits):
+    src = torch.tensor([DIGIT_TO_ID[d] for d in digits])
+    tgt = torch.tensor([SOS_ID] + [WORD_TO_ID[
+        ['zero','one','two','three','four','five','six','seven','eight','nine'][d]
+    ] for d in digits] + [EOS_ID])
+    return src.unsqueeze(0), tgt.unsqueeze(0)
+
+model = ToySeq2SeqWithAttention(vocab_size=25)
+optimizer = optim.Adam(model.parameters(), lr=5e-3)
+criterion = nn.CrossEntropyLoss(ignore_index=0)
+
+# Training
+for epoch in range(1, 301):
+    losses = []
+    for _ in range(32):
+        digits = [np.random.randint(0, 10) for _ in range(4)]
+        src, tgt = make_pair(digits)
+        logits, _ = model(src, tgt)
+        loss = criterion(logits.reshape(-1, 25), tgt[:, 1:].reshape(-1))
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+        losses.append(loss.item())
+
+    if epoch % 100 == 0:
+        print(f"Epoch {epoch:3d}: avg_loss={np.mean(losses):.4f}")
+
+# Test and visualize attention
+model.eval()
+test_digits = [3, 7, 1, 5]
+src_test, tgt_test = make_pair(test_digits)
+
+with torch.no_grad():
+    logits, attn_weights = model(src_test, tgt_test, teacher_force=False)
+
+predicted_ids = logits.argmax(-1)[0].numpy()
+predicted_words = [ID_TO_WORD.get(int(i), '?') for i in predicted_ids]
+actual_words = ['three', 'seven', 'one', 'five']
+
+print(f"\nTest: digits = {test_digits}")
+print(f"Predicted: {predicted_words}")
+print(f"Actual:    {actual_words}")
+
+# Plot alignment matrix
+attn_np = attn_weights[0].detach().numpy()  # (tgt_len, src_len)
+src_labels = [str(d) for d in test_digits]
+tgt_labels = actual_words
+
+plt.figure(figsize=(6, 5))
+plt.imshow(attn_np, cmap='Blues', vmin=0, vmax=1, aspect='auto')
+plt.colorbar(label='Attention weight')
+plt.xticks(range(len(src_labels)), src_labels)
+plt.yticks(range(len(tgt_labels)), tgt_labels)
+plt.xlabel('Source (digit position)')
+plt.ylabel('Target (word position)')
+plt.title('Learned Attention Alignment\n(should be near-diagonal!)')
+for i in range(len(tgt_labels)):
+    for j in range(len(src_labels)):
+        plt.text(j, i, f'{attn_np[i,j]:.2f}', ha='center', va='center', fontsize=9)
+plt.tight_layout()
+plt.show()
+
+print("\nIf training succeeded:")
+print("  Row 'three' should highlight column '3' (position 0)")
+print("  Row 'seven' should highlight column '7' (position 1)")
+print("  etc.")
+print("This diagonal pattern EMERGES WITHOUT EXPLICIT SUPERVISION!")</code></pre>
+
+  <p>The alignment matrix visualization is one of the most compelling demonstrations in deep learning: the model discovers, completely on its own, that "three" corresponds to "3" and "seven" corresponds to "7". No explicit label says "target position 0 comes from source position 0" — the model infers this structure purely by learning to translate. This same phenomenon, at a much larger scale, enabled the understanding that led directly to the Transformer architecture — where attention is not just augmenting an LSTM, but <em>replacing</em> it entirely.</p>
+</div>
+
+<!-- ── Section 9 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">9</span> From Attention to Transformers</h2>
+
+  <p>With everything we've learned about attention, we're now ready to understand what the 2017 "Attention is All You Need" paper really proposed: what if we removed the LSTM entirely and built a model consisting purely of attention and feed-forward layers?</p>
+
+  <pre><code class="language-python">print("Key insight: attention is strictly more powerful than RNNs for sequences")
+print()
+print("RNN limitations that attention solves:")
+print()
+print("  1. Sequential computation:")
+print("     RNN:       must process step 1, then step 2, ..., then step T (serial)")
+print("     Attention: computes all positions simultaneously (parallel on GPU)")
+print(f"     Speed gain: O(T) → O(1) time depth (with O(T^2) memory)")
+print()
+print("  2. Long-range dependencies:")
+print("     RNN:       path length between positions i and j = |i - j| steps")
+print("     Attention: path length = 1 step (direct attention)")
+print()
+print("  3. Variable input handling:")
+print("     RNN:       handles variable length natively, but with bounded memory")
+print("     Attention: handles variable length, all positions equally accessible")
+print()
+print("What the Transformer keeps from RNNs:")
+print("  - Residual connections (originally from ResNet)")
+print("  - Layer normalization")
+print("  - Dropout")
+print()
+print("What the Transformer adds:")
+print("  - Positional encoding (since attention has no inherent order)")
+print("  - Multiple stacked encoder layers (each with self-attention + FFN)")
+print("  - Multiple stacked decoder layers (self-attn + cross-attn + FFN)")
+print()
+print("Preview: Lesson 53 covers the full Transformer architecture in detail.")</code></pre>
+
+  <div class="callout callout-tip">
+    <span class="callout-icon">💡</span>
+    <div class="callout-body">
+      <strong>Why Transformers Needed Positional Encoding</strong>
+      <p>Attention is by nature <em>permutation-invariant</em>: if you shuffle the input sequence, each position's attention weights change (because they depend on content, not position), but the overall computation treats all positions equally. This means a Transformer would represent "The cat sat on the mat" and "The mat sat on the cat" identically without positional information. Solution: add a positional encoding vector to each token embedding before the first attention layer. The original Transformer used sinusoidal functions; modern models use learned positional embeddings. This is one of the key differences between Transformer and RNN architectures.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Quiz ── -->
+<div class="quiz-section">
+  <div id="quiz51"></div>
+</div>
+
+<!-- ── Practice ── -->
+<div class="practice-card">
+  <h2>✍️ Practice Exercises</h2>
+  <ol>
+    <li>Implement <code>BahdanauAttention</code> from scratch (without referencing the code above). Test it on a random encoder output of shape (4, 10, 256) and a decoder query of shape (4, 256). Verify that attention weights sum to 1.0 and the context vector has the right shape.</li>
+    <li>Implement the causal masking in <code>scaled_dot_product_attention</code> and manually verify for a 4-token sequence: position 0 can attend only to position 0; position 3 can attend to positions 0, 1, 2, 3. Print the attention weight matrix and confirm the upper triangle is all zeros.</li>
+    <li>Use PyTorch's <code>nn.MultiheadAttention</code> with <code>embed_dim=128</code>, <code>num_heads=4</code>. Compute the output for a random batch. Then try <code>num_heads=8</code> and <code>num_heads=16</code>. Does the output shape change? Does the parameter count change? Explain your observations.</li>
+    <li>Load a pre-trained BERT model and tokenize the sentence "The bank near the river was flooded." Extract the attention weights from layer 0 and layer 11 for the word "bank". Which layer shows the most "contextual" attention pattern (attending to "river")? What does this tell you about how BERT processes context across layers?</li>
+  </ol>
+  <details>
+    <summary>▶ Show Solution (Exercise 2 — Causal Masking Verification)</summary>
+    <pre><code class="language-python">import torch
+import torch.nn.functional as F
+import math
+
+def scaled_dot_product_attention_with_mask(Q, K, V, mask=None):
+    d_k = Q.size(-1)
+    scores = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(d_k)
+    if mask is not None:
+        scores = scores.masked_fill(mask == 0, float('-inf'))
+    weights = F.softmax(scores, dim=-1)
+    # Replace NaN (from all-inf rows) with 0
+    weights = torch.nan_to_num(weights, nan=0.0)
+    return torch.matmul(weights, V), weights
+
+# Create causal mask for seq_len=4
+seq_len = 4
+causal_mask = torch.tril(torch.ones(seq_len, seq_len)).unsqueeze(0).unsqueeze(0)
+
+print("Causal mask:")
+print(causal_mask[0, 0].numpy().astype(int))
+print()
+
+# Apply to random Q, K, V
+torch.manual_seed(0)
+Q = torch.randn(1, 1, seq_len, 32)  # (B, H, T, d_k)
+K = torch.randn(1, 1, seq_len, 32)
+V = torch.randn(1, 1, seq_len, 32)
+
+output, weights = scaled_dot_product_attention_with_mask(Q, K, V, causal_mask)
+
+print("Attention weights (should be lower triangular):")
+print(weights[0, 0].detach().numpy().round(3))
+print()
+
+# Verify causal property
+print("Verification:")
+print(f"  Position 0 can attend to:   {[j for j, w in enumerate(weights[0,0,0]) if w > 0.001]}")
+print(f"  Position 1 can attend to:   {[j for j, w in enumerate(weights[0,0,1]) if w > 0.001]}")
+print(f"  Position 2 can attend to:   {[j for j, w in enumerate(weights[0,0,2]) if w > 0.001]}")
+print(f"  Position 3 can attend to:   {[j for j, w in enumerate(weights[0,0,3]) if w > 0.001]}")
+print()
+# Check upper triangle is ~0
+upper_tri_sum = weights[0, 0].triu(diagonal=1).abs().sum().item()
+print(f"  Upper triangle sum (should be ~0): {upper_tri_sum:.6f}")</code></pre>
+  </details>
+</div>
+
+<!-- ── Primary Source ── -->
+<div class="primary-source">
+  <h2>📚 Primary Source for This Lesson</h2>
+  <p><a href="https://arxiv.org/abs/1409.0473" target="_blank"><strong>Bahdanau, Cho &amp; Bengio (2014) — "Neural Machine Translation by Jointly Learning to Align and Translate"</strong></a><br>
+  The paper that introduced attention as a fix for Seq2Seq's information bottleneck (Lesson 51) — the direct ancestor of the scaled dot-product and multi-head attention covered here, which the next lesson generalizes into the full Transformer.</p>
+</div>
+
+<!-- ── Ask Tutor ── -->
+<div class="ask-tutor">
+  <span class="icon">💬</span>
+  <span>Mixing up queries, keys, and values, or unsure why attention needs to be scaled by √d_k? Your AI tutor can walk through the attention computation on a small worked example.</span>
+</div>
+
+<!-- Navigation -->
+<nav class="lesson-nav">
+  <a href="./0051-seq2seq-encoder-decoder.html" class="nav-btn">← Lesson 51: Seq2Seq &amp; Encoder-Decoder</a>
+  <a href="./0053-transformer-architecture.html" class="nav-btn nav-btn-next">Lesson 53: Transformer Architecture →</a>
+</nav>
+
+</div><!-- /content-wrapper -->
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-core.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/plugins/autoloader/prism-autoloader.min.js"></script>
+<script src="https://cdn.plot.ly/plotly-2.32.0.min.js"></script>
+<script src="../assets/charts.js"></script>
+<script src="../assets/quiz.js"></script>
+<script>
+/* ── Interactive attention-weight heatmap with softmax temperature (Section 8) ── */
+(function () {
+  const SRC_TOKENS = ["The", "agreement", "on", "the", "European", "Economic", "Area"];
+  // Raw alignment scores e_{t,s} for the decoder step generating "accord" (= "agreement")
+  const RAW_SCORES = [0.8, 4.5, 0.3, 0.5, 1.2, 1.6, 0.6];
+
+  function softmaxWithTemperature(scores, T) {
+    const scaled = scores.map(s => s / T);
+    const maxS = Math.max(...scaled);
+    const exps = scaled.map(s => Math.exp(s - maxS));
+    const sum = exps.reduce((a, b) => a + b, 0);
+    return exps.map(e => e / sum);
+  }
+
+  function entropyLabel(weights) {
+    const maxW = Math.max(...weights);
+    if (maxW > 0.75) return 'sharply focused on one word (near one-hot)';
+    if (maxW > 0.45) return 'concentrated mostly on "agreement", with a little spillover onto neighboring words';
+    if (maxW > 0.25) return 'spreading out — several words now share meaningful weight';
+    return 'nearly uniform — attention is spread almost equally across every source word';
+  }
+
+  function renderTempHeatmap(T) {
+    const weights = softmaxWithTemperature(RAW_SCORES, T);
+
+    const trace = {
+      z: [weights],
+      x: SRC_TOKENS,
+      y: ['accord'],
+      type: 'heatmap',
+      zmin: 0, zmax: 1,
+      colorscale: [[0, MLCharts.theme.bgAlt], [1, MLCharts.theme.violet]],
+      hovertemplate: '%{x}<br>weight = %{z:.3f}<extra></extra>',
+      colorbar: { title: { text: 'weight' }, thickness: 14 },
+    };
+
+    const layout = MLCharts.baseLayout({
+      margin: { l: 70, r: 24, t: 10, b: 60 },
+      xaxis: { side: 'bottom' },
+      yaxis: { autorange: 'reversed' },
+      annotations: SRC_TOKENS.map((tok, i) => ({
+        x: tok, y: 'accord', text: weights[i].toFixed(2),
+        showarrow: false,
+        font: { size: 11, color: weights[i] > 0.5 ? '#fff' : MLCharts.theme.textBase },
+      })),
+    });
+
+    Plotly.react('l51-temp-heatmap', [trace], layout, MLCharts.config);
+
+    const caption = document.getElementById('l51-temp-caption');
+    if (caption) caption.textContent = `T = ${T.toFixed(2)} — attention is ${entropyLabel(weights)}.`;
+  }
+
+  MLCharts.linkSlider('l51-temp-slider', 'l51-temp-value', renderTempHeatmap, v => v.toFixed(2));
+})();
+</script>
+<script>
+new MLQuiz('quiz51', [
+  {
+    question: "In the QKV attention framework, what does the Query represent?",
+    options: [
+      "What the current decoder position (or any query position) is 'looking for' — it is compared to each Key via dot product to compute how relevant each position's Value should be",
+      "The quality score assigned to each attention head, which determines how much weight each head receives in the final output",
+      "The final output of the attention mechanism after the weighted sum of Values has been computed",
+      "The mask applied to future positions in causal attention to prevent the model from seeing tokens it hasn't generated yet"
+    ],
+    correct: 0,
+    explanation: "In QKV attention: Query = 'what am I looking for?' (from the decoder or current position), Key = 'what do I contain/advertise?' (from encoder or all positions), Value = 'what will I contribute if attended to?' (usually same source as Keys). The attention score is the dot product Q·Kᵀ — high score means the query found what it was looking for in that key. The output is a weighted sum of Values, where weights come from softmax(Q·Kᵀ/√d_k). This generalises across encoder-decoder attention, self-attention, and cross-attention — the same formula handles all three cases."
+  },
+  {
+    question: "Why is the dot product scaled by 1/√dₖ before applying softmax?",
+    options: [
+      "For high-dimensional vectors, dot products grow large (expected magnitude ∝ √d), pushing softmax into saturation where gradients vanish — dividing by √dₖ keeps dot products at a consistent scale with healthy gradients",
+      "The scaling converts the dot product into a proper probability by normalizing by the maximum possible value",
+      "Dividing by √dₖ speeds up computation by reducing the magnitude of the numbers processed in the attention layer",
+      "The scaling factor √dₖ accounts for the batch size so that larger batches don't produce larger attention scores"
+    ],
+    correct: 0,
+    explanation: "Two vectors of dimension d have expected dot product ≈ √d when components are random N(0,1). For d=64: expected magnitude ≈ 8; for d=512: expected magnitude ≈ 22.6. When dot products are large, softmax(large_values) saturates — the maximum entry → 1 and all others → 0. In this region, the softmax function is essentially flat, so ∂softmax/∂x ≈ 0 everywhere. Gradients vanish during training. Dividing by √dₖ brings the expected dot product back to ≈1, keeping softmax in its informative, non-saturated regime where gradients are meaningful."
+  },
+  {
+    question: "In self-attention, Q, K, V all come from the same sequence. What capability does this enable that RNNs lack?",
+    options: [
+      "Each position can directly attend to all other positions in a single operation — resolving long-range dependencies in O(1) path length regardless of sequence length, versus RNN's O(T) path",
+      "The model can process the same token multiple times with different interpretations",
+      "Self-attention allows the model to process sequences of arbitrary length without any memory constraints",
+      "Using the same source for Q, K, V means the model doesn't need separate parameters for each, reducing the total parameter count"
+    ],
+    correct: 0,
+    explanation: "In self-attention, the representation of each position is computed as a weighted average of all other positions' representations — in a single matrix multiplication. 'The animal didn't cross the street because it was too tired': resolving that 'it' refers to 'animal' requires connecting positions 1 and 7 — in self-attention, this is one dot product (O(1) path length). In an LSTM, information must travel through 6 sequential hidden state updates (O(T) path length). For the 100-word sentence case, self-attention provides a 100× shorter dependency path, which is why transformers dramatically outperform LSTMs on long-document tasks."
+  },
+  {
+    question: "What is masked self-attention used for in decoder-only transformers like GPT?",
+    options: [
+      "To prevent each position from attending to future tokens — at step t, the model can only see tokens at positions ≤ t (lower triangular mask), maintaining the autoregressive property required for generation",
+      "To block padding tokens from being attended to, ensuring variable-length sequences in a batch don't contaminate each other",
+      "To randomly drop attention connections during training as a form of regularization, similar to dropout",
+      "To prevent the first token ([BOS]) from attending to any other token, as it contains no useful context yet"
+    ],
+    correct: 0,
+    explanation: "Causal (masked) self-attention uses a lower-triangular mask: position i can attend to positions 0, 1, ..., i but NOT i+1, i+2, .... This is enforced by setting attention scores for 'future' positions to -∞ before softmax (→ 0 weight). This preserves the autoregressive property: when generating token at position t, the model hasn't seen tokens at positions t+1 onwards yet. Without this mask, the model could 'cheat' during training by looking at future tokens to predict the next token — it would memorize rather than learn language. GPT, GPT-2, GPT-4 all use exactly this mechanism."
+  },
+  {
+    question: "Multi-head attention uses h attention heads in parallel. What is the main advantage over single-head attention, and does adding more heads increase the parameter count?",
+    options: [
+      "Each head can attend to different types of relationships (syntax, semantics, coreference) simultaneously — and no, the total parameters don't change because embed_dim is divided among heads",
+      "More heads increases the effective receptive field, allowing each position to aggregate information from longer ranges",
+      "Multiple heads provide ensemble averaging, reducing the variance of the attention estimates",
+      "More heads means more parameters, which increases model capacity — the parameter count increases linearly with num_heads"
+    ],
+    correct: 0,
+    explanation: "With embed_dim=512 and h=8 heads: each head has d_k = 512/8 = 64 dimensions. W_Q is still 512×512 (just interpreted as 8 separate 512×64 projections). Total parameters for Q, K, V = 3 × 512² = 786,432 regardless of h — same as single-head. The gain: each head has different learned W_Q, W_K, W_V (since they're different parts of the full matrix), so they specialize in attending to different relationships. Research shows different heads track coreference, subject-verb agreement, semantic roles, etc. simultaneously. This is representational richness without additional cost."
+  }
+]);
+</script>
+
+</body>
+</html>

@@ -1,0 +1,735 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lesson 58: Autoencoders | ML Mastery</title>
+  <link rel="stylesheet" href="../assets/style.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
+</head>
+<body>
+
+<!-- ── Header ── -->
+<header class="lesson-header">
+  <div class="header-inner">
+    <nav class="breadcrumb">
+      <a href="../reference/curriculum-map.html">ML Mastery</a>
+      <span class="sep">›</span>
+      <span>Phase 5: Advanced Deep Learning &amp; NLP</span>
+    </nav>
+    <div class="lesson-badges">
+      <span class="phase-badge">Phase 5 · Advanced Deep Learning &amp; NLP</span>
+      <span class="lesson-num-badge">Lesson 58</span>
+    </div>
+    <h1 class="lesson-title">Autoencoders: From PCA to Generative Latent Spaces</h1>
+    <p class="lesson-subtitle">A neural network trained to reproduce its own input, forced through a narrow bottleneck — the simplest possible generative architecture, and the direct bridge from PCA's linear compression to the latent spaces that power GANs and diffusion models.</p>
+    <div class="meta-pills">
+      <span class="meta-pill">⏱ ~65 min</span>
+      <span class="meta-pill">🐍 Python + PyTorch</span>
+      <span class="meta-pill">🔬 Representation Learning</span>
+      <span class="meta-pill">Requires Lesson 57</span>
+    </div>
+  </div>
+</header>
+
+<main class="lesson-main">
+<div class="content-wrapper">
+
+<!-- Objectives -->
+<div class="objectives-card">
+  <h2>🎯 What You'll Learn</h2>
+  <ul>
+    <li>Why autoencoders exist: unsupervised representation learning by predicting your own input through an information bottleneck</li>
+    <li>The encoder → latent code → decoder architecture, and why the bottleneck's width is the single most important design choice</li>
+    <li>How an autoencoder is exactly "nonlinear PCA" — and precisely where a linear autoencoder becomes mathematically identical to PCA</li>
+    <li>Denoising and sparse autoencoders — regularizing the bottleneck so it learns robust structure instead of memorizing</li>
+    <li>Reconstruction error as an anomaly-detection signal, and how the variational autoencoder (VAE) turns a deterministic bottleneck into the sample-able latent space that GANs and diffusion models build on</li>
+  </ul>
+</div>
+
+<!-- ── Section 1 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">1</span> From PCA to Nonlinear Compression: Why Autoencoders?</h2>
+
+  <p>Back in Lesson 31, PCA compressed high-dimensional data into a smaller number of components by finding the linear directions of maximum variance. It works — but it has a hard ceiling: PCA can only ever discover <strong>straight-line</strong> structure. If your data lies on a curved manifold (a spiral, a swiss roll, the space of natural face images), no number of linear components will unfold it without distortion.</p>
+
+  <p>An <strong>autoencoder</strong> asks the same underlying question PCA asks — "what's the smallest number of numbers I need to reconstruct this data?" — but answers it with a neural network instead of an eigendecomposition. Because a neural network with nonlinear activations can represent curved, folded, and arbitrarily complex functions, it can compress data that PCA physically cannot.</p>
+
+  <pre><code class="language-python">import numpy as np
+import matplotlib.pyplot as plt
+
+# A nonlinear 1D manifold embedded in 2D -- a curve, not a line.
+# This single number "t" fully determines the point: x = t, y = sin(t) + noise.
+np.random.seed(42)
+t = np.linspace(-3, 3, 300)
+X = np.column_stack([t, np.sin(t * 1.5)]) + np.random.normal(0, 0.05, (300, 2))
+
+# PCA's 1 component MUST be a straight line through this 2D space --
+# it cannot bend to follow the curve, no matter how the line is rotated.
+from sklearn.decomposition import PCA
+pca = PCA(n_components=1)
+X_pca_1d = pca.fit_transform(X)
+X_pca_reconstructed = pca.inverse_transform(X_pca_1d)
+pca_error = np.mean(np.sum((X - X_pca_reconstructed) ** 2, axis=1))
+print(f"PCA (1 component) reconstruction MSE: {pca_error:.4f}")
+
+# An autoencoder with a 1-unit bottleneck can, in principle, learn to encode
+# each point as its true parameter t and decode back through the curve --
+# recovering the manifold almost exactly, because nothing forces its
+# encoder/decoder functions to be linear.
+print("A well-trained 1D-bottleneck autoencoder on this data: MSE approaches 0")
+print("-- because the *true* underlying structure genuinely is 1-dimensional,")
+print("it's just not a straight line PCA can represent.")</code></pre>
+
+  <div class="callout callout-key">
+    <span class="callout-icon">🔑</span>
+    <div class="callout-body">
+      <strong>An Autoencoder Is "PCA, But Let the Network Choose the Basis"</strong>
+      <p>If you strip an autoencoder down to a single linear layer for the encoder, a single linear layer for the decoder, no activation functions, and train it with mean-squared-error reconstruction loss, its optimal solution spans <em>exactly</em> the same subspace as PCA's top principal components. Every nonlinear autoencoder you'll build in this lesson is a strict generalization of that linear special case — swap in nonlinear activations, and the bottleneck can represent curved structure PCA cannot touch.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 2 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">2</span> The Autoencoder Architecture: Encoder, Bottleneck, Decoder</h2>
+
+  <p>Every autoencoder has the same three-part shape, and the entire architecture is trained with a single, almost embarrassingly simple objective: reproduce the input.</p>
+  <ul>
+    <li><strong>Encoder</strong> <em>f(x)</em>: a network that compresses the input <em>x</em> (dimension d) down to a <strong>latent code</strong> <em>z</em> (dimension k, where k &lt;&lt; d).</li>
+    <li><strong>Bottleneck</strong>: the latent code <em>z</em> itself — the narrowest layer in the network, and the only channel information is allowed to pass through.</li>
+    <li><strong>Decoder</strong> <em>g(z)</em>: a network that expands the latent code back up to a reconstruction <em>x̂</em>, the same shape as the original input.</li>
+  </ul>
+
+  <p>Training minimizes <strong>reconstruction loss</strong> — typically mean squared error for continuous inputs, or binary cross-entropy for pixel values scaled to [0,1] — between <em>x</em> and <em>x̂</em>:</p>
+  <p style="text-align:center; font-style:italic; margin: 1.25rem 0; font-size: 1.1rem;">L(x, x̂) = ‖x − g(f(x))‖²</p>
+
+  <pre><code class="language-python">import torch
+import torch.nn as nn
+
+class Autoencoder(nn.Module):
+    def __init__(self, input_dim=784, latent_dim=32):
+        super().__init__()
+        # Encoder: input_dim -> ... -> latent_dim (the bottleneck)
+        self.encoder = nn.Sequential(
+            nn.Linear(input_dim, 256), nn.ReLU(),
+            nn.Linear(256, 64), nn.ReLU(),
+            nn.Linear(64, latent_dim),          # no activation -- raw latent code
+        )
+        # Decoder: latent_dim -> ... -> input_dim (mirror image of the encoder)
+        self.decoder = nn.Sequential(
+            nn.Linear(latent_dim, 64), nn.ReLU(),
+            nn.Linear(64, 256), nn.ReLU(),
+            nn.Linear(256, input_dim), nn.Sigmoid(),  # pixels scaled to [0, 1]
+        )
+
+    def forward(self, x):
+        z = self.encoder(x)
+        x_hat = self.decoder(z)
+        return x_hat, z
+
+model = Autoencoder(input_dim=784, latent_dim=32)   # 784 = 28x28 MNIST pixels
+x = torch.rand(16, 784)                              # a batch of 16 flattened images
+x_hat, z = model(x)
+print(f"Input shape:  {x.shape}")
+print(f"Latent shape: {z.shape}")     # (16, 32) -- 784 pixels compressed to 32 numbers
+print(f"Output shape: {x_hat.shape}") # (16, 784) -- reconstructed back to full size
+print(f"Compression ratio: {784 / 32:.1f}x")</code></pre>
+
+  <div class="callout callout-tip">
+    <span class="callout-icon">💡</span>
+    <div class="callout-body">
+      <strong>No Labels Anywhere</strong>
+      <p>Notice the training signal is the input itself — <code>x</code> plays the role of both the model's input and its target. This makes autoencoders <strong>self-supervised</strong>: you get a supervised-style loss function with gradients you can backpropagate, but without a single human-provided label. This is the same trick behind BERT's masked-language-modeling objective (Lesson 54) and GPT's next-token prediction (Lesson 55) — construct a target from the data itself.</p>
+    </div>
+  </div>
+
+  <h3>See the Bottleneck Effect: Linear (PCA) vs Nonlinear (Autoencoder) Compression</h3>
+  <p>The chart below uses the curved dataset from Section 1. Drag the slider to control how sharply the manifold curves. The blue line is PCA's best possible 1-component reconstruction — always a straight line, because that's all a linear method can produce. The amber curve is what a sufficiently-trained 1-unit-bottleneck autoencoder learns instead — the true nonlinear manifold itself. Watch the reconstruction-error gap widen as curvature increases: that gap <em>is</em> the value nonlinearity adds.</p>
+
+  <div class="diagram-controls">
+    <div class="diagram-control-row">
+      <span class="diagram-control-label">Manifold Curvature</span>
+      <input type="range" id="l58-curve-slider" class="diagram-slider" min="0" max="3" step="0.1" value="1.5">
+      <span class="diagram-control-value" id="l58-curve-value">1.5</span>
+    </div>
+  </div>
+  <div class="chart-container">
+    <div id="l58-manifold-chart" style="height:420px;"></div>
+    <p class="chart-caption" id="l58-manifold-caption">PCA (linear, 1 component) vs an ideal nonlinear 1D-bottleneck autoencoder, reconstructing the same curved data.</p>
+  </div>
+</div>
+
+<!-- ── Section 3 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">3</span> Training: Reconstruction Loss</h2>
+
+  <p>Training an autoencoder looks exactly like training any other PyTorch model (Lesson 42) — the only unusual part is that the target labels <em>are</em> the input batch.</p>
+
+  <pre><code class="language-python">import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader
+from torchvision import datasets, transforms
+
+transform = transforms.Compose([transforms.ToTensor(), transforms.Lambda(lambda x: x.view(-1))])
+train_data = datasets.MNIST(root='./data', train=True, download=True, transform=transform)
+train_loader = DataLoader(train_data, batch_size=128, shuffle=True)
+
+model = Autoencoder(input_dim=784, latent_dim=32)
+optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+criterion = nn.MSELoss()
+
+model.train()
+for epoch in range(10):
+    total_loss = 0.0
+    for images, _ in train_loader:            # note: labels are discarded (_)
+        images = images.view(images.size(0), -1)
+
+        x_hat, z = model(images)
+        loss = criterion(x_hat, images)         # reconstruct the INPUT, not a label
+
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+        total_loss += loss.item() * images.size(0)
+
+    avg_loss = total_loss / len(train_data)
+    print(f"Epoch {epoch+1}: reconstruction MSE = {avg_loss:.4f}")</code></pre>
+
+  <p>After training, two things become useful: the <strong>decoder</strong> can turn any latent vector into a plausible-looking image (even ones you invent), and the <strong>encoder</strong> gives you a compact, learned feature representation of any input — one you can feed into a downstream classifier, clustering algorithm, or anomaly detector instead of the raw pixels.</p>
+</div>
+
+<!-- ── Section 4 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">4</span> Undercomplete vs Overcomplete: Why the Bottleneck Matters</h2>
+
+  <p>The bottleneck width <em>k</em> is the single most consequential hyperparameter in an autoencoder, because it directly controls whether the network is forced to learn anything at all:</p>
+  <ul>
+    <li><strong>Undercomplete</strong> (<em>k</em> &lt; input dimension <em>d</em>): the standard case. The network <em>cannot</em> pass every input through unchanged — it must discard something, which forces it to learn which structure is worth keeping. This is where genuine compression and feature learning happen.</li>
+    <li><strong>Overcomplete</strong> (<em>k</em> ≥ <em>d</em>): with no bottleneck constraint, the easiest solution is the identity function — literally copy input to output through every layer, achieving zero reconstruction loss while learning nothing useful whatsoever.</li>
+  </ul>
+
+  <pre><code class="language-python">import torch
+import torch.nn as nn
+
+# An overcomplete autoencoder (latent_dim > input_dim) with NO other constraint
+# can trivially learn the identity mapping -- perfect reconstruction, zero
+# useful structure learned. This is a genuine failure mode, not a hypothetical.
+overcomplete = Autoencoder(input_dim=20, latent_dim=64)   # 64 > 20 -- overcomplete!
+
+# If you must use an overcomplete bottleneck (e.g. because you want a very
+# expressive latent space for downstream generation), you need an explicit
+# regularizer instead of relying on the bottleneck width alone:
+#   - Sparse autoencoder (Section 6): penalize the number of ACTIVE latent units
+#   - Denoising autoencoder (Section 5): corrupt the input so copying it verbatim
+#     is impossible -- the network must learn robust structure to fill the gaps
+#   - Contractive autoencoder: penalize how sensitive z is to small input changes</code></pre>
+
+  <div class="callout callout-warn">
+    <span class="callout-icon">⚠️</span>
+    <div class="callout-body">
+      <strong>Perfect Reconstruction Loss Can Be a Red Flag</strong>
+      <p>Just like 100% training accuracy is a red flag for a classifier (Lesson 15), near-zero reconstruction loss on an undercomplete autoencoder that never improves further, or any overcomplete autoencoder at all, can mean the network found a degenerate shortcut rather than learning meaningful structure. Always check what the latent code is actually capturing — visualize it (Section 8, Lesson 32's t-SNE), or verify it's useful for a downstream task — not just how low the loss number is.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 5 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">5</span> Denoising Autoencoders</h2>
+
+  <p>A <strong>denoising autoencoder</strong> (Vincent et al., 2008) makes one small but powerful change to training: corrupt the input with noise before feeding it to the encoder, but still compute the loss against the <em>clean, uncorrupted</em> original. The network is forced to learn what the data <em>should</em> look like, not how to memorize what it was shown.</p>
+
+  <pre><code class="language-python">import torch
+
+def add_noise(images, noise_factor=0.3):
+    noisy = images + noise_factor * torch.randn_like(images)
+    return torch.clamp(noisy, 0.0, 1.0)
+
+model = Autoencoder(input_dim=784, latent_dim=32)
+optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+criterion = torch.nn.MSELoss()
+
+model.train()
+for epoch in range(10):
+    for images, _ in train_loader:
+        images = images.view(images.size(0), -1)
+        noisy_images = add_noise(images)              # corrupt the INPUT only
+
+        x_hat, z = model(noisy_images)
+        loss = criterion(x_hat, images)                 # compare against the CLEAN target
+
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+# At inference time, feed a noisy/corrupted image and get a cleaned-up
+# reconstruction -- the network learned the manifold of "plausible" images
+# well enough to project a corrupted point back onto it.</code></pre>
+
+  <p>This single idea — corrupt the input, reconstruct the clean target — is the direct conceptual ancestor of diffusion models' entire training procedure (Lesson 60): both are, at their core, learning to map a noisy sample back toward the clean data manifold. Diffusion models simply repeat this denoising step hundreds of times at carefully controlled noise levels instead of once.</p>
+</div>
+
+<!-- ── Section 6 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">6</span> Sparse Autoencoders</h2>
+
+  <p>A <strong>sparse autoencoder</strong> takes the opposite regularization strategy: allow a wide (even overcomplete) bottleneck, but add a penalty term that pushes most latent units toward zero for any given input, so only a small handful of units are "active" at once. This forces each active unit to specialize — to mean something specific — rather than letting the network spread information diffusely across a wide, unconstrained code.</p>
+
+  <pre><code class="language-python">import torch
+import torch.nn as nn
+
+def sparse_loss(z, target_sparsity=0.05, beta=1e-3):
+    """KL-divergence penalty pushing average activation toward target_sparsity."""
+    rho_hat = torch.mean(torch.sigmoid(z), dim=0)   # avg activation per unit, across the batch
+    rho = torch.full_like(rho_hat, target_sparsity)
+    kl = rho * torch.log(rho / rho_hat) + (1 - rho) * torch.log((1 - rho) / (1 - rho_hat))
+    return beta * kl.sum()
+
+criterion = nn.MSELoss()
+model = Autoencoder(input_dim=784, latent_dim=128)   # deliberately wide/overcomplete
+optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+
+for images, _ in train_loader:
+    images = images.view(images.size(0), -1)
+    x_hat, z = model(images)
+    loss = criterion(x_hat, images) + sparse_loss(z)   # reconstruction + sparsity penalty
+    optimizer.zero_grad()
+    loss.backward()
+    optimizer.step()
+    break   # (one batch shown for illustration)</code></pre>
+
+  <p>Sparse autoencoders are the technique behind mechanistic-interpretability tools that decompose a large language model's internal activations into human-interpretable "features" — training a sparse autoencoder on a transformer's hidden states, then inspecting which inputs light up each sparse unit.</p>
+</div>
+
+<!-- ── Section 7 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">7</span> From Autoencoders to Variational Autoencoders (VAEs)</h2>
+
+  <p>Everything so far produces a <strong>deterministic</strong> latent code: the same input always maps to the exact same point <em>z</em>, and most of latent space is never visited during training — so decoding a <em>random</em> point you didn't get from encoding a real input usually produces garbage. That's a real problem if your goal is generation rather than compression.</p>
+
+  <p>A <strong>Variational Autoencoder (VAE)</strong> (Kingma &amp; Welling, 2013) fixes this with one architectural change: instead of encoding <em>x</em> to a single point <em>z</em>, the encoder outputs the parameters of a <em>distribution</em> — a mean <em>μ</em> and standard deviation <em>σ</em> — and <em>z</em> is sampled from <em>N(μ, σ²)</em>. A KL-divergence loss term additionally pulls every input's distribution toward a standard normal <em>N(0, 1)</em>, packing the whole latent space densely and smoothly instead of leaving gaps.</p>
+
+  <pre><code class="language-python">import torch
+import torch.nn as nn
+
+class VAE(nn.Module):
+    def __init__(self, input_dim=784, latent_dim=32):
+        super().__init__()
+        self.encoder_body = nn.Sequential(nn.Linear(input_dim, 256), nn.ReLU())
+        self.fc_mu = nn.Linear(256, latent_dim)        # outputs the mean
+        self.fc_logvar = nn.Linear(256, latent_dim)     # outputs log-variance (numerically stable)
+        self.decoder = nn.Sequential(
+            nn.Linear(latent_dim, 256), nn.ReLU(),
+            nn.Linear(256, input_dim), nn.Sigmoid(),
+        )
+
+    def reparameterize(self, mu, logvar):
+        # The "reparameterization trick": sampling directly is not differentiable,
+        # so express the random sample as a deterministic function of mu/logvar
+        # plus external noise -- gradients can now flow through mu and logvar.
+        std = torch.exp(0.5 * logvar)
+        eps = torch.randn_like(std)
+        return mu + eps * std
+
+    def forward(self, x):
+        h = self.encoder_body(x)
+        mu, logvar = self.fc_mu(h), self.fc_logvar(h)
+        z = self.reparameterize(mu, logvar)
+        return self.decoder(z), mu, logvar
+
+def vae_loss(x_hat, x, mu, logvar):
+    recon_loss = nn.functional.binary_cross_entropy(x_hat, x, reduction='sum')
+    kl_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())   # pulls toward N(0,1)
+    return recon_loss + kl_loss
+
+# Generation: sample directly from the prior N(0, I) and decode -- no input needed
+model = VAE()
+z_random = torch.randn(8, 32)   # 8 random points from the latent prior
+generated = model.decoder(z_random)
+print(f"Generated {generated.shape[0]} new samples from pure noise, shape {generated.shape}")</code></pre>
+
+  <div class="callout callout-key">
+    <span class="callout-icon">🔑</span>
+    <div class="callout-body">
+      <strong>The VAE Is the Missing Link to GANs and Diffusion</strong>
+      <p>A standard autoencoder learns to compress; a VAE learns to <em>generate</em>, because its regularized latent space is densely and smoothly populated, so any random draw from <em>N(0, I)</em> decodes to something plausible. That's exactly the property Lesson 59's GAN generator and Lesson 60's diffusion model both need — a latent space you can sample from. The three architectures differ mainly in <em>how</em> they enforce a well-behaved latent space: a VAE does it with an explicit KL penalty during training; a GAN does it implicitly through adversarial competition; a diffusion model does it by learning to reverse a noising process step by step.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 8 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">8</span> Practical Applications: Anomaly Detection &amp; Pretraining</h2>
+
+  <p>Outside of pure generation, an autoencoder's reconstruction error is itself a directly useful signal — a model trained only on <em>normal</em> data will reconstruct normal inputs well and <em>anomalous</em> inputs poorly, because it never learned the structure needed to compress them.</p>
+
+  <pre><code class="language-python">import torch
+import numpy as np
+
+# Train the autoencoder ONLY on normal transactions (Lesson 33's anomaly
+# detection framing applies directly -- this is an unsupervised detector).
+model = Autoencoder(input_dim=20, latent_dim=4)
+# ... train on X_normal only, as in Section 3 ...
+
+model.eval()
+with torch.no_grad():
+    x_hat, _ = model(X_test)
+    reconstruction_error = torch.mean((X_test - x_hat) ** 2, dim=1)
+
+# Anomalies -- fraud, defects, sensor faults -- were never seen during
+# training, so the decoder has no learned structure to reconstruct them
+# well with; their error will sit well above the normal-data distribution.
+threshold = reconstruction_error[:8000].quantile(0.99)   # 99th pct of known-normal errors
+flagged = reconstruction_error > threshold
+print(f"Flagged {flagged.sum().item()} of {len(X_test)} transactions as anomalous")</code></pre>
+
+  <p>The encoder half also has a life of its own, independent of the decoder: pretrain an autoencoder on a large pool of unlabeled data, discard the decoder, and use the trained encoder as a fixed or fine-tunable feature extractor for a downstream supervised task with far fewer labels than training from scratch would need — the same transfer-learning logic from Lesson 47, applied to representations learned without any labels at all.</p>
+
+  <table style="width:100%; border-collapse: collapse; margin: 1.25rem 0; font-size: 0.88rem;">
+    <thead>
+      <tr style="background: var(--bg-alt); text-align: left;">
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Variant</th>
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">What it adds</th>
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Primary use</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Vanilla (undercomplete)</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Bottleneck narrower than input</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Nonlinear dimensionality reduction, pretraining</td>
+      </tr>
+      <tr style="background: var(--bg-subtle);">
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Denoising</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Corrupted input, clean target</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Robust features; image/audio denoising</td>
+      </tr>
+      <tr>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Sparse</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Activation-sparsity penalty</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Interpretable, disentangled features</td>
+      </tr>
+      <tr style="background: var(--bg-subtle);">
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Variational (VAE)</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Probabilistic latent code + KL penalty</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Generation — sampling new, plausible data</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+<!-- ── Real-World Spotlight ── -->
+<div class="use-case-section">
+  <div class="use-case-header">
+    <span style="font-size:1.5rem">🌍</span>
+    <h2>Real-World Spotlight: Manufacturing Defect Detection with Autoencoders</h2>
+  </div>
+  <p>A chip fabrication plant produces high-resolution images of every wafer, but defective wafers are extremely rare (well under 1% of production) and defect types keep changing as manufacturing processes evolve — a classic case where labeled examples of "bad" are scarce, but examples of "good" are abundant. This is exactly the setup an autoencoder-based anomaly detector is built for.</p>
+  <pre><code class="language-python">import torch
+import torch.nn as nn
+import numpy as np
+
+class ConvAutoencoder(nn.Module):
+    """A convolutional autoencoder for image-shaped defect data."""
+    def __init__(self):
+        super().__init__()
+        self.encoder = nn.Sequential(
+            nn.Conv2d(1, 16, 3, stride=2, padding=1), nn.ReLU(),   # 64x64 -> 32x32
+            nn.Conv2d(16, 32, 3, stride=2, padding=1), nn.ReLU(),  # 32x32 -> 16x16
+            nn.Conv2d(32, 8, 3, stride=2, padding=1), nn.ReLU(),   # 16x16 -> 8x8 (bottleneck)
+        )
+        self.decoder = nn.Sequential(
+            nn.ConvTranspose2d(8, 32, 3, stride=2, padding=1, output_padding=1), nn.ReLU(),
+            nn.ConvTranspose2d(32, 16, 3, stride=2, padding=1, output_padding=1), nn.ReLU(),
+            nn.ConvTranspose2d(16, 1, 3, stride=2, padding=1, output_padding=1), nn.Sigmoid(),
+        )
+
+    def forward(self, x):
+        z = self.encoder(x)
+        return self.decoder(z), z
+
+# ── Step 1: Train ONLY on images of known-good wafers ──
+model = ConvAutoencoder()
+optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+criterion = nn.MSELoss(reduction='none')   # per-pixel error, not averaged yet
+
+# for epoch in range(30):
+#     for good_wafer_images in good_wafer_loader:   # ONLY non-defective wafers
+#         x_hat, z = model(good_wafer_images)
+#         loss = criterion(x_hat, good_wafer_images).mean()
+#         optimizer.zero_grad(); loss.backward(); optimizer.step()
+
+# ── Step 2: At inference, per-pixel error localizes the defect ──
+def detect_and_localize(model, wafer_image, threshold_percentile=99.5, calibration_errors=None):
+    model.eval()
+    with torch.no_grad():
+        x_hat, _ = model(wafer_image)
+        pixel_error = ((wafer_image - x_hat) ** 2).squeeze()   # per-pixel reconstruction error
+
+    # A defect-free wafer reconstructs uniformly well everywhere; a scratch,
+    # particle, or crack is structure the model never learned to compress,
+    # so it shows up as a bright "error heatmap" at exactly that location.
+    threshold = np.percentile(calibration_errors, threshold_percentile)
+    defect_mask = pixel_error > threshold
+    is_defective = defect_mask.float().mean() > 0.001   # >0.1% of pixels flagged
+    return is_defective, pixel_error, defect_mask
+
+print("Per-pixel reconstruction error doubles as both a defect flag AND a")
+print("localization map -- pointing an inspector directly at the scratch,")
+print("contamination, or crack, with zero labeled defect images required.")</code></pre>
+  <p>This is the pattern behind most industrial visual-inspection systems built before large labeled defect datasets exist: train unsupervised on abundant "normal" images, and let reconstruction error double as both a detector and a localizer. As real defect examples accumulate over time, teams typically graduate to a supervised or semi-supervised detector — but the autoencoder baseline ships on day one, with zero defective examples required to get started.</p>
+</div>
+
+<!-- ── Quiz ── -->
+<div class="quiz-section">
+  <div id="lesson-58-quiz"></div>
+</div>
+
+<!-- ── Practice ── -->
+<div class="practice-card">
+  <h2>✍️ Practice Exercises</h2>
+  <ol>
+    <li>Train an undercomplete autoencoder (latent_dim=2) on MNIST. Plot the 2D latent codes colored by digit label (no labels used in training — only for the plot afterward). Do digits cluster, even though the model never saw a single label?</li>
+    <li>Repeat Exercise 1 with a linear-only autoencoder (no activation functions anywhere) and compare its 2D latent plot to PCA's first two components on the same data. How similar are they, and why does the theory in Section 1 predict this?</li>
+    <li>Train a denoising autoencoder on MNIST with <code>noise_factor=0.5</code>. Feed it test images corrupted with noise it never saw during training (e.g. salt-and-pepper instead of Gaussian). Does it still clean them up reasonably well? What does that suggest about what it actually learned?</li>
+    <li>Train a vanilla autoencoder only on the digit "1", then compute reconstruction error on a full test set containing all ten digits. Plot the error distribution per digit class — does "1" show the lowest error, confirming the anomaly-detection principle from Section 8?</li>
+  </ol>
+
+  <details>
+    <summary>▶ Hints</summary>
+    <pre><code class="language-python">import torch
+import matplotlib.pyplot as plt
+
+model.eval()
+with torch.no_grad():
+    all_z, all_labels = [], []
+    for images, labels in test_loader:
+        images = images.view(images.size(0), -1)
+        _, z = model(images)
+        all_z.append(z)
+        all_labels.append(labels)
+    all_z = torch.cat(all_z).numpy()
+    all_labels = torch.cat(all_labels).numpy()
+
+plt.figure(figsize=(8, 6))
+scatter = plt.scatter(all_z[:, 0], all_z[:, 1], c=all_labels, cmap='tab10', s=5, alpha=0.6)
+plt.colorbar(scatter, label='Digit')
+plt.xlabel('Latent dim 1'); plt.ylabel('Latent dim 2')
+plt.title('2D Autoencoder Latent Space (unsupervised)')
+plt.savefig('ae_latent_space.png', dpi=150)</code></pre>
+  </details>
+</div>
+
+<!-- ── Primary Source ── -->
+<div class="primary-source">
+  <h2>📚 Primary Source for This Lesson</h2>
+  <p><a href="https://www.deeplearningbook.org/contents/autoencoders.html" target="_blank"><strong>Goodfellow, Bengio &amp; Courville — Deep Learning, Chapter 14: Autoencoders</strong></a><br>
+  The canonical reference, covering undercomplete, regularized, and stochastic autoencoders in depth. For denoising autoencoders, see Vincent et al. (2008) "Extracting and Composing Robust Features with Denoising Autoencoders." For the variational autoencoder, see Kingma &amp; Welling (2013) "Auto-Encoding Variational Bayes" — the paper that introduced the reparameterization trick used in Section 7.</p>
+</div>
+
+<!-- ── Ask Tutor ── -->
+<div class="ask-tutor">
+  <span class="icon">💬</span>
+  <span>Autoencoder collapsing to blurry, average-looking reconstructions? Latent space not clustering the way you expected? Paste your architecture and training curve — your AI tutor can help diagnose whether it's a bottleneck, capacity, or loss-function issue.</span>
+</div>
+
+<!-- ── Navigation ── -->
+<nav class="lesson-nav">
+  <a href="./0057-object-detection-segmentation.html" class="nav-btn">← Lesson 57: Object Detection &amp; Segmentation</a>
+  <a href="./0059-gans.html" class="nav-btn nav-btn-next">Lesson 59: Generative Adversarial Networks →</a>
+</nav>
+
+</div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-core.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/plugins/autoloader/prism-autoloader.min.js"></script>
+<script src="https://cdn.plot.ly/plotly-2.32.0.min.js"></script>
+<script src="../assets/charts.js"></script>
+<script src="../assets/quiz.js"></script>
+<script>
+/* ── Interactive linear (PCA) vs nonlinear (autoencoder) manifold chart (Section 2) ── */
+(function () {
+  function mulberry32(seed) {
+    return function () {
+      seed |= 0; seed = (seed + 0x6D2B79F5) | 0;
+      let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+  function gaussian(rng) {
+    const u1 = Math.max(rng(), 1e-9), u2 = rng();
+    return Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
+  }
+
+  const rand = mulberry32(58058);
+  const N = 200;
+  const T = [];
+  for (let i = 0; i < N; i++) T.push(-3 + (6 * i) / (N - 1));
+
+  function buildData(amplitude) {
+    // x = t, y = amplitude * sin(1.5t) + noise -- an intrinsically 1D manifold
+    // whose curvature is controlled by "amplitude".
+    const rng2 = mulberry32(58059);
+    return T.map(t => [t, amplitude * Math.sin(1.5 * t) + gaussian(rng2) * 0.05]);
+  }
+
+  // PCA (1 component): project onto the top eigenvector of the covariance,
+  // then reconstruct -- always a straight line through the data's mean.
+  function pcaReconstruction(points) {
+    const n = points.length;
+    const meanX = points.reduce((s, p) => s + p[0], 0) / n;
+    const meanY = points.reduce((s, p) => s + p[1], 0) / n;
+    let sxx = 0, sxy = 0, syy = 0;
+    points.forEach(p => {
+      const dx = p[0] - meanX, dy = p[1] - meanY;
+      sxx += dx * dx; sxy += dx * dy; syy += dy * dy;
+    });
+    sxx /= n; sxy /= n; syy /= n;
+    const trace = sxx + syy, det = sxx * syy - sxy * sxy;
+    const disc = Math.sqrt(Math.max(trace * trace / 4 - det, 0));
+    const lambda1 = trace / 2 + disc;
+    let vx, vy;
+    if (Math.abs(sxy) > 1e-9) { vx = sxy; vy = lambda1 - sxx; }
+    else { vx = sxx >= syy ? 1 : 0; vy = sxx >= syy ? 0 : 1; }
+    const norm = Math.sqrt(vx * vx + vy * vy) || 1;
+    vx /= norm; vy /= norm;
+
+    const reconstructed = points.map(p => {
+      const dx = p[0] - meanX, dy = p[1] - meanY;
+      const proj = dx * vx + dy * vy;
+      return [meanX + proj * vx, meanY + proj * vy];
+    });
+    const mse = reconstructed.reduce((s, r, i) => {
+      const ex = points[i][0] - r[0], ey = points[i][1] - r[1];
+      return s + (ex * ex + ey * ey);
+    }, 0) / n;
+    return { reconstructed, mse, meanX, meanY, vx, vy };
+  }
+
+  // "Ideal nonlinear autoencoder": with enough capacity, the encoder/decoder
+  // recover the true 1D generating curve almost exactly (near-zero error,
+  // modulo the irreducible noise already baked into the data).
+  function autoencoderReconstruction(points, amplitude) {
+    const reconstructed = T.map(t => [t, amplitude * Math.sin(1.5 * t)]);
+    const mse = reconstructed.reduce((s, r, i) => {
+      const ex = points[i][0] - r[0], ey = points[i][1] - r[1];
+      return s + (ex * ex + ey * ey);
+    }, 0) / points.length;
+    return { reconstructed, mse };
+  }
+
+  function render(amplitude) {
+    const points = buildData(amplitude);
+    const pca = pcaReconstruction(points);
+    const ae = autoencoderReconstruction(points, amplitude);
+
+    const pcaLineLen = 4.2;
+    const pcaLine = {
+      x: [pca.meanX - pca.vx * pcaLineLen, pca.meanX + pca.vx * pcaLineLen],
+      y: [pca.meanY - pca.vy * pcaLineLen, pca.meanY + pca.vy * pcaLineLen],
+    };
+
+    const traces = [
+      {
+        x: points.map(p => p[0]), y: points.map(p => p[1]), type: 'scatter', mode: 'markers',
+        marker: { color: MLCharts.theme.textMuted, size: 6, opacity: 0.55 },
+        name: 'Data (intrinsically 1D)', hoverinfo: 'skip',
+      },
+      {
+        x: pcaLine.x, y: pcaLine.y, type: 'scatter', mode: 'lines',
+        line: { color: MLCharts.theme.blue, width: 3 },
+        name: `PCA (linear) — MSE ${pca.mse.toFixed(3)}`,
+        hovertemplate: 'PCA reconstruction line<extra></extra>',
+      },
+      {
+        x: ae.reconstructed.map(p => p[0]), y: ae.reconstructed.map(p => p[1]), type: 'scatter', mode: 'lines',
+        line: { color: MLCharts.theme.amber, width: 3 },
+        name: `Autoencoder (nonlinear) — MSE ${ae.mse.toFixed(3)}`,
+        hovertemplate: 'autoencoder reconstruction curve<extra></extra>',
+      },
+    ];
+
+    const layout = MLCharts.baseLayout({
+      xaxis: { title: { text: 'Feature 1' }, range: [-4, 4] },
+      yaxis: { title: { text: 'Feature 2' }, range: [-4, 4] },
+      legend: { font: { size: 11 }, orientation: 'h', y: -0.22, x: 0.5, xanchor: 'center' },
+    });
+    Plotly.react('l58-manifold-chart', traces, layout, MLCharts.config);
+
+    const caption = document.getElementById('l58-manifold-caption');
+    if (caption) {
+      const ratio = pca.mse / Math.max(ae.mse, 1e-6);
+      caption.textContent = amplitude < 0.15
+        ? 'At curvature ≈ 0 the manifold is already a straight line — PCA and the autoencoder achieve essentially the same (near-zero) reconstruction error.'
+        : `At this curvature, PCA's error is ${ratio.toFixed(1)}× higher than the nonlinear autoencoder's — the gap that a linear method can never close, no matter how it's rotated.`;
+    }
+  }
+
+  MLCharts.linkSlider('l58-curve-slider', 'l58-curve-value', render, v => v.toFixed(1));
+})();
+</script>
+<script>
+new MLQuiz('lesson-58-quiz', [
+  {
+    question: "What makes autoencoder training \"self-supervised\" rather than unsupervised in the same sense as K-Means or PCA?",
+    options: [
+      "The input itself is used as the training target, giving a supervised-style loss and gradient signal without any human-provided labels",
+      "Autoencoders secretly require labels, just like any classifier",
+      "Self-supervised means the model labels itself using a separate clustering step before training begins",
+      "There's no meaningful difference -- \"self-supervised\" and \"unsupervised\" are exact synonyms"
+    ],
+    correct: 0,
+    explanation: "An autoencoder's loss function compares the reconstruction x-hat to the original input x -- so x plays double duty as both input and target. This gives you a well-defined, differentiable loss (unlike, say, K-Means' non-differentiable hard assignments) without needing a human to label anything. The same self-supervised pattern -- construct a target from the data itself -- underlies BERT's masked-token prediction and GPT's next-token prediction."
+  },
+  {
+    question: "Why does an overcomplete autoencoder (latent_dim >= input_dim) risk learning nothing useful, unless additional regularization is added?",
+    options: [
+      "With no bottleneck constraint forcing information loss, the easiest way to achieve zero reconstruction loss is simply to learn the identity function -- copy input straight through to output",
+      "Overcomplete autoencoders always fail to converge during training",
+      "PyTorch raises a runtime error whenever latent_dim exceeds input_dim",
+      "The decoder becomes mathematically undefined when the latent dimension is too large"
+    ],
+    correct: 0,
+    explanation: "The whole point of the bottleneck is to force the network to discard something, so what survives must be the structure worth keeping. If the latent dimension is at least as large as the input, the network is free to just pass every value through unchanged (the identity mapping), achieving perfect reconstruction while learning nothing about the data's structure. Sparse or denoising regularization is required to make an overcomplete bottleneck useful."
+  },
+  {
+    question: "A denoising autoencoder is fed a corrupted (noisy) input during training. What is the loss computed against?",
+    options: [
+      "The original, clean version of the input -- not the corrupted version the encoder actually saw",
+      "The corrupted input itself, so the model learns to reproduce noise faithfully",
+      "A separate, unrelated validation image chosen at random",
+      "The average of many corrupted versions of the same image"
+    ],
+    correct: 0,
+    explanation: "The defining trick of a denoising autoencoder: corrupt only the input side, but keep the loss target as the clean, uncorrupted original. This prevents the trivial identity-mapping shortcut (Section 4) even with an overcomplete bottleneck, and forces the network to learn the true structure of 'plausible' data well enough to project a corrupted point back onto it -- the same underlying idea diffusion models scale up into a multi-step denoising process."
+  },
+  {
+    question: "What specific architectural change does a Variational Autoencoder (VAE) make compared to a standard autoencoder, and why does it matter for generation?",
+    options: [
+      "The encoder outputs the parameters of a distribution (mean and variance) rather than a single point, and a KL-divergence loss packs the latent space densely around a standard normal -- so random samples from that prior decode to plausible outputs",
+      "A VAE simply uses a wider bottleneck than a standard autoencoder",
+      "A VAE replaces the decoder with a lookup table instead of a neural network",
+      "A VAE removes the reconstruction loss entirely and trains on classification accuracy instead"
+    ],
+    correct: 0,
+    explanation: "A standard autoencoder's latent space has no guarantee of being densely or smoothly populated -- most random points decode to garbage because the encoder never mapped anything there during training. A VAE's encoder outputs a distribution (mu, sigma) for every input, and the KL-divergence term explicitly pulls all of these distributions toward N(0, I), packing the whole space so that ANY random draw from that prior lands somewhere the decoder has learned to interpret. This sampleable latent space is exactly what's needed to generate new, never-seen examples."
+  },
+  {
+    question: "In the manufacturing defect-detection example, why can the same reconstruction-error map be used both to flag a wafer as defective AND to point out where the defect is?",
+    options: [
+      "The autoencoder was trained only on non-defective wafers, so it never learned to compactly represent structure like scratches or contamination -- that structure reconstructs poorly, and per-PIXEL error is high exactly where the unfamiliar structure sits",
+      "The model was separately trained with bounding-box labels marking defect locations",
+      "Reconstruction error is computed as a single scalar per image, with no spatial information at all",
+      "The convolutional encoder automatically outputs (x, y) coordinates for any anomaly it detects"
+    ],
+    correct: 0,
+    explanation: "Because training only used normal wafers, the network's learned compression is tuned to normal structure -- a defect is, by definition, something the model never learned to reconstruct well. Computing error per-pixel rather than averaging it into one number turns that same reconstruction-quality signal into a spatial heatmap: high-error pixels cluster right where the unfamiliar structure (scratch, particle, crack) is located, giving both a detection signal and a localization map from a single unsupervised model, with zero labeled defect examples needed."
+  }
+]);
+</script>
+
+</body>
+</html>

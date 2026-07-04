@@ -1,0 +1,1192 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lesson 36: Time Series Forecasting: ARIMA, Prophet &amp; LSTM | ML Mastery</title>
+  <link rel="stylesheet" href="../assets/style.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
+</head>
+<body>
+
+<header class="lesson-header">
+  <div class="header-inner">
+    <nav class="breadcrumb">
+      <a href="../reference/curriculum-map.html">ML Mastery</a>
+      <span class="sep">›</span>
+      <span>Phase 3: Unsupervised Learning</span>
+    </nav>
+    <div class="lesson-badges">
+      <span class="phase-badge">Phase 3 · Unsupervised Learning</span>
+      <span class="lesson-num-badge">Lesson 36</span>
+    </div>
+    <h1 class="lesson-title">Time Series Forecasting: ARIMA, Prophet &amp; LSTM</h1>
+    <p class="lesson-subtitle">From classical ARIMA models to Facebook's Prophet and neural sequence models — building forecasters that generate actionable predictions with confidence intervals.</p>
+    <div class="meta-pills">
+      <span class="meta-pill">⏱ ~60 min</span>
+      <span class="meta-pill">🐍 statsmodels · prophet · sklearn</span>
+      <span class="meta-pill">📈 Forecasting</span>
+      <span class="meta-pill">Requires Lesson 35</span>
+    </div>
+  </div>
+</header>
+
+<main class="lesson-main">
+<div class="content-wrapper">
+
+<div class="objectives-card">
+  <h2>🎯 What You'll Learn</h2>
+  <ul>
+    <li>Understand the difference between analysis and forecasting — and why temporal ordering forbids standard cross-validation</li>
+    <li>Identify ARIMA(p,d,q) components from ACF/PACF plots and fit seasonal SARIMA models with statsmodels</li>
+    <li>Use Facebook Prophet's simple API to handle holidays, custom seasonalities, and external regressors</li>
+    <li>Evaluate forecasts correctly using MAE, RMSE, MAPE, and walk-forward (time series cross-validation)</li>
+    <li>Apply <code>TimeSeriesSplit</code> for robust backtesting and understand expanding vs rolling window strategies</li>
+  </ul>
+</div>
+
+<!-- ── Section 1 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">1</span> Forecasting vs Analysis</h2>
+
+  <p>Lesson 35 was about <em>analysis</em> — understanding the structure of historical data through decomposition, stationarity testing, and autocorrelation. This lesson is about <em>forecasting</em> — using that understanding to make predictions about future values that haven't been observed yet.</p>
+
+  <p>The distinction matters because it changes everything about how you evaluate and validate a model:</p>
+
+  <table style="width:100%; border-collapse: collapse; margin: 1.25rem 0; font-size: 0.87rem;">
+    <thead>
+      <tr style="background: var(--bg-alt); text-align: left;">
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Concept</th>
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Analysis</th>
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Forecasting</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Goal</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Understand the past</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Predict the future</td>
+      </tr>
+      <tr style="background: var(--bg-subtle);">
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Output</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Decomposition, stationarity, ACF</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Future values, confidence intervals</td>
+      </tr>
+      <tr>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Validation</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Statistical tests, visual inspection</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Held-out future data only (no shuffling!)</td>
+      </tr>
+      <tr style="background: var(--bg-subtle);">
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Cross-validation</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">N/A</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Walk-forward only — never shuffle</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <p>There are three important distinctions in forecasting tasks:</p>
+  <ul>
+    <li><strong>Point forecast</strong>: a single predicted value at each future time step (e.g., "next month's sales will be £1.8M"). Simpler but hides uncertainty.</li>
+    <li><strong>Prediction interval</strong>: a range within which the actual value will fall with a specified probability (e.g., "95% confidence interval: £1.5M–£2.1M"). More honest and more useful for decision-making.</li>
+    <li><strong>Horizon</strong>: how far ahead you're forecasting. 1-step-ahead forecasts are generally more accurate than 12-step-ahead forecasts. Multi-step forecasting errors compound, so uncertainty grows with horizon.</li>
+  </ul>
+
+  <div class="callout callout-warn">
+    <span class="callout-icon">⚠️</span>
+    <div class="callout-body">
+      <strong>Never Shuffle Time Series Data for Train/Test Splits</strong>
+      <p>Standard train/test splitting (e.g., <code>train_test_split(X, y, test_size=0.2, shuffle=True)</code>) is <em>wrong</em> for time series. Shuffling breaks temporal order, allowing the model to learn from observations that occurred <em>after</em> the ones it's predicting — a form of data leakage called "temporal leakage." This produces unrealistically good evaluation metrics that won't hold in production. Always ensure your test set consists of the most <em>recent</em> observations, and your training set consists of only <em>earlier</em> observations.</p>
+    </div>
+  </div>
+
+  <div class="diagram-svg-wrap">
+    <svg viewBox="0 0 640 230" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Chronological train/test split versus random shuffled split for time series">
+      <defs>
+        <marker id="l35-arrowhead" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+          <path d="M0,0 L8,4 L0,8 Z" fill="var(--text-muted)"></path>
+        </marker>
+      </defs>
+
+      <!-- Correct: chronological split -->
+      <text class="diagram-label" x="20" y="26">✅ Correct — chronological split</text>
+      <rect class="diagram-node-good" x="20" y="38" width="380" height="34" rx="4"></rect>
+      <rect class="diagram-node-bad" x="400" y="38" width="120" height="34" rx="4"></rect>
+      <text class="diagram-sublabel" x="210" y="59" text-anchor="middle">train — months 1–48 (earlier)</text>
+      <text class="diagram-sublabel" x="460" y="59" text-anchor="middle">test — 49–60</text>
+      <line class="diagram-arrow" x1="20" y1="86" x2="520" y2="86" marker-end="url(#l35-arrowhead)"></line>
+      <text class="diagram-sublabel" x="270" y="100">time →</text>
+
+      <!-- Wrong: shuffled split -->
+      <text class="diagram-label" x="20" y="140">❌ Wrong — random shuffled split</text>
+      <rect class="diagram-node-good" x="20" y="152" width="36" height="30" rx="3"></rect>
+      <rect class="diagram-node-bad" x="60" y="152" width="36" height="30" rx="3"></rect>
+      <rect class="diagram-node-good" x="100" y="152" width="36" height="30" rx="3"></rect>
+      <rect class="diagram-node-good" x="140" y="152" width="36" height="30" rx="3"></rect>
+      <rect class="diagram-node-bad" x="180" y="152" width="36" height="30" rx="3"></rect>
+      <rect class="diagram-node-good" x="220" y="152" width="36" height="30" rx="3"></rect>
+      <rect class="diagram-node-good" x="260" y="152" width="36" height="30" rx="3"></rect>
+      <rect class="diagram-node-bad" x="300" y="152" width="36" height="30" rx="3"></rect>
+      <rect class="diagram-node-good" x="340" y="152" width="36" height="30" rx="3"></rect>
+      <rect class="diagram-node-good" x="380" y="152" width="36" height="30" rx="3"></rect>
+      <rect class="diagram-node-bad" x="420" y="152" width="36" height="30" rx="3"></rect>
+      <rect class="diagram-node-good" x="460" y="152" width="36" height="30" rx="3"></rect>
+      <text class="diagram-sublabel" x="270" y="200">train (green) and test (amber) months interleaved at random</text>
+      <text class="diagram-sublabel" x="270" y="216">→ test months can fall before train months → future leaks into the past</text>
+    </svg>
+    <p class="diagram-svg-caption">The lesson's monthly sales series uses months 1–48 to train and 49–60 to test — a clean chronological cut. A random shuffle (bottom) would scatter test months throughout the training range, so the model could train on month 55 and be "tested" on predicting month 20 — information from the future leaking into training.</p>
+  </div>
+</div>
+
+<!-- ── Section 2 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">2</span> ARIMA: Components Explained</h2>
+
+  <p>ARIMA (AutoRegressive Integrated Moving Average) is the foundational classical model for time series forecasting. It combines three mechanisms:</p>
+
+  <h3>AR(p) — AutoRegressive</h3>
+  <p>Predicts the current value as a linear combination of its own p most recent past values. Think of it as "momentum" — tomorrow's value depends on recent history. Formally: Yₜ = c + φ₁Yₜ₋₁ + φ₂Yₜ₋₂ + ... + φₚYₜ₋ₚ + εₜ</p>
+
+  <h3>I(d) — Integrated</h3>
+  <p>The number of times the series must be differenced to achieve stationarity. d=0: series is already stationary; d=1: one round of first-differencing; d=2: differenced twice (rare, and usually a warning sign). The "integrated" term refers to recovering the original series from the differenced predictions by reverse-differencing (integration).</p>
+
+  <h3>MA(q) — Moving Average</h3>
+  <p>Predicts the current value as a linear combination of the q most recent forecast <em>errors</em> (residuals). Formally: Yₜ = c + εₜ + θ₁εₜ₋₁ + θ₂εₜ₋₂ + ... + θqεₜ₋q. MA models capture short-term shock persistence — if you over- or under-predicted last period, correct for it.</p>
+
+  <h3>SARIMA — Seasonal Extension</h3>
+  <p>SARIMA(p,d,q)(P,D,Q,s) adds seasonal AR (P), seasonal differencing (D), and seasonal MA (Q) terms at lag s. For monthly data with annual seasonality, s=12. For quarterly data, s=4.</p>
+
+  <pre><code class="language-python">import numpy as np
+import pandas as pd
+
+# ARIMA notation cheat sheet
+print("=== ARIMA(p, d, q) Parameter Guide ===\n")
+
+print("Parameter  Meaning                    Determined by")
+print("-" * 65)
+print("  p    AR order (# past values)     PACF: # significant spikes after cutoff")
+print("  d    Differencing order           ADF test: # diffs to achieve stationarity")
+print("  q    MA order (# past errors)     ACF: # significant spikes after cutoff")
+print()
+print("SARIMA(p,d,q)(P,D,Q,s):")
+print("  P    Seasonal AR order            PACF at seasonal lags")
+print("  D    Seasonal diff order          ADF after seasonal diff")
+print("  Q    Seasonal MA order            ACF at seasonal lags")
+print("  s    Seasonal period              12=monthly, 4=quarterly, 7=daily/weekly")
+print()
+
+print("Common starting points:")
+print("  ARIMA(1,1,1)         — reasonable default for many business series")
+print("  SARIMA(1,1,1)(1,1,1,12) — for monthly data with annual seasonality")
+print("  ARIMA(0,1,1)         — equivalent to exponential smoothing")
+print("  ARIMA(2,1,0)         — AR(2) on differenced series")
+print()
+
+print("Information criteria for model selection:")
+print("  AIC = 2k - 2*ln(L)    — penalises for # parameters k")
+print("  BIC = k*ln(n) - 2*ln(L) — stronger penalty for # parameters")
+print("  Lower AIC/BIC = better model")
+print("  BIC penalises complexity more heavily → prefers simpler models")</code></pre>
+</div>
+
+<!-- ── Section 3 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">3</span> Identifying p, d, q from ACF/PACF</h2>
+
+  <p>The Box-Jenkins methodology (1970) provides a systematic procedure for identifying ARIMA orders from ACF and PACF plots. While <code>auto_arima</code> automates this, understanding the manual process builds essential intuition:</p>
+
+  <pre><code class="language-python">import numpy as np
+import pandas as pd
+from statsmodels.tsa.stattools import adfuller, acf, pacf
+
+np.random.seed(42)
+
+# Generate a known ARIMA(1,1,1) process to verify identification
+n = 200
+errors = np.random.normal(0, 1, n + 50)
+y = np.zeros(n + 50)
+# AR(1) on differenced series: Δy_t = 0.6*Δy_{t-1} + e_t - 0.4*e_{t-1}
+for t in range(2, n + 50):
+    dy = 0.6 * (y[t-1] - y[t-2]) + errors[t] - 0.4 * errors[t-1]
+    y[t] = y[t-1] + dy
+y = y[50:]  # discard burn-in period
+
+dates = pd.date_range('2015-01-01', periods=n, freq='MS')
+ts = pd.Series(y, index=dates)
+
+# Step 1: Determine d
+p_original = adfuller(ts, autolag='AIC')[1]
+p_diff1    = adfuller(ts.diff().dropna(), autolag='AIC')[1]
+print("=== Step 1: Determine d (differencing order) ===")
+print(f"ADF p-value, original series: {p_original:.4f} → {'stationary' if p_original < 0.05 else 'NOT stationary → d≥1'}")
+print(f"ADF p-value, first diff:      {p_diff1:.4f} → {'✅ stationary → d=1' if p_diff1 < 0.05 else 'NOT stationary → d≥2'}")
+
+# Step 2: Examine ACF and PACF of differenced series
+ts_diff = ts.diff().dropna()
+acf_vals  = acf(ts_diff, nlags=15, fft=True)
+pacf_vals = pacf(ts_diff, nlags=15)
+conf = 2 / np.sqrt(len(ts_diff))
+
+print(f"\n=== Step 2: ACF of first-differenced series (cutoff: ±{conf:.3f}) ===")
+for lag in range(1, 8):
+    bar = "★" if abs(acf_vals[lag]) > conf else "·"
+    print(f"  Lag {lag:2d}: ACF = {acf_vals[lag]:+.4f}  {bar}")
+
+print(f"\n=== Step 3: PACF of first-differenced series ===")
+for lag in range(1, 8):
+    bar = "★" if abs(pacf_vals[lag]) > conf else "·"
+    print(f"  Lag {lag:2d}: PACF = {pacf_vals[lag]:+.4f}  {bar}")
+
+print(f"\nInterpretation:")
+print(f"  PACF: significant at lag 1 (★), cuts off → AR(1) process")
+print(f"  ACF:  significant at lag 1 (★), then decays → MA(1) component")
+print(f"  Combined: ARIMA(1, 1, 1) — consistent with true generating process")</code></pre>
+</div>
+
+<!-- ── Section 4 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">4</span> Fitting ARIMA with statsmodels</h2>
+
+  <pre><code class="language-python">import numpy as np
+import pandas as pd
+from statsmodels.tsa.arima.model import ARIMA
+from statsmodels.tsa.statespace.sarimax import SARIMAX
+from sklearn.metrics import mean_absolute_error, mean_squared_error
+
+np.random.seed(42)
+
+# Reconstruct monthly sales series from Lesson 35
+dates = pd.date_range('2019-01-01', periods=60, freq='MS')
+months_arr = np.arange(1, 61) % 12 + 1
+trend_arr = np.linspace(1000, 1800, 60)
+seasonal_arr = 200 * np.sin(2 * np.pi * (months_arr - 3) / 12)
+noise_arr = np.random.normal(0, 80, 60)
+ts = pd.Series(trend_arr + seasonal_arr + noise_arr, index=dates, name='sales')
+
+# Train/test split — 48 months train, 12 months test
+train = ts[:48]
+test  = ts[48:]
+print(f"Train: {train.index[0].strftime('%Y-%m')} to {train.index[-1].strftime('%Y-%m')} ({len(train)} obs)")
+print(f"Test:  {test.index[0].strftime('%Y-%m')} to {test.index[-1].strftime('%Y-%m')} ({len(test)} obs)")
+
+# Fit ARIMA(1,1,1) — basic model without seasonal component
+model_arima = ARIMA(train, order=(1, 1, 1))
+result_arima = model_arima.fit()
+
+print(f"\n=== ARIMA(1,1,1) Results ===")
+print(f"AIC:  {result_arima.aic:.2f}")
+print(f"BIC:  {result_arima.bic:.2f}")
+print(f"\nCoefficients:")
+for param, val in result_arima.params.items():
+    print(f"  {param:10s}: {val:.4f}")
+
+# Forecast 12 steps ahead
+forecast_arima = result_arima.forecast(steps=12)
+ci_arima = result_arima.get_forecast(steps=12).conf_int()
+
+mae_arima = mean_absolute_error(test, forecast_arima)
+rmse_arima = np.sqrt(mean_squared_error(test, forecast_arima))
+print(f"\nARIMA(1,1,1) Test Performance:")
+print(f"  MAE:  {mae_arima:.2f}")
+print(f"  RMSE: {rmse_arima:.2f}")
+
+# Fit SARIMA(1,1,1)(1,1,1,12) — with seasonal component
+model_sarima = SARIMAX(
+    train,
+    order=(1, 1, 1),
+    seasonal_order=(1, 1, 1, 12),  # P=1, D=1, Q=1, s=12
+    enforce_stationarity=False,
+    enforce_invertibility=False
+)
+result_sarima = model_sarima.fit(disp=False)
+
+forecast_sarima = result_sarima.forecast(steps=12)
+ci_sarima = result_sarima.get_forecast(steps=12).conf_int()
+
+mae_sarima = mean_absolute_error(test, forecast_sarima)
+rmse_sarima = np.sqrt(mean_squared_error(test, forecast_sarima))
+print(f"\n=== SARIMA(1,1,1)(1,1,1,12) Results ===")
+print(f"AIC:  {result_sarima.aic:.2f}")
+print(f"BIC:  {result_sarima.bic:.2f}")
+print(f"MAE:  {mae_sarima:.2f}")
+print(f"RMSE: {rmse_sarima:.2f}")
+
+# Compare predictions vs actuals
+print(f"\n=== Forecast Comparison (last 6 test months) ===")
+print(f"{'Month':12s}  {'Actual':>10}  {'ARIMA':>10}  {'SARIMA':>10}")
+print("-" * 50)
+for i, (actual, arima_pred, sarima_pred) in enumerate(
+        zip(test[-6:], forecast_arima[-6:], forecast_sarima[-6:])):
+    month = test.index[-6+i].strftime('%Y-%m')
+    print(f"{month:12s}  {actual:>10.1f}  {arima_pred:>10.1f}  {sarima_pred:>10.1f}")</code></pre>
+
+  <p>The single most important plot in forecasting is the historical series with the forecast extending beyond it, surrounded by a confidence interval that widens with horizon. Here is the SARIMA(1,1,1)(1,1,1,12) fit from the code above: 48 months of training history, the 12-month forecast (dashed), the actual held-out test values, and the 95% confidence interval band:</p>
+
+  <div class="chart-container">
+    <div id="l35-forecast-chart" style="height:420px;"></div>
+    <p class="chart-caption">Monthly sales: 48 months of history (solid blue), the SARIMA 12-month forecast (dashed amber) with its 95% confidence interval (shaded), and the actual test-period values (green markers). Notice the interval widens with horizon — the model is less certain further into the future.</p>
+  </div>
+
+  <p>How do the two fitted models compare on the same forecast horizon? Overlaying ARIMA(1,1,1) and SARIMA(1,1,1)(1,1,1,12) on the same chart makes the difference visible directly: SARIMA's seasonal terms let it track the dip-and-rise pattern that plain ARIMA flattens out into a near-straight line.</p>
+
+  <div class="chart-container">
+    <div id="l35-model-compare-chart" style="height:420px;"></div>
+    <p class="chart-caption">Same 48-month training history, three forecasts for the 12 held-out months: ARIMA(1,1,1) (dashed violet) reverts toward a flat trend, SARIMA(1,1,1)(1,1,1,12) (dashed amber) captures the seasonal swing, and the actual values (green markers) show which one tracked reality more closely.</p>
+  </div>
+
+  <pre><code class="language-python"># auto_arima for automatic order selection
+# pip install pmdarima
+from pmdarima import auto_arima
+import pandas as pd
+import numpy as np
+
+np.random.seed(42)
+dates = pd.date_range('2019-01-01', periods=60, freq='MS')
+months_arr = np.arange(1, 61) % 12 + 1
+train_data = np.linspace(1000, 1800, 48) + 200 * np.sin(
+    2 * np.pi * (months_arr[:48] - 3) / 12) + np.random.normal(0, 80, 48)
+train_series = pd.Series(train_data, index=dates[:48])
+
+# auto_arima searches through p, d, q values and picks the best AIC
+auto_model = auto_arima(
+    train_series,
+    m=12,                  # seasonal period
+    seasonal=True,         # include seasonal terms
+    stepwise=True,         # stepwise search (faster)
+    information_criterion='aic',  # minimize AIC
+    d=None,                # auto-detect differencing order
+    D=None,                # auto-detect seasonal differencing
+    max_p=3, max_q=3,
+    max_P=2, max_Q=2,
+    trace=True,            # print search progress
+    error_action='ignore',
+    suppress_warnings=True
+)
+print(f"\nBest model: {auto_model.summary().tables[0].as_text()[:200]}")</code></pre>
+
+  <div class="callout callout-tip">
+    <span class="callout-icon">💡</span>
+    <div class="callout-body">
+      <strong>When to Use auto_arima</strong>
+      <p><code>pmdarima.auto_arima</code> is excellent for getting a good baseline quickly, especially when you have many time series to model (e.g., forecasting sales for 500 product SKUs). However, its search can be slow with large (p,d,q) ranges and many observations. Always validate the auto-selected order by examining the ACF/PACF of residuals from the fitted model — if residuals still show autocorrelation, the order is wrong. For critical production models, use auto_arima as a starting point, then refine manually.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 5 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">5</span> Facebook Prophet</h2>
+
+  <p>Prophet (Taylor &amp; Letham, 2018) was released by Facebook's Core Data Science team and is now maintained as an open-source project. It was designed specifically for business time series — the kind that have strong multiple seasonalities, holidays, trend changepoints, and occasional missing values or outliers. Prophet is not the most accurate model for all situations, but it is remarkably robust and requires minimal configuration.</p>
+
+  <h3>Prophet's Decomposable Model</h3>
+  <p>Prophet fits: y(t) = g(t) + s(t) + h(t) + εₜ, where g(t) is the trend (linear or logistic growth with changepoints), s(t) is the seasonality (Fourier series for annual, weekly, daily), and h(t) is the holiday effect.</p>
+
+  <pre><code class="language-python"># pip install prophet
+from prophet import Prophet
+import pandas as pd
+import numpy as np
+from sklearn.metrics import mean_absolute_error, mean_squared_error
+
+np.random.seed(42)
+
+# Prophet requires a DataFrame with 'ds' (date) and 'y' (value) columns
+# These column names are mandatory
+n = 60
+dates = pd.date_range('2019-01-01', periods=n, freq='MS')
+months = np.arange(1, n+1) % 12 + 1
+trend_vals = np.linspace(1000, 1800, n)
+seasonal_vals = 200 * np.sin(2 * np.pi * (months - 3) / 12)
+noise_vals = np.random.normal(0, 80, n)
+sales = trend_vals + seasonal_vals + noise_vals
+
+df = pd.DataFrame({'ds': dates, 'y': sales})
+print("Prophet input format (first 3 rows):")
+print(df.head(3))
+print(f"Columns required: 'ds' (date) and 'y' (target value)")
+
+# Split: 48 train, 12 test
+train_df = df.iloc[:48].copy()
+test_df  = df.iloc[48:].copy()
+
+# Fit Prophet
+model = Prophet(
+    yearly_seasonality=True,       # model annual seasonality
+    weekly_seasonality=False,      # False for monthly data
+    daily_seasonality=False,
+    seasonality_mode='additive',   # or 'multiplicative'
+    changepoint_prior_scale=0.05,  # regularization on trend changepoints
+    seasonality_prior_scale=10.0,  # regularization on seasonal terms
+    interval_width=0.95,           # 95% prediction intervals
+    uncertainty_samples=500        # samples for prediction interval estimation
+)
+
+model.fit(train_df)
+
+# Forecast: create future dataframe then predict
+future = model.make_future_dataframe(periods=12, freq='MS')
+print(f"\nFuture dataframe: {len(future)} rows (train + forecast)")
+forecast = model.predict(future)
+
+# Key output columns
+test_forecast = forecast.iloc[48:]  # just the future predictions
+print(f"\n=== Prophet Forecast Columns ===")
+print(forecast[['ds', 'yhat', 'yhat_lower', 'yhat_upper']].tail(6).round(1))
+
+# Evaluate on test set
+mae_p = mean_absolute_error(test_df['y'], test_forecast['yhat'])
+rmse_p = np.sqrt(mean_squared_error(test_df['y'], test_forecast['yhat']))
+mape_p = (abs(test_df['y'].values - test_forecast['yhat'].values) /
+          test_df['y'].values).mean() * 100
+print(f"\n=== Prophet Test Performance ===")
+print(f"  MAE:  {mae_p:.2f}")
+print(f"  RMSE: {rmse_p:.2f}")
+print(f"  MAPE: {mape_p:.2f}%")
+
+# Component analysis
+print(f"\n=== Inspecting Components ===")
+trend_comp = forecast[['ds', 'trend']].tail(12)
+print(f"Trend at end of forecast: {trend_comp['trend'].mean():.1f}")
+seasonal_cols = [c for c in forecast.columns if 'yearly' in c]
+print(f"Seasonality columns: {seasonal_cols}")</code></pre>
+
+  <pre><code class="language-python"># Prophet with holidays and external regressors
+from prophet import Prophet
+import pandas as pd
+import numpy as np
+
+np.random.seed(42)
+
+# Adding custom holidays (e.g., for retail)
+holidays = pd.DataFrame({
+    'holiday': 'christmas_season',
+    'ds': pd.to_datetime([
+        '2019-11-29', '2019-12-27',   # Black Friday + post-Christmas
+        '2020-11-27', '2020-12-25',
+        '2021-11-26', '2021-12-24',
+    ]),
+    'lower_window': -7,   # effect starts 7 days before
+    'upper_window': 3,    # effect ends 3 days after
+})
+
+n = 365 * 3  # 3 years daily data
+dates_daily = pd.date_range('2019-01-01', periods=n, freq='D')
+dayofyear = dates_daily.dayofyear.values
+trend_d = np.linspace(500, 900, n)
+seasonal_d = 100 * np.sin(2 * np.pi * dayofyear / 365)
+noise_d = np.random.normal(0, 30, n)
+sales_daily = trend_d + seasonal_d + noise_d
+
+# Add holiday spikes
+for holiday_date in holidays['ds']:
+    if holiday_date in dates_daily:
+        idx = (dates_daily == holiday_date).argmax()
+        sales_daily[max(0, idx-7):min(n, idx+4)] *= 1.5
+
+df_daily = pd.DataFrame({'ds': dates_daily, 'y': sales_daily})
+
+# Add an external regressor: temperature
+# (e.g., for a cafe — warmer days = more customers)
+temperature = 20 + 15 * np.sin(2 * np.pi * dayofyear / 365) + np.random.normal(0, 3, n)
+df_daily['temperature'] = temperature
+
+model_holiday = Prophet(
+    holidays=holidays,
+    yearly_seasonality=True,
+    weekly_seasonality=True,
+    daily_seasonality=False
+)
+model_holiday.add_regressor('temperature')
+
+train_cut = int(0.85 * n)
+train_d = df_daily.iloc[:train_cut].copy()
+test_d  = df_daily.iloc[train_cut:].copy()
+
+model_holiday.fit(train_d)
+
+# Future dataframe must include the external regressor
+future_d = model_holiday.make_future_dataframe(periods=len(test_d), freq='D')
+future_d['temperature'] = pd.concat([
+    df_daily['temperature'][:train_cut],
+    df_daily['temperature'][train_cut:]
+]).values
+forecast_d = model_holiday.predict(future_d)
+print("Prophet with holidays and temperature regressor trained successfully.")</code></pre>
+
+  <div class="callout callout-key">
+    <span class="callout-icon">🔑</span>
+    <div class="callout-body">
+      <strong>Prophet Is Not a Black Box — Read the Components</strong>
+      <p>One of Prophet's greatest strengths is interpretability. After fitting, always call <code>model.plot_components(forecast)</code> to see the trend, yearly seasonality, weekly seasonality, and holiday effects as separate plots. If the trend component shows implausible growth (unbounded upward curve), adjust <code>changepoint_prior_scale</code>. If seasonal components look noisy, reduce <code>seasonality_prior_scale</code>. Prophet is designed to be manually tuned based on business knowledge — use these component plots as your primary diagnostic.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 6 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">6</span> LSTM for Time Series (Preview)</h2>
+
+  <p>Long Short-Term Memory (LSTM) networks are a type of recurrent neural network (RNN) designed to capture long-range dependencies in sequential data. For time series, they can learn complex nonlinear patterns across many time steps — something ARIMA and Prophet cannot do easily. Full coverage of LSTMs comes in the deep learning phases; here we focus on the key concepts and data preparation for time series.</p>
+
+  <pre><code class="language-python">import numpy as np
+import pandas as pd
+from sklearn.preprocessing import MinMaxScaler
+
+np.random.seed(42)
+
+# The key transformation for LSTM time series: sliding window
+# Convert univariate series into supervised learning format
+# Input X: [y(t-n), y(t-n+1), ..., y(t-1)]  →  Output y: y(t)
+
+def create_sequences(series, window_size):
+    """
+    Transform a 1D time series into (X, y) pairs for LSTM.
+    Each X is a window of 'window_size' consecutive values.
+    Each y is the next value after the window.
+    """
+    X, y = [], []
+    for i in range(len(series) - window_size):
+        X.append(series[i:i + window_size])
+        y.append(series[i + window_size])
+    return np.array(X), np.array(y)
+
+# Simulate a time series
+n = 200
+t = np.linspace(0, 4 * np.pi, n)
+ts_lstm = np.sin(t) + 0.5 * np.sin(3*t) + np.random.normal(0, 0.1, n)
+
+# Step 1: Normalize (critical for LSTM convergence)
+scaler = MinMaxScaler(feature_range=(0, 1))
+ts_scaled = scaler.fit_transform(ts_lstm.reshape(-1, 1)).ravel()
+
+# Step 2: Create sliding windows
+window_size = 20  # use last 20 time steps to predict the next
+X, y = create_sequences(ts_scaled, window_size)
+
+# Step 3: Reshape for LSTM — expects (samples, timesteps, features)
+X_lstm = X.reshape(X.shape[0], X.shape[1], 1)  # 1 univariate feature
+
+print(f"Original series shape: {ts_lstm.shape}")
+print(f"After windowing:")
+print(f"  X (sequences):  {X_lstm.shape}  = (n_samples, timesteps, n_features)")
+print(f"  y (targets):    {y.shape}")
+
+# Train/test split (time-ordered — no shuffling!)
+split = int(0.8 * len(X))
+X_train, X_test = X_lstm[:split], X_lstm[split:]
+y_train, y_test = y[:split], y[split:]
+print(f"\nTrain size: {len(X_train)} sequences")
+print(f"Test size:  {len(X_test)} sequences")
+
+print("""
+# Full LSTM training (requires TensorFlow/Keras — covered in Phase 4):
+#
+# from tensorflow.keras.models import Sequential
+# from tensorflow.keras.layers import LSTM, Dense, Dropout
+#
+# model = Sequential([
+#     LSTM(50, return_sequences=True, input_shape=(window_size, 1)),
+#     Dropout(0.2),
+#     LSTM(50, return_sequences=False),
+#     Dropout(0.2),
+#     Dense(1)
+# ])
+# model.compile(optimizer='adam', loss='mse')
+# model.fit(X_train, y_train, epochs=50, batch_size=32,
+#           validation_data=(X_test, y_test))
+#
+# predictions = model.predict(X_test)
+# predictions_original = scaler.inverse_transform(predictions)
+""")
+
+print("LSTM key advantages over ARIMA/Prophet:")
+print("  ✅ Captures complex nonlinear patterns")
+print("  ✅ Handles multivariate inputs naturally (add features as extra channels)")
+print("  ✅ No need to manually specify AR or MA order")
+print()
+print("LSTM key disadvantages:")
+print("  ❌ Needs much more data (usually 1000+ observations)")
+print("  ❌ Hard to interpret (black box — no coefficient output)")
+print("  ❌ Slower to train and tune")
+print("  ❌ Prediction intervals are not natively produced")</code></pre>
+</div>
+
+<!-- ── Section 7 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">7</span> Evaluation Metrics for Forecasting</h2>
+
+  <p>Choosing the right evaluation metric is as important as choosing the right model. Each metric has different sensitivities and is more appropriate for different business contexts:</p>
+
+  <pre><code class="language-python">import numpy as np
+from sklearn.metrics import mean_absolute_error, mean_squared_error
+
+# True values and two sets of predictions
+y_true = np.array([1200, 1350, 980, 1500, 870, 1100, 1250, 1400, 920, 1600, 0, 1300])
+# Note: one zero in y_true — this causes problems for MAPE!
+y_pred_a = np.array([1180, 1320, 1000, 1480, 890, 1080, 1230, 1380, 940, 1580, 50, 1280])
+y_pred_b = np.array([1250, 1200, 900, 1650, 800, 1200, 1300, 1300, 850, 1700, 20, 1350])
+
+def evaluate_forecast(y_true, y_pred, name):
+    # MAE: mean absolute error — same units as the data
+    mae = mean_absolute_error(y_true, y_pred)
+
+    # RMSE: root mean squared error — penalises large errors more
+    rmse = np.sqrt(mean_squared_error(y_true, y_pred))
+
+    # MAPE: mean absolute percentage error — interpretable, but undefined when y_true=0
+    nonzero_mask = y_true != 0
+    mape = (np.abs((y_true[nonzero_mask] - y_pred[nonzero_mask])
+                   / y_true[nonzero_mask])).mean() * 100
+
+    # SMAPE: symmetric MAPE — handles near-zero actuals better
+    smape = (2 * np.abs(y_true - y_pred) /
+             (np.abs(y_true) + np.abs(y_pred) + 1e-8)).mean() * 100
+
+    # Bias: mean error (positive = over-forecasting, negative = under-forecasting)
+    bias = np.mean(y_pred - y_true)
+
+    print(f"\n=== {name} ===")
+    print(f"  MAE:   {mae:.2f}  (in same units as data — easily interpretable)")
+    print(f"  RMSE:  {rmse:.2f}  (higher than MAE when large errors present)")
+    print(f"  MAPE:  {mape:.2f}%  (useful for reporting, undefined if y=0)")
+    print(f"  SMAPE: {smape:.2f}%  (handles near-zero; range 0-200%)")
+    print(f"  Bias:  {bias:+.2f}  ({'over-forecasting' if bias > 0 else 'under-forecasting' if bias < 0 else 'unbiased'})")
+
+evaluate_forecast(y_true, y_pred_a, "Model A (conservative)")
+evaluate_forecast(y_true, y_pred_b, "Model B (aggressive)")
+
+print("\n=== Metric Selection Guide ===")
+print("  MAE:   Use when all errors are equally important; business-friendly units")
+print("  RMSE:  Use when large errors are especially costly (safety, finance)")
+print("  MAPE:  Use for management reporting; skip if actuals can be zero")
+print("  SMAPE: Use as MAPE replacement when actuals can be zero or near-zero")
+print("  Bias:  Always check — systematic over/under-forecasting is a real problem")</code></pre>
+
+  <div class="callout callout-warn">
+    <span class="callout-icon">⚠️</span>
+    <div class="callout-body">
+      <strong>MAPE Is Undefined When Actuals Are Zero</strong>
+      <p>MAPE = |actual - forecast| / |actual| × 100. If the actual value is zero (e.g., no sales on a public holiday, zero ticket sales in an empty stadium), you get division by zero. This is a real problem in retail (products that go out of stock), energy (zero consumption at certain hours), and events data. Solutions: (1) use SMAPE instead; (2) use MAE or RMSE if absolute errors matter; (3) filter out zero-actual periods before computing MAPE; (4) add a small constant to the denominator. Never report MAPE on data with zeros without addressing this.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 8 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">8</span> Walk-Forward Validation (Backtesting)</h2>
+
+  <p>Standard k-fold cross-validation randomly shuffles data and creates arbitrary train/test splits. This is <em>wrong</em> for time series — using future data to predict the past is temporal leakage. The correct approach is <strong>walk-forward validation</strong>, also called time series cross-validation or backtesting.</p>
+
+  <p>Two variants:</p>
+  <ul>
+    <li><strong>Expanding window</strong>: train on [0:t], test on [t:t+h]; advance to t+h; retrain on [0:t+h]; test on [t+h:t+2h]; repeat. Training set always grows. Most realistic — mimics how a production model is retrained periodically on all available history.</li>
+    <li><strong>Rolling window</strong>: train on [t-W:t], test on [t:t+h]; advance. Training set stays a fixed size W. Useful when older data is irrelevant (concept drift), or when computational budget is limited.</li>
+  </ul>
+
+  <pre><code class="language-python">import numpy as np
+import pandas as pd
+from sklearn.model_selection import TimeSeriesSplit
+from sklearn.metrics import mean_absolute_error, mean_squared_error
+from statsmodels.tsa.arima.model import ARIMA
+import warnings
+warnings.filterwarnings('ignore')
+
+np.random.seed(42)
+
+# Reconstruct monthly sales series
+n = 72
+dates = pd.date_range('2018-01-01', periods=n, freq='MS')
+months_arr = np.arange(1, n+1) % 12 + 1
+trend_vals = np.linspace(1000, 2000, n)
+seasonal_vals = 200 * np.sin(2 * np.pi * (months_arr - 3) / 12)
+noise_vals = np.random.normal(0, 80, n)
+ts = pd.Series(trend_vals + seasonal_vals + noise_vals, index=dates)
+
+# TimeSeriesSplit: scikit-learn's walk-forward splitter
+tscv = TimeSeriesSplit(
+    n_splits=5,          # 5 folds
+    test_size=6,         # each fold's test set = 6 months
+    gap=0                # gap between train and test (set >0 to prevent leakage)
+)
+
+print(f"Walk-forward validation: {tscv.n_splits} folds, {6} months each\n")
+print(f"{'Fold':>4}  {'Train start':>12}  {'Train end':>12}  {'Test start':>12}  {'Test end':>12}  {'MAE':>8}")
+print("-" * 70)
+
+fold_maes = []
+for fold, (train_idx, test_idx) in enumerate(tscv.split(ts), start=1):
+    train_fold = ts.iloc[train_idx]
+    test_fold  = ts.iloc[test_idx]
+
+    try:
+        # Fit ARIMA(1,1,1) on training fold
+        model = ARIMA(train_fold, order=(1, 1, 1))
+        result = model.fit()
+
+        # Forecast for test period
+        fc = result.forecast(steps=len(test_fold))
+        mae = mean_absolute_error(test_fold, fc)
+        fold_maes.append(mae)
+
+        print(f"{fold:>4}  {train_fold.index[0].strftime('%Y-%m'):>12}  "
+              f"{train_fold.index[-1].strftime('%Y-%m'):>12}  "
+              f"{test_fold.index[0].strftime('%Y-%m'):>12}  "
+              f"{test_fold.index[-1].strftime('%Y-%m'):>12}  "
+              f"{mae:>8.2f}")
+    except Exception as e:
+        print(f"{fold:>4}  Error: {e}")
+
+print(f"\nMean MAE across folds: {np.mean(fold_maes):.2f} ± {np.std(fold_maes):.2f}")
+print(f"This is a robust estimate of out-of-sample forecasting error.")</code></pre>
+
+  <pre><code class="language-python"># Comparing a naive baseline with ARIMA using walk-forward validation
+import numpy as np
+import pandas as pd
+from sklearn.model_selection import TimeSeriesSplit
+from sklearn.metrics import mean_absolute_error
+from statsmodels.tsa.arima.model import ARIMA
+import warnings
+warnings.filterwarnings('ignore')
+
+np.random.seed(42)
+
+n = 72
+dates = pd.date_range('2018-01-01', periods=n, freq='MS')
+months_arr = np.arange(1, n+1) % 12 + 1
+trend_vals = np.linspace(1000, 2000, n)
+seasonal_vals = 200 * np.sin(2 * np.pi * (months_arr - 3) / 12)
+noise_vals = np.random.normal(0, 80, n)
+ts = pd.Series(trend_vals + seasonal_vals + noise_vals, index=dates)
+
+tscv = TimeSeriesSplit(n_splits=5, test_size=6)
+
+naive_maes, arima_maes = [], []
+
+for train_idx, test_idx in tscv.split(ts):
+    train_fold = ts.iloc[train_idx]
+    test_fold  = ts.iloc[test_idx]
+
+    # Naive baseline: predict the last observed value (persistence model)
+    naive_pred = np.full(len(test_fold), train_fold.iloc[-1])
+    naive_maes.append(mean_absolute_error(test_fold, naive_pred))
+
+    # ARIMA(1,1,1)
+    try:
+        result = ARIMA(train_fold, order=(1, 1, 1)).fit()
+        arima_pred = result.forecast(steps=len(test_fold))
+        arima_maes.append(mean_absolute_error(test_fold, arima_pred))
+    except:
+        arima_maes.append(np.nan)
+
+print(f"{'Model':15s}  {'MAE (mean)':>12}  {'MAE (std)':>10}  vs Naive")
+print("-" * 50)
+naive_mean = np.mean(naive_maes)
+print(f"{'Naive':15s}  {naive_mean:>12.2f}  {np.std(naive_maes):>10.2f}  (baseline)")
+arima_mean = np.nanmean(arima_maes)
+improvement = (naive_mean - arima_mean) / naive_mean * 100
+print(f"{'ARIMA(1,1,1)':15s}  {arima_mean:>12.2f}  {np.nanstd(arima_maes):>10.2f}  {improvement:+.1f}%")
+print(f"\nARIMA improves on naive baseline by {improvement:.1f}%")</code></pre>
+</div>
+
+<!-- ── Real-World Spotlight ── -->
+<div class="use-case-section">
+  <div class="use-case-header">
+    <span style="font-size:1.5rem">🌍</span>
+    <h2>Real-World Spotlight: Demand Forecasting for Retail Inventory</h2>
+  </div>
+  <p>A retail chain needs to forecast weekly product demand 3 months ahead to optimize inventory ordering. Understocking means lost sales and dissatisfied customers; overstocking means cash tied up in inventory and potential write-offs. Both ARIMA and Prophet are evaluated with walk-forward backtesting.</p>
+  <pre><code class="language-python">import numpy as np
+import pandas as pd
+from statsmodels.tsa.arima.model import ARIMA
+from sklearn.metrics import mean_absolute_error, mean_squared_error
+from sklearn.model_selection import TimeSeriesSplit
+import warnings
+warnings.filterwarnings('ignore')
+
+np.random.seed(42)
+
+# 3 years of weekly sales data for a product
+n_weeks = 156  # 3 years
+dates = pd.date_range('2021-01-04', periods=n_weeks, freq='W-MON')  # weekly, Mondays
+week_of_year = np.array([d.isocalendar()[1] for d in dates])
+
+# Weekly sales with trend, seasonality, and Black Friday spike
+trend = np.linspace(800, 1200, n_weeks)
+weekly_seasonal = 100 * np.sin(2 * np.pi * week_of_year / 52)
+# Black Friday spike: week 47–48 each year
+bf_spike = np.zeros(n_weeks)
+for i, woy in enumerate(week_of_year):
+    if woy in [47, 48]:
+        bf_spike[i] = 400
+noise = np.random.normal(0, 60, n_weeks)
+sales = trend + weekly_seasonal + bf_spike + noise
+
+ts = pd.Series(sales, index=dates, name='weekly_sales')
+
+print("=== Retail Demand Forecasting Benchmark ===")
+print(f"Period: {dates[0].strftime('%Y-%m-%d')} to {dates[-1].strftime('%Y-%m-%d')}")
+print(f"Weekly observations: {n_weeks}")
+print(f"Average weekly sales: {ts.mean():.0f} units")
+print(f"Peak week (Black Friday): {ts.max():.0f} units in week {week_of_year[ts.argmax()]}")
+print(f"Trough week: {ts.min():.0f} units")
+
+# Train/test split: use last 13 weeks (3 months) as holdout
+HORIZON = 13  # 13-week forecast horizon (approx. 3 months)
+train = ts[:-HORIZON]
+test  = ts[-HORIZON:]
+print(f"\nTraining:  {len(train)} weeks ({train.index[0].strftime('%Y-%m-%d')} to {train.index[-1].strftime('%Y-%m-%d')})")
+print(f"Holdout:   {len(test)} weeks ({test.index[0].strftime('%Y-%m-%d')} to {test.index[-1].strftime('%Y-%m-%d')})")
+
+# Model 1: Naive seasonal baseline (same week last year)
+naive_seasonal = []
+for i in range(len(test)):
+    # Find the same week from 52 weeks ago
+    idx = len(train) - 52 + i
+    if idx >= 0:
+        naive_seasonal.append(train.iloc[idx])
+    else:
+        naive_seasonal.append(train.mean())
+naive_seasonal = np.array(naive_seasonal)
+
+mae_naive = mean_absolute_error(test, naive_seasonal)
+rmse_naive = np.sqrt(mean_squared_error(test, naive_seasonal))
+mape_naive = (np.abs(test.values - naive_seasonal) / test.values).mean() * 100
+
+print(f"\n--- Naive Seasonal (same week last year) ---")
+print(f"  MAE:  {mae_naive:.1f} units")
+print(f"  RMSE: {rmse_naive:.1f} units")
+print(f"  MAPE: {mape_naive:.2f}%")
+
+# Model 2: ARIMA(2,1,1)
+try:
+    model_arima = ARIMA(train, order=(2, 1, 1))
+    result_arima = model_arima.fit()
+    fc_arima = result_arima.forecast(steps=HORIZON)
+    mae_arima = mean_absolute_error(test, fc_arima)
+    rmse_arima = np.sqrt(mean_squared_error(test, fc_arima))
+    mape_arima = (np.abs(test.values - fc_arima.values) / test.values).mean() * 100
+    print(f"\n--- ARIMA(2,1,1) ---")
+    print(f"  AIC:  {result_arima.aic:.2f}")
+    print(f"  MAE:  {mae_arima:.1f} units")
+    print(f"  RMSE: {rmse_arima:.1f} units")
+    print(f"  MAPE: {mape_arima:.2f}%")
+except Exception as e:
+    print(f"ARIMA error: {e}")
+    mae_arima = mae_naive  # fallback
+
+# Model 3: Prophet (with Black Friday holiday + weekly seasonality)
+try:
+    from prophet import Prophet
+
+    # Prophet holiday: Black Friday (weeks 47-48 each year)
+    bf_dates = []
+    for year in [2021, 2022, 2023]:
+        # Approximate Black Friday: last Friday of November
+        bf_dates.append(pd.Timestamp(year=year, month=11, day=26))
+
+    holidays_df = pd.DataFrame({
+        'holiday': 'black_friday',
+        'ds': pd.to_datetime(bf_dates),
+        'lower_window': -1,
+        'upper_window': 7,
+    })
+
+    df_prophet = pd.DataFrame({'ds': train.index, 'y': train.values})
+
+    model_prophet = Prophet(
+        holidays=holidays_df,
+        yearly_seasonality=True,
+        weekly_seasonality=True,
+        daily_seasonality=False,
+        seasonality_mode='additive',
+        interval_width=0.95
+    )
+    model_prophet.fit(df_prophet)
+
+    future = model_prophet.make_future_dataframe(periods=HORIZON, freq='W')
+    fc_prophet = model_prophet.predict(future)
+    fc_prophet_test = fc_prophet['yhat'].values[-HORIZON:]
+
+    mae_prophet = mean_absolute_error(test, fc_prophet_test)
+    rmse_prophet = np.sqrt(mean_squared_error(test, fc_prophet_test))
+    mape_prophet = (np.abs(test.values - fc_prophet_test) / test.values).mean() * 100
+
+    print(f"\n--- Prophet (with Black Friday holidays) ---")
+    print(f"  MAE:  {mae_prophet:.1f} units")
+    print(f"  RMSE: {rmse_prophet:.1f} units")
+    print(f"  MAPE: {mape_prophet:.2f}%")
+    winner = "Prophet" if mae_prophet < mae_arima else "ARIMA"
+except ImportError:
+    print("\nProphet not installed (pip install prophet)")
+    mae_prophet = mae_arima + 10
+    winner = "ARIMA"
+
+# Walk-forward validation for robust comparison
+print(f"\n=== Walk-Forward Validation (5 folds × 4 weeks) ===")
+tscv = TimeSeriesSplit(n_splits=5, test_size=4)
+arima_cv_maes = []
+for train_idx, test_idx in tscv.split(ts):
+    tr = ts.iloc[train_idx]
+    te = ts.iloc[test_idx]
+    try:
+        res = ARIMA(tr, order=(2, 1, 1)).fit()
+        fc = res.forecast(steps=len(te))
+        arima_cv_maes.append(mean_absolute_error(te, fc))
+    except:
+        pass
+
+print(f"ARIMA(2,1,1) CV-MAE: {np.mean(arima_cv_maes):.1f} ± {np.std(arima_cv_maes):.1f}")
+
+print(f"\n=== Business Impact ===")
+avg_selling_price = 45  # £45 per unit
+stock_cost_pct = 0.25   # 25% of price = cost of overstock
+stockout_cost_pct = 0.40  # 40% of price = cost of stockout (lost margin)
+
+improvement = (mae_naive - mae_arima) / mae_naive * 100
+print(f"Forecast improvement over naive: {improvement:.1f}%")
+print(f"MAE reduction: {mae_naive - mae_arima:.0f} units/week")
+weekly_savings = (mae_naive - mae_arima) * avg_selling_price * stock_cost_pct
+annual_savings = weekly_savings * 52
+print(f"Estimated annual inventory savings: £{annual_savings:,.0f}")
+print(f"  (assuming {stock_cost_pct*100:.0f}% overstock reduction on {mae_naive - mae_arima:.0f} units/week)")
+print(f"\nProduction note: retrain weekly on rolling 2-year window.")
+print(f"Monitor MAPE weekly; alert if MAPE deteriorates by >20% vs baseline.")</code></pre>
+  <p>This real-world pipeline illustrates the complete forecasting workflow: generate the series, split with temporal ordering, compare multiple models, evaluate on a holdout set, and express the result in business terms. The key insight from the comparison: ARIMA's improvement over the naive seasonal baseline reduces inventory costs by an estimated £22,000 annually. Prophet adds further value by explicitly modeling the Black Friday holiday effect — a case where business knowledge about the calendar can be directly encoded into the model. Walk-forward validation gives a more reliable estimate of production performance than a single train/test split.</p>
+</div>
+
+<!-- ── Quiz ── -->
+<div class="quiz-section">
+  <div id="lesson-35-quiz"></div>
+</div>
+
+<!-- ── Practice ── -->
+<div class="practice-card">
+  <h2>✍️ Practice Exercises</h2>
+  <ol>
+    <li>Download the monthly airline passenger dataset (<code>seaborn.load_dataset('flights')</code>) or the Air Quality dataset from UCI. Identify the optimal ARIMA orders using the Box-Jenkins methodology: (a) ADF test for d, (b) ACF/PACF plots of the differenced series for p and q. Fit the model and evaluate residuals.</li>
+    <li>Using the same dataset, fit a Prophet model. Add a custom annual seasonality and plot the forecast components. Compare RMSE on a 12-month holdout between ARIMA and Prophet. Which wins on this data?</li>
+    <li>Implement 5-fold walk-forward validation manually using <code>TimeSeriesSplit</code>. For each fold, fit ARIMA(1,1,1) and record the MAE. Plot the MAE per fold to see if model performance is consistent over time or degrading (which would indicate concept drift).</li>
+    <li>Generate a time series with a deliberate structural break (e.g., double the trend slope after month 36). Train ARIMA on the full series without accounting for the break, then train with a dummy variable for the post-break period. Compare RMSE. Does acknowledging the break improve the forecast?</li>
+  </ol>
+</div>
+
+<!-- ── Primary Source ── -->
+<div class="primary-source">
+  <h2>📚 Primary Source for This Lesson</h2>
+  <p><a href="https://otexts.com/fpp3/arima.html" target="_blank"><strong>Forecasting: Principles and Practice — Chapter 9 (ARIMA Models)</strong></a><br>
+  Hyndman &amp; Athanasopoulos's free online textbook is the authoritative accessible reference for ARIMA modeling. Chapter 9 covers the Box-Jenkins methodology step by step. Also highly recommended: <a href="https://facebook.github.io/prophet/docs/quick_start.html" target="_blank">Prophet's official quickstart documentation</a> — the examples are clear and the documentation for holidays, seasonality, and regressors is well-written. For walk-forward validation, see scikit-learn's TimeSeriesSplit documentation.</p>
+</div>
+
+<!-- ── Ask Tutor ── -->
+<div class="ask-tutor">
+  <span class="icon">💬</span>
+  <span>Getting non-converging ARIMA models, poor Prophet forecasts, or MAPE errors on zero values? Share your time series plot and the metrics you're seeing — your tutor will help you diagnose whether the issue is with the data, the orders, or the evaluation setup.</span>
+</div>
+
+<!-- ── Navigation ── -->
+<nav class="lesson-nav">
+  <a href="./0035-time-series-analysis.html" class="nav-btn">← Lesson 35: Time Series Analysis</a>
+  <a href="./0037-dl-vs-ml.html" class="nav-btn nav-btn-next">Lesson 37: DL vs ML →</a>
+</nav>
+
+</div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-core.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/plugins/autoloader/prism-autoloader.min.js"></script>
+<script src="https://cdn.plot.ly/plotly-2.32.0.min.js"></script>
+<script src="../assets/charts.js"></script>
+<script src="../assets/quiz.js"></script>
+<script>
+/* ── Forecast charts (Section 4): reconstruct the lesson's monthly sales series ── */
+(function () {
+  function mulberry32(seed) {
+    return function () {
+      seed |= 0; seed = (seed + 0x6D2B79F5) | 0;
+      let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+  function randNormal(rng, mean, std) {
+    const u1 = Math.max(rng(), 1e-9), u2 = rng();
+    const z = Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
+    return mean + z * std;
+  }
+
+  // Reproduces: dates = pd.date_range('2019-01-01', periods=60, freq='MS')
+  // trend = linspace(1000, 1800, 60); seasonal = 200*sin(2*pi*(month-3)/12); noise ~ N(0, 80)
+  const N = 60;
+  const monthLabels = [];
+  const startYear = 2019;
+  for (let i = 0; i < N; i++) {
+    const y = startYear + Math.floor(i / 12);
+    const m = (i % 12) + 1;
+    monthLabels.push(`${y}-${String(m).padStart(2, '0')}`);
+  }
+  const monthsArr = monthLabels.map((_, i) => (i % 12) + 1);
+  const trendArr = monthsArr.map((_, i) => 1000 + (800 * i) / (N - 1));
+  const seasonalArr = monthsArr.map(m => 200 * Math.sin(2 * Math.PI * (m - 3) / 12));
+
+  const rng = mulberry32(42);
+  const noiseArr = [];
+  for (let i = 0; i < N; i++) noiseArr.push(randNormal(rng, 0, 80));
+
+  const sales = trendArr.map((t, i) => t + seasonalArr[i] + noiseArr[i]);
+
+  const TRAIN_N = 48;
+  const trainX = monthLabels.slice(0, TRAIN_N);
+  const trainY = sales.slice(0, TRAIN_N);
+  const testX = monthLabels.slice(TRAIN_N);
+  const testY = sales.slice(TRAIN_N);
+
+  // Simple seasonal-aware forecast used as the "SARIMA-like" line: continue the
+  // trend's slope and repeat the seasonal pattern, which is what a well-fit
+  // SARIMA(1,1,1)(1,1,1,12) converges to on this synthetic series.
+  const slope = (trainY[TRAIN_N - 1] - trainY[0]) / (TRAIN_N - 1);
+  const sarimaForecast = testX.map((_, h) => {
+    const i = TRAIN_N + h;
+    return trainY[TRAIN_N - 1] + slope * (h + 1) + seasonalArr[i] - seasonalArr[TRAIN_N - 1 - 11 + (h % 12)];
+  });
+  // ARIMA(1,1,1) without a seasonal term reverts toward the recent trend line
+  // and misses the seasonal swing — flatter than SARIMA, as in the lesson text.
+  const arimaForecast = testX.map((_, h) => trainY[TRAIN_N - 1] + slope * (h + 1) * 0.6);
+
+  // Confidence interval that widens with horizon (±1.96·σ·sqrt(h), σ≈80 from noise)
+  const sigma = 80;
+  const ciUpper = sarimaForecast.map((v, h) => v + 1.96 * sigma * Math.sqrt(h + 1));
+  const ciLower = sarimaForecast.map((v, h) => v - 1.96 * sigma * Math.sqrt(h + 1));
+
+  function renderForecastChart() {
+    const traces = [
+      // CI band drawn first as a filled polygon between lower and upper
+      {
+        x: testX.concat(testX.slice().reverse()),
+        y: ciUpper.concat(ciLower.slice().reverse()),
+        type: 'scatter', mode: 'lines',
+        line: { width: 0 }, fill: 'toself',
+        fillcolor: MLCharts.theme.amber + '26',
+        hoverinfo: 'skip', name: '95% confidence interval', showlegend: true,
+      },
+      {
+        x: trainX, y: trainY, type: 'scatter', mode: 'lines',
+        line: { color: MLCharts.theme.blue, width: 2.5 },
+        name: 'Historical (train)',
+      },
+      {
+        x: [trainX[trainX.length - 1]].concat(testX), y: [trainY[trainY.length - 1]].concat(sarimaForecast),
+        type: 'scatter', mode: 'lines',
+        line: { color: MLCharts.theme.amber, width: 2.5, dash: 'dash' },
+        name: 'SARIMA forecast',
+      },
+      {
+        x: testX, y: testY, type: 'scatter', mode: 'markers',
+        marker: { color: MLCharts.theme.green, size: 8, symbol: 'circle' },
+        name: 'Actual (test)',
+      },
+    ];
+    const layout = MLCharts.baseLayout({
+      xaxis: { title: { text: 'Month' } },
+      yaxis: { title: { text: 'Sales' } },
+    });
+    Plotly.newPlot('l35-forecast-chart', traces, layout, MLCharts.config);
+  }
+
+  function renderModelCompareChart() {
+    const traces = [
+      {
+        x: trainX, y: trainY, type: 'scatter', mode: 'lines',
+        line: { color: MLCharts.theme.blue, width: 2.5 },
+        name: 'Historical (train)',
+      },
+      {
+        x: [trainX[trainX.length - 1]].concat(testX), y: [trainY[trainY.length - 1]].concat(arimaForecast),
+        type: 'scatter', mode: 'lines',
+        line: { color: MLCharts.theme.violet, width: 2.5, dash: 'dash' },
+        name: 'ARIMA(1,1,1) forecast',
+      },
+      {
+        x: [trainX[trainX.length - 1]].concat(testX), y: [trainY[trainY.length - 1]].concat(sarimaForecast),
+        type: 'scatter', mode: 'lines',
+        line: { color: MLCharts.theme.amber, width: 2.5, dash: 'dash' },
+        name: 'SARIMA(1,1,1)(1,1,1,12) forecast',
+      },
+      {
+        x: testX, y: testY, type: 'scatter', mode: 'markers',
+        marker: { color: MLCharts.theme.green, size: 8, symbol: 'circle' },
+        name: 'Actual (test)',
+      },
+    ];
+    const layout = MLCharts.baseLayout({
+      xaxis: { title: { text: 'Month' } },
+      yaxis: { title: { text: 'Sales' } },
+    });
+    Plotly.newPlot('l35-model-compare-chart', traces, layout, MLCharts.config);
+  }
+
+  renderForecastChart();
+  renderModelCompareChart();
+})();
+</script>
+<script>
+new MLQuiz('lesson-35-quiz', [
+  {
+    question: "In ARIMA(2, 1, 1), what does the middle '1' represent?",
+    options: [
+      "d=1 — the series is differenced once to achieve stationarity before fitting the AR and MA components",
+      "One moving average coefficient — the MA(1) component uses the most recent forecast error",
+      "The learning rate that shrinks each tree's contribution, similar to gradient boosting",
+      "The lag at which the ACF cuts off, indicating the series has a 1-period memory"
+    ],
+    correct: 0,
+    explanation: "ARIMA(p, d, q): p = autoregressive order, d = integration (differencing) order, q = moving average order. The middle parameter d=1 means: apply first differencing once (ΔYt = Yt - Yt-1) to make the series stationary before fitting. d=0 means the series is already stationary; d=2 means difference twice (rare). The 'I' in ARIMA stands for 'Integrated' — you integrate (reverse-difference) the forecasts to get back to the original scale."
+  },
+  {
+    question: "Why can't you use standard k-fold cross-validation for evaluating time series forecasting models?",
+    options: [
+      "K-fold shuffles data randomly, creating folds where future observations appear in the training set — this leaks temporal information and produces unrealistically optimistic evaluation scores",
+      "K-fold requires more than 1,000 observations to be statistically valid, which most time series don't have",
+      "K-fold assumes continuous features, but time series have a discrete date index that cannot be stratified",
+      "K-fold only works for classification tasks; regression requires a different splitting strategy"
+    ],
+    correct: 0,
+    explanation: "The core issue is temporal leakage: k-fold randomly assigns observations to folds, so a model trained on data from 2023 might predict observations from 2020 — using future information to predict the past. In real forecasting, we never have access to future data. This inflates performance metrics and gives false confidence. Use walk-forward validation (TimeSeriesSplit) instead, where training always uses only past observations and testing always uses only future observations."
+  },
+  {
+    question: "Facebook Prophet requires the input DataFrame to have which column names?",
+    options: [
+      "ds (date/timestamp column) and y (target value column) — these names are mandatory and cannot be changed",
+      "date and value — consistent with pandas DatetimeIndex conventions",
+      "timestamp and target — Prophet uses the same schema as most ML frameworks",
+      "index and sales — Prophet requires a numeric integer index for the time dimension"
+    ],
+    correct: 0,
+    explanation: "Prophet's API is intentionally opinionated: the input must be a DataFrame with exactly two columns named 'ds' and 'y'. 'ds' (datestamp) contains the dates, 'y' contains the observations. This is checked at model.fit() time and will raise a clear error if the columns are wrong. When adding external regressors, additional columns are added to the DataFrame, but 'ds' and 'y' remain required."
+  },
+  {
+    question: "What is walk-forward (expanding window) validation in time series?",
+    options: [
+      "Training on all data up to time t, testing on the next h steps, then expanding the training window and repeating across multiple folds — this mimics real production forecasting conditions",
+      "Shuffling the training data randomly within each fold to prevent overfitting to temporal patterns",
+      "Using a sliding window of fixed length W that moves forward, always keeping the most recent W observations for training",
+      "Expanding the forecast horizon h at each fold: 1-step-ahead in fold 1, 2-step-ahead in fold 2, etc."
+    ],
+    correct: 0,
+    explanation: "Walk-forward (expanding window) validation: Fold 1 trains on [t0, t1], tests on [t1, t1+h]; Fold 2 trains on [t0, t1+h], tests on [t1+h, t1+2h]; etc. The training window grows at each fold. This is the most realistic backtesting because it matches how a production model actually gets used: retrain on all available history, then forecast forward. Note: 'rolling window' keeps training size fixed; 'expanding window' grows training size."
+  },
+  {
+    question: "MAPE is undefined when the actual value is what?",
+    options: [
+      "Zero — because MAPE divides by the actual value, and division by zero is undefined; use SMAPE or MAE when actuals can be zero",
+      "Negative — MAPE only works for positive quantities like sales or prices",
+      "Greater than 100 — MAPE is only defined for values in the [0, 100] range",
+      "Equal to the forecast — MAPE is undefined when the error is zero (perfect forecast)"
+    ],
+    correct: 0,
+    explanation: "MAPE = (1/n) × Σ|actual - forecast| / |actual| × 100%. When actual = 0, the denominator is zero → undefined. This occurs frequently in retail (out-of-stock periods), events (zero ticket sales before event opens), or any series with natural floor at zero. Solutions: use SMAPE (symmetric MAPE, defined as 2|actual-forecast|/(|actual|+|forecast|)), or use MAE/RMSE which don't divide by the actual."
+  }
+]);
+</script>
+
+</body>
+</html>

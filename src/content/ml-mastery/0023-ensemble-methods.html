@@ -42,6 +42,7 @@
     <li>Explain bootstrap sampling and implement <code>BaggingClassifier</code> with out-of-bag evaluation</li>
     <li>Train <code>RandomForestClassifier</code> and understand why random feature subsets make trees more diverse</li>
     <li>Extract and interpret feature importances from a Random Forest</li>
+    <li>Combine diverse model types with <code>StackingClassifier</code>, letting a trained meta-learner replace a fixed voting rule</li>
   </ul>
 </div>
 
@@ -90,7 +91,7 @@ for name, model in models.items():
     <span class="callout-icon">🔑</span>
     <div class="callout-body">
       <strong>Bias-Variance Decomposition of Ensemble Error</strong>
-      <p>The expected prediction error of any model decomposes as: Error = Bias² + Variance + Irreducible Noise. A single deep decision tree has low bias but high variance (it changes a lot if you retrain on different data). Averaging many such trees keeps the low bias while cancelling out their variance — the trees' individual errors wash out. Ensembles primarily reduce variance.</p>
+      <p>The expected prediction error of any model decomposes as: Error = Bias² + Variance + Irreducible Noise. A single deep decision tree has low bias but high variance (it changes a lot if you retrain on different data). Averaging many such trees keeps the low bias while canceling out their variance — the trees' individual errors wash out. Ensembles primarily reduce variance.</p>
     </div>
   </div>
 </div>
@@ -528,7 +529,7 @@ top_perm = set(perm_df.nlargest(10).index)
 print(f"\nFeatures in both top-10 lists: {len(top_imp & top_perm)}/10")
 # Usually 7-9 overlap — permutation importance is the more trustworthy version</code></pre>
 
-  <p>The fraud-detection model later in this lesson prints exactly this kind of ranking. Here are its top 5 fraud predictors as a horizontal bar chart — the standard way to visualise <code>feature_importances_</code> (sorted, longest bar on top):</p>
+  <p>The fraud-detection model later in this lesson prints exactly this kind of ranking. Here are its top 5 fraud predictors as a horizontal bar chart — the standard way to visualize <code>feature_importances_</code> (sorted, longest bar on top):</p>
 
   <div class="chart-container">
     <div id="l23-importance-chart" style="height:340px;"></div>
@@ -539,9 +540,88 @@ print(f"\nFeatures in both top-10 lists: {len(top_imp & top_perm)}/10")
     <span class="callout-icon">⚠️</span>
     <div class="callout-body">
       <strong>Use Permutation Importance for Critical Feature Selection</strong>
-      <p>Impurity-based feature importances are computed on training data — they reflect how useful a feature was during training, not how much it matters for test-set predictions. Permutation importance shuffles one feature at a time on the <em>test set</em> and measures performance degradation. It is unbiased and reflects true generalisation importance. The extra computation time is almost always worth it.</p>
+      <p>Impurity-based feature importances are computed on training data — they reflect how useful a feature was during training, not how much it matters for test-set predictions. Permutation importance shuffles one feature at a time on the <em>test set</em> and measures performance degradation. It is unbiased and reflects true generalization importance. The extra computation time is almost always worth it.</p>
     </div>
   </div>
+</div>
+
+<!-- ── Section 9 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">9</span> Stacking: Learning How to Combine Models</h2>
+
+  <p>Voting (Sections 2–4) combines predictions with a <em>fixed</em> rule — majority vote, or a hand-picked weighted average. <strong>Stacking</strong> (stacked generalization) replaces that fixed rule with a learned one: train a second model, the <strong>meta-learner</strong>, whose job is to figure out the best way to combine the base models' predictions, using the base models' outputs as its input features.</p>
+
+  <pre><code class="language-python">import numpy as np
+from sklearn.ensemble import StackingClassifier, RandomForestClassifier, GradientBoostingClassifier
+from sklearn.linear_model import LogisticRegression
+from sklearn.svm import SVC
+from sklearn.model_selection import cross_val_score
+from sklearn.datasets import make_classification
+
+X, y = make_classification(n_samples=1000, n_features=20, n_informative=10, random_state=42)
+
+base_learners = [
+    ('rf',  RandomForestClassifier(n_estimators=100, random_state=42)),
+    ('gb',  GradientBoostingClassifier(n_estimators=100, random_state=42)),
+    ('svc', SVC(probability=True, random_state=42)),
+]
+
+# The meta-learner (final_estimator) is trained on the base learners' OUT-OF-FOLD
+# predictions -- sklearn handles this internally via cross-validation (cv=5) so
+# the meta-learner never sees predictions a base model made on its own training data.
+stack = StackingClassifier(
+    estimators=base_learners,
+    final_estimator=LogisticRegression(),
+    cv=5,
+)
+
+# Compare each base learner alone vs the stacked ensemble
+for name, model in base_learners:
+    scores = cross_val_score(model, X, y, cv=5, scoring='accuracy')
+    print(f"{name:5s} alone:  {scores.mean():.4f} ± {scores.std():.4f}")
+
+stack_scores = cross_val_score(stack, X, y, cv=5, scoring='accuracy')
+print(f"\nStacked ensemble: {stack_scores.mean():.4f} ± {stack_scores.std():.4f}")
+# Stacking typically beats every individual base learner, and often beats
+# simple voting too -- the meta-learner can weigh SVC more heavily on
+# examples where trees struggle, and vice versa, instead of a fixed blend.</code></pre>
+
+  <div class="callout callout-key">
+    <span class="callout-icon">🔑</span>
+    <div class="callout-body">
+      <strong>Why Out-of-Fold Predictions Matter</strong>
+      <p>If the meta-learner trained on predictions the base models made on their <em>own</em> training data, it would be learning from overfit, overly-confident predictions that don't reflect real generalization error — and the whole ensemble would overfit. <code>StackingClassifier</code>'s <code>cv</code> parameter fixes this automatically: each base model's contribution to the meta-learner's training set comes from when that example was in a held-out fold, exactly like cross-validation's train/test discipline (Lesson 20), just nested one level deeper.</p>
+    </div>
+  </div>
+
+  <p>Stacking's practical cost is complexity and inference latency — you're now running every base model plus a meta-learner for every prediction — so it earns its place when the accuracy gain over the best single model or a simple voting ensemble is worth that overhead: Kaggle-style competitions where every fraction of a point matters, or high-value predictions (credit risk, fraud) where marginal accuracy translates directly into money.</p>
+
+  <table style="width:100%; border-collapse: collapse; margin: 1.25rem 0; font-size: 0.88rem;">
+    <thead>
+      <tr style="background: var(--bg-alt); text-align: left;">
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Ensembling approach</th>
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Combination rule</th>
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">When it shines</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Voting (Sections 2–4)</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Fixed — majority or weighted average</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Simple, fast, hard to overfit; good default</td>
+      </tr>
+      <tr style="background: var(--bg-subtle);">
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Bagging / Random Forest (Sections 5–8)</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Average over many <em>same-type</em> models on bootstrapped data</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Reducing variance of a single high-variance model type</td>
+      </tr>
+      <tr>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Stacking</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Learned — a trained meta-model</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Squeezing out the last bit of accuracy from diverse model types</td>
+      </tr>
+    </tbody>
+  </table>
 </div>
 
 <!-- ── Real-World Spotlight ── -->
@@ -550,7 +630,7 @@ print(f"\nFeatures in both top-10 lists: {len(top_imp & top_perm)}/10")
     <span style="font-size:1.5rem">🌍</span>
     <h2>Real-World Spotlight: Fraud Detection with Random Forest</h2>
   </div>
-  <p>Online fraud datasets are characterised by severe class imbalance (often 0.1–1% fraud), and both false positives (blocking legitimate customers) and false negatives (missing fraud) are costly. Random Forests with <code>class_weight='balanced'</code> and OOB evaluation are a standard strong baseline in the industry.</p>
+  <p>Online fraud datasets are characterized by severe class imbalance (often 0.1–1% fraud), and both false positives (blocking legitimate customers) and false negatives (missing fraud) are costly. Random Forests with <code>class_weight='balanced'</code> and OOB evaluation are a standard strong baseline in the industry.</p>
   <pre><code class="language-python">import numpy as np
 import pandas as pd
 from sklearn.ensemble import VotingClassifier, RandomForestClassifier
@@ -802,18 +882,29 @@ new MLQuiz('lesson-23-quiz', [
       "Test set samples used to validate the final ensemble after training"
     ],
     correct: 0,
-    explanation: "When a bootstrap sample of n items is drawn with replacement from n training examples, on average about 36.8% of training examples are not selected. These 'out-of-bag' samples are never seen during training for that particular tree, so they can be used to evaluate it. Averaging OOB predictions across all trees gives the OOB score — a reliable estimate of generalisation performance without needing a separate validation set."
+    explanation: "When a bootstrap sample of n items is drawn with replacement from n training examples, on average about 36.8% of training examples are not selected. These 'out-of-bag' samples are never seen during training for that particular tree, so they can be used to evaluate it. Averaging OOB predictions across all trees gives the OOB score — a reliable estimate of generalization performance without needing a separate validation set."
   },
   {
     question: "Why do Random Forests generally outperform single decision trees?",
     options: [
       "By averaging many trees trained on different data and feature subsets, they reduce variance while maintaining low bias",
       "Random Forests use deeper trees that can capture more complex patterns than a single tree",
-      "Random Forests use gradient descent to optimise the ensemble, unlike single trees",
+      "Random Forests use gradient descent to optimize the ensemble, unlike single trees",
       "Random Forests apply regularization to each tree's coefficients, reducing overfitting"
     ],
     correct: 0,
     explanation: "A single deep decision tree has low bias (it can fit complex patterns) but high variance (it changes a lot with different training data — it memorises noise). Random Forest keeps the low bias by using deep trees but reduces variance by averaging many trees trained on different bootstrap samples and different feature subsets. The individual trees' errors cancel out, leading to a much more stable, accurate model."
+  },
+  {
+    question: "In StackingClassifier, why must the meta-learner be trained on each base model's OUT-OF-FOLD predictions rather than predictions made on the base models' own training data?",
+    options: [
+      "Predictions on a model's own training data are overly optimistic (overfit), so training the meta-learner on them would teach it to trust overconfident, non-generalizing signals",
+      "sklearn raises a runtime error if in-fold predictions are used",
+      "Out-of-fold predictions are always more accurate than in-fold predictions",
+      "It has no real effect on the final ensemble's performance either way"
+    ],
+    correct: 0,
+    explanation: "A base model's predictions on the exact data it was trained on are systematically too confident and too accurate compared to how it performs on genuinely unseen data. If the meta-learner trained on these inflated, overfit predictions, it would learn a combination rule that looks great in training but fails to generalize. Using out-of-fold predictions (generated via internal cross-validation, StackingClassifier's cv parameter) ensures the meta-learner only ever sees realistic, held-out-quality signal from each base model -- the same discipline that makes ordinary cross-validation trustworthy."
   }
 ]);
 </script>

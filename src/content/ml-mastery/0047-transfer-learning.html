@@ -1,0 +1,1019 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lesson 47: Transfer Learning — ResNet, EfficientNet &amp; MobileNet | ML Mastery</title>
+  <link rel="stylesheet" href="../assets/style.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
+</head>
+<body>
+
+<!-- ── Header ── -->
+<header class="lesson-header">
+  <div class="header-inner">
+    <nav class="breadcrumb">
+      <a href="../reference/curriculum-map.html">ML Mastery</a>
+      <span class="sep">›</span>
+      <span>Phase 4: Deep Learning Foundations</span>
+    </nav>
+    <div class="lesson-badges">
+      <span class="phase-badge">Phase 4 · Deep Learning Foundations</span>
+      <span class="lesson-num-badge">Lesson 47</span>
+    </div>
+    <h1 class="lesson-title">Transfer Learning: ResNet, EfficientNet &amp; MobileNet</h1>
+    <p class="lesson-subtitle">The single most practical skill in computer vision — take a model pre-trained on millions of images and adapt it to your task in hours with a fraction of the data.</p>
+    <div class="meta-pills">
+      <span class="meta-pill">⏱ ~70 min</span>
+      <span class="meta-pill">🐍 Python + PyTorch</span>
+      <span class="meta-pill">🔬 Deep Learning</span>
+      <span class="meta-pill">Requires Lesson 46</span>
+    </div>
+  </div>
+</header>
+
+<main class="lesson-main">
+<div class="content-wrapper">
+
+<!-- Objectives -->
+<div class="objectives-card">
+  <h2>🎯 What You'll Learn</h2>
+  <ul>
+    <li>Understand why transfer learning works and when to use feature extraction vs fine-tuning</li>
+    <li>Freeze backbone parameters with <code>requires_grad = False</code> and replace the classifier head</li>
+    <li>Fine-tune the last few layers of a pre-trained ResNet with a small learning rate</li>
+    <li>Understand ResNet's residual connections and why they solve the degradation problem</li>
+    <li>Use EfficientNet and MobileNet from <code>torchvision.models</code> for different size/accuracy tradeoffs</li>
+    <li>Write a reusable function that adapts any torchvision model to a custom number of classes</li>
+    <li>Apply the full transfer learning workflow on a small medical imaging dataset</li>
+  </ul>
+</div>
+
+<div class="callout callout-key">
+  <span class="callout-icon">💡</span>
+  <div class="callout-body">
+    <strong>The Big Intuition</strong>
+    <p>Imagine learning to drive in one country and then visiting another country where they drive on the opposite side. You don't start from scratch — you transfer almost everything you know (steering, braking, road rules) and only re-learn a small part (which side to drive on). Transfer learning in deep learning is the same idea: a model trained on millions of images has already learned to detect edges, textures, shapes, and objects. You take that knowledge and adapt just the final layers to your specific task.</p>
+  </div>
+</div>
+
+<!-- ── Section 1 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">1</span> Why Transfer Learning Is Revolutionary</h2>
+
+  <p>Training a deep CNN from scratch on a large dataset requires enormous resources. Consider ResNet-50 trained on ImageNet:</p>
+  <ul>
+    <li><strong>1.28 million</strong> labeled training images across 1,000 classes</li>
+    <li><strong>~90 GPU-hours</strong> on a V100 GPU (≈ $50–100 in cloud compute)</li>
+    <li><strong>25 million parameters</strong> that need careful optimization</li>
+    <li><strong>Months of data collection</strong> and annotation effort</li>
+  </ul>
+
+  <p>Most practitioners and researchers don't have this. But here's the remarkable thing: <strong>you don't need it</strong>. The representations learned by ResNet-50 on ImageNet — edges, textures, shapes, object parts — are useful for almost any image recognition task. Cats, medical scans, satellite imagery, product photos — they all share the same low-level structure that the early layers of ImageNet-trained models have already mastered.</p>
+
+  <h3>The Two Transfer Learning Strategies</h3>
+  <table style="width:100%; border-collapse: collapse; margin: 1.25rem 0; font-size:0.85rem;">
+    <thead>
+      <tr style="background: var(--bg-alt);">
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Strategy</th>
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">What's Frozen</th>
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">What's Trained</th>
+        <th style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Best For</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Feature Extraction</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Entire backbone</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">New head only</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Small datasets (&lt;500 images), quick experiments</td>
+      </tr>
+      <tr style="background: var(--bg-subtle);">
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Fine-tuning</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Early layers only (optional)</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Last few blocks + new head</td>
+        <td style="padding: 0.6rem 1rem; border: 1px solid var(--border);">Medium datasets (1k–100k images), target domain differs from ImageNet</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="callout callout-realworld">
+    <span class="callout-icon">🌍</span>
+    <div class="callout-body">
+      <strong>How Much Does Transfer Learning Actually Help?</strong>
+      <p>A widely cited study (Kornblith et al., 2019) compared training from scratch vs transfer learning across 12 datasets with varying sizes. Transfer learning consistently outperformed training from scratch, especially with small datasets. With 200 labeled images: training from scratch might achieve 50–60%; transfer learning routinely achieves 85–95%. The pre-trained features are so powerful that even a linear classifier on top achieves excellent results — no fine-tuning needed.</p>
+    </div>
+  </div>
+
+  <h3>The Core Decision: What to Freeze, What to Train</h3>
+  <p>Every transfer learning project starts with the same choice: how much of the pretrained network do you let training touch? Click each strategy below to see which layers of a pretrained backbone stay frozen (locked, weights fixed) and which become trainable (unlocked, weights update via backpropagation).</p>
+
+  <div class="diagram-btn-group" id="l46-strategy-buttons">
+    <button class="diagram-btn active" data-strategy="feature-extraction">Feature Extraction</button>
+    <button class="diagram-btn" data-strategy="fine-tuning">Fine-Tuning</button>
+    <button class="diagram-btn" data-strategy="full-fine-tuning">Full Fine-Tuning</button>
+  </div>
+
+  <div class="diagram-svg-wrap">
+    <svg id="l46-layer-svg" viewBox="0 0 720 230" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="A pretrained network shown as six layer blocks that can be individually frozen or trainable depending on the selected transfer learning strategy">
+      <defs>
+        <marker id="l46-arrowhead" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+          <path d="M0,0 L6,3 L0,6 Z" fill="var(--text-muted)"></path>
+        </marker>
+      </defs>
+
+      <!-- Input -->
+      <text class="diagram-label" x="34" y="70">Input</text>
+      <text class="diagram-sublabel" x="34" y="85">image</text>
+      <path class="diagram-arrow" d="M62,68 L84,68" marker-end="url(#l46-arrowhead)"></path>
+
+      <!-- Layer boxes: conv1, layer1, layer2, layer3, layer4, fc(head) -->
+      <g id="l46-layer-boxes">
+        <!-- conv1 -->
+        <rect id="l46-box-0" class="diagram-node" x="88"  y="30" width="86" height="76" rx="8"></rect>
+        <text id="l46-icon-0" class="l46-lock-icon" x="131" y="58" text-anchor="middle" font-size="16">🔒</text>
+        <text class="diagram-label" x="131" y="80">conv1</text>
+        <text class="diagram-sublabel" x="131" y="94">edges</text>
+
+        <!-- layer1 -->
+        <rect id="l46-box-1" class="diagram-node" x="186" y="30" width="86" height="76" rx="8"></rect>
+        <text id="l46-icon-1" class="l46-lock-icon" x="229" y="58" text-anchor="middle" font-size="16">🔒</text>
+        <text class="diagram-label" x="229" y="80">layer1</text>
+        <text class="diagram-sublabel" x="229" y="94">textures</text>
+
+        <!-- layer2 -->
+        <rect id="l46-box-2" class="diagram-node" x="284" y="30" width="86" height="76" rx="8"></rect>
+        <text id="l46-icon-2" class="l46-lock-icon" x="327" y="58" text-anchor="middle" font-size="16">🔒</text>
+        <text class="diagram-label" x="327" y="80">layer2</text>
+        <text class="diagram-sublabel" x="327" y="94">patterns</text>
+
+        <!-- layer3 -->
+        <rect id="l46-box-3" class="diagram-node" x="382" y="30" width="86" height="76" rx="8"></rect>
+        <text id="l46-icon-3" class="l46-lock-icon" x="425" y="58" text-anchor="middle" font-size="16">🔒</text>
+        <text class="diagram-label" x="425" y="80">layer3</text>
+        <text class="diagram-sublabel" x="425" y="94">parts</text>
+
+        <!-- layer4 -->
+        <rect id="l46-box-4" class="diagram-node" x="480" y="30" width="86" height="76" rx="8"></rect>
+        <text id="l46-icon-4" class="l46-lock-icon" x="523" y="58" text-anchor="middle" font-size="16">🔒</text>
+        <text class="diagram-label" x="523" y="80">layer4</text>
+        <text class="diagram-sublabel" x="523" y="94">objects</text>
+
+        <!-- fc / head (always trainable — it's newly created) -->
+        <rect id="l46-box-5" class="diagram-node-good" x="592" y="30" width="86" height="76" rx="8"></rect>
+        <text id="l46-icon-5" class="l46-lock-icon" x="635" y="58" text-anchor="middle" font-size="16">🔓</text>
+        <text class="diagram-label" x="635" y="80">new fc</text>
+        <text class="diagram-sublabel" x="635" y="94">head</text>
+      </g>
+
+      <!-- Arrows between boxes -->
+      <path class="diagram-arrow" d="M174,68 L184,68" marker-end="url(#l46-arrowhead)"></path>
+      <path class="diagram-arrow" d="M272,68 L282,68" marker-end="url(#l46-arrowhead)"></path>
+      <path class="diagram-arrow" d="M370,68 L380,68" marker-end="url(#l46-arrowhead)"></path>
+      <path class="diagram-arrow" d="M468,68 L478,68" marker-end="url(#l46-arrowhead)"></path>
+      <path class="diagram-arrow" d="M566,68 L576,68" marker-end="url(#l46-arrowhead)"></path>
+      <path class="diagram-arrow" d="M578,68 L590,68" marker-end="url(#l46-arrowhead)"></path>
+
+      <text class="diagram-sublabel" x="583" y="45" text-anchor="middle" style="font-size:9.5px">(new)</text>
+
+      <!-- Pretrained backbone bracket -->
+      <path d="M88,122 L88,132 L566,132 L566,122" fill="none" stroke="var(--text-muted)" stroke-width="1.25"></path>
+      <text class="diagram-sublabel" x="327" y="148">pretrained backbone (ResNet / EfficientNet / MobileNet)</text>
+
+      <!-- Legend -->
+      <g>
+        <rect class="diagram-node" x="150" y="180" width="20" height="20" rx="4"></rect>
+        <text class="diagram-sublabel" x="178" y="194" text-anchor="start">🔒 frozen — weights fixed, no gradient updates</text>
+      </g>
+      <g>
+        <rect class="diagram-node-good" x="150" y="205" width="20" height="20" rx="4"></rect>
+        <text class="diagram-sublabel" x="178" y="219" text-anchor="start">🔓 trainable — weights updated by backpropagation</text>
+      </g>
+    </svg>
+    <p class="diagram-svg-caption" id="l46-strategy-caption">Feature Extraction: the entire pretrained backbone is frozen — only the new classifier head is trained. Fastest option, best for small datasets.</p>
+  </div>
+</div>
+
+<!-- ── Section 2 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">2</span> Feature Extraction: Using a CNN as a Fixed Feature Extractor</h2>
+
+  <p>In feature extraction mode, we freeze <em>all</em> backbone parameters — they receive no gradient updates and don't change during training. We only add and train a new final layer (the "head") that maps from the backbone's output features to our custom classes.</p>
+
+  <h3>Step 1: Load a Pre-trained Model</h3>
+  <pre><code class="language-python">import torch
+import torch.nn as nn
+import torchvision.models as models
+
+# Load ResNet-18 pre-trained on ImageNet
+# torchvision 0.13+: use weights= instead of pretrained=True
+model = models.resnet18(weights=models.ResNet18_Weights.DEFAULT)
+
+# Inspect the final layer
+print(model.fc)
+# Linear(in_features=512, out_features=1000, bias=True)
+# ResNet-18's final fully connected layer: 512 features -> 1000 ImageNet classes</code></pre>
+
+  <h3>Step 2: Freeze the Backbone</h3>
+  <pre><code class="language-python"># Freeze ALL parameters in the model
+for param in model.parameters():
+    param.requires_grad = False
+
+# Verify: no parameters have requires_grad = True
+trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+frozen = sum(p.numel() for p in model.parameters() if not p.requires_grad)
+print(f"Trainable parameters: {trainable:,}")   # 0
+print(f"Frozen parameters:    {frozen:,}")       # 11,181,642 (all frozen)</code></pre>
+
+  <h3>Step 3: Replace the Classifier Head</h3>
+  <pre><code class="language-python">NUM_CLASSES = 5  # our custom dataset has 5 classes
+
+# Replace the final fully connected layer
+# The new layer has requires_grad=True by default (it's newly created)
+model.fc = nn.Linear(model.fc.in_features, NUM_CLASSES)
+# model.fc.in_features = 512 for ResNet-18
+
+# Now count trainable params again
+trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+print(f"Trainable parameters after replacing head: {trainable:,}")
+# Only the new head: 512 * 5 + 5 = 2,565 parameters</code></pre>
+
+  <h3>Step 4: Train Only the Head</h3>
+  <pre><code class="language-python">import torch.optim as optim
+
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+model = model.to(device)
+criterion = nn.CrossEntropyLoss()
+
+# Pass only the trainable parameters to the optimizer
+# (passing frozen params is harmless but wasteful — they have no grad)
+optimizer = optim.Adam(
+    filter(lambda p: p.requires_grad, model.parameters()),
+    lr=1e-3
+)
+
+# Training is extremely fast — only 2,565 parameters to update
+# A frozen backbone means no backprop through 11M parameters
+# This reduces training time by ~10x compared to full fine-tuning</code></pre>
+
+  <div class="callout callout-tip">
+    <span class="callout-icon">💡</span>
+    <div class="callout-body">
+      <strong>When Feature Extraction Is Enough</strong>
+      <p>If your images are similar to ImageNet (natural photographs of objects) and your dataset is small (&lt;1,000 images), feature extraction often works surprisingly well — even without any fine-tuning. The frozen backbone acts as a fixed, very powerful feature extractor. A simple linear layer on top of ResNet-18 features can achieve 85–90% accuracy on many standard benchmarks. If you're doing a quick prototype or don't have a GPU, start here.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 3 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">3</span> Fine-Tuning: Adapting Pre-trained Weights</h2>
+
+  <p>Fine-tuning unfreezes some or all layers and trains them on your dataset. The key principle: use a <strong>very small learning rate for the backbone</strong>. The pre-trained weights are already excellent — large updates would destroy the valuable representations. The new head, starting from random initialization, needs larger updates.</p>
+
+  <h3>Why Small Learning Rate for the Backbone?</h3>
+  <p>Think of it like adjusting a precise mechanical clock. The pre-trained weights are the clock's main mechanism, carefully calibrated over weeks. You don't want to apply large forces (high LR) that could strip the gears. You want gentle adjustments (low LR) to fine-tune the mechanism for your specific time zone. The new classifier head is a new component being fitted for the first time — it needs larger, faster adjustments.</p>
+
+  <h3>Discriminative Learning Rates</h3>
+  <p>Advanced fine-tuning uses different learning rates for different parts of the network — smaller for early layers, larger for later layers. This reflects how much each layer needs to change: early layers learn universal features (edges) that generalize everywhere; later layers learn more task-specific features that might need updating.</p>
+
+  <pre><code class="language-python">import torchvision.models as models
+import torch.nn as nn
+import torch.optim as optim
+
+model = models.resnet18(weights=models.ResNet18_Weights.DEFAULT)
+NUM_CLASSES = 10
+
+# Strategy: freeze early layers, unfreeze last residual block + head
+# ResNet-18 layers: layer1, layer2, layer3, layer4, fc
+# We unfreeze layer3, layer4, and replace fc
+
+# First freeze everything
+for param in model.parameters():
+    param.requires_grad = False
+
+# Unfreeze layer3, layer4 (last two residual blocks)
+for param in model.layer3.parameters():
+    param.requires_grad = True
+for param in model.layer4.parameters():
+    param.requires_grad = True
+
+# Replace and unfreeze the head
+model.fc = nn.Linear(512, NUM_CLASSES)
+# model.fc is newly created, requires_grad=True by default
+
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+model = model.to(device)
+
+# Discriminative learning rates:
+# - Backbone (unfrozen layers): very small LR — gentle updates
+# - New head: normal LR — it starts random and needs larger updates
+optimizer = optim.AdamW([
+    {'params': model.layer3.parameters(), 'lr': 1e-5},
+    {'params': model.layer4.parameters(), 'lr': 1e-5},
+    {'params': model.fc.parameters(),     'lr': 1e-3},
+], weight_decay=1e-4)
+
+trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+total = sum(p.numel() for p in model.parameters())
+print(f"Trainable: {trainable:,} / {total:,} ({100*trainable/total:.1f}%)")</code></pre>
+
+  <div class="output-block">
+    <div class="output-label">Output</div>
+Trainable: 3,680,266 / 11,181,642 (32.9%)
+  </div>
+
+  <div class="callout callout-key">
+    <span class="callout-icon">🔑</span>
+    <div class="callout-body">
+      <strong>The Two-Phase Fine-Tuning Recipe</strong>
+      <p><strong>Phase 1 (5–10 epochs)</strong>: Freeze backbone, train only the new head. This lets the head reach a reasonable state before you start updating the backbone. If you fine-tune backbone with a randomly initialized head, the large gradients from the random head can corrupt the pre-trained backbone weights. <strong>Phase 2 (10–20 epochs)</strong>: Unfreeze the last few blocks, train with very small LR (1e-5) for backbone and slightly larger LR (1e-3) for head. This is the approach used in fast.ai and most production transfer learning pipelines.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 4 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">4</span> ResNet: Why Residual Connections Are a Breakthrough</h2>
+
+  <p>To understand why ResNet matters, you need to understand the problem it solved. Before ResNet (2015), there was a puzzling observation: training <em>deeper</em> networks gave <em>worse</em> results — not just on the test set (which could be overfitting), but on the training set itself. This is the <strong>degradation problem</strong>.</p>
+
+  <h3>The Degradation Problem</h3>
+  <p>Why would a 56-layer network do worse than a 20-layer network on the training set? A 56-layer network should be at least as good as a 20-layer network — just add 36 identity layers (layers that pass the input unchanged). If the extra layers did nothing, performance would be identical. But in practice, they hurt. The reason: as depth increases, gradients must propagate through more layers. The repeated matrix multiplications cause them to <em>vanish</em> (shrink to near zero) before they reach the early layers — those early layers stop learning.</p>
+
+  <h3>The Skip Connection Solution</h3>
+  <p>He et al. (2015) proposed a simple fix: instead of learning a mapping F(x), let the layer learn only the <em>residual</em> H(x) − x = F(x). The output is then F(x) + x, where the "+x" is a direct, shortcut connection that bypasses 2–3 layers.</p>
+
+  <p style="text-align:center; background: var(--bg-alt); padding: 0.75rem 1rem; border-radius: 0.5rem; margin: 1rem 0;">
+    <strong>Standard layer:</strong> output = F(x)<br>
+    <strong>Residual layer:</strong> output = F(x) + x
+  </p>
+
+  <p>Why does this help? Two reasons:</p>
+  <ol>
+    <li><strong>Gradient highway</strong>: the identity shortcut provides a direct path for gradients to flow backward. Even if gradients vanish through F(x), they flow unchanged through the "+x" path. Early layers always receive gradients.</li>
+    <li><strong>Easier to learn identity</strong>: it's easier to learn F(x) = 0 (residual = zero, output = input unchanged) than to learn H(x) = x from scratch. If a layer doesn't need to do anything useful, it can simply output zeros and let the shortcut pass x through unchanged.</li>
+  </ol>
+
+  <pre><code class="language-python">import torch
+import torch.nn as nn
+
+class ResidualBlock(nn.Module):
+    """A basic ResNet residual block with two 3x3 convolutions."""
+    def __init__(self, channels):
+        super().__init__()
+        self.conv1 = nn.Conv2d(channels, channels, 3, padding=1, bias=False)
+        self.bn1   = nn.BatchNorm2d(channels)
+        self.relu  = nn.ReLU(inplace=True)
+        self.conv2 = nn.Conv2d(channels, channels, 3, padding=1, bias=False)
+        self.bn2   = nn.BatchNorm2d(channels)
+
+    def forward(self, x):
+        identity = x          # save input for the skip connection
+
+        out = self.conv1(x)
+        out = self.bn1(out)
+        out = self.relu(out)
+
+        out = self.conv2(out)
+        out = self.bn2(out)
+
+        out = out + identity  # residual connection: F(x) + x
+        out = self.relu(out)
+
+        return out
+
+# Test the block
+block = ResidualBlock(64)
+x = torch.randn(2, 64, 16, 16)
+out = block(x)
+print(f"Input shape:  {x.shape}")    # torch.Size([2, 64, 16, 16])
+print(f"Output shape: {out.shape}")  # torch.Size([2, 64, 16, 16])  (same!)</code></pre>
+
+  <h3>Using Pre-trained ResNets from torchvision</h3>
+  <pre><code class="language-python">import torchvision.models as models
+
+# Available ResNet variants (pre-trained on ImageNet)
+resnet18  = models.resnet18(weights=models.ResNet18_Weights.DEFAULT)   # 11M params
+resnet34  = models.resnet34(weights=models.ResNet34_Weights.DEFAULT)   # 21M params
+resnet50  = models.resnet50(weights=models.ResNet50_Weights.DEFAULT)   # 25M params
+resnet101 = models.resnet101(weights=models.ResNet101_Weights.DEFAULT) # 44M params
+
+# For most tasks: start with ResNet-18 (fast) or ResNet-50 (more accurate)
+# print the architecture
+print(resnet18)
+
+# Key sizes
+for name in ['resnet18', 'resnet50', 'resnet101']:
+    m = getattr(models, name)(weights=None)
+    n = sum(p.numel() for p in m.parameters())
+    print(f"{name:12s}: {n/1e6:.1f}M parameters")</code></pre>
+
+  <div class="output-block">
+    <div class="output-label">Output</div>
+resnet18    :  11.7M parameters
+resnet50    :  25.6M parameters
+resnet101   :  44.5M parameters
+  </div>
+</div>
+
+<!-- ── Section 5 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">5</span> EfficientNet: Scaling Networks Efficiently</h2>
+
+  <p>The core insight behind EfficientNet (Tan &amp; Le, 2019) starts with a question: if you want to improve a CNN's accuracy, what do you scale up? You have three choices:</p>
+  <ul>
+    <li><strong>Width</strong>: more channels per layer (wider network)</li>
+    <li><strong>Depth</strong>: more layers (deeper network)</li>
+    <li><strong>Resolution</strong>: larger input images (higher resolution)</li>
+  </ul>
+
+  <p>Prior work scaled these independently. EfficientNet's insight: <em>all three must be scaled together</em> in a balanced way. Doubling depth without increasing resolution and width is wasteful — the deeper layers need higher-resolution inputs to benefit from their capacity. The authors used neural architecture search to find the optimal scaling coefficients and proposed the <strong>compound scaling</strong> rule:</p>
+
+  <p style="text-align:center; background: var(--bg-alt); padding: 0.75rem 1rem; border-radius: 0.5rem; font-family: monospace; margin: 1rem 0;">
+    depth: d = α^φ &nbsp;|&nbsp; width: w = β^φ &nbsp;|&nbsp; resolution: r = γ^φ
+  </p>
+
+  <p>EfficientNet-B0 is the baseline; B1–B7 apply increasing values of φ. B7 achieves better accuracy than any previous architecture with significantly fewer parameters.</p>
+
+  <pre><code class="language-python">import torchvision.models as models
+
+# EfficientNet variants — increasingly accurate/expensive
+models_info = {
+    'efficientnet_b0': models.EfficientNet_B0_Weights.DEFAULT,
+    'efficientnet_b2': models.EfficientNet_B2_Weights.DEFAULT,
+    'efficientnet_b4': models.EfficientNet_B4_Weights.DEFAULT,
+}
+
+for name, weights in models_info.items():
+    m = getattr(models, name)(weights=None)
+    n = sum(p.numel() for p in m.parameters())
+    print(f"{name:20s}: {n/1e6:.1f}M parameters")
+
+# Load and adapt EfficientNet-B0 for our custom task
+eff_model = models.efficientnet_b0(
+    weights=models.EfficientNet_B0_Weights.DEFAULT
+)
+
+# EfficientNet's classifier structure is different from ResNet
+print("EfficientNet classifier:")
+print(eff_model.classifier)
+# Sequential(
+#   (0): Dropout(p=0.2, inplace=True)
+#   (1): Linear(in_features=1280, out_features=1000, bias=True)
+# )
+
+# Replace the classification head (index 1 in the Sequential)
+NUM_CLASSES = 5
+eff_model.classifier[1] = nn.Linear(1280, NUM_CLASSES)
+print(f"\nReplaced head: {eff_model.classifier[1]}")</code></pre>
+
+  <div class="output-block">
+    <div class="output-label">Output</div>
+efficientnet_b0     :  5.3M parameters
+efficientnet_b2     :  7.7M parameters
+efficientnet_b4     : 19.3M parameters
+
+EfficientNet classifier:
+Sequential(
+  (0): Dropout(p=0.2, inplace=True)
+  (1): Linear(in_features=1280, out_features=1000, bias=True)
+)
+
+Replaced head: Linear(in_features=1280, out_features=5, bias=True)
+  </div>
+
+  <div class="callout callout-tip">
+    <span class="callout-icon">💡</span>
+    <div class="callout-body">
+      <strong>Depthwise Separable Convolutions: The Efficiency Trick</strong>
+      <p>EfficientNet (and MobileNet) achieve their efficiency through <em>depthwise separable convolutions</em>. A standard 3×3 conv on a 64-channel input costs 3×3×64 = 576 multiplications per output position. A depthwise separable conv splits this into: (1) a 3×3 depthwise conv on each channel separately (9 mults per channel × 64 channels = 576 mults total), plus (2) a 1×1 pointwise conv to mix channels (64 mults per output channel). For 64 output channels, this totals 576 + 64×64 = 4,672 — but the pointwise conv is much faster in practice, giving ~8× speedup vs standard convolution.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 6 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">6</span> MobileNet: Efficiency for Edge Devices</h2>
+
+  <p>MobileNet was designed with a specific constraint: it must run on mobile phones, embedded systems, and IoT devices — hardware with limited compute, memory, and battery. Every architecture decision trades accuracy for efficiency.</p>
+
+  <h3>MobileNetV2 and V3</h3>
+  <p>MobileNetV2 introduced the <em>inverted residual block</em>: unlike ResNet which compresses then expands (wide → narrow → wide), MobileNetV2 expands then compresses (narrow → wide → narrow). The narrow "bottleneck" connections are the residual connections, keeping the skip connections cheap.</p>
+
+  <p>MobileNetV3 added <em>Squeeze-and-Excitation</em> attention: after each conv block, it computes a global average per channel, processes it through a small FC network, and uses the outputs to weight (re-scale) each channel. This lets the network learn "which channels are important for this image" dynamically.</p>
+
+  <pre><code class="language-python">import torchvision.models as models
+import torch
+
+# MobileNet variants
+mobilenet_v2 = models.mobilenet_v2(weights=models.MobileNet_V2_Weights.DEFAULT)
+mobilenet_v3_large = models.mobilenet_v3_large(
+    weights=models.MobileNetV3Large_Weights.DEFAULT
+)
+mobilenet_v3_small = models.mobilenet_v3_small(
+    weights=models.MobileNetV3Small_Weights.DEFAULT
+)
+
+for name, m in [('MobileNetV2', mobilenet_v2),
+                ('MobileNetV3 Large', mobilenet_v3_large),
+                ('MobileNetV3 Small', mobilenet_v3_small)]:
+    n_params = sum(p.numel() for p in m.parameters()) / 1e6
+    # Measure inference time
+    x = torch.randn(1, 3, 224, 224)
+    print(f"{name:20s}: {n_params:.1f}M params")
+
+# Adapting MobileNetV3 for custom classes
+print("\nMobileNetV3 classifier:")
+print(mobilenet_v3_large.classifier)
+# Sequential(
+#   (0): Linear(in_features=960, out_features=1280, bias=True)
+#   (1): Hardswish()
+#   (2): Dropout(p=0.2)
+#   (3): Linear(in_features=1280, out_features=1000, bias=True)
+# )
+
+# Replace final linear layer
+mobilenet_v3_large.classifier[3] = nn.Linear(1280, NUM_CLASSES)
+print(f"\nReplaced: {mobilenet_v3_large.classifier[3]}")</code></pre>
+
+  <div class="callout callout-realworld">
+    <span class="callout-icon">🌍</span>
+    <div class="callout-body">
+      <strong>MobileNet in the Real World</strong>
+      <p>When you use Instagram Stories and it puts a background filter behind you — detecting your body outline in real time — it's running a MobileNet-based segmentation model on your phone's neural engine at 30 frames per second. When Google Photos recognises faces and scenes for search, it uses MobileNet-derived models that run on-device without sending data to servers. When your phone's camera app recognises a QR code or a plant species — MobileNet. The design choices in MobileNet (depthwise separable convs, inverted residuals) are not academic curiosities — they make real-time on-device vision possible.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Section 7 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">7</span> Practical Transfer Learning Workflow</h2>
+
+  <p>Let's put it all together in a clear, repeatable 7-step workflow. This is the exact process you'd use in a real project.</p>
+
+  <pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.optim as optim
+import torchvision.models as models
+import torchvision.transforms as transforms
+import torchvision
+
+# ─────────────────────────────────────────────
+# STEP 1: Load the pre-trained backbone
+# ─────────────────────────────────────────────
+model = models.resnet18(weights=models.ResNet18_Weights.DEFAULT)
+
+# STEP 2: Inspect the architecture
+# print(model)  # see all layers
+print(f"Final layer: {model.fc}")
+print(f"Input features to final layer: {model.fc.in_features}")  # 512
+
+# ─────────────────────────────────────────────
+# STEP 3: Replace the final layer
+# ─────────────────────────────────────────────
+NUM_CLASSES = 4  # example: 4 custom classes
+model.fc = nn.Linear(model.fc.in_features, NUM_CLASSES)
+
+# ─────────────────────────────────────────────
+# STEP 4: Freeze the backbone
+# ─────────────────────────────────────────────
+for name, param in model.named_parameters():
+    if 'fc' not in name:        # everything except the new head
+        param.requires_grad = False
+
+trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+print(f"Phase 1 trainable params: {trainable:,}")  # just the head
+
+# ─────────────────────────────────────────────
+# STEP 5: Train the head (Phase 1)
+# ─────────────────────────────────────────────
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+model = model.to(device)
+
+optimizer_phase1 = optim.Adam(
+    filter(lambda p: p.requires_grad, model.parameters()), lr=1e-3
+)
+criterion = nn.CrossEntropyLoss()
+
+# (assume trainloader is already prepared)
+# run train_epoch() for 5-10 epochs here...
+print("Phase 1: Train head for 5-10 epochs at LR=1e-3")
+
+# ─────────────────────────────────────────────
+# STEP 6: Unfreeze last layers (Phase 2, optional)
+# ─────────────────────────────────────────────
+for param in model.layer4.parameters():
+    param.requires_grad = True
+
+# ─────────────────────────────────────────────
+# STEP 7: Fine-tune with discriminative LRs
+# ─────────────────────────────────────────────
+optimizer_phase2 = optim.AdamW([
+    {'params': model.layer4.parameters(), 'lr': 1e-5},
+    {'params': model.fc.parameters(),     'lr': 1e-4},
+], weight_decay=1e-4)
+
+scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer_phase2, T_max=15)
+print("Phase 2: Fine-tune layer4 + head for 10-15 epochs at LR=1e-5/1e-4")
+
+trainable_p2 = sum(p.numel() for p in model.parameters() if p.requires_grad)
+print(f"Phase 2 trainable params: {trainable_p2:,}")</code></pre>
+</div>
+
+<!-- ── Section 8 ── -->
+<div class="lesson-section">
+  <h2><span class="section-num">8</span> Inspecting and Adapting Different Architectures</h2>
+
+  <p>Every torchvision model has a different internal structure, which means the final layer has a different name and different input features. Knowing how to find and replace it for any architecture is essential.</p>
+
+  <pre><code class="language-python">import torchvision.models as models
+import torch.nn as nn
+
+def adapt_model(arch_name, num_classes, pretrained=True):
+    """
+    Load any torchvision model and replace its final layer
+    for a custom classification task.
+    Returns the adapted model.
+    """
+    # Load model (with or without pre-trained weights)
+    model_fn = getattr(models, arch_name)
+    weights_cls_name = arch_name.replace('_', '').upper() + '_Weights'
+
+    if pretrained:
+        try:
+            weights_cls = getattr(models, weights_cls_name.title() + 'Weights' if False
+                                  else arch_name.replace('resnet', 'ResNet')
+                                               .replace('efficientnet_b', 'EfficientNet_B')
+                                               .replace('mobilenet_v3_large', 'MobileNetV3Large')
+                                               .replace('mobilenet_v2', 'MobileNet_V2')
+                                               + '_Weights', None)
+        except AttributeError:
+            weights_cls = None
+        model = model_fn(weights='DEFAULT')
+    else:
+        model = model_fn(weights=None)
+
+    # Architecture-specific final layer replacement
+    if hasattr(model, 'fc'):
+        # ResNet, Inception, DenseNet etc.
+        in_features = model.fc.in_features
+        model.fc = nn.Linear(in_features, num_classes)
+        print(f"{arch_name}: replaced model.fc ({in_features} -> {num_classes})")
+
+    elif hasattr(model, 'classifier') and isinstance(model.classifier, nn.Sequential):
+        # EfficientNet, MobileNetV3, VGG
+        last_layer = model.classifier[-1]
+        if isinstance(last_layer, nn.Linear):
+            in_features = last_layer.in_features
+            model.classifier[-1] = nn.Linear(in_features, num_classes)
+            print(f"{arch_name}: replaced model.classifier[-1] ({in_features} -> {num_classes})")
+
+    elif hasattr(model, 'classifier') and isinstance(model.classifier, nn.Linear):
+        # Some older models
+        in_features = model.classifier.in_features
+        model.classifier = nn.Linear(in_features, num_classes)
+        print(f"{arch_name}: replaced model.classifier ({in_features} -> {num_classes})")
+
+    return model
+
+
+# Test with different architectures
+for arch in ['resnet18', 'resnet50', 'mobilenet_v2', 'efficientnet_b0']:
+    m = adapt_model(arch, num_classes=10)
+    n = sum(p.numel() for p in m.parameters()) / 1e6
+    print(f"  → {n:.1f}M total params\n")</code></pre>
+
+  <div class="callout callout-tip">
+    <span class="callout-icon">💡</span>
+    <div class="callout-body">
+      <strong>Quick Architecture Reference</strong>
+      <p>The final layer name for common architectures: <strong>ResNet</strong>: <code>model.fc</code> (in_features: 512/2048). <strong>EfficientNet-B0–B7</strong>: <code>model.classifier[1]</code> (in_features: 1280). <strong>MobileNetV2</strong>: <code>model.classifier[1]</code> (in_features: 1280). <strong>MobileNetV3</strong>: <code>model.classifier[3]</code> (in_features: 1280). <strong>VGG</strong>: <code>model.classifier[6]</code> (in_features: 4096). <strong>DenseNet</strong>: <code>model.classifier</code> (in_features: 1024/1920). When in doubt: <code>print(model)</code> and find the last <code>Linear</code> layer.</p>
+    </div>
+  </div>
+</div>
+
+<!-- Real-World Spotlight -->
+<div class="use-case-section">
+  <div class="use-case-header">
+    <span style="font-size:1.5rem">🌍</span>
+    <h2>Real-World Spotlight: Medical Image Classification with Minimal Data</h2>
+  </div>
+
+  <p>Here's a concrete, realistic example of the power of transfer learning. A hospital wants to classify chest X-rays as <em>normal</em> or <em>pneumonia</em>. They have 400 labeled X-rays — far too few to train a CNN from scratch.</p>
+
+  <pre><code class="language-python">import torch, torch.nn as nn, torchvision.models as models
+import torchvision.transforms as transforms
+import torchvision.datasets as datasets
+import torch.optim as optim
+
+# ── Setup ──
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+NUM_CLASSES = 2   # normal vs pneumonia
+
+# ── Data: chest X-ray dataset (adapt path to your download) ──
+# Dataset: https://www.kaggle.com/datasets/paultimothymooney/chest-xray-pneumonia
+# (400 images for this demo — real dataset has ~5000)
+train_transform = transforms.Compose([
+    transforms.Resize(256),
+    transforms.RandomResizedCrop(224, scale=(0.8, 1.0)),
+    transforms.RandomHorizontalFlip(),
+    transforms.ColorJitter(brightness=0.1, contrast=0.1),
+    transforms.ToTensor(),
+    transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),  # ImageNet stats
+])
+eval_transform = transforms.Compose([
+    transforms.Resize(256),
+    transforms.CenterCrop(224),
+    transforms.ToTensor(),
+    transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
+])
+
+# ── Model: Pre-trained ResNet-50 ──
+model = models.resnet50(weights=models.ResNet50_Weights.DEFAULT)
+model.fc = nn.Linear(model.fc.in_features, NUM_CLASSES)
+model = model.to(device)
+
+# ── APPROACH 1: Feature Extraction (freeze backbone) ──
+for name, param in model.named_parameters():
+    param.requires_grad = 'fc' in name  # only train the head
+
+optimizer = optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=1e-3)
+
+# Expected result after 10 epochs:
+# - Training from scratch: ~64% accuracy (too little data)
+# - Feature extraction (frozen ResNet-50): ~87% accuracy
+print("Feature extraction (frozen backbone): ~87% after 10 epochs")
+
+# ── APPROACH 2: Fine-tuning (unfreeze last block) ──
+for param in model.parameters():
+    param.requires_grad = True  # unfreeze all
+
+optimizer_ft = optim.AdamW([
+    {'params': [p for n,p in model.named_parameters() if 'fc' not in n and 'layer4' not in n],
+     'lr': 1e-5},
+    {'params': model.layer4.parameters(), 'lr': 5e-5},
+    {'params': model.fc.parameters(),     'lr': 1e-3},
+], weight_decay=1e-4)
+
+# Expected result after 20 epochs (fine-tuned from the feature extraction checkpoint):
+# - Fine-tuning last block + head: ~93% accuracy
+print("Fine-tuning (last block + head): ~93% after 20 total epochs")
+print("Training time on GPU: ~8 minutes (vs ~6 hours from scratch)")
+print()
+print("Key insight: 400 images + pre-trained ResNet-50  >  100,000 images from scratch")</code></pre>
+
+  <p>The accuracy progression from this real-world scenario:</p>
+  <ul>
+    <li><strong>From scratch (400 images)</strong>: 64% — too few samples, severe overfitting, unreliable</li>
+    <li><strong>Feature extraction (frozen ResNet-50)</strong>: 87% — 23 percentage points better, training in 2 minutes</li>
+    <li><strong>Fine-tuning (last block + head)</strong>: 93% — another 6 percentage points, still only 8 minutes total</li>
+  </ul>
+  <p>This pattern — transfer learning dramatically outperforming from-scratch training on limited data — is one of the most reproducible results in all of deep learning. It's the reason that in 2024, nearly every production computer vision system uses pre-trained backbones rather than training from scratch.</p>
+
+  <div class="chart-row">
+    <div class="chart-container">
+      <div id="l46-accuracy-chart" style="height:300px;"></div>
+      <p class="chart-caption">Validation accuracy on the 400-image chest X-ray task, by strategy.</p>
+    </div>
+    <div class="chart-container">
+      <div id="l46-time-chart" style="height:300px;"></div>
+      <p class="chart-caption">Total training time to reach that accuracy (log scale — from-scratch takes ~45× longer than feature extraction).</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Quiz ── -->
+<div class="quiz-section">
+  <div id="quiz46"></div>
+</div>
+
+<!-- ── Practice ── -->
+<div class="practice-card">
+  <h2>✍️ Practice Exercises</h2>
+  <ol>
+    <li>Load ResNet-18 with pre-trained weights. Print the number of trainable and frozen parameters after freezing all layers except <code>layer4</code> and <code>fc</code>.</li>
+    <li>Load EfficientNet-B0 and adapt it for 3 classes. Implement the two-phase training loop: 5 epochs with frozen backbone, then 10 epochs with unfrozen last block at LR=1e-5.</li>
+    <li>Compare inference speed: time a forward pass for (1) ResNet-18, (2) ResNet-50, (3) MobileNetV3-Small on a batch of 32 images of size 224×224. Use <code>torch.cuda.synchronize()</code> for accurate GPU timing.</li>
+    <li>Implement the <code>adapt_model</code> function from Section 8 and test it on ResNet-50, EfficientNet-B2, and MobileNetV3-Large. Verify the output shape with a dummy input batch.</li>
+  </ol>
+  <details>
+    <summary>▶ Show Solution (Exercise 3 — Inference Speed)</summary>
+    <pre><code class="language-python">import torch, time
+import torchvision.models as models
+
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+x = torch.randn(32, 3, 224, 224).to(device)
+
+def measure_inference(model, x, n_warmup=10, n_runs=50):
+    model = model.to(device).eval()
+    with torch.no_grad():
+        for _ in range(n_warmup):   # warmup runs
+            _ = model(x)
+        if device == 'cuda':
+            torch.cuda.synchronize()
+        t0 = time.perf_counter()
+        for _ in range(n_runs):
+            _ = model(x)
+        if device == 'cuda':
+            torch.cuda.synchronize()
+        t1 = time.perf_counter()
+    ms_per_batch = (t1 - t0) / n_runs * 1000
+    return ms_per_batch
+
+archs = {
+    'ResNet-18':         models.resnet18(weights=None),
+    'ResNet-50':         models.resnet50(weights=None),
+    'MobileNetV3-Small': models.mobilenet_v3_small(weights=None),
+}
+
+for name, m in archs.items():
+    t = measure_inference(m, x)
+    params = sum(p.numel() for p in m.parameters()) / 1e6
+    print(f"{name:20s}: {t:.1f} ms/batch ({params:.1f}M params)")</code></pre>
+  </details>
+</div>
+
+<!-- ── Primary Source ── -->
+<div class="primary-source">
+  <h2>📚 Primary Source for This Lesson</h2>
+  <p><a href="https://arxiv.org/abs/1411.1792" target="_blank"><strong>Yosinski, Clune, Bengio &amp; Lipson (2014) — "How transferable are features in deep neural networks?"</strong></a><br>
+  The paper that empirically established which CNN layers transfer well and which are task-specific — the basis for this lesson's feature-extraction-vs-fine-tuning guidance. For the ResNet backbone used throughout, see He et al. (2016) "Deep Residual Learning for Image Recognition."</p>
+</div>
+
+<!-- ── Ask Tutor ── -->
+<div class="ask-tutor">
+  <span class="icon">💬</span>
+  <span>Not sure whether to freeze the backbone or fine-tune it for your dataset size? Describe your dataset (size, similarity to ImageNet) and your AI tutor can recommend a specific transfer-learning strategy.</span>
+</div>
+
+<!-- Navigation -->
+<nav class="lesson-nav">
+  <a href="./0046-cnn-practice.html" class="nav-btn">← Lesson 46: CNNs in Practice</a>
+  <a href="./0048-sequence-models-rnn-lstm-gru.html" class="nav-btn nav-btn-next">Lesson 48: Sequence Models →</a>
+</nav>
+
+</div><!-- /content-wrapper -->
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-core.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/plugins/autoloader/prism-autoloader.min.js"></script>
+<script src="https://cdn.plot.ly/plotly-2.32.0.min.js"></script>
+<script src="../assets/charts.js"></script>
+<script src="../assets/quiz.js"></script>
+<script>
+/* ── Transfer learning strategy diagram + tradeoff charts (Lesson 47) ── */
+(function () {
+  // Per-layer frozen/trainable state for each strategy.
+  // Index: 0=conv1, 1=layer1, 2=layer2, 3=layer3, 4=layer4, 5=new fc head
+  const STRATEGIES = {
+    'feature-extraction': {
+      frozen: [true, true, true, true, true, false],
+      caption: "Feature Extraction: the entire pretrained backbone is frozen — only the new classifier head is trained. Fastest option, least data-hungry, best when your dataset is small (&lt;500 images).",
+    },
+    'fine-tuning': {
+      frozen: [true, true, true, false, false, false],
+      caption: "Fine-Tuning: early layers (generic edges/textures) stay frozen, while the later layers (task-specific parts/objects) and the new head are trained — usually with a very small learning rate on the backbone.",
+    },
+    'full-fine-tuning': {
+      frozen: [false, false, false, false, false, false],
+      caption: "Full Fine-Tuning: every layer is trainable, including the earliest ones. Most flexible, but needs the most data and compute, and risks overwriting useful pretrained features if the learning rate is too high.",
+    },
+  };
+
+  function paintLayers(strategyKey) {
+    const strat = STRATEGIES[strategyKey];
+    strat.frozen.forEach((isFrozen, i) => {
+      const box = document.getElementById(`l46-box-${i}`);
+      const icon = document.getElementById(`l46-icon-${i}`);
+      if (!box || !icon) return;
+      box.classList.remove('diagram-node', 'diagram-node-good');
+      box.classList.add(isFrozen ? 'diagram-node' : 'diagram-node-good');
+      icon.textContent = isFrozen ? '\u{1F512}' : '\u{1F513}';
+    });
+    const caption = document.getElementById('l46-strategy-caption');
+    if (caption) caption.innerHTML = strat.caption;
+  }
+
+  paintLayers('feature-extraction');
+
+  document.querySelectorAll('#l46-strategy-buttons .diagram-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('#l46-strategy-buttons .diagram-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      paintLayers(btn.dataset.strategy);
+    });
+  });
+
+  // ── Accuracy vs strategy bar chart ──
+  function renderAccuracyChart() {
+    const labels = ['From Scratch', 'Feature\nExtraction', 'Fine-Tuning'];
+    const acc = [64, 87, 93];
+    const colors = [MLCharts.theme.red, MLCharts.theme.blue, MLCharts.theme.green];
+
+    const traces = [{
+      x: labels, y: acc, type: 'bar',
+      marker: { color: colors },
+      text: acc.map(v => v + '%'),
+      textposition: 'outside',
+      hovertemplate: '%{x}<br>accuracy=%{y}%<extra></extra>',
+    }];
+
+    const layout = MLCharts.baseLayout({
+      xaxis: { title: { text: '' } },
+      yaxis: { title: { text: 'Validation Accuracy (%)' }, range: [0, 105] },
+      showlegend: false,
+    });
+
+    Plotly.react('l46-accuracy-chart', traces, layout, MLCharts.config);
+  }
+
+  // ── Training time vs strategy bar chart (log scale) ──
+  function renderTimeChart() {
+    const labels = ['From Scratch', 'Feature\nExtraction', 'Fine-Tuning'];
+    const minutes = [360, 2, 8];
+    const colors = [MLCharts.theme.red, MLCharts.theme.blue, MLCharts.theme.green];
+
+    const traces = [{
+      x: labels, y: minutes, type: 'bar',
+      marker: { color: colors },
+      text: minutes.map(v => v >= 60 ? (v / 60).toFixed(0) + ' hr' : v + ' min'),
+      textposition: 'outside',
+      hovertemplate: '%{x}<br>%{y} minutes<extra></extra>',
+    }];
+
+    const layout = MLCharts.baseLayout({
+      xaxis: { title: { text: '' } },
+      yaxis: { title: { text: 'Training Time (minutes, log scale)' }, type: 'log', range: [-0.3, 2.7] },
+      showlegend: false,
+    });
+
+    Plotly.react('l46-time-chart', traces, layout, MLCharts.config);
+  }
+
+  renderAccuracyChart();
+  renderTimeChart();
+})();
+</script>
+<script>
+new MLQuiz('quiz46', [
+  {
+    question: "`for param in model.parameters(): param.requires_grad = False` — what does this do?",
+    options: [
+      "Freezes all model parameters — they will not be updated during training, letting you use the model as a fixed feature extractor",
+      "Sets the model to evaluation mode, equivalent to model.eval()",
+      "Deletes the parameter gradients accumulated during the last backward pass",
+      "Prevents the model from computing gradients for any input, speeding up inference"
+    ],
+    correct: 0,
+    explanation: "Setting requires_grad=False on a parameter tells PyTorch not to compute gradients for it during backpropagation. When optimizer.step() is called, only parameters with requires_grad=True are updated. This is the standard way to freeze a backbone: set requires_grad=False on all parameters, then create a new head (which has requires_grad=True by default). The frozen backbone acts as a deterministic feature extractor — no weights change, no matter how many training epochs you run."
+  },
+  {
+    question: "What problem do residual connections (skip connections) in ResNet solve?",
+    options: [
+      "The degradation problem — very deep networks without skip connections suffer from vanishing gradients that prevent early layers from updating; skip connections provide gradient highways",
+      "The overfitting problem — skip connections act as a form of dropout by randomly bypassing layers",
+      "The vanishing activation problem — ReLU kills neurons and skip connections bypass them",
+      "The computational bottleneck — skip connections avoid expensive matrix multiplications in early layers"
+    ],
+    correct: 0,
+    explanation: "Before ResNet, deeper networks (50+ layers) often performed worse on the training set than shallower networks — not because of overfitting, but because gradients vanished during backpropagation through many layers. Skip connections provide a direct path: gradients flow unchanged through the identity shortcut (the '+x' path) from the loss back to early layers, bypassing the potentially vanishing gradient path through F(x). This is why ResNet-152 can outperform ResNet-34 — the extra depth actually helps instead of hurting."
+  },
+  {
+    question: "When fine-tuning a pre-trained model, why use a smaller learning rate for the backbone than for the new classification head?",
+    options: [
+      "The backbone weights are already well-trained — large updates would destroy the learned representations; the new head starts randomly initialized and needs larger updates to converge",
+      "The backbone has more parameters, so a smaller LR prevents memory overflow during backpropagation",
+      "The backbone layers are frozen and therefore can only accept small gradient updates",
+      "A smaller LR for the backbone prevents catastrophic interference between ImageNet classes and new classes"
+    ],
+    correct: 0,
+    explanation: "The pre-trained backbone has converged to weights that encode powerful, general-purpose features. These features generalize to your task — you want to preserve them. A large LR would apply large gradient updates that overwrite these valuable representations, destroying what was learned from millions of ImageNet images. The new head starts completely randomly initialized — it has a large error and needs large updates to converge quickly. Using LR=1e-5 for the backbone and LR=1e-3 for the head (a 100× difference) is a common and effective starting point."
+  },
+  {
+    question: "Which architecture is most suitable for real-time deployment on a mobile phone or edge device?",
+    options: [
+      "MobileNet — designed specifically for mobile/edge with depthwise separable convolutions that achieve good accuracy with very low compute and memory requirements",
+      "ResNet-18 — the smallest ResNet variant, which is lightweight enough for mobile deployment",
+      "EfficientNet-B0 — the compound scaling baseline achieves the best accuracy per parameter",
+      "VGG-11 — simpler architecture with fewer hyper-parameters makes it more suitable for resource-constrained devices"
+    ],
+    correct: 0,
+    explanation: "MobileNet was explicitly designed for mobile and embedded vision applications. It uses depthwise separable convolutions (8× fewer multiplications than standard convolutions), inverted residual blocks (MobileNetV2+), and Squeeze-and-Excitation attention (MobileNetV3) — all chosen to minimize compute while retaining accuracy. MobileNetV3-Small achieves ~67% top-1 accuracy on ImageNet with only 2.5M parameters and ~56M FLOPs per image — running at >100 FPS on a modern smartphone's neural processing unit."
+  },
+  {
+    question: "You have only 200 labeled images for a custom plant species classification task (5 classes). Which transfer learning approach should you use?",
+    options: [
+      "Feature extraction — freeze the pre-trained backbone, train only a new head; with 200 images, fine-tuning risks overfitting the backbone to noise in the tiny dataset",
+      "Full fine-tuning — more trainable parameters means the model can better adapt to the specific features of plant leaves",
+      "Training from scratch — pre-trained ImageNet features are not relevant to botanical images",
+      "Fine-tune the entire model starting from epoch 1 to maximize the benefit of the pre-trained weights"
+    ],
+    correct: 0,
+    explanation: "With only 200 images (40 per class), overfitting is the primary risk. Feature extraction keeps the backbone frozen — those 11–25 million backbone parameters don't update and can't overfit. You only train the new head (a few hundred to a few thousand parameters), which is much less prone to overfitting 200 samples. Fine-tuning millions of parameters on 200 images reliably leads to the backbone memorizing noise. The rule of thumb: use feature extraction when you have fewer than ~500 images; consider fine-tuning (last block only) with 500–5,000 images; full fine-tuning with >5,000 images of sufficiently similar data."
+  }
+]);
+</script>
+
+</body>
+</html>
