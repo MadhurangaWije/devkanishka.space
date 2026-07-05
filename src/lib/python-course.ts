@@ -227,7 +227,11 @@ const PY_QUIZ_JS = `var QuizWidget = (function () {
   }
 
   function escAttr(str) {
-    return String(str).replace(/'/g, "\\\\'").replace(/\\n/g, ' ');
+    return String(str)
+      .replace(/&/g, '&amp;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, "\\\\'")
+      .replace(/\\n/g, ' ');
   }
 
   return { render: render, select: select, reset: reset };
@@ -371,9 +375,9 @@ const PY_HIGHLIGHT_JS = `(function () {
       var comment = commentIdx > 0 ? line.substring(commentIdx) : "";
 
       code = escapeHtml(code)
+        .replace(/(".*?"|'.*?')/g, '<span style="color:#c3e88d">$1</span>')
         .replace(/\\b(python3?|brew|sudo|apt|dnf|pip3?|cd|ls|mkdir|rm|cp|mv|cat|echo|export|source|chmod)\\b/g,
-          '<span style="color:#80cbc4">$1</span>')
-        .replace(/(".*?"|'.*?')/g, '<span style="color:#c3e88d">$1</span>');
+          '<span style="color:#80cbc4">$1</span>');
 
       if (comment) {
         comment = '<span style="color:#546e7a;font-style:italic">' + escapeHtml(comment) + '</span>';
