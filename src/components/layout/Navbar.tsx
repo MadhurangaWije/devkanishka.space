@@ -10,6 +10,7 @@ const NAV_LINKS = [
   { href: '/blog', label: 'blog' },
   { href: '/tutorials', label: 'guides' },
   { href: '/experiments', label: 'experiments' },
+  { href: '/ask', label: 'ask me' },
   { href: '/contact', label: 'contact' },
 ];
 

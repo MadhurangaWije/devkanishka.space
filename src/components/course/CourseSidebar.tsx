@@ -119,8 +119,21 @@ export function CourseSidebar({
         </div>
       )}
 
+      {/* Ask me link */}
+      <div className="border-t border-site-border pt-4 mt-auto">
+        <Link
+          href="/ask"
+          onClick={() => setMobileOpen(false)}
+          className="flex items-center gap-2 font-mono text-xs text-text-secondary hover:text-accent transition-colors group"
+        >
+          <span className="text-text-muted group-hover:text-accent transition-colors">✉</span>
+          Stuck? Ask me
+          <span className="text-text-muted group-hover:text-accent transition-colors">→</span>
+        </Link>
+      </div>
+
       {/* Progress footer */}
-      <div className="mt-auto pt-6 border-t border-site-border">
+      <div className="pt-6 border-t border-site-border">
         <p className="font-mono text-xs text-text-muted">
           {totalPhases} of {denominator} phases · {totalLessons} lessons
         </p>
