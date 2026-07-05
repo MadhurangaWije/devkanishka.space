@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { Resend } from 'resend';
+import nodemailer from 'nodemailer';
 import { renderSimpleMarkdown } from '@/lib/simple-markdown';
 
 export const runtime = 'nodejs';
@@ -8,19 +8,19 @@ const MAX_FILES = 3;
 const MAX_TOTAL_BYTES = 4 * 1024 * 1024;
 const BLOCKED_EXTENSIONS = ['exe', 'bat', 'cmd', 'sh', 'msi', 'dll'];
 
+// Sent via Gmail's own SMTP, authenticated as this account, so mail is
+// genuinely "from" it rather than a spoofed/branded domain address.
 const OWNER_EMAIL = '123kanishka@gmail.com';
-const SENDER_ADDRESS = 'Ask Me <ask@devkanishka.space>';
-const SENDER_ADDRESS_PERSONAL = 'Kanishka <ask@devkanishka.space>';
 
 function escapeHtml(input: string): string {
   return input.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
 export async function POST(request: NextRequest) {
-  const apiKey = process.env.RESEND_API_KEY;
+  const appPassword = process.env.GMAIL_APP_PASSWORD;
 
-  if (!apiKey) {
-    console.error('Ask Me: RESEND_API_KEY not configured');
+  if (!appPassword) {
+    console.error('Ask Me: GMAIL_APP_PASSWORD not configured');
     return NextResponse.json(
       { success: false, error: "This isn't set up yet — email me directly at hi@devkanishka.space." },
       { status: 500 }
@@ -80,15 +80,20 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  const resend = new Resend(apiKey);
+  const transporter = nodemailer.createTransport({
+    service: 'gmail',
+    auth: { user: OWNER_EMAIL, pass: appPassword },
+  });
+
   const questionHtml = renderSimpleMarkdown(question);
 
-  const resendAttachments = await Promise.all(
+  const mailAttachments = await Promise.all(
     attachments.map(async (file) => ({
       filename: file.name,
       content: Buffer.from(await file.arrayBuffer()),
     }))
   );
+  const attachmentNote = mailAttachments.length ? `${mailAttachments.length} attachment(s) included.` : '';
 
   const detailRows = [
     `<p><strong>From:</strong> ${escapeHtml(name || 'Not provided')} (${escapeHtml(email)})</p>`,
@@ -99,22 +104,22 @@ export async function POST(request: NextRequest) {
 
   try {
     // Notify the owner — replying to this email goes straight to the asker.
-    await resend.emails.send({
-      from: SENDER_ADDRESS,
+    await transporter.sendMail({
+      from: `Ask Me <${OWNER_EMAIL}>`,
       to: OWNER_EMAIL,
       replyTo: email,
       subject: `New question from ${name || email} — Ask Me`,
-      html: `${detailRows}\n<hr />\n${questionHtml}${
-        resendAttachments.length ? `\n<p>${resendAttachments.length} attachment(s) included.</p>` : ''
-      }`,
-      attachments: resendAttachments,
+      html: `${detailRows}\n<hr />\n${questionHtml}${attachmentNote ? `\n<p>${attachmentNote}</p>` : ''}`,
+      text: `From: ${name || 'Not provided'} (${email})\n${
+        context ? `Context: ${context}\n` : ''
+      }\n${question}${attachmentNote ? `\n\n${attachmentNote}` : ''}`,
+      attachments: mailAttachments,
     });
 
     // Confirmation copy for the asker — replying to this reaches the owner directly.
-    await resend.emails.send({
-      from: SENDER_ADDRESS_PERSONAL,
+    await transporter.sendMail({
+      from: `Kanishka <${OWNER_EMAIL}>`,
       to: email,
-      replyTo: OWNER_EMAIL,
       subject: "Got your question — I'll get back to you soon",
       html: `
         <p>Thanks for reaching out — here's a copy of what you sent:</p>
@@ -123,6 +128,7 @@ export async function POST(request: NextRequest) {
         <hr />
         <p>I'll reply here directly based on my availability, usually within a few days.</p>
       `,
+      text: `Thanks for reaching out — here's a copy of what you sent:\n\n${question}\n\nI'll reply here directly based on my availability, usually within a few days.`,
     });
 
     return NextResponse.json({ success: true });
