@@ -1,16 +1,20 @@
+export type TutorialCategory = 'Cloud & Infrastructure' | 'AI & Machine Learning' | 'Programming & Backend';
+
 export type Tutorial = {
   slug: string;
   title: string;
   description: string;
   difficulty: 'beginner' | 'intermediate' | 'advanced';
+  category: TutorialCategory;
   parts: number;
-  estimatedHours: number;
   tags: string[];
   featured: boolean;
   learningOutcomes: string[];
   prerequisites: string[];
-  parts_list: { title: string; duration: number }[];
+  parts_list: { title: string }[];
 };
+
+export const CATEGORIES: TutorialCategory[] = ['Cloud & Infrastructure', 'AI & Machine Learning', 'Programming & Backend'];
 
 export const tutorials: Tutorial[] = [
   {
@@ -19,8 +23,8 @@ export const tutorials: Tutorial[] = [
     description:
       'A complete, practitioner-oriented guide through every AZ-104 exam domain — 25 lessons across 6 modules covering identity & governance, storage, compute, networking, monitoring, and enterprise-scale architecture. Built for engineers who want to understand the reasoning behind every Azure decision, not just the commands.',
     difficulty: 'intermediate',
+    category: 'Cloud & Infrastructure',
     parts: 6,
-    estimatedHours: 12,
     tags: ['azure', 'cloud', 'az-104', 'devops', 'networking', 'identity'],
     featured: true,
     learningOutcomes: [
@@ -37,12 +41,12 @@ export const tutorials: Tutorial[] = [
       'No Azure experience required — the course builds from first principles',
     ],
     parts_list: [
-      { title: 'Module 1 — Identity & Governance (5 lessons)', duration: 125 },
-      { title: 'Module 2 — Storage (3 lessons)', duration: 75 },
-      { title: 'Module 3 — Compute (5 lessons)', duration: 125 },
-      { title: 'Module 4 — Networking (5 lessons)', duration: 125 },
-      { title: 'Module 5 — Monitor & Maintain (4 lessons)', duration: 100 },
-      { title: 'Module 6 — Enterprise Architecture (3 lessons)', duration: 75 },
+      { title: 'Module 1 — Identity & Governance (5 lessons)' },
+      { title: 'Module 2 — Storage (3 lessons)' },
+      { title: 'Module 3 — Compute (5 lessons)' },
+      { title: 'Module 4 — Networking (5 lessons)' },
+      { title: 'Module 5 — Monitor & Maintain (4 lessons)' },
+      { title: 'Module 6 — Enterprise Architecture (3 lessons)' },
     ],
   },
   {
@@ -51,8 +55,8 @@ export const tutorials: Tutorial[] = [
     description:
       'A structured, from-scratch path through machine learning and deep learning — built for engineers who want to understand the math and code, not just import sklearn. Six phases covering data science foundations, supervised and unsupervised ML, deep learning, NLP & LLMs, and production MLOps — 69 lessons in total.',
     difficulty: 'intermediate',
+    category: 'AI & Machine Learning',
     parts: 6,
-    estimatedHours: 77,
     tags: ['python', 'numpy', 'pandas', 'machine-learning', 'deep-learning', 'pytorch'],
     featured: true,
     learningOutcomes: [
@@ -70,12 +74,12 @@ export const tutorials: Tutorial[] = [
       'No ML experience needed — we build intuition before formulas',
     ],
     parts_list: [
-      { title: 'Phase 1 — Data Science Foundations (8 lessons)', duration: 480 },
-      { title: 'Phase 2 — Supervised Machine Learning (19 lessons)', duration: 1320 },
-      { title: 'Phase 3 — Unsupervised Learning & Time Series (9 lessons)', duration: 535 },
-      { title: 'Phase 4 — Deep Learning Foundations (12 lessons)', duration: 840 },
-      { title: 'Phase 5 — Advanced Deep Learning & NLP (14 lessons)', duration: 965 },
-      { title: 'Phase 6 — Production ML & MLOps (7 lessons)', duration: 480 },
+      { title: 'Phase 1 — Data Science Foundations (8 lessons)' },
+      { title: 'Phase 2 — Supervised Machine Learning (19 lessons)' },
+      { title: 'Phase 3 — Unsupervised Learning & Time Series (9 lessons)' },
+      { title: 'Phase 4 — Deep Learning Foundations (12 lessons)' },
+      { title: 'Phase 5 — Advanced Deep Learning & NLP (14 lessons)' },
+      { title: 'Phase 6 — Production ML & MLOps (7 lessons)' },
     ],
   },
   {
@@ -84,8 +88,8 @@ export const tutorials: Tutorial[] = [
     description:
       "A complete learning path from zero to production — structured, progressive, no gaps. Seven phases covering how the web works, REST APIs, databases, authentication, testing, Docker, CI/CD, and advanced system design. Built for aspiring engineers who want to understand the backend deeply, not just follow recipes.",
     difficulty: 'beginner',
+    category: 'Programming & Backend',
     parts: 7,
-    estimatedHours: 40,
     tags: ['node.js', 'javascript', 'backend', 'rest-api', 'postgresql', 'docker'],
     featured: true,
     learningOutcomes: [
@@ -103,34 +107,13 @@ export const tutorials: Tutorial[] = [
       'No backend experience required — we start from zero',
     ],
     parts_list: [
-      {
-        title: 'Phase 1 — Foundations',
-        duration: 300,
-      },
-      {
-        title: 'Phase 2 — Building REST APIs',
-        duration: 360,
-      },
-      {
-        title: 'Phase 3 — Data & Persistence',
-        duration: 360,
-      },
-      {
-        title: 'Phase 4 — Authentication & Security',
-        duration: 360,
-      },
-      {
-        title: 'Phase 5 — Production Readiness',
-        duration: 300,
-      },
-      {
-        title: 'Phase 6 — Infrastructure & Deployment',
-        duration: 330,
-      },
-      {
-        title: 'Phase 7 — Advanced Topics',
-        duration: 390,
-      },
+      { title: 'Phase 1 — Foundations' },
+      { title: 'Phase 2 — Building REST APIs' },
+      { title: 'Phase 3 — Data & Persistence' },
+      { title: 'Phase 4 — Authentication & Security' },
+      { title: 'Phase 5 — Production Readiness' },
+      { title: 'Phase 6 — Infrastructure & Deployment' },
+      { title: 'Phase 7 — Advanced Topics' },
     ],
   },
   {
@@ -139,8 +122,8 @@ export const tutorials: Tutorial[] = [
     description:
       "A complete path through Python — from your very first print(\"Hello\") to production-ready code. Covers core language fundamentals, intermediate patterns (decorators, generators, context managers), concurrency and type hints, building production APIs with FastAPI, applying Python to ML/AI with NumPy/Pandas/scikit-learn, and a bonus phase on CPython internals — bytecode, the object model, descriptors, metaclasses, and the import system.",
     difficulty: 'beginner',
+    category: 'Programming & Backend',
     parts: 6,
-    estimatedHours: 28,
     tags: ['python', 'fundamentals', 'async', 'oop', 'fastapi', 'machine-learning'],
     featured: true,
     learningOutcomes: [
@@ -157,12 +140,12 @@ export const tutorials: Tutorial[] = [
       'A willingness to type code out and run it, not just read it',
     ],
     parts_list: [
-      { title: 'Phase 1 — Python Foundations (13 lessons)', duration: 320 },
-      { title: 'Phase 2 — Intermediate Python (13 lessons)', duration: 360 },
-      { title: 'Phase 3 — Advanced Python (6 lessons)', duration: 180 },
-      { title: 'Phase 4 — FastAPI & Web APIs (6 lessons)', duration: 250 },
-      { title: 'Phase 5 — Python for ML & AI (4 lessons)', duration: 170 },
-      { title: 'Phase 6 — CPython Internals, Bonus (7 lessons)', duration: 330 },
+      { title: 'Phase 1 — Python Foundations (13 lessons)' },
+      { title: 'Phase 2 — Intermediate Python (13 lessons)' },
+      { title: 'Phase 3 — Advanced Python (6 lessons)' },
+      { title: 'Phase 4 — FastAPI & Web APIs (6 lessons)' },
+      { title: 'Phase 5 — Python for ML & AI (4 lessons)' },
+      { title: 'Phase 6 — CPython Internals, Bonus (7 lessons)' },
     ],
   },
   {
@@ -171,8 +154,8 @@ export const tutorials: Tutorial[] = [
     description:
       "As agentic coding tools take over more and more of the actual typing, the engineer's job is shifting — less time hand-writing implementation, more time deciding what the system should look like in the first place: the trade-offs, the failure modes, the architecture an AI assistant can't choose for you. This is a complete, from-scratch path through that discipline — 15 chapters and 65 lessons from first principles through databases, caching, consensus, microservices, and security, each chapter closing with a scored quiz and a set of interview questions with model answers.",
     difficulty: 'intermediate',
+    category: 'Programming & Backend',
     parts: 15,
-    estimatedHours: 15,
     tags: ['system-design', 'architecture', 'distributed-systems', 'scalability', 'interview-prep'],
     featured: true,
     learningOutcomes: [
@@ -190,76 +173,21 @@ export const tutorials: Tutorial[] = [
       'Curiosity about why production systems are built the way they are',
     ],
     parts_list: [
-      { title: 'Chapter 1 — Thinking in Systems (6 lessons)', duration: 55 },
-      { title: 'Chapter 2 — How the Internet Works (6 lessons)', duration: 54 },
-      { title: 'Chapter 3 — Web Architecture Patterns (6 lessons)', duration: 55 },
-      { title: 'Chapter 4 — Databases & Storage (8 lessons)', duration: 80 },
-      { title: 'Chapter 5 — Caching (6 lessons)', duration: 59 },
-      { title: 'Chapter 6 — Load Balancing & Reverse Proxies (6 lessons)', duration: 57 },
-      { title: 'Chapter 7 — Scalability Patterns (6 lessons)', duration: 60 },
-      { title: 'Chapter 8 — Asynchronous Processing (6 lessons)', duration: 59 },
-      { title: 'Chapter 9 — Consistency & Distributed Consensus (7 lessons)', duration: 69 },
-      { title: 'Chapter 10 — Microservices & Service Architecture (7 lessons)', duration: 67 },
-      { title: 'Chapter 11 — API Design (6 lessons)', duration: 57 },
-      { title: 'Chapter 12 — Observability & Reliability (7 lessons)', duration: 67 },
-      { title: 'Chapter 13 — Security Architecture (6 lessons)', duration: 59 },
-      { title: 'Chapter 14 — Data Pipelines & Stream Processing (6 lessons)', duration: 57 },
-      { title: 'Chapter 15 — Putting It All Together (7 lessons + glossary)', duration: 69 },
-    ],
-  },
-  {
-    slug: 'distributed-systems-from-scratch',
-    title: "Distributed Systems from Scratch",
-    description:
-      "Build a distributed key-value store from the ground up. We cover consensus with Raft, leader election, log replication, snapshotting, and fault tolerance — with working Go code throughout.",
-    difficulty: 'advanced',
-    parts: 9,
-    estimatedHours: 14,
-    tags: ['distributed-systems', 'go', 'raft', 'databases'],
-    featured: true,
-    learningOutcomes: [
-      'Implement the Raft consensus algorithm from scratch',
-      'Build a fault-tolerant key-value store with log replication',
-      'Understand split-brain scenarios and how to prevent them',
-      'Design for partial failure — the reality of distributed systems',
-    ],
-    prerequisites: ['Solid Go knowledge', 'Basic understanding of networking (TCP/IP)', 'Familiarity with concurrent programming'],
-    parts_list: [
-      { title: 'Introduction & Architecture Overview', duration: 45 },
-      { title: 'Building the RPC Layer', duration: 60 },
-      { title: 'Leader Election with Raft', duration: 90 },
-      { title: 'Log Replication', duration: 90 },
-      { title: 'Handling Network Partitions', duration: 75 },
-      { title: 'Snapshotting for Log Compaction', duration: 60 },
-      { title: 'The Key-Value State Machine', duration: 60 },
-      { title: 'Testing Distributed Systems (Chaos Testing)', duration: 75 },
-      { title: 'Production Hardening & Observability', duration: 60 },
-    ],
-  },
-  {
-    slug: 'go-for-python-developers',
-    title: "Go for Python Developers",
-    description:
-      "A practical, no-nonsense guide to Go for engineers who already know Python. We skip the basics and focus on what's genuinely different — concurrency, interfaces, error handling, and building production-grade services.",
-    difficulty: 'intermediate',
-    parts: 6,
-    estimatedHours: 8,
-    tags: ['go', 'python', 'backend', 'concurrency'],
-    featured: true,
-    learningOutcomes: [
-      'Translate Python idioms to idiomatic Go',
-      'Understand goroutines, channels, and the Go memory model',
-      'Handle errors the Go way — and why it\'s actually better',
-      'Build a production-ready HTTP API in Go',
-    ],
-    prerequisites: ['Solid Python knowledge', 'Basic understanding of REST APIs', 'Comfort with the command line'],
-    parts_list: [
-      { title: 'Go from a Python Lens: Similarities and Differences', duration: 50 },
-      { title: 'Types, Interfaces, and Composition vs Inheritance', duration: 70 },
-      { title: 'Error Handling: Explicit is Better Than Implicit', duration: 60 },
-      { title: 'Goroutines, Channels, and Concurrency Primitives', duration: 90 },
-      { title: 'Building a REST API: net/http vs gin vs chi', duration: 80 },
-      { title: 'Testing, Benchmarking, and Profiling in Go', duration: 70 },
+      { title: 'Chapter 1 — Thinking in Systems (6 lessons)' },
+      { title: 'Chapter 2 — How the Internet Works (6 lessons)' },
+      { title: 'Chapter 3 — Web Architecture Patterns (6 lessons)' },
+      { title: 'Chapter 4 — Databases & Storage (8 lessons)' },
+      { title: 'Chapter 5 — Caching (6 lessons)' },
+      { title: 'Chapter 6 — Load Balancing & Reverse Proxies (6 lessons)' },
+      { title: 'Chapter 7 — Scalability Patterns (6 lessons)' },
+      { title: 'Chapter 8 — Asynchronous Processing (6 lessons)' },
+      { title: 'Chapter 9 — Consistency & Distributed Consensus (7 lessons)' },
+      { title: 'Chapter 10 — Microservices & Service Architecture (7 lessons)' },
+      { title: 'Chapter 11 — API Design (6 lessons)' },
+      { title: 'Chapter 12 — Observability & Reliability (7 lessons)' },
+      { title: 'Chapter 13 — Security Architecture (6 lessons)' },
+      { title: 'Chapter 14 — Data Pipelines & Stream Processing (6 lessons)' },
+      { title: 'Chapter 15 — Putting It All Together (7 lessons + glossary)' },
     ],
   },
   {
@@ -268,8 +196,8 @@ export const tutorials: Tutorial[] = [
     description:
       "A complete, certification-aligned path through Kubernetes — 91 lessons across 14 chapters. From architecture and core workloads through networking, storage, scheduling, RBAC and advanced security, observability, CRDs and operators, service mesh and autoscaling, deep internals (API server, etcd, scheduler, kubelet), and production operations at scale. Tagged throughout for CKA, CKAD, and CKS relevance.",
     difficulty: 'advanced',
+    category: 'Cloud & Infrastructure',
     parts: 14,
-    estimatedHours: 38,
     tags: ['kubernetes', 'devops', 'cka', 'ckad', 'cks', 'service-mesh', 'gitops'],
     featured: true,
     learningOutcomes: [
@@ -286,45 +214,20 @@ export const tutorials: Tutorial[] = [
       'No prior Kubernetes experience required — the course builds from first principles',
     ],
     parts_list: [
-      { title: 'Chapter 1 — Foundations & Architecture (5 lessons)', duration: 110 },
-      { title: 'Chapter 2 — Core Workloads (7 lessons)', duration: 160 },
-      { title: 'Chapter 3 — Configuration & Secrets (6 lessons)', duration: 140 },
-      { title: 'Chapter 4 — Networking (7 lessons)', duration: 165 },
-      { title: 'Chapter 5 — Storage (4 lessons)', duration: 95 },
-      { title: 'Chapter 6 — Scheduling & Resource Management (7 lessons)', duration: 165 },
-      { title: 'Chapter 7 — Security: RBAC & Identity (5 lessons)', duration: 115 },
-      { title: 'Chapter 8 — Security: Advanced (7 lessons)', duration: 165 },
-      { title: 'Chapter 9 — Observability & Debugging (6 lessons)', duration: 140 },
-      { title: 'Chapter 10 — Advanced Patterns (7 lessons)', duration: 165 },
-      { title: 'Chapter 11 — GitOps & Manifest Management (1 lesson)', duration: 25 },
-      { title: 'Chapter 12 — Service Mesh, Autoscaling & Cloud-Native Tooling (10 lessons)', duration: 240 },
-      { title: 'Chapter 13 — Deep Internals (7 lessons)', duration: 165 },
-      { title: 'Chapter 14 — Production Operations at Scale (12 lessons)', duration: 280 },
-    ],
-  },
-  {
-    slug: 'jwt-auth-in-go-from-scratch',
-    title: "Implementing JWT Authentication in Go from Scratch",
-    description:
-      "Authentication that you understand is authentication you can debug at 2am. We implement JWT auth from scratch — signing, verification, refresh tokens, revocation, and common security pitfalls to avoid.",
-    difficulty: 'intermediate',
-    parts: 5,
-    estimatedHours: 6,
-    tags: ['go', 'security', 'authentication', 'backend'],
-    featured: false,
-    learningOutcomes: [
-      'Understand JWT structure, signing, and verification',
-      'Implement access and refresh token flows',
-      'Build a token revocation strategy that actually scales',
-      'Avoid the most common JWT security mistakes',
-    ],
-    prerequisites: ['Basic Go knowledge', 'Understanding of HTTP and REST', 'Familiarity with cryptography concepts (helpful but not required)'],
-    parts_list: [
-      { title: 'JWT Anatomy: Header, Payload, Signature', duration: 40 },
-      { title: 'Generating and Signing Tokens with go-jwt', duration: 55 },
-      { title: 'Middleware for Route Protection', duration: 50 },
-      { title: 'Refresh Tokens and Rotation Strategy', duration: 65 },
-      { title: 'Revocation, Security Pitfalls, and Production Checklist', duration: 60 },
+      { title: 'Chapter 1 — Foundations & Architecture (5 lessons)' },
+      { title: 'Chapter 2 — Core Workloads (7 lessons)' },
+      { title: 'Chapter 3 — Configuration & Secrets (6 lessons)' },
+      { title: 'Chapter 4 — Networking (7 lessons)' },
+      { title: 'Chapter 5 — Storage (4 lessons)' },
+      { title: 'Chapter 6 — Scheduling & Resource Management (7 lessons)' },
+      { title: 'Chapter 7 — Security: RBAC & Identity (5 lessons)' },
+      { title: 'Chapter 8 — Security: Advanced (7 lessons)' },
+      { title: 'Chapter 9 — Observability & Debugging (6 lessons)' },
+      { title: 'Chapter 10 — Advanced Patterns (7 lessons)' },
+      { title: 'Chapter 11 — GitOps & Manifest Management (1 lesson)' },
+      { title: 'Chapter 12 — Service Mesh, Autoscaling & Cloud-Native Tooling (10 lessons)' },
+      { title: 'Chapter 13 — Deep Internals (7 lessons)' },
+      { title: 'Chapter 14 — Production Operations at Scale (12 lessons)' },
     ],
   },
   {
@@ -333,8 +236,8 @@ export const tutorials: Tutorial[] = [
     description:
       "A complete, hands-on path through Docker — from the shipping-container analogy and the Linux primitives containers are built from, through Dockerfiles, Compose, networking, and observability, to production hardening, image supply-chain security, and an orchestration primer that hands off cleanly into Kubernetes.",
     difficulty: 'beginner',
+    category: 'Cloud & Infrastructure',
     parts: 6,
-    estimatedHours: 11,
     tags: ['docker', 'containers', 'devops', 'security', 'production', 'kubernetes'],
     featured: true,
     learningOutcomes: [
@@ -351,12 +254,12 @@ export const tutorials: Tutorial[] = [
       'No prior Docker or container experience required',
     ],
     parts_list: [
-      { title: 'Phase 1 — Container Foundations (6 lessons)', duration: 130 },
-      { title: 'Phase 2 — Building Images (4 lessons)', duration: 100 },
-      { title: 'Phase 3 — Running Containers in Practice (6 lessons)', duration: 140 },
-      { title: 'Phase 4 — Production & Observability (6 lessons)', duration: 140 },
-      { title: 'Phase 5 — Orchestration Primer (5 lessons)', duration: 110 },
-      { title: 'Phase 6 — Advanced & Production Hardening (6 lessons)', duration: 140 },
+      { title: 'Phase 1 — Container Foundations (6 lessons)' },
+      { title: 'Phase 2 — Building Images (4 lessons)' },
+      { title: 'Phase 3 — Running Containers in Practice (6 lessons)' },
+      { title: 'Phase 4 — Production & Observability (6 lessons)' },
+      { title: 'Phase 5 — Orchestration Primer (5 lessons)' },
+      { title: 'Phase 6 — Advanced & Production Hardening (6 lessons)' },
     ],
   },
   {
@@ -365,8 +268,8 @@ export const tutorials: Tutorial[] = [
     description:
       "A practical, project-driven curriculum for software engineers moving into AI engineering — calling LLM APIs, prompt engineering, building RAG pipelines end to end, tool-using and multi-agent systems, MCP, and shipping AI features safely with guardrails, cost control, and observability. Every lesson after the first builds something real.",
     difficulty: 'intermediate',
+    category: 'AI & Machine Learning',
     parts: 5,
-    estimatedHours: 9,
     tags: ['ai', 'llm', 'rag', 'agents', 'prompt-engineering', 'python'],
     featured: true,
     learningOutcomes: [
@@ -383,11 +286,11 @@ export const tutorials: Tutorial[] = [
       'No prior AI/ML experience required',
     ],
     parts_list: [
-      { title: 'Module 1 — Foundations & LLMs (4 lessons)', duration: 100 },
-      { title: 'Module 2 — Prompt Engineering (4 lessons)', duration: 110 },
-      { title: 'Module 3 — RAG Pipeline (6 lessons)', duration: 165 },
-      { title: 'Module 4 — AI Agents & Tools (5 lessons)', duration: 150 },
-      { title: 'Module 5 — Production & Safety (4 lessons)', duration: 120 },
+      { title: 'Module 1 — Foundations & LLMs (4 lessons)' },
+      { title: 'Module 2 — Prompt Engineering (4 lessons)' },
+      { title: 'Module 3 — RAG Pipeline (6 lessons)' },
+      { title: 'Module 4 — AI Agents & Tools (5 lessons)' },
+      { title: 'Module 5 — Production & Safety (4 lessons)' },
     ],
   },
   {
@@ -396,8 +299,8 @@ export const tutorials: Tutorial[] = [
     description:
       "A complete path through CI/CD — from your first GitHub Actions workflow through caching, secrets, and matrix builds, deploying to Azure App Service, ACR, and AKS, GitOps with ArgoCD and progressive delivery, supply-chain hardening with Cosign and OPA Gatekeeper, and operating pipelines reliably at scale.",
     difficulty: 'intermediate',
+    category: 'Cloud & Infrastructure',
     parts: 6,
-    estimatedHours: 12,
     tags: ['ci-cd', 'github-actions', 'devops', 'gitops', 'argocd', 'kubernetes', 'azure'],
     featured: true,
     learningOutcomes: [
@@ -414,12 +317,12 @@ export const tutorials: Tutorial[] = [
       'No prior CI/CD experience required',
     ],
     parts_list: [
-      { title: 'Phase 1 — CI Fundamentals (10 lessons)', duration: 220 },
-      { title: 'Phase 2 — Deploying to Azure (7 lessons)', duration: 160 },
-      { title: 'Phase 3 — GitOps & ArgoCD (8 lessons)', duration: 180 },
-      { title: 'Phase 4 — Hardening & Supply Chain Security (3 lessons)', duration: 70 },
-      { title: 'Phase 5 — Operating Pipelines at Scale (4 lessons)', duration: 95 },
-      { title: 'Phase 6 — Capstone (2 lessons)', duration: 60 },
+      { title: 'Phase 1 — CI Fundamentals (10 lessons)' },
+      { title: 'Phase 2 — Deploying to Azure (7 lessons)' },
+      { title: 'Phase 3 — GitOps & ArgoCD (8 lessons)' },
+      { title: 'Phase 4 — Hardening & Supply Chain Security (3 lessons)' },
+      { title: 'Phase 5 — Operating Pipelines at Scale (4 lessons)' },
+      { title: 'Phase 6 — Capstone (2 lessons)' },
     ],
   },
   {
@@ -428,8 +331,8 @@ export const tutorials: Tutorial[] = [
     description:
       "A complete path to AZ-305 and professional architect skills — 50 lessons across 8 phases. Built for engineers who already know Azure administration (AZ-104) and want the architect layer on top: not how to create a VNet, but when, why, and at what tier. Covers governance, networking, compute, data platforms, security, reliability, advanced patterns, and closes with real case-study drills and a capstone architecture.",
     difficulty: 'advanced',
+    category: 'Cloud & Infrastructure',
     parts: 8,
-    estimatedHours: 22,
     tags: ['azure', 'az-305', 'cloud-architecture', 'networking', 'security', 'well-architected'],
     featured: true,
     learningOutcomes: [
@@ -446,14 +349,14 @@ export const tutorials: Tutorial[] = [
       'No prior architect-level experience required — the course builds the design layer from there',
     ],
     parts_list: [
-      { title: 'Phase 1 — Foundations (6 lessons)', duration: 150 },
-      { title: 'Phase 2 — Core Infrastructure (7 lessons)', duration: 175 },
-      { title: 'Phase 3 — Application Architecture (6 lessons)', duration: 150 },
-      { title: 'Phase 4 — Data & Integration (7 lessons)', duration: 175 },
-      { title: 'Phase 5 — Security & Governance (7 lessons)', duration: 175 },
-      { title: 'Phase 6 — Reliability & Operations (7 lessons)', duration: 175 },
-      { title: 'Phase 7 — Advanced Patterns (5 lessons)', duration: 125 },
-      { title: 'Phase 8 — Exam Prep & Capstone Projects (5 lessons)', duration: 150 },
+      { title: 'Phase 1 — Foundations (6 lessons)' },
+      { title: 'Phase 2 — Core Infrastructure (7 lessons)' },
+      { title: 'Phase 3 — Application Architecture (6 lessons)' },
+      { title: 'Phase 4 — Data & Integration (7 lessons)' },
+      { title: 'Phase 5 — Security & Governance (7 lessons)' },
+      { title: 'Phase 6 — Reliability & Operations (7 lessons)' },
+      { title: 'Phase 7 — Advanced Patterns (5 lessons)' },
+      { title: 'Phase 8 — Exam Prep & Capstone Projects (5 lessons)' },
     ],
   },
 ];

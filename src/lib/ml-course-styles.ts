@@ -40,7 +40,7 @@ export const ML_COURSE_CSS = `
   --font-sans:  'Inter', system-ui, sans-serif;
   --font-serif: 'Inter', system-ui, sans-serif;
   --font-mono:  'JetBrains Mono', 'Fira Code', monospace;
-  --max-w:      760px;
+  --max-w:      700px;
   --r-sm:       6px;
   --r-md:       10px;
   --r-lg:       16px;
@@ -95,7 +95,7 @@ export const ML_COURSE_CSS = `
 .ml-lesson-host ul, .ml-lesson-host ol { padding-left: 1.4rem; margin-bottom: 1rem; }
 .ml-lesson-host li { font-size: 0.985rem; line-height: 1.8; margin-bottom: 0.3rem; color: var(--text-base); }
 .ml-lesson-host li:last-child { margin-bottom: 0; }
-.ml-lesson-host strong { font-weight: 600; color: var(--heading); }
+.ml-lesson-host strong { font-weight: 600; }
 .ml-lesson-host em    { font-style: italic; color: var(--text-muted); }
 .ml-lesson-host a     { color: var(--blue); text-decoration: none; }
 .ml-lesson-host a:hover { text-decoration: underline; }
@@ -572,7 +572,7 @@ export const ML_COURSE_CSS = `
 
 /* Bottom nav (React-rendered, outside .ml-lesson-host) */
 .ml-lesson-bottom-nav { background: #0f1117; border-top: 1px solid #2e3350; }
-.ml-lesson-bottom-nav-inner { max-width: 760px; margin: 0 auto; padding: 24px 32px; display: flex; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+.ml-lesson-bottom-nav-inner { max-width: 700px; margin: 0 auto; padding: 24px 32px; display: flex; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
 .ml-lesson-nav-link { display: flex; flex-direction: column; gap: 4px; padding: 12px 16px; border: 1px solid #2e3350; border-radius: 8px; text-decoration: none; transition: border-color 0.15s, background 0.15s; flex: 1; min-width: 160px; max-width: 280px; }
 .ml-lesson-nav-link:hover { border-color: #7c6ff7; background: #1a1d27; }
 .ml-lesson-nav-link--next { text-align: right; margin-left: auto; }

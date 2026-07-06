@@ -27,7 +27,7 @@ export const PY_COURSE_CSS = `
   color: var(--text);
   font-family: var(--lh-sans);
   font-size: 16px;
-  line-height: 1.7;
+  line-height: 1.8;
   min-height: 100%;
 }
 
@@ -78,7 +78,7 @@ export const PY_COURSE_CSS = `
 .py-lesson-host .lesson-meta span { display: flex; align-items: center; gap: 4px; }
 
 .py-lesson-host #content {
-  max-width: 780px;
+  max-width: 700px;
   margin: 0 auto;
   padding: 40px 32px 60px;
   width: 100%;
@@ -91,7 +91,7 @@ export const PY_COURSE_CSS = `
   color: #fff;
   margin: 2.5rem 0 0.75rem;
   padding-bottom: 8px;
-  border-bottom: 2px solid var(--border);
+  border-bottom: 2px solid var(--accent);
   scroll-margin-top: 6rem;
 }
 .py-lesson-host h3 { font-size: 1.1rem; font-weight: 600; color: #fff; margin: 1.8rem 0 0.5rem; }
@@ -102,7 +102,7 @@ export const PY_COURSE_CSS = `
 .py-lesson-host li::marker { color: var(--accent); }
 .py-lesson-host a { color: var(--accent); text-decoration: none; }
 .py-lesson-host a:hover { text-decoration: underline; }
-.py-lesson-host strong { font-weight: 600; color: #fff; }
+.py-lesson-host strong { font-weight: 600; }
 .py-lesson-host em { color: var(--accent2); font-style: normal; }
 
 /* ── Code ─────────────────────────────────────────────────── */
@@ -317,7 +317,7 @@ export const PY_COURSE_CSS = `
 
 /* ── Bottom nav (React-rendered) ─────────────────────────── */
 .lesson-bottom-nav { background: #0f1117; border-top: 1px solid #2e3350; }
-.lesson-bottom-nav-inner { max-width: 780px; margin: 0 auto; padding: 24px 32px; display: flex; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+.lesson-bottom-nav-inner { max-width: 700px; margin: 0 auto; padding: 24px 32px; display: flex; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
 .lesson-nav-link { display: flex; flex-direction: column; gap: 4px; padding: 12px 16px; border: 1px solid #2e3350; border-radius: 8px; text-decoration: none; transition: border-color 0.15s, background 0.15s; flex: 1; min-width: 160px; max-width: 280px; }
 .lesson-nav-link:hover { border-color: #7c6ff7; background: #1a1d27; }
 .lesson-nav-link--next { text-align: right; margin-left: auto; }

@@ -33,7 +33,7 @@ export const DOCKER_COURSE_CSS = `
   --orange-50:  #2a1a0e;
   --font-sans:  'Inter', system-ui, sans-serif;
   --font-mono:  'JetBrains Mono', 'Fira Code', monospace;
-  --max-w:      760px;
+  --max-w:      700px;
   --r-sm:       6px;
   --r-md:       10px;
   --r-lg:       16px;
@@ -62,7 +62,7 @@ export const DOCKER_COURSE_CSS = `
   margin-bottom: 1rem;
   line-height: 1.3;
   scroll-margin-top: 6rem;
-  border-bottom: 1px solid var(--border);
+  border-bottom: 2px solid var(--blue);
   padding-bottom: 0.5rem;
 }
 .docker-lesson-host h2:first-child { margin-top: 0; }
@@ -79,7 +79,7 @@ export const DOCKER_COURSE_CSS = `
 .docker-lesson-host ul, .docker-lesson-host ol { padding-left: 1.4rem; margin-bottom: 1.1rem; }
 .docker-lesson-host li { font-size: 0.985rem; line-height: 1.8; margin-bottom: 0.35rem; color: var(--text-base); }
 .docker-lesson-host li:last-child { margin-bottom: 0; }
-.docker-lesson-host strong { font-weight: 600; color: var(--heading); }
+.docker-lesson-host strong { font-weight: 600; }
 .docker-lesson-host em { font-style: italic; color: var(--text-muted); }
 .docker-lesson-host a { color: var(--blue); text-decoration: none; }
 .docker-lesson-host a:hover { text-decoration: underline; }
@@ -243,7 +243,7 @@ export const DOCKER_COURSE_CSS = `
 
 /* Bottom nav (React-rendered, outside .docker-lesson-host) */
 .docker-lesson-bottom-nav { background: #0f1117; border-top: 1px solid #2e3350; }
-.docker-lesson-bottom-nav-inner { max-width: 760px; margin: 0 auto; padding: 24px 32px; display: flex; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+.docker-lesson-bottom-nav-inner { max-width: 700px; margin: 0 auto; padding: 24px 32px; display: flex; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
 .docker-lesson-nav-link { display: flex; flex-direction: column; gap: 4px; padding: 12px 16px; border: 1px solid #2e3350; border-radius: 8px; text-decoration: none; transition: border-color 0.15s, background 0.15s; flex: 1; min-width: 160px; max-width: 280px; }
 .docker-lesson-nav-link:hover { border-color: #7c6ff7; background: #1a1d27; }
 .docker-lesson-nav-link--next { text-align: right; margin-left: auto; }

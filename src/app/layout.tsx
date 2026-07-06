@@ -4,6 +4,7 @@ import { GoogleAnalytics } from '@next/third-parties/google';
 import '@/styles/globals.css';
 import { Navbar } from '@/components/layout/Navbar';
 import { Footer } from '@/components/layout/Footer';
+import { ReadingModeProvider } from '@/components/course/ReadingModeContext';
 
 const inter = Inter({
   subsets: ['latin'],
@@ -47,9 +48,11 @@ export default function RootLayout({
       className={`${inter.variable} ${jetbrainsMono.variable}`}
     >
       <body className="bg-bg text-text-primary font-mono antialiased">
-        <Navbar />
-        <main>{children}</main>
-        <Footer />
+        <ReadingModeProvider>
+          <Navbar />
+          <main>{children}</main>
+          <Footer />
+        </ReadingModeProvider>
       </body>
       <GoogleAnalytics gaId="G-8FHZD85CJ1" />
     </html>

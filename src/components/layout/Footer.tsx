@@ -1,4 +1,7 @@
+'use client';
+
 import Link from 'next/link';
+import { useReadingMode } from '@/components/course/ReadingModeContext';
 
 const SOCIAL_LINKS = [
   { label: 'GitHub', href: 'https://github.com/kanishka' },
@@ -7,6 +10,9 @@ const SOCIAL_LINKS = [
 ];
 
 export function Footer() {
+  const { isReadingMode } = useReadingMode();
+  if (isReadingMode) return null;
+
   return (
     <footer className="border-t border-site-border mt-24">
       <div className="container-site py-12">

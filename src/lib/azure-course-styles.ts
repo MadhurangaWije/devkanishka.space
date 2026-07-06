@@ -20,8 +20,8 @@ export const AZURE_COURSE_CSS = `
   font-family: var(--az-font);
   color: var(--az-text);
   background: transparent;
-  line-height: 1.75;
-  max-width: 820px;
+  line-height: 1.8;
+  max-width: 700px;
   margin: 0 auto;
   padding: 2rem 1.5rem 5rem;
 }
@@ -33,17 +33,17 @@ export const AZURE_COURSE_CSS = `
 /* ── Typography ── */
 .azure-lesson-host h1 {
   font-size: 2rem; font-weight: 700; letter-spacing: -0.02em;
-  line-height: 1.2; margin-bottom: 0.3rem; color: var(--az-dark);
+  line-height: 1.2; margin-bottom: 0.3rem; color: #ffffff;
 }
 .azure-lesson-host h2 {
   font-size: 1.3rem; font-weight: 700; margin-top: 2.8rem;
-  margin-bottom: 0.7rem; color: var(--az-dark);
-  border-bottom: 2px solid var(--az-light); padding-bottom: 0.3rem;
+  margin-bottom: 0.7rem; color: #ffffff;
+  border-bottom: 2px solid var(--az-blue); padding-bottom: 0.3rem;
   scroll-margin-top: 6rem;
 }
 .azure-lesson-host h3 {
   font-size: 1.05rem; font-weight: 600; margin-top: 1.8rem;
-  margin-bottom: 0.4rem; color: var(--az-text);
+  margin-bottom: 0.4rem; color: #ffffff;
 }
 .azure-lesson-host p  { margin-bottom: 1rem; }
 .azure-lesson-host a  {
@@ -54,7 +54,7 @@ export const AZURE_COURSE_CSS = `
 .azure-lesson-host ul,
 .azure-lesson-host ol { padding-left: 1.4rem; margin-bottom: 1rem; }
 .azure-lesson-host li { margin-bottom: 0.3rem; }
-.azure-lesson-host strong { font-weight: 600; color: var(--az-dark); }
+.azure-lesson-host strong { font-weight: 600; }
 .azure-lesson-host em { color: var(--az-muted); }
 .azure-lesson-host code {
   font-family: var(--az-mono); font-size: 0.85em;
@@ -232,7 +232,7 @@ export const AZURE_COURSE_CSS = `
 
 /* ── Azure bottom nav (React-injected) ── */
 .az-bottom-nav {
-  max-width: 820px; margin: 0 auto;
+  max-width: 700px; margin: 0 auto;
   padding: 2rem 1.5rem 4rem;
 }
 .az-bottom-nav-inner {

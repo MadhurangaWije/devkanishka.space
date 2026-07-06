@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { motion, AnimatePresence } from 'framer-motion';
 import type { PhaseMeta } from '@/lib/backend-course';
+import { useReadingMode } from '@/components/course/ReadingModeContext';
 
 const DEFAULT_COMING_SOON = [
   'Phase 3 — Data & Persistence',
@@ -31,6 +32,9 @@ export function CourseSidebar({
 }: Props) {
   const pathname = usePathname();
   const [mobileOpen, setMobileOpen] = useState(false);
+  const { isReadingMode, toggleReadingMode } = useReadingMode();
+  // Only meaningful on an actual lesson page, not the course overview.
+  const onLessonPage = pathname !== courseBase && pathname.startsWith(`${courseBase}/`);
 
   const totalLessons = phases.reduce((sum, p) => sum + p.lessons.length, 0);
   const totalPhases = phases.length;
@@ -149,40 +153,56 @@ export function CourseSidebar({
 
   return (
     <>
-      {/* Desktop sidebar */}
-      <aside className="hidden lg:flex flex-col w-72 shrink-0 border-r border-site-border sticky top-16 h-[calc(100vh-64px)] overflow-hidden">
-        <SidebarContent />
-      </aside>
-
-      {/* Mobile toggle */}
-      <div className="lg:hidden fixed bottom-6 right-6 z-40">
-        <button
-          onClick={() => setMobileOpen(!mobileOpen)}
-          className="flex items-center gap-2 px-4 py-2.5 bg-surface border border-site-border rounded-full font-mono text-xs text-text-secondary hover:text-accent hover:border-accent/30 transition-colors shadow-lg"
-        >
-          {mobileOpen ? '× close' : '≡ lessons'}
-        </button>
-      </div>
-
-      <AnimatePresence>
-        {mobileOpen && (
-          <motion.div
-            initial={{ x: '100%' }}
-            animate={{ x: 0 }}
-            exit={{ x: '100%' }}
-            transition={{ type: 'spring', damping: 30, stiffness: 300 }}
-            className="lg:hidden fixed inset-y-0 right-0 z-30 w-72 bg-bg border-l border-site-border shadow-2xl overflow-y-auto"
-          >
+      {!isReadingMode && (
+        <>
+          {/* Desktop sidebar */}
+          <aside className="hidden lg:flex flex-col w-72 shrink-0 border-r border-site-border sticky top-16 h-[calc(100vh-64px)] overflow-hidden">
             <SidebarContent />
-          </motion.div>
-        )}
-      </AnimatePresence>
+          </aside>
 
-      {mobileOpen && (
-        <div
-          className="lg:hidden fixed inset-0 z-20 bg-black/50"
-          onClick={() => setMobileOpen(false)}
-        />
+          {/* Mobile toggle */}
+          <div className="lg:hidden fixed bottom-6 right-6 z-40">
+            <button
+              onClick={() => setMobileOpen(!mobileOpen)}
+              className="flex items-center gap-2 px-4 py-2.5 bg-surface border border-site-border rounded-full font-mono text-xs text-text-secondary hover:text-accent hover:border-accent/30 transition-colors shadow-lg"
+            >
+              {mobileOpen ? '× close' : '≡ lessons'}
+            </button>
+          </div>
+
+          <AnimatePresence>
+            {mobileOpen && (
+              <motion.div
+                initial={{ x: '100%' }}
+                animate={{ x: 0 }}
+                exit={{ x: '100%' }}
+                transition={{ type: 'spring', damping: 30, stiffness: 300 }}
+                className="lg:hidden fixed inset-y-0 right-0 z-30 w-72 bg-bg border-l border-site-border shadow-2xl overflow-y-auto"
+              >
+                <SidebarContent />
+              </motion.div>
+            )}
+          </AnimatePresence>
+
+          {mobileOpen && (
+            <div
+              className="lg:hidden fixed inset-0 z-20 bg-black/50"
+              onClick={() => setMobileOpen(false)}
+            />
+          )}
+        </>
+      )}
+
+      {/* Reading mode toggle — lesson pages only, always visible (including
+          while reading mode is active, so there's a way back out) */}
+      {onLessonPage && (
+        <button
+          onClick={toggleReadingMode}
+          title={isReadingMode ? 'Exit reading mode' : 'Enter reading mode'}
+          className="fixed top-20 right-6 z-50 flex items-center gap-2 px-3.5 py-2 bg-surface border border-site-border rounded-full font-mono text-xs text-text-secondary hover:text-accent hover:border-accent/30 transition-colors shadow-lg"
+        >
+          {isReadingMode ? '⤢ exit' : '⛶ read'}
+        </button>
       )}
     </>
   );

@@ -23,7 +23,7 @@ export const SD_COURSE_CSS = `
   --font-body:  'Inter', system-ui, sans-serif;
   --font-heading: 'Inter', system-ui, sans-serif;
   --font-mono:  'JetBrains Mono', 'Fira Code', monospace;
-  --max-width: 760px;
+  --max-width: 700px;
   background: var(--bg);
   color: var(--text);
   font-family: var(--font-body);
@@ -52,8 +52,8 @@ export const SD_COURSE_CSS = `
 }
 
 .sd-lesson-host h1 { font-size: 1.9rem; border-bottom: 3px solid var(--accent); padding-bottom: 0.5rem; margin-top: 0; }
-.sd-lesson-host h2 { font-size: 1.4rem; color: var(--accent-blue); }
-.sd-lesson-host h3 { font-size: 1.15rem; color: var(--text); }
+.sd-lesson-host h2 { font-size: 1.4rem; border-bottom: 2px solid var(--accent-blue); padding-bottom: 0.5rem; scroll-margin-top: 6rem; }
+.sd-lesson-host h3 { font-size: 1.15rem; }
 
 .sd-lesson-host p { margin-bottom: 1.2rem; }
 
@@ -313,7 +313,7 @@ export const SD_COURSE_CSS = `
 
 /* ── Bottom prev/next nav (matches the ML & DL Mastery course's own copy) ── */
 .sd-lesson-bottom-nav { background: #0f1117; border-top: 1px solid #2e3350; }
-.sd-lesson-bottom-nav-inner { max-width: 760px; margin: 0 auto; padding: 24px 32px; display: flex; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+.sd-lesson-bottom-nav-inner { max-width: 700px; margin: 0 auto; padding: 24px 32px; display: flex; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
 .sd-lesson-nav-link { display: flex; flex-direction: column; gap: 4px; padding: 12px 16px; border: 1px solid #2e3350; border-radius: 8px; text-decoration: none; transition: border-color 0.15s, background 0.15s; flex: 1; min-width: 160px; max-width: 280px; }
 .sd-lesson-nav-link:hover { border-color: #7c6ff7; background: #1a1d27; }
 .sd-lesson-nav-link--next { text-align: right; margin-left: auto; }

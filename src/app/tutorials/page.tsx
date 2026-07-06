@@ -1,18 +1,13 @@
 import { Metadata } from 'next';
-import { tutorials } from '@/lib/data/tutorials';
+import { tutorials, CATEGORIES } from '@/lib/data/tutorials';
 import { TutorialCard } from '@/components/tutorials/TutorialCard';
 
 export const metadata: Metadata = {
   title: 'Tutorials',
-  description: 'Practical, in-depth tutorials for engineers who want to build real things — distributed systems, Go, Kubernetes, and more.',
+  description: 'Practical, in-depth tutorials for engineers who want to build real things — cloud & infrastructure, AI & machine learning, and programming & backend.',
 };
 
-const DIFFICULTIES = ['all', 'beginner', 'intermediate', 'advanced'] as const;
-
 export default function TutorialsPage() {
-  const featured = tutorials.filter((t) => t.featured);
-  const rest = tutorials.filter((t) => !t.featured);
-
   return (
     <div className="pt-32 pb-24">
       <div className="container-site">
@@ -27,7 +22,8 @@ export default function TutorialsPage() {
             someone else&apos;s journey a little smoother. But reading these isn&apos;t the
             work — you still have to sit with the hard parts, think them through on your
             own, and get your hands dirty applying it. Consider this a push in the right
-            direction, not a shortcut around the effort.
+            direction, not a shortcut around the effort. Go at whatever pace works for you —
+            there&apos;s no clock running here.
           </p>
         </div>
 
@@ -39,10 +35,7 @@ export default function TutorialsPage() {
               value: `${tutorials.reduce((acc, t) => acc + t.parts, 0)}`,
               label: 'total parts',
             },
-            {
-              value: `${tutorials.reduce((acc, t) => acc + t.estimatedHours, 0)}h`,
-              label: 'content',
-            },
+            { value: CATEGORIES.length.toString(), label: 'categories' },
           ].map((stat) => (
             <div key={stat.label}>
               <div className="font-sans text-2xl font-black">{stat.value}</div>
@@ -51,30 +44,24 @@ export default function TutorialsPage() {
           ))}
         </div>
 
-        {/* Featured */}
-        {featured.length > 0 && (
-          <>
-            <p className="label mb-6">featured series</p>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-16">
-              {featured.map((t, i) => (
-                <TutorialCard key={t.slug} tutorial={t} index={i} />
-              ))}
+        {/* Tutorials grouped by category */}
+        {CATEGORIES.map((category, ci) => {
+          const inCategory = tutorials.filter((t) => t.category === category);
+          if (inCategory.length === 0) return null;
+          return (
+            <div key={category} className={ci > 0 ? 'mt-16' : ''}>
+              <div className="flex items-center gap-4 mb-6">
+                <p className="label whitespace-nowrap">{category}</p>
+                <div className="flex-1 h-px bg-site-border" />
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                {inCategory.map((t, i) => (
+                  <TutorialCard key={t.slug} tutorial={t} index={i} />
+                ))}
+              </div>
             </div>
-
-            <div className="flex items-center gap-4 my-10">
-              <div className="flex-1 h-px bg-site-border" />
-              <span className="label">all tutorials</span>
-              <div className="flex-1 h-px bg-site-border" />
-            </div>
-          </>
-        )}
-
-        {/* All tutorials */}
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-          {rest.map((t, i) => (
-            <TutorialCard key={t.slug} tutorial={t} index={i} />
-          ))}
-        </div>
+          );
+        })}
       </div>
     </div>
   );

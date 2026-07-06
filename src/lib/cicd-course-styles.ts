@@ -23,7 +23,7 @@ export const CICD_COURSE_CSS = `
   --violet:     #a78bfa;
   --font-sans:  'Inter', system-ui, sans-serif;
   --font-mono:  'JetBrains Mono', 'Fira Code', monospace;
-  --max-w:      760px;
+  --max-w:      700px;
   --r-sm:       6px;
   --r-md:       10px;
   --r-lg:       16px;
@@ -51,7 +51,7 @@ export const CICD_COURSE_CSS = `
   margin-bottom: 1rem;
   line-height: 1.3;
   scroll-margin-top: 6rem;
-  border-bottom: 1px solid var(--border);
+  border-bottom: 2px solid var(--blue);
   padding-bottom: 0.5rem;
 }
 .cicd-lesson-host h2:first-child { margin-top: 0; }
@@ -61,7 +61,7 @@ export const CICD_COURSE_CSS = `
 .cicd-lesson-host ul, .cicd-lesson-host ol { padding-left: 1.4rem; margin-bottom: 1.1rem; }
 .cicd-lesson-host li { font-size: 0.985rem; line-height: 1.8; margin-bottom: 0.35rem; color: var(--text-base); }
 .cicd-lesson-host li:last-child { margin-bottom: 0; }
-.cicd-lesson-host strong { font-weight: 600; color: var(--heading); }
+.cicd-lesson-host strong { font-weight: 600; }
 .cicd-lesson-host em { font-style: italic; color: var(--text-muted); }
 .cicd-lesson-host a { color: var(--blue); text-decoration: none; }
 .cicd-lesson-host a:hover { text-decoration: underline; }
@@ -186,7 +186,7 @@ export const CICD_COURSE_CSS = `
 
 /* Bottom nav (React-rendered, outside .cicd-lesson-host) */
 .cicd-lesson-bottom-nav { background: #0f1117; border-top: 1px solid #2e3350; }
-.cicd-lesson-bottom-nav-inner { max-width: 760px; margin: 0 auto; padding: 24px 32px; display: flex; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+.cicd-lesson-bottom-nav-inner { max-width: 700px; margin: 0 auto; padding: 24px 32px; display: flex; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
 .cicd-lesson-nav-link { display: flex; flex-direction: column; gap: 4px; padding: 12px 16px; border: 1px solid #2e3350; border-radius: 8px; text-decoration: none; transition: border-color 0.15s, background 0.15s; flex: 1; min-width: 160px; max-width: 280px; }
 .cicd-lesson-nav-link:hover { border-color: #7c6ff7; background: #1a1d27; }
 .cicd-lesson-nav-link--next { text-align: right; margin-left: auto; }

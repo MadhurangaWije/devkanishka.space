@@ -22,20 +22,20 @@ export const SHARED_COURSE_CSS = `
   color: var(--text);
   font-family: var(--lh-sans);
   font-size: 16px;
-  line-height: 1.7;
+  line-height: 1.8;
   min-height: 100%;
 }
-.lesson-host .page { max-width: 780px; margin: 0 auto; padding: 48px 32px 32px; }
+.lesson-host .page { max-width: 700px; margin: 0 auto; padding: 48px 32px 32px; }
 
 /* Typography */
 .lesson-host h1 { font-family: var(--lh-sans); font-size: 2rem; font-weight: 700; line-height: 1.2; color: #fff; margin-bottom: 8px; letter-spacing: -0.02em; }
-.lesson-host h2 { font-family: var(--lh-sans); font-size: 0.85rem; font-weight: 600; color: var(--accent); margin: 40px 0 12px; letter-spacing: 0.06em; text-transform: uppercase; scroll-margin-top: 6rem; }
+.lesson-host h2 { font-family: var(--lh-sans); font-size: 1.35rem; font-weight: 700; color: #fff; margin: 2.75rem 0 1rem; line-height: 1.3; border-bottom: 2px solid var(--accent); padding-bottom: 0.5rem; scroll-margin-top: 6rem; }
 .lesson-host h3 { font-family: var(--lh-sans); font-size: 1.1rem; font-weight: 600; color: #fff; margin: 24px 0 8px; }
 .lesson-host h4 { font-family: var(--lh-sans); }
-.lesson-host p  { color: var(--text); margin-bottom: 16px; font-family: var(--lh-sans); font-weight: 400; line-height: 1.7; }
+.lesson-host p  { color: var(--text); margin-bottom: 16px; font-family: var(--lh-sans); font-weight: 400; line-height: 1.85; }
 .lesson-host a  { color: var(--accent); text-decoration: none; }
 .lesson-host a:hover { text-decoration: underline; }
-.lesson-host strong { color: #fff; font-weight: 600; }
+.lesson-host strong { font-weight: 600; }
 .lesson-host em { color: var(--accent2); font-style: normal; font-weight: 500; }
 
 /* Meta / header */
@@ -112,7 +112,7 @@ export const SHARED_COURSE_CSS = `
 
 /* Bottom nav (React-rendered) */
 .lesson-bottom-nav { background: #0f1117; border-top: 1px solid #2e3350; }
-.lesson-bottom-nav-inner { max-width: 780px; margin: 0 auto; padding: 24px 32px; display: flex; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+.lesson-bottom-nav-inner { max-width: 700px; margin: 0 auto; padding: 24px 32px; display: flex; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
 .lesson-nav-link { display: flex; flex-direction: column; gap: 4px; padding: 12px 16px; border: 1px solid #2e3350; border-radius: 8px; text-decoration: none; transition: border-color 0.15s, background 0.15s; flex: 1; min-width: 160px; max-width: 280px; }
 .lesson-nav-link:hover { border-color: #7c6ff7; background: #1a1d27; }
 .lesson-nav-link--next { text-align: right; margin-left: auto; }

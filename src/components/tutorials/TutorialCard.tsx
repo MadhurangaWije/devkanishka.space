@@ -40,10 +40,6 @@ export function TutorialCard({ tutorial, index = 0 }: TutorialCardProps) {
           <span className="font-mono text-xs text-text-muted">
             {tutorial.parts} parts
           </span>
-          <span className="font-mono text-xs text-text-muted">·</span>
-          <span className="font-mono text-xs text-text-muted">
-            ~{tutorial.estimatedHours}h
-          </span>
         </div>
 
         <h3 className="font-sans text-xl font-black tracking-tight text-text-primary group-hover:text-accent transition-colors mb-3">

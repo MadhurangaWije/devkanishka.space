@@ -62,10 +62,6 @@ export default async function TutorialDetailPage({ params }: Props) {
             <span className="font-mono text-sm text-text-muted">
               {tutorial.parts} parts
             </span>
-            <span className="font-mono text-sm text-text-muted">·</span>
-            <span className="font-mono text-sm text-text-muted">
-              ~{tutorial.estimatedHours}h total
-            </span>
           </div>
 
           <h1 className="font-sans text-4xl md:text-5xl font-black tracking-tighter leading-tight mb-6">
@@ -123,20 +119,13 @@ export default async function TutorialDetailPage({ params }: Props) {
               {tutorial.parts_list.map((part, i) => (
                 <div
                   key={i}
-                  className="flex items-center justify-between p-4 border border-site-border rounded group hover:border-accent/30 transition-colors"
+                  className="flex items-center gap-4 p-4 border border-site-border rounded group hover:border-accent/30 transition-colors"
                 >
-                  <div className="flex items-center gap-4">
-                    <span className="font-mono text-xs text-text-muted w-6 shrink-0">
-                      {String(i + 1).padStart(2, '0')}
-                    </span>
-                    <span className="font-mono text-sm text-text-secondary group-hover:text-text-primary transition-colors">
-                      {part.title}
-                    </span>
-                  </div>
-                  <span className="font-mono text-xs text-text-muted shrink-0 ml-4">
-                    {part.duration >= 60
-                      ? `${Math.floor(part.duration / 60)}h${part.duration % 60 ? ` ${part.duration % 60}m` : ''}`
-                      : `${part.duration}m`}
+                  <span className="font-mono text-xs text-text-muted w-6 shrink-0">
+                    {String(i + 1).padStart(2, '0')}
+                  </span>
+                  <span className="font-mono text-sm text-text-secondary group-hover:text-text-primary transition-colors">
+                    {part.title}
                   </span>
                 </div>
               ))}

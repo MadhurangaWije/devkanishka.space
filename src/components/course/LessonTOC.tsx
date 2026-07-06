@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import type { LessonHeading } from '@/lib/lesson-toc';
+import { useReadingMode } from '@/components/course/ReadingModeContext';
 
 type Props = {
   headings: LessonHeading[];
@@ -10,6 +11,7 @@ type Props = {
 export function LessonTOC({ headings }: Props) {
   const [activeId, setActiveId] = useState<string | null>(null);
   const observerRef = useRef<IntersectionObserver | null>(null);
+  const { isReadingMode } = useReadingMode();
 
   useEffect(() => {
     if (headings.length === 0) return;
@@ -33,7 +35,7 @@ export function LessonTOC({ headings }: Props) {
     return () => observerRef.current?.disconnect();
   }, [headings]);
 
-  if (headings.length === 0) return null;
+  if (headings.length === 0 || isReadingMode) return null;
 
   return (
     <nav
