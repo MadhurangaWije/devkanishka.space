@@ -14,6 +14,7 @@ type Props = {
 
 export function LessonChatWidget({ courseSlug }: Props) {
   const [open, setOpen] = useState(false);
+  const [hasOpened, setHasOpened] = useState(false);
   const [history, setHistory] = useState<Exchange[]>([]);
   const pathname = usePathname();
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -34,13 +35,37 @@ export function LessonChatWidget({ courseSlug }: Props) {
 
   return (
     <>
-      <button
-        onClick={() => setOpen((v) => !v)}
+      <motion.button
+        onClick={() => {
+          setOpen((v) => !v);
+          setHasOpened(true);
+        }}
         title={open ? 'Close chat' : 'Ask about this guide'}
-        className="fixed bottom-24 right-6 lg:bottom-6 z-50 flex items-center gap-2 px-3.5 py-2 bg-surface border border-site-border rounded-full font-mono text-xs text-text-secondary hover:text-accent hover:border-accent/30 transition-colors shadow-lg"
+        className="fixed bottom-24 right-6 lg:bottom-6 z-50 flex items-center gap-2 px-4 py-2.5 bg-surface border-2 border-accent rounded-full font-mono text-xs font-semibold text-accent shadow-lg shadow-accent/20"
+        animate={
+          !hasOpened
+            ? {
+                y: [0, -10, 0, -5, 0],
+                boxShadow: [
+                  '0 0 0 0 rgba(0, 232, 122, 0.5)',
+                  '0 0 0 8px rgba(0, 232, 122, 0)',
+                  '0 0 0 0 rgba(0, 232, 122, 0)',
+                  '0 0 0 8px rgba(0, 232, 122, 0)',
+                  '0 0 0 0 rgba(0, 232, 122, 0)',
+                ],
+              }
+            : { y: 0 }
+        }
+        transition={
+          !hasOpened
+            ? { duration: 1.4, repeat: Infinity, repeatDelay: 2.2, ease: 'easeInOut' }
+            : { duration: 0.2 }
+        }
+        whileHover={{ scale: 1.06 }}
+        whileTap={{ scale: 0.95 }}
       >
         {open ? '× close' : '💬 ask'}
-      </button>
+      </motion.button>
 
       <AnimatePresence>
         {open && (
