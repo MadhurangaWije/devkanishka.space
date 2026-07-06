@@ -26,10 +26,12 @@ export function LessonChatWidget({ courseSlug }: Props) {
   const [hasOpened, setHasOpened] = useState(false);
   const [history, setHistory] = useState<Exchange[]>([]);
   const [loadingMsgIndex, setLoadingMsgIndex] = useState(0);
+  const [pendingQuestion, setPendingQuestion] = useState('');
   const pathname = usePathname();
   const scrollRef = useRef<HTMLDivElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
 
-  const { completion, input, handleInputChange, handleSubmit, isLoading, error, setCompletion } = useCompletion({
+  const { completion, input, setInput, handleInputChange, handleSubmit, isLoading, error, setCompletion } = useCompletion({
     api: '/api/chat',
     streamProtocol: 'text',
     body: { courseSlug, lessonUrl: pathname },
@@ -42,6 +44,33 @@ export function LessonChatWidget({ courseSlug }: Props) {
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' });
   }, [history, completion]);
+
+  // Auto-grow the textarea as the user types multi-line questions, capped
+  // so it can't push the message list off-screen.
+  useEffect(() => {
+    const el = textareaRef.current;
+    if (!el) return;
+    el.style.height = 'auto';
+    el.style.height = `${Math.min(el.scrollHeight, 120)}px`;
+  }, [input]);
+
+  const submitQuestion = (e?: React.FormEvent) => {
+    e?.preventDefault();
+    if (!input.trim() || isLoading) return;
+    setPendingQuestion(input);
+    handleSubmit();
+    // useCompletion doesn't reliably clear `input` on its own — clear it
+    // ourselves. Safe: handleSubmit() above already closed over the current
+    // input value before this runs.
+    setInput('');
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      submitQuestion();
+    }
+  };
 
   // Cycles a short, friendly status line while waiting for the first token —
   // resets to the first message at the start of every new question.
@@ -123,7 +152,7 @@ export function LessonChatWidget({ courseSlug }: Props) {
               ))}
               {(isLoading || completion) && (
                 <div className="space-y-1.5">
-                  <p className="font-mono text-xs text-text-primary font-semibold">{input || history.at(-1)?.question}</p>
+                  <p className="font-mono text-xs text-text-primary font-semibold whitespace-pre-wrap">{pendingQuestion}</p>
                   {completion ? (
                     <div
                       className="chat-answer font-mono text-xs text-text-secondary leading-relaxed [&_p]:mb-2 [&_p:last-child]:mb-0 [&_ul]:list-disc [&_ul]:pl-4 [&_ul]:mb-2 [&_li]:mb-1 [&_strong]:text-text-primary [&_strong]:font-semibold [&_code]:text-accent [&_code]:bg-surface [&_code]:px-1 [&_code]:rounded [&_pre]:bg-surface [&_pre]:p-2 [&_pre]:rounded [&_pre]:overflow-x-auto [&_pre]:mb-2 [&_a]:text-accent [&_a]:underline"
@@ -165,14 +194,17 @@ export function LessonChatWidget({ courseSlug }: Props) {
             </div>
 
             {/* Input */}
-            <form onSubmit={handleSubmit} className="border-t border-site-border p-3 flex items-center gap-2 shrink-0">
-              <input
+            <form onSubmit={submitQuestion} className="border-t border-site-border p-3 flex items-end gap-2 shrink-0">
+              <textarea
+                ref={textareaRef}
                 value={input}
                 onChange={handleInputChange}
-                placeholder="Ask a question…"
+                onKeyDown={handleKeyDown}
+                placeholder="Ask a question… (Shift+Enter for a new line)"
                 disabled={isLoading}
                 maxLength={500}
-                className="flex-1 bg-surface border border-site-border rounded px-3 py-2 font-mono text-xs text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent/40"
+                rows={1}
+                className="flex-1 resize-none max-h-[120px] overflow-y-auto bg-surface border border-site-border rounded px-3 py-2 font-mono text-xs text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent/40"
               />
               <button
                 type="submit"
