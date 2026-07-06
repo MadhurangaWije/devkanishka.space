@@ -1,0 +1,464 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lesson 012 – Storage Accounts Deep Dive | AZ-305 Study Guide</title>
+    <link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<div class="lesson-wrap">
+
+    <!-- Header -->
+    <header class="lesson-header fade-in">
+        <span class="lesson-number">Lesson 012 · 🟡 REVIEW</span>
+        <h1>Storage Accounts Deep Dive</h1>
+        <p>You can create storage accounts and configure blobs. Now architect storage for cost, compliance, performance, and resilience — choosing redundancy tiers, lifecycle policies, file-storage platforms, and network isolation patterns.</p>
+    </header>
+
+    <!-- Table of Contents -->
+    <nav class="toc fade-in">
+        <h2>In This Lesson</h2>
+        <ol>
+            <li><a href="#redundancy">Redundancy as an Architecture Decision</a></li>
+            <li><a href="#ra-secondary">RA-GRS/RA-GZRS: Read-Access Secondaries</a></li>
+            <li><a href="#access-tiers">Access Tiers &amp; Lifecycle Management</a></li>
+            <li><a href="#immutable">Immutable Storage &amp; WORM Policies</a></li>
+            <li><a href="#file-storage">File Storage Decisions</a></li>
+            <li><a href="#networking">Storage Networking &amp; Zero-Trust</a></li>
+            <li><a href="#adls-gen2">Data Lake Storage Gen2</a></li>
+            <li><a href="#real-world">Real-World: Media Company Storage Architecture</a></li>
+            <li><a href="#quiz">Knowledge Check</a></li>
+        </ol>
+    </nav>
+
+    <!-- Section 1: Redundancy -->
+    <section id="redundancy" class="fade-in">
+        <h2>1. Redundancy as an Architecture Decision</h2>
+        <p>Storage redundancy isn't a checkbox — it's a cost-vs-resilience trade-off that directly affects your RTO and RPO. Every option replicates data synchronously within its primary region unless noted.</p>
+
+        <div class="diagram box-diagram slide-in-left" id="diagram-redundancy">
+            <h3>Redundancy Options — Data Copy Locations</h3>
+            <div class="box-row">
+                <div class="box blue">
+                    <strong>LRS</strong><br>
+                    3 copies<br>
+                    1 datacenter<br>
+                    <span class="tag">11 nines durability</span>
+                </div>
+                <div class="box green">
+                    <strong>ZRS</strong><br>
+                    3 copies<br>
+                    3 Availability Zones<br>
+                    <span class="tag">12 nines durability</span>
+                </div>
+                <div class="box purple">
+                    <strong>GRS</strong><br>
+                    6 copies total<br>
+                    Primary: 3 (LRS)<br>
+                    Secondary region: 3 (LRS)<br>
+                    <span class="tag">16 nines durability</span>
+                </div>
+                <div class="box orange">
+                    <strong>GZRS</strong><br>
+                    6 copies total<br>
+                    Primary: 3 AZs (ZRS)<br>
+                    Secondary region: 3 (LRS)<br>
+                    <span class="tag">16 nines durability</span>
+                </div>
+            </div>
+        </div>
+
+        <div class="key-concept">
+            <h3>🔑 Choosing Redundancy — Decision Framework</h3>
+            <table class="compare-table">
+                <thead>
+                    <tr><th>Option</th><th>Survives</th><th>RPO</th><th>Cost (relative)</th><th>Use When</th></tr>
+                </thead>
+                <tbody>
+                    <tr><td><strong>LRS</strong></td><td>Disk/rack failure</td><td>0 (sync)</td><td>1×</td><td>Dev/test; data easily recreated; cost-sensitive non-critical</td></tr>
+                    <tr><td><strong>ZRS</strong></td><td>AZ outage</td><td>0 (sync)</td><td>~1.25×</td><td>Production workloads needing HA without geo-replication</td></tr>
+                    <tr><td><strong>GRS</strong></td><td>Full region loss</td><td>~15 min (async)</td><td>~2×</td><td>Business-critical data with regional DR requirement</td></tr>
+                    <tr><td><strong>GZRS</strong></td><td>AZ outage + region loss</td><td>~15 min (async to secondary)</td><td>~2.5×</td><td>Maximum durability — regulated/mission-critical data</td></tr>
+                </tbody>
+            </table>
+        </div>
+
+        <div class="callout-warning">
+            <strong>⚠️ Key Nuance:</strong> GRS replicates asynchronously to the secondary region. A region failure before replication completes = data loss (RPO ~15 min). If you need RPO = 0, you must architect at the application layer (write to two regions yourself) — Azure storage alone cannot guarantee it.
+        </div>
+    </section>
+
+    <!-- Section 2: RA-GRS / RA-GZRS -->
+    <section id="ra-secondary" class="fade-in">
+        <h2>2. RA-GRS/RA-GZRS: Read-Access Secondaries</h2>
+        <p>Standard GRS keeps the secondary region offline until Microsoft initiates failover. <strong>RA-GRS</strong> (and RA-GZRS) adds a read-only endpoint you can use immediately — no failover needed.</p>
+
+        <div class="key-concept">
+            <h3>🔑 Consistency Model</h3>
+            <ul>
+                <li><strong>Eventually consistent</strong> — secondary may lag primary by up to ~15 minutes</li>
+                <li>Check <code>Last-Sync-Time</code> header to know how stale the secondary is</li>
+                <li>Read from <code>accountname-secondary.blob.core.windows.net</code></li>
+                <li>Writes always go to primary — secondary is read-only</li>
+            </ul>
+        </div>
+
+        <div class="key-concept">
+            <h3>🔑 Architecture Patterns for RA-GRS</h3>
+            <ul>
+                <li><strong>Read offload:</strong> Route analytics/reporting reads to secondary, reducing primary load</li>
+                <li><strong>Circuit breaker:</strong> If primary returns errors, auto-switch reads to secondary (accept stale data)</li>
+                <li><strong>Static content DR:</strong> Serve static assets from secondary if primary region is down</li>
+            </ul>
+        </div>
+
+        <div class="callout-warning">
+            <strong>⚠️ Failover Impact:</strong> Customer-initiated failover promotes the secondary to primary. After failover completes, the account becomes LRS in the new region. You must re-configure geo-replication after recovery.
+        </div>
+    </section>
+
+    <!-- Section 3: Access Tiers & Lifecycle -->
+    <section id="access-tiers" class="fade-in">
+        <h2>3. Access Tiers &amp; Lifecycle Management</h2>
+        <p>Access tiers let you align storage cost with access frequency. The architecture decision: automate tier transitions to optimize cost without manual intervention.</p>
+
+        <div class="diagram box-diagram slide-in-left" id="diagram-lifecycle">
+            <h3>Data Lifecycle Flow</h3>
+            <div class="box-row flow">
+                <div class="box red">
+                    <strong>Hot</strong><br>
+                    Frequent access<br>
+                    Highest storage cost<br>
+                    Lowest access cost
+                </div>
+                <div class="flow-arrow">→<br><small>30 days</small></div>
+                <div class="box yellow">
+                    <strong>Cool</strong><br>
+                    Infrequent (30+ days)<br>
+                    Lower storage cost<br>
+                    Higher access cost
+                </div>
+                <div class="flow-arrow">→<br><small>90 days</small></div>
+                <div class="box blue">
+                    <strong>Cold</strong><br>
+                    Rare access (90+ days)<br>
+                    Even lower storage<br>
+                    Higher access cost
+                </div>
+                <div class="flow-arrow">→<br><small>180 days</small></div>
+                <div class="box gray">
+                    <strong>Archive</strong><br>
+                    Offline storage<br>
+                    Cheapest storage<br>
+                    Hours to rehydrate
+                </div>
+                <div class="flow-arrow">→<br><small>365 days</small></div>
+                <div class="box dark">
+                    <strong>Delete</strong><br>
+                    Retention expired
+                </div>
+            </div>
+        </div>
+
+        <div class="key-concept">
+            <h3>🔑 Lifecycle Policy Architecture</h3>
+            <ul>
+                <li><strong>Rules run daily</strong> — tier transitions and deletions evaluated once per day</li>
+                <li><strong>Scope by prefix/blob index tags</strong> — different policies for different data classes (e.g., <code>logs/</code> vs <code>media/</code>)</li>
+                <li><strong>Early deletion penalty:</strong> Cool = 30 days min, Cold = 90 days min, Archive = 180 days min — moving data back before minimum = charged full retention</li>
+                <li><strong>Rehydration from Archive:</strong> Standard (up to 15 hours) or High Priority (under 1 hour, 10× cost)</li>
+            </ul>
+        </div>
+
+        <div class="key-concept">
+            <h3>🔑 Cost Architecture Heuristic</h3>
+            <p>If you access a blob <strong>less than once per 30 days</strong>, Cool saves money. Less than once per 90 days → Cold. Less than once per 180 days → Archive. Model your access pattern, then automate with lifecycle rules.</p>
+        </div>
+    </section>
+
+    <!-- Section 4: Immutable Storage -->
+    <section id="immutable" class="fade-in">
+        <h2>4. Immutable Storage — WORM Policies</h2>
+        <p>Write Once Read Many (WORM) ensures data cannot be modified or deleted for a defined retention period — required for SEC 17a-4, HIPAA, GDPR right-to-deletion timelines, and financial audit trails.</p>
+
+        <div class="key-concept">
+            <h3>🔑 Two Immutability Models</h3>
+            <ul>
+                <li><strong>Time-based retention:</strong> Data cannot be modified/deleted until the retention interval expires. Can be locked (irreversible) or unlocked (extendable but not shortenable).</li>
+                <li><strong>Legal hold:</strong> Indefinite immutability until the hold is explicitly cleared. No retention period — stays until legal/compliance team removes it. Multiple holds can stack (named tags).</li>
+            </ul>
+        </div>
+
+        <div class="key-concept">
+            <h3>🔑 Architecture Considerations</h3>
+            <ul>
+                <li>Immutability is set at <strong>container level</strong> (or account-level with version-level WORM)</li>
+                <li>Version-level WORM (preview → GA) allows per-blob policies — more flexible than container-level</li>
+                <li><strong>Locked policies cannot be shortened or removed</strong> — even by Owner or Microsoft support. Test thoroughly before locking.</li>
+                <li>Combine with <strong>lifecycle management:</strong> immutable blobs can still be tiered to Archive (saves cost during retention period)</li>
+            </ul>
+        </div>
+
+        <div class="callout-warning">
+            <strong>⚠️ Irreversibility:</strong> Once a time-based retention policy is <em>locked</em>, it cannot be deleted or shortened — only extended. A 7-year locked policy means that data physically cannot be removed for 7 years, even if the business requirement changes. Always start <em>unlocked</em> and lock only after legal sign-off.
+        </div>
+    </section>
+
+    <!-- Section 5: File Storage Decisions -->
+    <section id="file-storage" class="fade-in">
+        <h2>5. File Storage Decisions</h2>
+        <p>Three Azure services provide file-system semantics. Choosing the right one depends on protocol needs, performance tier, and migration source.</p>
+
+        <div class="key-concept">
+            <h3>🔑 Comparison Grid</h3>
+            <table class="compare-table">
+                <thead>
+                    <tr><th>Criteria</th><th>Azure Files</th><th>Azure NetApp Files</th><th>Blob NFS 3.0</th></tr>
+                </thead>
+                <tbody>
+                    <tr><td><strong>Protocols</strong></td><td>SMB 3.x, NFS 4.1</td><td>NFS 3/4.1, SMB 3.x</td><td>NFS 3.0 only</td></tr>
+                    <tr><td><strong>Performance</strong></td><td>Standard (HDD) or Premium (SSD)<br>Up to 100K IOPS</td><td>Ultra/Premium/Standard<br>Up to 450K IOPS, sub-ms latency</td><td>Flat namespace blob<br>Good throughput, higher latency</td></tr>
+                    <tr><td><strong>Max Size</strong></td><td>100 TiB per share</td><td>100 TiB per volume<br>500 TiB per pool</td><td>Unlimited (blob storage)</td></tr>
+                    <tr><td><strong>Best For</strong></td><td>Lift-and-shift file shares, home dirs, SMB apps</td><td>SAP, Oracle, HPC, latency-sensitive workloads, on-prem NetApp migration</td><td>Linux apps needing NFS over cheap blob storage (data lakes, ML datasets)</td></tr>
+                    <tr><td><strong>Cost Model</strong></td><td>Pay per GiB provisioned (premium) or used (standard)</td><td>Pay per capacity pool provisioned (min 4 TiB)</td><td>Pay per GiB used (blob pricing)</td></tr>
+                    <tr><td><strong>Identity Integration</strong></td><td>AD DS / Entra DS for SMB</td><td>AD DS for both protocols</td><td>No identity — POSIX UID/GID at container level</td></tr>
+                    <tr><td><strong>Snapshots/Backup</strong></td><td>Share snapshots, Azure Backup</td><td>NetApp snapshots, cross-region replication</td><td>Blob snapshots/versioning</td></tr>
+                </tbody>
+            </table>
+        </div>
+
+        <div class="key-concept">
+            <h3>🔑 Decision Flow</h3>
+            <ul>
+                <li><strong>Need SMB + AD integration?</strong> → Azure Files (or NetApp if you need sub-ms latency)</li>
+                <li><strong>Migrating from on-prem NetApp/ONTAP?</strong> → Azure NetApp Files (familiar snapshots, replication)</li>
+                <li><strong>Need NFS + cheap storage for analytics?</strong> → Blob NFS 3.0</li>
+                <li><strong>Sub-millisecond latency requirement?</strong> → Azure NetApp Files (only option)</li>
+                <li><strong>Budget-constrained lift-and-shift?</strong> → Azure Files Standard tier</li>
+            </ul>
+        </div>
+    </section>
+
+    <!-- Section 6: Storage Networking -->
+    <section id="networking" class="fade-in">
+        <h2>6. Storage Networking — Zero-Trust Architecture</h2>
+        <p>By default, storage accounts accept traffic from all networks. In a zero-trust design, you restrict to specific networks and access paths.</p>
+
+        <div class="key-concept">
+            <h3>🔑 Three Network Isolation Mechanisms</h3>
+            <table class="compare-table">
+                <thead>
+                    <tr><th>Mechanism</th><th>How It Works</th><th>Limitations</th><th>Use When</th></tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td><strong>Storage Firewall</strong><br>(IP/VNet rules)</td>
+                        <td>Allow-list of public IPs or VNet subnets; deny all others</td>
+                        <td>Public endpoint still exists; max 200 IP rules; max 200 VNet rules</td>
+                        <td>Quick restriction for known IPs; hybrid scenarios with on-prem IPs</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Service Endpoints</strong></td>
+                        <td>Optimal route from VNet subnet → storage public endpoint (stays on Azure backbone)</td>
+                        <td>Traffic still hits public endpoint (just from allowed subnet); no on-prem access; source IP = private but destination = public IP</td>
+                        <td>Cost-free network restriction; acceptable when you don't need private DNS or on-prem private access</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Private Endpoints</strong></td>
+                        <td>NIC with private IP in your VNet; storage gets a private IP; public access can be fully disabled</td>
+                        <td>Cost per endpoint (~$7.30/mo + data processing); requires Private DNS Zone for name resolution</td>
+                        <td>Zero-trust production; on-prem access via VPN/ExpressRoute; fully eliminate public exposure</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+
+        <div class="key-concept">
+            <h3>🔑 Architect's Recommendation</h3>
+            <ul>
+                <li><strong>Production / regulated:</strong> Private Endpoints + disable public access. Use Azure Private DNS Zones (<code>privatelink.blob.core.windows.net</code>) for resolution.</li>
+                <li><strong>Multi-VNet access:</strong> Private Endpoints in each VNet (or use hub VNet with DNS forwarding).</li>
+                <li><strong>Cost-sensitive non-critical:</strong> Service Endpoints are free and good enough if you don't need on-prem private access.</li>
+                <li><strong>Combine layers:</strong> Private Endpoint + Storage Firewall (deny public) + Entra ID RBAC data-plane = defense in depth.</li>
+            </ul>
+        </div>
+
+        <div class="exam-tip">
+            <strong>AZ-305 Exam Tip:</strong> If the question mentions "on-premises access to storage without traversing the public internet," the answer is Private Endpoint (accessed via VPN/ExpressRoute). Service Endpoints only work from within Azure VNets.
+        </div>
+    </section>
+
+    <!-- Section 7: Data Lake Storage Gen2 -->
+    <section id="adls-gen2" class="fade-in">
+        <h2>7. Data Lake Storage Gen2</h2>
+        <p>ADLS Gen2 = Azure Blob Storage + <strong>Hierarchical Namespace (HNS)</strong>. It's not a separate service — it's a storage account feature you enable at creation.</p>
+
+        <div class="key-concept">
+            <h3>🔑 When to Enable Hierarchical Namespace</h3>
+            <ul>
+                <li><strong>Big data analytics</strong> — Databricks, Synapse, HDInsight perform atomic directory operations (rename/move thousands of files in O(1) instead of O(n))</li>
+                <li><strong>ACL-based security</strong> — POSIX-like ACLs at folder/file level (in addition to RBAC)</li>
+                <li><strong>Multi-protocol access</strong> — Blob API + DFS API + NFS 3.0 + SFTP (all on same account)</li>
+                <li><strong>Structured data lake zones</strong> — raw/curated/enriched folders with different ACLs per team</li>
+            </ul>
+        </div>
+
+        <div class="key-concept">
+            <h3>🔑 When NOT to Use HNS</h3>
+            <ul>
+                <li>Pure object storage (CDN, static websites) — no benefit from hierarchy</li>
+                <li>Need Blob features not yet supported on HNS (check current limitations — some features lag)</li>
+                <li>Cannot be disabled after creation — plan ahead</li>
+            </ul>
+        </div>
+
+        <div class="callout-warning">
+            <strong>⚠️ Irreversible:</strong> HNS cannot be disabled once enabled. If you enable it and later decide you don't need it, you must create a new account and migrate data. Always decide at account design time.
+        </div>
+    </section>
+
+    <!-- Section 8: Real-World -->
+    <section id="real-world" class="fade-in">
+        <h2>8. Real-World: Media Company Storage Architecture</h2>
+        <div class="real-world-scenario">
+            <h3>📐 Scenario: Global Media Company — 50TB/day Ingest</h3>
+            <p>A media company ingests 50 TB of video daily, processes it within 24 hours, and must retain raw footage for 7 years (SEC compliance). Processed derivatives are accessed frequently for 30 days, then rarely.</p>
+
+            <h4>Architecture Decision Record</h4>
+
+            <table class="compare-table">
+                <thead>
+                    <tr><th>Component</th><th>Decision</th><th>Rationale</th></tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td><strong>Ingest Account</strong></td>
+                        <td>Hot tier, ZRS, HNS enabled</td>
+                        <td>High write throughput; AZ resilience for active processing; HNS for efficient directory renames during pipeline stages</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Redundancy</strong></td>
+                        <td>GZRS for raw footage; ZRS for derivatives</td>
+                        <td>Raw footage is irreplaceable (geo-protection). Derivatives can be reprocessed (AZ protection sufficient)</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Lifecycle — Derivatives</strong></td>
+                        <td>Hot 30d → Cool 90d → Archive 180d → Delete 2yr</td>
+                        <td>Access drops sharply after 30 days. Archive is 1/20th the cost of Hot. 2-year retention per business policy</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Lifecycle — Raw Footage</strong></td>
+                        <td>Hot 7d → Cool 30d → Cold 90d → Archive 180d</td>
+                        <td>Processing completes within 24h; rare re-processing after 7 days; 7-year WORM for compliance</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Compliance</strong></td>
+                        <td>Time-based retention (7yr, locked) on raw container</td>
+                        <td>SEC requires immutable retention. Locked = even admins can't delete</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Networking</strong></td>
+                        <td>Private Endpoints from processing VNet; public disabled</td>
+                        <td>Zero-trust: only the processing pipeline accesses storage. CDN fronts delivery tier separately</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Delivery Tier</strong></td>
+                        <td>Separate account, Hot, LRS, CDN-fronted</td>
+                        <td>CDN handles resilience; LRS sufficient for cached/derivable content</td>
+                    </tr>
+                </tbody>
+            </table>
+
+            <h4>Monthly Cost Impact of Lifecycle Policies</h4>
+            <p>Without lifecycle rules: ~$1M/mo at Hot tier for 1.5 PB cumulative.<br>
+            With lifecycle automation: ~$180K/mo — <strong>82% reduction</strong> by tiering aging data automatically.</p>
+        </div>
+    </section>
+
+    <!-- Exam Tip -->
+    <section class="fade-in">
+        <div class="exam-tip">
+            <strong>AZ-305 Exam Tip — Storage Redundancy Questions:</strong> The exam loves scenarios where you must balance cost against data criticality. Key patterns:
+            <ul>
+                <li>"Data can be recreated" → LRS (cheapest, recreate on failure)</li>
+                <li>"Must survive AZ failure" → ZRS</li>
+                <li>"Must survive regional disaster" → GRS/GZRS</li>
+                <li>"Need read access during outage without failover" → RA-GRS/RA-GZRS</li>
+                <li>"Lowest cost + regional protection" → GRS (not GZRS) — ZRS primary adds cost</li>
+            </ul>
+            Also watch for: <em>"Which is NOT supported?"</em> — you cannot change from GRS→ZRS directly (must do GRS→LRS→ZRS, or copy data to new account).
+        </div>
+    </section>
+
+    <!-- Quiz -->
+    <section id="quiz" class="fade-in">
+        <h2>Knowledge Check</h2>
+        <div class="quiz-container" id="lesson-quiz"></div>
+    </section>
+
+    <!-- Navigation -->
+    <nav class="lesson-nav">
+        <a href="0011-azure-networking-vnet-design.html">&larr; Prev: Lesson 011</a>
+        <a href="0013-databases-cosmos-sql-postgre.html">Next: Lesson 013 &rarr;</a>
+    </nav>
+</div>
+
+<script src="../assets/diagrams.js"></script>
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    // Quiz
+    AzureLessons.Quiz('lesson-quiz', [
+        {
+            question: "A healthcare company stores patient imaging data that must survive a full Azure region failure with RPO < 15 minutes. The data is read frequently during the first 48 hours, then rarely accessed for 7 years. What redundancy and lifecycle design is most appropriate?",
+            options: [
+                "LRS + lifecycle to Archive after 48 hours",
+                "GZRS + lifecycle to Cool at 7 days, Cold at 90 days, Archive at 180 days",
+                "GRS + lifecycle to Archive after 48 hours with high-priority rehydration on access",
+                "ZRS + cross-region copy via ADF + lifecycle to Archive"
+            ],
+            correct: 1,
+            explanation: "GZRS provides regional DR with AZ resilience. Lifecycle moves aging data through tiers gradually. Archiving after only 48 hours risks expensive rehydration for the occasional access in the first week. ZRS alone doesn't survive region loss."
+        },
+        {
+            question: "An application team needs NFS file access with sub-millisecond latency for an Oracle database migration. Which storage service should the architect recommend?",
+            options: [
+                "Azure Files Premium (NFS)",
+                "Azure NetApp Files (Ultra tier)",
+                "Blob Storage with NFS 3.0 protocol",
+                "Azure Managed Lustre"
+            ],
+            correct: 1,
+            explanation: "Azure NetApp Files Ultra tier provides sub-ms latency with NFS support — purpose-built for Oracle, SAP, and latency-sensitive workloads. Azure Files Premium is good but doesn't consistently achieve sub-ms. Blob NFS has higher latency. Managed Lustre is for HPC burst workloads."
+        },
+        {
+            question: "A finance company must ensure audit logs stored in blob cannot be deleted or modified for 5 years, even by subscription Owners. What configuration achieves this?",
+            options: [
+                "RBAC: remove delete permissions from all roles on the storage account",
+                "Resource lock (CanNotDelete) on the storage account",
+                "Time-based retention policy (5 years) in LOCKED state on the container",
+                "Azure Policy with deny effect on blob delete operations"
+            ],
+            correct: 2,
+            explanation: "A locked time-based retention policy is the only option that prevents deletion even by Owners and Microsoft support. Resource locks can be removed by Owners. RBAC can be changed. Policy can be exempted. Only WORM with locked state is truly immutable."
+        },
+        {
+            question: "An architect is designing storage network access for a multi-VNet topology where on-premises systems must access blobs without traversing the public internet. Which approach is correct?",
+            options: [
+                "Service Endpoints on each VNet subnet with storage firewall rules",
+                "Private Endpoints in hub VNet + DNS forwarding from on-premises + disable public access",
+                "Storage firewall allowing the on-premises public IP range",
+                "Service Endpoints + VPN Gateway with forced tunneling"
+            ],
+            correct: 1,
+            explanation: "Private Endpoints give storage a private IP reachable from on-premises via VPN/ExpressRoute. DNS forwarding resolves blob.core.windows.net to the private IP. Service Endpoints only work from within Azure VNets — they don't help on-premises. The firewall IP allow-list still uses public internet."
+        }
+    ]);
+
+    // Initialize interactions
+    AzureLessons.ScrollReveal();
+    AzureLessons.Collapsible();
+});
+</script>
+</body>
+</html>

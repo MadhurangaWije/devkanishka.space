@@ -1,0 +1,852 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>L39 · Dependency Injection — Python A→Z</title>
+<link rel="stylesheet" href="../assets/style.css" />
+</head>
+<body>
+<div id="sidebar-placeholder"></div>
+<div id="main">
+  <div id="lesson-header">
+    <div class="lesson-track track-fastapi">🟩 FastAPI</div>
+    <h1>Dependency Injection</h1>
+    <div class="lesson-meta">
+      <span>📖 Lesson 39</span>
+      <span>⏱ 45 min</span>
+      <span>🧪 5 questions</span>
+      <span>💻 3 exercises</span>
+    </div>
+  </div>
+  <div id="content">
+
+    <div class="objectives">
+      <h4>🎯 Learning Objectives</h4>
+      <ul>
+        <li>Understand what dependency injection is and why FastAPI uses it</li>
+        <li>Write simple function-based dependencies with <code>Depends()</code></li>
+        <li>Use dependencies for query parameter parsing, pagination, and shared logic</li>
+        <li>Write class-based dependencies with <code>__call__</code></li>
+        <li>Use <code>yield</code> dependencies for setup/teardown (database sessions, file handles)</li>
+        <li>Nest dependencies and share them across routers with <code>dependencies=[]</code></li>
+        <li>Override dependencies in tests with <code>app.dependency_overrides</code></li>
+      </ul>
+    </div>
+
+    <!-- ─────────────────────────────────────────────────────────────── -->
+    <h2 id="what-is-di">1 — What is Dependency Injection?</h2>
+
+    <p>
+      <strong>Dependency Injection (DI)</strong> is a pattern where a function declares
+      what it needs and the framework supplies those values automatically.
+      You write <em>what</em> you need; the framework figures out <em>how</em> to provide it.
+    </p>
+
+    <p>Why DI matters in a web framework:</p>
+    <ul>
+      <li><strong>Avoid repetition</strong> — auth checks, DB sessions, and pagination logic are
+          written once and reused across every handler that needs them.</li>
+      <li><strong>Testability</strong> — swap real dependencies for fakes in tests without
+          touching application code.</li>
+      <li><strong>Separation of concerns</strong> — route handlers stay focused on business
+          logic; cross-cutting concerns live in dedicated dependency functions.</li>
+    </ul>
+
+    <p>
+      FastAPI's DI system is built around <code>Depends()</code>. It works for query
+      parameters, path parameters, request headers, request bodies, database sessions,
+      auth tokens — anything you need to provide to a handler.
+    </p>
+
+    <div class="callout callout-concept">
+      <strong>How FastAPI resolves dependencies</strong><br />
+      <code>Depends()</code> is resolved at <em>request time</em>. FastAPI inspects each
+      handler's signature, finds every <code>Depends()</code> argument, resolves them
+      recursively (dependencies can depend on other dependencies), and injects the results.
+      If two handlers in the same request share the same dependency, FastAPI calls it
+      <strong>once per request</strong> and caches the result — unless you opt out with
+      <code>use_cache=False</code>.
+    </div>
+
+    <!-- ─────────────────────────────────────────────────────────────── -->
+    <h2 id="basic-depends">2 — Basic <code>Depends()</code> Usage</h2>
+
+    <p>
+      Any regular Python function can be a dependency. Declare it, then reference it
+      inside a route signature wrapped in <code>Depends()</code>. FastAPI resolves its
+      parameters exactly as it does for route parameters.
+    </p>
+
+    <div style="position:relative"><pre><code class="language-python">from fastapi import FastAPI, Depends
+
+app = FastAPI()
+
+# A simple dependency — just a function
+def get_query_params(q: str = "", skip: int = 0, limit: int = 10):
+    return {"q": q, "skip": skip, "limit": limit}
+
+# Inject it into a route with Depends()
+@app.get("/items")
+def list_items(params: dict = Depends(get_query_params)):
+    return params
+
+@app.get("/users")
+def list_users(params: dict = Depends(get_query_params)):
+    # same dependency, reused across two routes
+    return params
+</code></pre><span class="code-label">basic_depends.py</span></div>
+
+    <p>
+      Visiting <code>/items?q=hello&amp;skip=5&amp;limit=3</code> causes FastAPI to call
+      <code>get_query_params(q="hello", skip=5, limit=3)</code> automatically and pass the
+      returned dict as <code>params</code>.
+    </p>
+
+    <div class="callout callout-tip">
+      <strong>Swagger UI shows dependency parameters</strong><br />
+      The dependency function participates in OpenAPI documentation. Its parameters
+      (<code>q</code>, <code>skip</code>, <code>limit</code>) appear as query parameters
+      in the auto-generated Swagger UI — no extra annotation needed.
+    </div>
+
+    <!-- ─────────────────────────────────────────────────────────────── -->
+    <h2 id="typed-nested">3 — Typed Return Values &amp; Nested Dependencies</h2>
+
+    <p>
+      Dependencies can return typed Pydantic models, and they can themselves depend on
+      other dependencies — forming a chain that FastAPI resolves bottom-up.
+    </p>
+
+    <div style="position:relative"><pre><code class="language-python">from fastapi import FastAPI, Depends, Header, HTTPException, Query, status
+from pydantic import BaseModel
+
+app = FastAPI()
+
+class Pagination(BaseModel):
+    skip: int = 0
+    limit: int = 10
+
+def pagination(skip: int = 0, limit: int = Query(default=10, le=100)) -> Pagination:
+    return Pagination(skip=skip, limit=limit)
+
+# ── Nested dependencies ──
+def get_token(authorization: str = Header(...)):
+    """Extract Bearer token from Authorization header."""
+    scheme, _, token = authorization.partition(" ")
+    if scheme.lower() != "bearer":
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="Invalid auth scheme")
+    return token
+
+def get_current_user(token: str = Depends(get_token)):
+    """Validate token and return user id (simplified)."""
+    if token == "secret-token":
+        return {"user_id": 42, "role": "admin"}
+    raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+
+@app.get("/profile")
+def profile(user: dict = Depends(get_current_user)):
+    # get_current_user → get_token → Authorization header
+    # FastAPI resolves the whole chain automatically
+    return {"welcome": user["user_id"], "role": user["role"]}
+</code></pre><span class="code-label">nested_deps.py</span></div>
+
+    <p>The dependency chain for <code>/profile</code>:</p>
+
+    <table>
+      <thead>
+        <tr>
+          <th>Step</th>
+          <th>Who resolves it</th>
+          <th>What it needs</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>1</td>
+          <td><code>get_token</code></td>
+          <td><code>Authorization</code> request header</td>
+        </tr>
+        <tr>
+          <td>2</td>
+          <td><code>get_current_user</code></td>
+          <td>token string from <code>get_token</code></td>
+        </tr>
+        <tr>
+          <td>3</td>
+          <td><code>profile</code> handler</td>
+          <td>user dict from <code>get_current_user</code></td>
+        </tr>
+      </tbody>
+    </table>
+
+    <p>
+      FastAPI walks the chain bottom-up: it resolves <code>get_token</code> first, feeds
+      the result to <code>get_current_user</code>, then feeds that result to
+      <code>profile</code>. If any step raises an <code>HTTPException</code>, the chain
+      short-circuits and the error response is returned immediately.
+    </p>
+
+    <!-- ─────────────────────────────────────────────────────────────── -->
+    <h2 id="class-based">4 — Class-Based Dependencies</h2>
+
+    <p>
+      When a dependency needs <em>configuration</em> that varies between use sites, a
+      class is cleaner than a function. Define <code>__init__</code> to accept
+      configuration and <code>__call__</code> to handle each request.
+    </p>
+
+    <div style="position:relative"><pre><code class="language-python">from fastapi import FastAPI, Depends, Query
+
+app = FastAPI()
+
+class PaginationDep:
+    """Reusable pagination dependency with configurable max limit."""
+    def __init__(self, max_limit: int = 100):
+        self.max_limit = max_limit
+
+    def __call__(
+        self,
+        skip: int = Query(default=0, ge=0),
+        limit: int = Query(default=10, ge=1),
+    ) -> dict:
+        limit = min(limit, self.max_limit)
+        return {"skip": skip, "limit": limit}
+
+# Create instances with different configs
+standard_pagination = PaginationDep(max_limit=100)
+admin_pagination    = PaginationDep(max_limit=1000)
+
+@app.get("/items")
+def list_items(page: dict = Depends(standard_pagination)):
+    return page
+
+@app.get("/admin/items")
+def admin_list(page: dict = Depends(admin_pagination)):
+    return page
+</code></pre><span class="code-label">class_dep.py</span></div>
+
+    <p>
+      <code>standard_pagination</code> and <code>admin_pagination</code> are two instances
+      of the same class configured differently. FastAPI calls
+      <code>instance.__call__(skip=…, limit=…)</code> per request, resolving
+      <code>skip</code> and <code>limit</code> from query parameters automatically.
+    </p>
+
+    <div class="callout callout-concept">
+      <strong>When to use class-based dependencies</strong><br />
+      Prefer class-based deps when you need to <em>parameterise</em> the dependency at
+      definition time (e.g. different limits for different routers). Prefer function-based
+      deps for simple, stateless logic with no configuration.
+    </div>
+
+    <!-- ─────────────────────────────────────────────────────────────── -->
+    <h2 id="yield-deps">5 — <code>yield</code> Dependencies (Setup / Teardown)</h2>
+
+    <p>
+      When a dependency must clean up after itself (close a DB connection, release a lock,
+      flush a buffer), use <code>yield</code> instead of <code>return</code>. FastAPI runs
+      everything <em>before</em> the <code>yield</code> as setup and everything
+      <em>after</em> as teardown — guaranteed even if the handler raises an exception.
+    </p>
+
+    <div style="position:relative"><pre><code class="language-python">from fastapi import FastAPI, Depends
+from typing import Generator
+
+app = FastAPI()
+
+# Simulated DB session
+class DBSession:
+    def __init__(self):
+        print("DB: connection opened")
+        self.committed = False
+
+    def query(self, model):
+        return [{"id": 1}, {"id": 2}]
+
+    def commit(self):
+        self.committed = True
+
+    def close(self):
+        print("DB: connection closed")
+
+def get_db() -> Generator[DBSession, None, None]:
+    db = DBSession()
+    try:
+        yield db          # ← value injected into route
+    finally:
+        db.close()        # ← always runs after response sent
+
+@app.get("/items")
+def list_items(db: DBSession = Depends(get_db)):
+    return db.query("Item")
+</code></pre><span class="code-label">yield_dep.py</span></div>
+
+    <p>Lifecycle for a single request to <code>/items</code>:</p>
+
+    <ol>
+      <li>FastAPI calls <code>get_db()</code>.</li>
+      <li>Code before <code>yield</code> runs — <code>DBSession()</code> is created and the
+          connection is opened.</li>
+      <li>The yielded <code>db</code> object is injected into <code>list_items</code>.</li>
+      <li><code>list_items</code> executes and the response is prepared.</li>
+      <li>FastAPI resumes <code>get_db()</code> after the <code>yield</code> — the
+          <code>finally</code> block closes the connection.</li>
+    </ol>
+
+    <p>The same pattern with SQLAlchemy async sessions looks like this:</p>
+
+    <div style="position:relative"><pre><code class="language-python">from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
+
+DATABASE_URL = "postgresql+asyncpg://user:pass@localhost/db"
+engine = create_async_engine(DATABASE_URL)
+AsyncSessionLocal = async_sessionmaker(engine, expire_on_commit=False)
+
+async def get_db() -> AsyncSession:
+    async with AsyncSessionLocal() as session:
+        yield session
+</code></pre><span class="code-label">async_db_dep.py</span></div>
+
+    <div class="callout callout-tip">
+      <strong>One <code>yield</code> per dependency</strong><br />
+      Only a single <code>yield</code> is allowed. Code before it = setup; code after it
+      (ideally in a <code>finally</code> block) = teardown. If the handler raises an
+      exception, FastAPI re-raises it <em>after</em> teardown completes, so cleanup always
+      happens.
+    </div>
+
+    <!-- ─────────────────────────────────────────────────────────────── -->
+    <h2 id="router-app-deps">6 — Router-Level &amp; App-Level Dependencies</h2>
+
+    <p>
+      Instead of adding <code>Depends()</code> to every single route signature, you can
+      attach dependencies to an entire router or to the whole application.
+    </p>
+
+    <div style="position:relative"><pre><code class="language-python">from fastapi import FastAPI, APIRouter, Depends, Header, HTTPException, status
+
+app = FastAPI()
+
+def verify_api_key(x_api_key: str = Header(...)):
+    if x_api_key != "my-secret-key":
+        raise HTTPException(status.HTTP_403_FORBIDDEN, detail="Invalid API key")
+
+# ── Apply to a whole router ──
+admin_router = APIRouter(
+    prefix="/admin",
+    tags=["admin"],
+    dependencies=[Depends(verify_api_key)],  # applied to ALL routes in this router
+)
+
+@admin_router.get("/users")
+def admin_users():
+    return [{"id": 1, "name": "Alice"}]
+
+@admin_router.get("/stats")
+def admin_stats():
+    return {"total_users": 42}
+
+app.include_router(admin_router)
+
+# ── Apply to the whole app ──
+app2 = FastAPI(dependencies=[Depends(verify_api_key)])  # every route requires the key
+</code></pre><span class="code-label">router_deps.py</span></div>
+
+    <p>Three levels of dependency application — choose the right scope:</p>
+
+    <table>
+      <thead>
+        <tr>
+          <th>Level</th>
+          <th>How to apply</th>
+          <th>Scope</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Route</td>
+          <td><code>def handler(x = Depends(dep))</code></td>
+          <td>One specific route only</td>
+        </tr>
+        <tr>
+          <td>Router</td>
+          <td><code>APIRouter(dependencies=[Depends(dep)])</code></td>
+          <td>All routes in that router</td>
+        </tr>
+        <tr>
+          <td>Application</td>
+          <td><code>FastAPI(dependencies=[Depends(dep)])</code></td>
+          <td>Every route in the app</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <div class="callout callout-tip">
+      <strong>Dependencies for side effects</strong><br />
+      When a dependency is applied at router or app level via <code>dependencies=[]</code>,
+      its return value is discarded — it runs purely for side effects (auth checks,
+      rate limiting, logging). If you need the return value in the handler, declare the
+      dep in the handler signature instead.
+    </div>
+
+    <!-- ─────────────────────────────────────────────────────────────── -->
+    <h2 id="caching-use-cache">7 — Caching &amp; <code>use_cache</code></h2>
+
+    <p>
+      By default FastAPI caches each dependency's result for the duration of a single
+      request. If <code>expensive_op</code> is used by two different dependencies in the
+      same request, it is called only once and the result is reused.
+    </p>
+
+    <div style="position:relative"><pre><code class="language-python">import time
+from fastapi import FastAPI, Depends
+
+app = FastAPI()
+
+def expensive_op():
+    print("running expensive operation...")
+    time.sleep(0.1)    # simulate slow I/O
+    return {"result": 42}
+
+# Default: use_cache=True — called once per request even if used by multiple deps
+@app.get("/cached")
+def cached_route(
+    a: dict = Depends(expensive_op),
+    b: dict = Depends(expensive_op),   # same instance as `a` — called only once
+):
+    return {"a": a, "b": b}
+
+# use_cache=False — force a fresh call every time
+@app.get("/fresh")
+def fresh_route(
+    a: dict = Depends(expensive_op, use_cache=False),
+    b: dict = Depends(expensive_op, use_cache=False),  # called twice
+):
+    return {"a": a, "b": b}
+</code></pre><span class="code-label">caching_deps.py</span></div>
+
+    <div class="callout callout-concept">
+      <strong>Overriding dependencies in tests</strong><br />
+      <code>app.dependency_overrides</code> is a plain dict mapping the original dependency
+      callable to a replacement. Set it before a test, clear it after:
+    </div>
+
+    <div style="position:relative"><pre><code class="language-python">from fastapi.testclient import TestClient
+
+# Replace get_current_user with a fake that always returns a test user
+def fake_current_user():
+    return {"user_id": 99, "role": "tester"}
+
+app.dependency_overrides[get_current_user] = fake_current_user
+
+client = TestClient(app)
+response = client.get("/profile", headers={"Authorization": "Bearer anything"})
+assert response.json() == {"welcome": 99, "role": "tester"}
+
+# Clean up after the test
+app.dependency_overrides = {}
+</code></pre><span class="code-label">test_overrides.py</span></div>
+
+    <p>
+      Caching is scoped to a <strong>single request</strong>, never across requests.
+      Use <code>use_cache=False</code> when the dependency has per-call side effects
+      that must execute every time (e.g. incrementing a per-call request counter or
+      generating a fresh nonce).
+    </p>
+
+    <table>
+      <thead>
+        <tr>
+          <th>Scenario</th>
+          <th>Recommended setting</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Expensive read (DB lookup, token validation)</td>
+          <td><code>use_cache=True</code> (default)</td>
+        </tr>
+        <tr>
+          <td>Side-effecting call (counter, nonce)</td>
+          <td><code>use_cache=False</code></td>
+        </tr>
+        <tr>
+          <td>Swap dep in tests</td>
+          <td><code>app.dependency_overrides[dep] = fake</code></td>
+        </tr>
+      </tbody>
+    </table>
+
+    <!-- ── 8. Security Dependencies ── -->
+    <h2 id="security-deps">Security Dependencies</h2>
+    <p>
+      The most common real-world use of DI in FastAPI is authentication and authorisation.
+      FastAPI provides <code>OAuth2PasswordBearer</code> and <code>HTTPBearer</code> as
+      ready-made security dependencies, but you can build your own token-validation chain
+      with plain <code>Depends()</code>.
+    </p>
+    <div style="position:relative">
+      <pre><code class="language-python">from fastapi import FastAPI, Depends, HTTPException, status
+from fastapi.security import OAuth2PasswordBearer
+from pydantic import BaseModel
+
+app = FastAPI()
+
+# OAuth2PasswordBearer extracts the Bearer token from the Authorization header
+# tokenUrl is the endpoint that issues tokens (shown in /docs)
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/token")
+
+class TokenData(BaseModel):
+    user_id: int
+    role: str
+
+# Fake token store — in production use JWT (Lesson 40)
+VALID_TOKENS = {
+    "admin-token-abc": TokenData(user_id=1, role="admin"),
+    "user-token-xyz":  TokenData(user_id=2, role="user"),
+}
+
+def get_current_user(token: str = Depends(oauth2_scheme)) -> TokenData:
+    user = VALID_TOKENS.get(token)
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return user
+
+def require_admin(user: TokenData = Depends(get_current_user)) -> TokenData:
+    if user.role != "admin":
+        raise HTTPException(status.HTTP_403_FORBIDDEN, detail="Admin access required")
+    return user
+
+@app.get("/me")
+def me(user: TokenData = Depends(get_current_user)):
+    return user
+
+@app.delete("/users/{user_id}")
+def delete_user(user_id: int, admin: TokenData = Depends(require_admin)):
+    return {"deleted": user_id, "by": admin.user_id}</code></pre>
+      <span class="code-label">security.py</span>
+    </div>
+    <p>
+      The dependency chain is: <code>delete_user</code> → <code>require_admin</code> →
+      <code>get_current_user</code> → <code>oauth2_scheme</code> → <code>Authorization</code> header.
+      FastAPI resolves the whole chain and each step either succeeds or raises an
+      <code>HTTPException</code> that aborts the request immediately.
+    </p>
+
+    <!-- ── 9. Testing with dependency_overrides ── -->
+    <h2 id="testing-overrides">Testing with <code>dependency_overrides</code></h2>
+    <p>
+      One of the biggest benefits of DI is testability. Instead of mocking internals,
+      you swap entire dependencies at the app level — no patching, no monkeypatching.
+    </p>
+    <div style="position:relative">
+      <pre><code class="language-python"># test_routes.py
+import pytest
+from fastapi.testclient import TestClient
+from main import app, get_db, get_current_user
+from models import DBSession, TokenData
+
+# ── Fake DB ──
+class FakeDB:
+    def query(self, model):
+        return [{"id": 99, "name": "Test Item"}]
+    def close(self): pass
+
+def override_get_db():
+    yield FakeDB()
+
+# ── Fake auth ──
+def override_get_current_user():
+    return TokenData(user_id=99, role="user")
+
+# ── Apply overrides ──
+app.dependency_overrides[get_db]           = override_get_db
+app.dependency_overrides[get_current_user] = override_get_current_user
+
+client = TestClient(app)
+
+def test_list_items():
+    resp = client.get("/items")
+    assert resp.status_code == 200
+    assert resp.json()[0]["id"] == 99
+
+def test_me():
+    resp = client.get("/me", headers={"Authorization": "Bearer anything"})
+    assert resp.status_code == 200
+    assert resp.json()["user_id"] == 99</code></pre>
+      <span class="code-label">test_routes.py</span>
+    </div>
+
+    <div class="callout callout-tip">
+      Clear overrides between test modules to avoid state leakage:
+      <code>app.dependency_overrides.clear()</code> — or use a pytest fixture with
+      <code>yield</code> to set up and tear down overrides per test.
+    </div>
+
+    <div style="position:relative">
+      <pre><code class="language-python"># conftest.py — scoped override fixture
+import pytest
+from fastapi.testclient import TestClient
+from main import app, get_current_user
+from models import TokenData
+
+@pytest.fixture
+def client_as_admin():
+    app.dependency_overrides[get_current_user] = lambda: TokenData(user_id=1, role="admin")
+    yield TestClient(app)
+    app.dependency_overrides.clear()   # ← always clean up
+
+def test_admin_delete(client_as_admin):
+    resp = client_as_admin.delete("/users/5")
+    assert resp.status_code == 200</code></pre>
+      <span class="code-label">conftest.py</span>
+    </div>
+
+    <!-- ── 10. Background Tasks as Dependencies ── -->
+    <h2 id="background-tasks">Background Tasks via Dependencies</h2>
+    <p>
+      <code>BackgroundTasks</code> can be injected as a dependency to offload work
+      (sending emails, writing audit logs) that should not delay the HTTP response.
+    </p>
+    <div style="position:relative">
+      <pre><code class="language-python">from fastapi import FastAPI, BackgroundTasks, Depends
+import time
+
+app = FastAPI()
+
+def send_welcome_email(email: str):
+    """Runs after the response is sent — never delays the caller."""
+    time.sleep(2)          # simulate slow email provider
+    print(f"Email sent to {email}")
+
+def audit_log(user_id: int, action: str):
+    print(f"AUDIT: user {user_id} performed {action}")
+
+@app.post("/register")
+def register(
+    email: str,
+    background_tasks: BackgroundTasks,
+):
+    # Do the fast synchronous work first
+    user = {"id": 42, "email": email}
+
+    # Queue slow tasks — run after response is returned to client
+    background_tasks.add_task(send_welcome_email, email)
+    background_tasks.add_task(audit_log, user["id"], "register")
+
+    return {"user": user, "message": "Registration successful"}</code></pre>
+      <span class="code-label">background_tasks.py</span>
+    </div>
+
+    <div class="callout callout-warn">
+      <code>BackgroundTasks</code> runs in the same process as the web server — it is suitable
+      for lightweight fire-and-forget tasks. For heavy workloads (video encoding, large data
+      processing) use a proper task queue: <strong>Celery + Redis</strong> or
+      <strong>ARQ</strong>. See Lesson 42 for a full treatment of background tasks.
+    </div>
+
+    <!-- ── Best Practices ── -->
+    <h2 id="best-practices">Best Practices</h2>
+    <ul>
+      <li><strong>Keep dependencies small and single-purpose</strong> — <code>get_current_user</code> validates the token; <code>require_admin</code> checks the role. Don't combine them into one giant function.</li>
+      <li><strong>Always use <code>yield</code> for resources that need cleanup</strong> — database sessions, file handles, HTTP clients. Wrap the yield in <code>try/finally</code> so cleanup runs even on exceptions.</li>
+      <li><strong>Apply auth at the router or app level</strong> for blanket protection — use <code>APIRouter(dependencies=[Depends(require_auth)])</code> instead of adding the dep to every route individually.</li>
+      <li><strong>Leverage <code>dependency_overrides</code> in tests</strong> — never patch internals; swap entire dependencies. This keeps tests fast (no real DB/network) and decoupled.</li>
+      <li><strong>Use class-based deps when configuration is needed</strong> — <code>RateLimiter(max_rpm=60)</code> is cleaner than a closure or global variable.</li>
+      <li><strong>Prefer <code>use_cache=True</code> (the default)</strong> — a single DB session per request is almost always what you want. Use <code>use_cache=False</code> only for deps with intentional per-call side effects.</li>
+      <li><strong>Type the return value of dependencies</strong> — <code>def get_db() -&gt; Generator[Session, None, None]</code> gives IDE autocompletion and mypy coverage in route handlers.</li>
+    </ul>
+
+    <!-- ── Exercises ── -->
+    <h2 id="exercises">Exercises</h2>
+    <div class="exercise-section">
+
+      <div class="exercise">
+        <h3>Exercise 1 — Reusable Pagination &amp; Sorting</h3>
+        <p>Build a reusable dependency that handles both pagination and sorting:</p>
+        <ul>
+          <li>Create a class <code>QueryOptions</code> with <code>__call__(skip, limit, sort_by, order)</code> where <code>sort_by</code> is constrained to <code>Literal["id","name","price"]</code> and <code>order</code> to <code>Literal["asc","desc"]</code>.</li>
+          <li>Inject it into <code>GET /products</code> and <code>GET /orders</code>.</li>
+          <li>Apply <code>skip</code>/<code>limit</code> slicing and sort a fake in-memory list before returning.</li>
+          <li>Write a pytest test that uses <code>TestClient</code> and verifies the correct slice is returned.</li>
+        </ul>
+        <details>
+          <summary>💡 Hint</summary>
+          <pre><code class="language-python">from fastapi import FastAPI, Depends, Query
+from typing import Literal
+
+app = FastAPI()
+
+PRODUCTS = [
+    {"id": i, "name": f"Product {i}", "price": i * 1.5}
+    for i in range(1, 21)
+]
+
+class QueryOptions:
+    def __call__(
+        self,
+        skip:    int = Query(default=0, ge=0),
+        limit:   int = Query(default=5, ge=1, le=20),
+        sort_by: Literal["id", "name", "price"] = "id",
+        order:   Literal["asc", "desc"] = "asc",
+    ) -> dict:
+        return {"skip": skip, "limit": limit, "sort_by": sort_by, "order": order}
+
+query_opts = QueryOptions()
+
+@app.get("/products")
+def list_products(opts: dict = Depends(query_opts)):
+    items = sorted(PRODUCTS, key=lambda x: x[opts["sort_by"]], reverse=opts["order"] == "desc")
+    return items[opts["skip"]: opts["skip"] + opts["limit"]]</code></pre>
+        </details>
+      </div>
+
+      <div class="exercise">
+        <h3>Exercise 2 — DB Session Lifecycle</h3>
+        <p>Simulate a database session dependency with full lifecycle logging:</p>
+        <ul>
+          <li>Create a <code>FakeSession</code> class with <code>begin()</code>, <code>commit()</code>, <code>rollback()</code>, and <code>close()</code> methods that print their actions.</li>
+          <li>Write a <code>get_session()</code> yield dependency: open → yield → commit on success → rollback on exception → always close.</li>
+          <li>Build two routes: <code>POST /items</code> (succeeds, should commit) and <code>POST /bad</code> (raises an exception after yield, should rollback).</li>
+          <li>Run the app and confirm the lifecycle logs appear in the correct order.</li>
+        </ul>
+        <details>
+          <summary>💡 Hint</summary>
+          <pre><code class="language-python">from fastapi import FastAPI, Depends, HTTPException
+
+app = FastAPI()
+
+class FakeSession:
+    def begin(self):    print("SESSION: begin")
+    def commit(self):   print("SESSION: commit")
+    def rollback(self): print("SESSION: rollback")
+    def close(self):    print("SESSION: close")
+
+def get_session():
+    db = FakeSession()
+    db.begin()
+    try:
+        yield db
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+@app.post("/items")
+def create_item(db: FakeSession = Depends(get_session)):
+    return {"status": "created"}
+
+@app.post("/bad")
+def bad_route(db: FakeSession = Depends(get_session)):
+    raise HTTPException(500, "something went wrong")</code></pre>
+        </details>
+      </div>
+
+      <div class="exercise">
+        <h3>Exercise 3 — Role-Based Access Control</h3>
+        <p>Implement a full RBAC dependency chain:</p>
+        <ul>
+          <li>Write <code>get_token(authorization: str = Header(...))</code> that extracts a Bearer token.</li>
+          <li>Write <code>get_current_user(token)</code> that looks up the token in a dict of <code>{token: UserData}</code> and raises 401 if not found.</li>
+          <li>Write a factory <code>require_role(role: str)</code> that returns a dependency function checking <code>user.role == role</code>, raising 403 on failure.</li>
+          <li>Create three routes: <code>GET /public</code> (no auth), <code>GET /user-area</code> (any authenticated user), <code>DELETE /admin/nuke</code> (admin only).</li>
+          <li>Write three tests using <code>dependency_overrides</code>: unauthenticated access to public, user access to user-area, admin access to admin route, and confirm a regular user gets 403 on the admin route.</li>
+        </ul>
+        <details>
+          <summary>💡 Hint — require_role factory</summary>
+          <pre><code class="language-python">from fastapi import Depends
+
+def require_role(role: str):
+    def checker(user = Depends(get_current_user)):
+        if user["role"] != role:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, detail=f"{role} role required")
+        return user
+    return checker
+
+@app.delete("/admin/nuke", dependencies=[Depends(require_role("admin"))])
+def nuke():
+    return {"nuked": True}</code></pre>
+        </details>
+      </div>
+
+    </div><!-- /exercise-section -->
+
+    <div id="quiz-section"></div>
+    <div id="lesson-nav-footer"></div>
+  </div><!-- /content -->
+</div><!-- /main -->
+
+<script src="../assets/nav-data.js"></script>
+<script src="../assets/nav.js"></script>
+<script src="../assets/quiz.js"></script>
+<script src="../assets/highlight.js"></script>
+
+<script>
+buildLessonFooter();
+
+QuizWidget.render("quiz-section", [
+  {
+    question: "What does FastAPI do when the same dependency appears in multiple route parameters or sub-dependencies in a single request?",
+    options: [
+      "It calls the dependency function once for each parameter that declares it",
+      "It raises an error — the same dependency cannot be used more than once",
+      "By default (use_cache=True) it calls the dependency once and reuses the result for the entire request",
+      "It runs the dependencies in parallel using asyncio.gather"
+    ],
+    correct: 2,
+    explanation: "FastAPI caches dependency results per request by default (use_cache=True). If get_current_user appears in both a route handler and a sub-dependency, the function is called once and the result is shared. This avoids redundant DB/network calls. Set use_cache=False to force a fresh call every time — useful for deps with intentional per-call side effects like counters or rate-limiters."
+  },
+  {
+    question: "In a `yield` dependency, when does the code after `yield` execute?",
+    options: [
+      "Immediately after the yield statement, before the route handler runs",
+      "After FastAPI has sent the response to the client (teardown phase)",
+      "Only if the route handler raises an exception",
+      "After all other dependencies in the chain have been set up"
+    ],
+    correct: 1,
+    explanation: "In a yield dependency, code before yield is setup (runs before the handler), the yielded value is injected, the handler runs and FastAPI sends the response, then code after yield is teardown (runs after the response is sent). This guarantees resources are released regardless of whether the handler succeeded or raised an exception — which is why wrapping teardown in finally is recommended."
+  },
+  {
+    question: "What is the correct way to apply a dependency to every route in an `APIRouter` without adding it to each route individually?",
+    options: [
+      "Decorate the router object with @router.depends()",
+      "Pass dependencies=[Depends(my_dep)] to the APIRouter constructor",
+      "Set app.middleware to run the dependency before routing",
+      "Add the dependency to every @router.get() and @router.post() call explicitly"
+    ],
+    correct: 1,
+    explanation: "APIRouter accepts a dependencies parameter: APIRouter(prefix='/admin', dependencies=[Depends(verify_api_key)]). Every route registered on that router will automatically run verify_api_key before executing. This is the standard way to protect an entire section of an API (e.g. all /admin routes) without repeating the dep on every endpoint."
+  },
+  {
+    question: "How do you swap a real database dependency for a fake one in a pytest test?",
+    options: [
+      "Use unittest.mock.patch to monkeypatch the dependency function",
+      "Set app.dependency_overrides[real_dep] = fake_dep before creating the TestClient",
+      "Import the fake directly into the route module before importing the app",
+      "Pass the fake as a query parameter named __override__ in the test request"
+    ],
+    correct: 1,
+    explanation: "app.dependency_overrides is a dict that maps the original dependency callable to a replacement. When FastAPI resolves the dependency during the test, it finds the override and calls the fake instead. This is much cleaner than monkeypatching — no import magic, no side effects on other tests (as long as you clear the overrides afterward). Always call app.dependency_overrides.clear() (or use a yield fixture) to avoid leaking state between tests."
+  },
+  {
+    question: "What is the key advantage of class-based dependencies (using `__call__`) over plain function dependencies?",
+    options: [
+      "Class-based dependencies run faster because Python optimises __call__ internally",
+      "Class-based dependencies can be marked as async; function dependencies cannot",
+      "Class-based dependencies can be configured at instantiation time, creating reusable parameterised deps like PaginationDep(max_limit=100)",
+      "Class-based dependencies bypass Pydantic validation, making them suitable for raw request access"
+    ],
+    correct: 2,
+    explanation: "The main benefit of a class-based dependency is that you can configure it when you create the instance. PaginationDep(max_limit=100) and PaginationDep(max_limit=1000) are two separately-configured deps from the same class — something you cannot easily do with a plain function without resorting to closures or global config. The class instance is then used as a callable via __call__, which FastAPI invokes per request."
+  }
+]);
+</script>
+</body>
+</html>

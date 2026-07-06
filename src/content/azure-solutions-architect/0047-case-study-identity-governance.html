@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lesson 047 – Case Study: Identity & Governance for Multi-BU Enterprise | AZ-305 Study Guide</title>
+    <link rel="stylesheet" href="../assets/styles.css">
+    <script src="../assets/diagrams.js"></script>
+</head>
+<body>
+<div class="lesson-wrap">
+
+    <header class="lesson-header fade-in">
+        <span class="lesson-number">Lesson 047 · 🟢 DEEP DIVE (~35 min)</span>
+        <h1>Case Study: Identity &amp; Governance for a Multi-BU Enterprise</h1>
+        <p>Walk through a full AZ-305-style scenario — design management groups, subscriptions, identity federation, RBAC, compliance policies, and monitoring for Contoso Holdings.</p>
+    </header>
+
+    <!-- ───────── SCENARIO ───────── -->
+    <section id="scenario" class="fade-in">
+        <h2>The Scenario</h2>
+        <div class="scenario-box" style="background:var(--card-bg);border-left:4px solid var(--accent);padding:1.2rem;border-radius:8px;margin-bottom:1.5rem;">
+            <h3 style="margin-top:0;">Contoso Holdings — Enterprise Overview</h3>
+            <ul>
+                <li><strong>3 Business Units:</strong> Retail, Finance, Healthcare</li>
+                <li><strong>5,000 employees</strong> across USA, UK, and Germany</li>
+                <li><strong>Acquisition:</strong> Fabrikam Corp (500 employees, separate Entra ID tenant) — must integrate within 6 months</li>
+                <li><strong>Compliance:</strong> PCI-DSS for Finance BU, HIPAA for Healthcare BU, GDPR for all EU data</li>
+                <li><strong>Current state:</strong> Flat subscription model (one sub per team), no management groups, no PIM, basic Conditional Access</li>
+                <li><strong>Goals:</strong> Unified identity, per-BU governance guardrails, least-privilege access, centralized audit</li>
+            </ul>
+        </div>
+    </section>
+
+    <!-- ───────── DECISION 1 ───────── -->
+    <section id="mg-hierarchy" class="fade-in">
+        <h2>Decision 1 — Management Group Hierarchy</h2>
+        <div class="box-diagram" data-diagram='{
+            "title": "Management Group Hierarchy",
+            "boxes": [
+                {"id": "root", "label": "Tenant Root Group", "x": 300, "y": 30, "color": "#6366f1"},
+                {"id": "contoso", "label": "Contoso Holdings", "x": 300, "y": 100, "color": "#6366f1"},
+                {"id": "retail", "label": "MG: Retail", "x": 80, "y": 190, "color": "#10b981"},
+                {"id": "finance", "label": "MG: Finance (PCI)", "x": 270, "y": 190, "color": "#f59e0b"},
+                {"id": "health", "label": "MG: Healthcare (HIPAA)", "x": 480, "y": 190, "color": "#ef4444"},
+                {"id": "shared", "label": "MG: Shared Services", "x": 160, "y": 280, "color": "#8b5cf6"},
+                {"id": "sandbox", "label": "MG: Sandbox / Dev", "x": 380, "y": 280, "color": "#64748b"},
+                {"id": "fabrikam", "label": "MG: Acquisition (Fabrikam)", "x": 560, "y": 280, "color": "#0ea5e9"}
+            ],
+            "connections": [
+                {"from": "root", "to": "contoso"},
+                {"from": "contoso", "to": "retail"},
+                {"from": "contoso", "to": "finance"},
+                {"from": "contoso", "to": "health"},
+                {"from": "contoso", "to": "shared"},
+                {"from": "contoso", "to": "sandbox"},
+                {"from": "contoso", "to": "fabrikam"}
+            ]
+        }'></div>
+        <h3>Rationale</h3>
+        <ul>
+            <li>Each BU gets its own MG for <strong>scoped policy assignment</strong> (PCI initiative on Finance, HIPAA on Healthcare).</li>
+            <li><strong>Shared Services MG</strong> hosts networking hub, DNS, monitoring — policies inherited from parent but no BU-specific compliance.</li>
+            <li><strong>Sandbox MG</strong> with relaxed policies for dev/test; deny production data via policy.</li>
+            <li><strong>Acquisition MG</strong> isolates Fabrikam resources during integration; move subscriptions to BU MGs post-migration.</li>
+            <li>Max depth = 3 levels (root → Contoso → BU) — keeps inheritance simple.</li>
+        </ul>
+    </section>
+
+    <!-- ───────── DECISION 2 ───────── -->
+    <section id="subscriptions" class="fade-in">
+        <h2>Decision 2 — Subscription Topology</h2>
+        <table>
+            <thead><tr><th>Management Group</th><th>Subscriptions</th><th>Purpose</th></tr></thead>
+            <tbody>
+                <tr><td>Shared Services</td><td>sub-connectivity, sub-management</td><td>Hub VNet, Firewall, Log Analytics, Defender for Cloud</td></tr>
+                <tr><td>Retail</td><td>sub-retail-prod, sub-retail-dev</td><td>E-commerce workloads</td></tr>
+                <tr><td>Finance</td><td>sub-finance-prod, sub-finance-dev</td><td>PCI-scoped workloads only</td></tr>
+                <tr><td>Healthcare</td><td>sub-health-prod, sub-health-dev</td><td>PHI workloads, HIPAA controls</td></tr>
+                <tr><td>Acquisition</td><td>sub-fabrikam-landing</td><td>Temporary home for migrated Fabrikam resources</td></tr>
+                <tr><td>Sandbox</td><td>sub-sandbox</td><td>Experimentation, budget-capped</td></tr>
+            </tbody>
+        </table>
+        <p><strong>Key rule:</strong> Prod &amp; dev separated per BU so dev never inherits production compliance overhead unnecessarily — but still inherits BU-level tagging policies.</p>
+    </section>
+
+    <!-- ───────── DECISION 3 ───────── -->
+    <section id="identity" class="fade-in">
+        <h2>Decision 3 — Identity &amp; Cross-Tenant Access</h2>
+        <div class="box-diagram" data-diagram='{
+            "title": "Identity Federation — Acquisition",
+            "boxes": [
+                {"id": "contoso-tenant", "label": "Contoso Entra ID (Primary)", "x": 120, "y": 50, "color": "#6366f1"},
+                {"id": "fabrikam-tenant", "label": "Fabrikam Entra ID (Acquired)", "x": 450, "y": 50, "color": "#0ea5e9"},
+                {"id": "cta", "label": "Cross-Tenant Access Settings", "x": 280, "y": 150, "color": "#f59e0b"},
+                {"id": "b2b", "label": "B2B Direct Connect", "x": 120, "y": 240, "color": "#10b981"},
+                {"id": "pim", "label": "PIM — JIT Privileged Roles", "x": 450, "y": 240, "color": "#ef4444"},
+                {"id": "ca", "label": "Conditional Access (per-BU)", "x": 280, "y": 320, "color": "#8b5cf6"}
+            ],
+            "connections": [
+                {"from": "contoso-tenant", "to": "cta"},
+                {"from": "fabrikam-tenant", "to": "cta"},
+                {"from": "cta", "to": "b2b"},
+                {"from": "contoso-tenant", "to": "pim"},
+                {"from": "contoso-tenant", "to": "ca"}
+            ]
+        }'></div>
+        <h3>Design Choices</h3>
+        <ul>
+            <li><strong>Cross-Tenant Access Settings</strong> — configure inbound trust so Fabrikam users access Contoso resources without re-creating accounts (B2B direct connect).</li>
+            <li><strong>Entra ID PIM</strong> — all Global Admin, Subscription Owner, and Key Vault Admin roles require activation with justification + 4-hour max window.</li>
+            <li><strong>Conditional Access per BU:</strong></li>
+            <ul>
+                <li>Finance — require compliant device + phishing-resistant MFA + block non-US locations.</li>
+                <li>Healthcare — require managed device + session sign-in frequency 1 hour for PHI apps.</li>
+                <li>Retail — standard MFA + risk-based sign-in policy.</li>
+            </ul>
+            <li><strong>Long-term plan:</strong> Migrate Fabrikam identities into Contoso tenant (cross-tenant sync → full migration) within 6 months; retire Fabrikam tenant.</li>
+        </ul>
+    </section>
+
+    <!-- ───────── DECISION 4 ───────── -->
+    <section id="governance" class="fade-in">
+        <h2>Decision 4 — Policy &amp; Tagging</h2>
+        <table>
+            <thead><tr><th>Scope</th><th>Policy Initiative</th><th>Key Policies</th></tr></thead>
+            <tbody>
+                <tr><td>Contoso MG (all)</td><td>Baseline Security</td><td>Require tags (BU, Environment, CostCenter), deny public IP on VMs, enable Defender</td></tr>
+                <tr><td>Finance MG</td><td>PCI-DSS v4</td><td>Encrypt at rest (CMK), enable NSG flow logs, deny storage without private endpoint</td></tr>
+                <tr><td>Healthcare MG</td><td>HIPAA/HITRUST</td><td>Audit diagnostic settings, enforce TLS 1.2, deny non-encrypted SQL</td></tr>
+                <tr><td>Sandbox MG</td><td>Cost Control</td><td>Allowed VM SKUs (B-series only), deny premium storage, budget alert</td></tr>
+            </tbody>
+        </table>
+        <h3>Tagging Taxonomy</h3>
+        <ul>
+            <li><code>BU</code> — Retail | Finance | Healthcare | Shared</li>
+            <li><code>Environment</code> — prod | dev | sandbox</li>
+            <li><code>CostCenter</code> — mapped to internal finance codes</li>
+            <li><code>DataClassification</code> — Public | Internal | Confidential | Restricted</li>
+            <li><code>ComplianceScope</code> — PCI | HIPAA | GDPR | None</li>
+        </ul>
+    </section>
+
+    <!-- ───────── DECISION 5 ───────── -->
+    <section id="monitoring" class="fade-in">
+        <h2>Decision 5 — Monitoring Architecture</h2>
+        <ul>
+            <li><strong>Centralized Log Analytics workspace</strong> in Shared Services subscription for security logs, Azure AD sign-in/audit, and Defender for Cloud.</li>
+            <li><strong>Per-BU workspaces</strong> for application-level diagnostics — keeps HIPAA/PCI data within compliance boundary and controls access via workspace-level RBAC.</li>
+            <li><strong>Azure Monitor Data Collection Rules</strong> route VM/platform metrics to the correct workspace based on subscription tags.</li>
+            <li><strong>Sentinel</strong> connected to the central workspace for unified SIEM; BU workspaces linked as additional data sources.</li>
+        </ul>
+        <p><em>Why hybrid?</em> A single workspace simplifies correlation but creates compliance risk (PCI auditors can see HIPAA data). Workspace-level RBAC + resource-context access gives the best balance.</p>
+    </section>
+
+    <!-- ───────── SUMMARY ───────── -->
+    <section id="summary" class="fade-in">
+        <h2>Architecture Summary</h2>
+        <table>
+            <thead><tr><th>Area</th><th>Decision</th><th>Rationale</th></tr></thead>
+            <tbody>
+                <tr><td>MG Hierarchy</td><td>3-level: Root → Contoso → BU/Shared/Sandbox/Acquisition</td><td>Scoped policy, simple inheritance</td></tr>
+                <tr><td>Subscriptions</td><td>Prod + Dev per BU, shared connectivity/management, landing zone for acquisition</td><td>Blast-radius isolation, compliance scoping</td></tr>
+                <tr><td>Identity</td><td>Cross-tenant access + B2B → eventual full migration; PIM for all privileged roles</td><td>Least privilege, smooth acquisition path</td></tr>
+                <tr><td>Policy</td><td>Baseline at top MG, compliance initiatives at BU MGs</td><td>Enforce guardrails without over-constraining dev</td></tr>
+                <tr><td>Monitoring</td><td>Central security workspace + per-BU app workspaces + Sentinel</td><td>Unified SIEM, compliance data separation</td></tr>
+            </tbody>
+        </table>
+    </section>
+
+    <!-- ───────── QUIZ ───────── -->
+    <section id="quiz" class="fade-in">
+        <h2>Practice Questions — Contoso Scenario</h2>
+        <div class="quiz" id="q47">
+            <div class="quiz-question" data-answer="B">
+                <p><strong>Q1:</strong> Where should the PCI-DSS policy initiative be assigned?</p>
+                <label><input type="radio" name="q47a" value="A"> Tenant Root Group</label>
+                <label><input type="radio" name="q47a" value="B"> Finance Management Group</label>
+                <label><input type="radio" name="q47a" value="C"> sub-finance-prod subscription only</label>
+                <label><input type="radio" name="q47a" value="D"> Each resource group in Finance</label>
+                <div class="quiz-explanation">Assign at the Finance MG to cover both prod and dev subscriptions. Tenant Root is too broad; subscription-only misses dev resources that still need compliance; RG-level is unmanageable.</div>
+            </div>
+            <div class="quiz-question" data-answer="C">
+                <p><strong>Q2:</strong> What is the recommended approach for Fabrikam users to access Contoso resources during integration?</p>
+                <label><input type="radio" name="q47b" value="A"> Recreate all 500 accounts in Contoso tenant immediately</label>
+                <label><input type="radio" name="q47b" value="B"> Federate both tenants to a third-party IdP</label>
+                <label><input type="radio" name="q47b" value="C"> Configure Cross-Tenant Access Settings with B2B direct connect</label>
+                <label><input type="radio" name="q47b" value="D"> Create a VPN between tenants</label>
+                <div class="quiz-explanation">Cross-Tenant Access Settings allow Fabrikam users to authenticate with their home tenant and access Contoso resources — no account duplication or third-party IdP needed.</div>
+            </div>
+            <div class="quiz-question" data-answer="D">
+                <p><strong>Q3:</strong> Why use separate Log Analytics workspaces for Healthcare and Finance instead of one central workspace?</p>
+                <label><input type="radio" name="q47c" value="A"> Cost savings — per-BU workspaces are cheaper</label>
+                <label><input type="radio" name="q47c" value="B"> Azure limits one workspace per subscription</label>
+                <label><input type="radio" name="q47c" value="C"> Sentinel cannot ingest from multiple workspaces</label>
+                <label><input type="radio" name="q47c" value="D"> Compliance boundary isolation — auditors for PCI should not access PHI data</label>
+                <div class="quiz-explanation">Separate workspaces enforce data isolation so PCI auditors cannot see HIPAA-protected data and vice versa. Sentinel CAN ingest from multiple workspaces.</div>
+            </div>
+            <div class="quiz-question" data-answer="A">
+                <p><strong>Q4:</strong> Which PIM configuration best fits the Contoso scenario for Global Admin?</p>
+                <label><input type="radio" name="q47d" value="A"> Eligible assignment, requires justification, 4-hour max activation, approval required</label>
+                <label><input type="radio" name="q47d" value="B"> Permanent active assignment for the IT Director</label>
+                <label><input type="radio" name="q47d" value="C"> Eligible with no approval and 24-hour activation window</label>
+                <label><input type="radio" name="q47d" value="D"> Active assignment with Conditional Access only</label>
+                <div class="quiz-explanation">Global Admin is the highest-risk role — JIT activation with justification, approval, and short duration (4 hours) applies least-privilege principles.</div>
+            </div>
+            <div class="quiz-question" data-answer="B">
+                <p><strong>Q5:</strong> After full migration, what happens to the Fabrikam MG and tenant?</p>
+                <label><input type="radio" name="q47e" value="A"> Keep both tenants running permanently for redundancy</label>
+                <label><input type="radio" name="q47e" value="B"> Move subscriptions to appropriate BU MGs and decommission the Fabrikam tenant</label>
+                <label><input type="radio" name="q47e" value="C"> Merge the Fabrikam tenant into Contoso automatically via Azure Portal</label>
+                <label><input type="radio" name="q47e" value="D"> Convert the Fabrikam MG into a resource group</label>
+                <div class="quiz-explanation">Post-migration, Fabrikam subscriptions move under the correct BU management groups. The separate tenant is decommissioned — Azure does not support "merging" tenants natively.</div>
+            </div>
+        </div>
+    </section>
+
+    <!-- ───────── NAV ───────── -->
+    <nav class="lesson-nav fade-in">
+        <a href="0046-identity-governance-review.html" class="prev">← Lesson 046</a>
+        <a href="0048-cost-optimization-strategies.html" class="next">Lesson 048 →</a>
+    </nav>
+</div>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

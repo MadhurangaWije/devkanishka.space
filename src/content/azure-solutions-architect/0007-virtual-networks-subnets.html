@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lesson 007 – Virtual Networks & Subnets | AZ-305 Study Guide</title>
+    <link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<div class="lesson-wrap">
+
+    <!-- Header -->
+    <header class="lesson-header fade-in">
+        <span class="lesson-number">Lesson 007 · 🟡 REVIEW</span>
+        <h1>Virtual Networks &amp; Subnets</h1>
+        <p>You know VNet basics from AZ-104. Now focus on address-space planning at scale, hub-spoke CIDR allocation, subnet design patterns, PaaS delegation, and DNS resolver architecture.</p>
+    </header>
+
+    <!-- Table of Contents -->
+    <nav class="toc fade-in">
+        <h2>In This Lesson</h2>
+        <ol>
+            <li><a href="#address-space">Address Space Planning at Scale</a></li>
+            <li><a href="#hub-spoke-cidr">Hub-Spoke: Address Allocation Strategy</a></li>
+            <li><a href="#subnet-patterns">Subnet Design Patterns</a></li>
+            <li><a href="#subnet-delegation">Subnet Delegation for PaaS</a></li>
+            <li><a href="#dns-architecture">DNS Architecture: Private Resolver &amp; Conditional Forwarding</a></li>
+            <li><a href="#real-world">Real-World: 50-App Migration Network Plan</a></li>
+            <li><a href="#quiz">Knowledge Check</a></li>
+        </ol>
+    </nav>
+
+    <!-- Section 1: Address Space Planning -->
+    <section id="address-space" class="fade-in">
+        <h2>1. Address Space Planning at Scale</h2>
+
+        <div class="key-concept">
+            <h3>🔑 RFC 1918 Ranges &amp; Their Practical Limits</h3>
+            <p>Azure VNets use RFC 1918 private addresses. Your choice of range determines maximum scale:</p>
+            <ul>
+                <li><strong>10.0.0.0/8</strong> — 16.7M addresses. Use this as your enterprise super-block. Partition it across regions and environments.</li>
+                <li><strong>172.16.0.0/12</strong> — 1M addresses. Often reserved for on-premises legacy or DMZs.</li>
+                <li><strong>192.168.0.0/16</strong> — 65K addresses. Too small for cloud-scale; avoid for Azure (conflicts with home networks and VPN clients).</li>
+            </ul>
+        </div>
+
+        <h3>CIDR Sizing Rules of Thumb</h3>
+        <ul>
+            <li>Azure reserves <strong>5 IPs per subnet</strong> (first 4 + last). A /28 gives only 11 usable hosts.</li>
+            <li>Always size subnets <strong>2× current need</strong> — you cannot resize a subnet with resources in it.</li>
+            <li>VNet address space <em>can</em> be expanded without downtime, but overlapping with a peered VNet requires deleting the peering first.</li>
+            <li>Document a <strong>CIDR allocation table</strong> (IPAM) before deploying anything. Tools: Azure IPAM, Excel, or NetBox.</li>
+        </ul>
+
+        <div class="callout-warning">
+            <strong>⚠️ Overlap = Outage.</strong> If two VNets that need to peer share even one overlapping IP, peering creation fails. Plan non-overlapping ranges from day one — retrofitting requires re-IP or NAT (painful).
+        </div>
+
+        <h3>Avoiding Overlaps with On-Premises</h3>
+        <ul>
+            <li>Inventory <em>all</em> on-prem ranges (including forgotten labs, DR sites, partner VPNs).</li>
+            <li>Reserve a dedicated slice of 10.x.x.x for Azure (e.g., 10.64.0.0/10 → 4M addresses for cloud).</li>
+            <li>Use <strong>supernetting</strong>: summarize Azure ranges into a single route advertisement back to on-prem.</li>
+        </ul>
+    </section>
+
+    <!-- Section 2: Hub-Spoke CIDR -->
+    <section id="hub-spoke-cidr" class="fade-in">
+        <h2>2. Hub-Spoke: Address Allocation Strategy</h2>
+
+        <div class="key-concept">
+            <h3>🔑 Allocate Big for Hub, Moderate for Spokes, Reserve for Growth</h3>
+            <p>A proven pattern for enterprise networks:</p>
+            <ul>
+                <li><strong>Hub VNet:</strong> /16 (65K IPs) — holds gateway, firewall, bastion, DNS, shared services.</li>
+                <li><strong>Each Spoke VNet:</strong> /20 (4K IPs) — enough for multiple subnets within a workload.</li>
+                <li><strong>Growth Reserve:</strong> Leave 50% of your super-block unallocated for future spokes/regions.</li>
+            </ul>
+        </div>
+
+        <h3>Example: Regional Allocation from 10.64.0.0/10</h3>
+        <table class="compare-grid">
+            <thead>
+                <tr><th>Component</th><th>CIDR</th><th>Usable IPs</th><th>Purpose</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>East US Hub</td><td>10.64.0.0/16</td><td>~65K</td><td>Shared services, gateways, firewall</td></tr>
+                <tr><td>Spoke 01 (ERP)</td><td>10.65.0.0/20</td><td>~4K</td><td>SAP/ERP workload</td></tr>
+                <tr><td>Spoke 02 (Web)</td><td>10.65.16.0/20</td><td>~4K</td><td>Public-facing web apps</td></tr>
+                <tr><td>Spoke 03 (Data)</td><td>10.65.32.0/20</td><td>~4K</td><td>Data platform (SQL, Synapse)</td></tr>
+                <tr><td>Reserved</td><td>10.65.48.0/20 – 10.65.240.0/20</td><td>—</td><td>Future spokes (12+ slots)</td></tr>
+                <tr><td>West Europe Hub</td><td>10.68.0.0/16</td><td>~65K</td><td>Second region hub</td></tr>
+            </tbody>
+        </table>
+
+        <!-- BoxDiagram: Hub-Spoke CIDR Plan -->
+        <div class="diagram slide-in-left" data-diagram='{
+            "nodes": [
+                {"id": "hub", "label": "Hub 10.64.0.0/16", "x": 220, "y": 120, "w": 160, "h": 50, "shape": "rect", "icon": "🏛️", "tooltip": "Hub VNet — /16 for gateways, firewall, DNS, shared services"},
+                {"id": "spoke1", "label": "Spoke 01\n10.65.0.0/20", "x": 50, "y": 20, "w": 130, "h": 45, "shape": "rect", "icon": "📦", "tooltip": "ERP workload — 4K IPs"},
+                {"id": "spoke2", "label": "Spoke 02\n10.65.16.0/20", "x": 220, "y": 20, "w": 130, "h": 45, "shape": "rect", "icon": "🌐", "tooltip": "Web apps — 4K IPs"},
+                {"id": "spoke3", "label": "Spoke 03\n10.65.32.0/20", "x": 400, "y": 20, "w": 130, "h": 45, "shape": "rect", "icon": "🗄️", "tooltip": "Data platform — 4K IPs"},
+                {"id": "reserved", "label": "Reserved Spokes\n10.65.48–240.0/20", "x": 400, "y": 200, "w": 150, "h": 45, "shape": "rect", "icon": "📋", "tooltip": "12+ future spoke slots pre-allocated"},
+                {"id": "onprem", "label": "On-Prem\n172.16.0.0/12", "x": 50, "y": 200, "w": 130, "h": 45, "shape": "rect", "icon": "🏢", "tooltip": "On-premises uses 172.16/12 — no overlap with 10.64/10"}
+            ],
+            "edges": [
+                {"from": "spoke1", "to": "hub", "label": "peering", "style": "solid"},
+                {"from": "spoke2", "to": "hub", "label": "peering", "style": "solid"},
+                {"from": "spoke3", "to": "hub", "label": "peering", "style": "solid"},
+                {"from": "hub", "to": "onprem", "label": "ER/VPN", "style": "solid"},
+                {"from": "hub", "to": "reserved", "label": "future peering", "style": "dotted"}
+            ],
+            "groups": [
+                {"label": "East US Region (10.64.0.0/14)", "x": 30, "y": 5, "w": 530, "h": 260}
+            ]
+        }'></div>
+        <p class="diagram-caption">Hub-spoke CIDR allocation: non-overlapping /20 spokes carved from a regional /14 super-block, with growth reserves.</p>
+    </section>
+
+    <!-- Section 3: Subnet Patterns -->
+    <section id="subnet-patterns" class="fade-in">
+        <h2>3. Subnet Design Patterns</h2>
+
+        <div class="key-concept">
+            <h3>🔑 Purpose-Built Subnets with Specific Naming</h3>
+            <p>Azure requires certain subnet names for platform services. Design subnets by function, not by team:</p>
+        </div>
+
+        <h3>Hub Subnet Layout</h3>
+        <table class="compare-grid">
+            <thead>
+                <tr><th>Subnet Name</th><th>CIDR (from hub /16)</th><th>Purpose</th><th>Required Name?</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>GatewaySubnet</td><td>10.64.0.0/26</td><td>VPN/ER Gateway</td><td>✅ Exact name required</td></tr>
+                <tr><td>AzureFirewallSubnet</td><td>10.64.1.0/26</td><td>Azure Firewall</td><td>✅ Exact name required</td></tr>
+                <tr><td>AzureFirewallManagementSubnet</td><td>10.64.1.64/26</td><td>Firewall forced-tunnel mgmt</td><td>✅ If forced tunneling</td></tr>
+                <tr><td>AzureBastionSubnet</td><td>10.64.2.0/26</td><td>Azure Bastion</td><td>✅ Exact name required</td></tr>
+                <tr><td>snet-dns-resolver-inbound</td><td>10.64.3.0/28</td><td>DNS Private Resolver inbound</td><td>❌ Custom, delegated</td></tr>
+                <tr><td>snet-dns-resolver-outbound</td><td>10.64.3.16/28</td><td>DNS Private Resolver outbound</td><td>❌ Custom, delegated</td></tr>
+                <tr><td>snet-shared-services</td><td>10.64.4.0/24</td><td>DCs, SCCM, monitoring agents</td><td>❌</td></tr>
+            </tbody>
+        </table>
+
+        <h3>Spoke Subnet Layout (Typical 3-Tier App)</h3>
+        <!-- BoxDiagram: Spoke Subnet Layout -->
+        <div class="diagram slide-in-right" data-diagram='{
+            "nodes": [
+                {"id": "web", "label": "snet-web\n10.65.0.0/24", "x": 30, "y": 30, "w": 140, "h": 40, "shape": "rect", "icon": "🌐", "tooltip": "Web/frontend tier — App GW or LB frontend"},
+                {"id": "app", "label": "snet-app\n10.65.1.0/24", "x": 30, "y": 90, "w": 140, "h": 40, "shape": "rect", "icon": "⚙️", "tooltip": "Application/API tier — VMs or containers"},
+                {"id": "data", "label": "snet-data\n10.65.2.0/24", "x": 30, "y": 150, "w": 140, "h": 40, "shape": "rect", "icon": "🗄️", "tooltip": "Data tier — SQL, Redis, private endpoints"},
+                {"id": "pe", "label": "snet-private-endpoints\n10.65.3.0/24", "x": 230, "y": 30, "w": 170, "h": 40, "shape": "rect", "icon": "🔗", "tooltip": "Dedicated subnet for PaaS private endpoints"},
+                {"id": "delegation", "label": "snet-appservice\n10.65.4.0/24", "x": 230, "y": 90, "w": 170, "h": 40, "shape": "rect", "icon": "📱", "tooltip": "Delegated to Microsoft.Web/serverFarms for VNet integration"},
+                {"id": "reserved", "label": "Reserved\n10.65.5–15.0/24", "x": 230, "y": 150, "w": 170, "h": 40, "shape": "rect", "icon": "📋", "tooltip": "Growth space — 11 additional /24 subnets available"}
+            ],
+            "edges": [
+                {"from": "web", "to": "app", "label": "NSG rules", "style": "solid"},
+                {"from": "app", "to": "data", "label": "NSG rules", "style": "solid"},
+                {"from": "app", "to": "pe", "label": "to PaaS", "style": "dashed"},
+                {"from": "app", "to": "delegation", "label": "VNet Integration", "style": "dashed"}
+            ],
+            "groups": [
+                {"label": "Spoke VNet 10.65.0.0/20", "x": 15, "y": 10, "w": 405, "h": 200}
+            ]
+        }'></div>
+        <p class="diagram-caption">Spoke subnet layout: separate subnets for each tier, private endpoints, and delegated subnets — each with its own NSG.</p>
+
+        <h3>Subnet Design Principles</h3>
+        <ul>
+            <li><strong>One NSG per subnet</strong> — don't share NSGs across subnets with different security postures.</li>
+            <li><strong>Separate private-endpoint subnet</strong> — keeps PE NICs isolated; easier to audit and avoids NSG conflicts.</li>
+            <li><strong>Delegation subnets are exclusive</strong> — no other resources can be placed in a delegated subnet.</li>
+            <li><strong>/27 minimum for most services</strong> — gives 27 usable IPs; enough for auto-scale.</li>
+            <li><strong>GatewaySubnet: /27 minimum</strong> (Microsoft recommends /26 for ExpressRoute coexistence).</li>
+        </ul>
+    </section>
+
+    <!-- Section 4: Subnet Delegation -->
+    <section id="subnet-delegation" class="fade-in">
+        <h2>4. Subnet Delegation for PaaS</h2>
+
+        <div class="key-concept">
+            <h3>🔑 Delegation = Exclusive Access for a PaaS Service</h3>
+            <p>When you delegate a subnet, Azure grants the specified service permission to inject resources (NICs, load balancers) into that subnet. No other resource types can coexist. The service may also apply its own network policies.</p>
+        </div>
+
+        <h3>Common Delegations</h3>
+        <table class="compare-grid">
+            <thead>
+                <tr><th>Service</th><th>Delegation Namespace</th><th>Min Subnet Size</th><th>Key Constraints</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>App Service (VNet Integration)</td><td>Microsoft.Web/serverFarms</td><td>/28</td><td>One plan per subnet; use separate subnet per ASP</td></tr>
+                <tr><td>SQL Managed Instance</td><td>Microsoft.Sql/managedInstances</td><td>/27 (16 instances max)</td><td>Subnet dedicated; requires route table and NSG with specific rules</td></tr>
+                <tr><td>Container Apps Environment</td><td>Microsoft.App/environments</td><td>/23</td><td>Large CIDR required; 250+ IPs for infrastructure</td></tr>
+                <tr><td>Azure NetApp Files</td><td>Microsoft.NetApp/volumes</td><td>/28</td><td>Dedicated subnet; no NSGs supported</td></tr>
+                <tr><td>Azure Databricks</td><td>Microsoft.Databricks/workspaces</td><td>/26 (two subnets)</td><td>Needs host + container subnets</td></tr>
+                <tr><td>API Management (stv2)</td><td>Microsoft.ApiManagement/service</td><td>/27</td><td>NSG required with specific ports open</td></tr>
+            </tbody>
+        </table>
+
+        <div class="exam-tip">
+            <strong>AZ-305 Exam Tip:</strong> If a question asks "What is required before deploying SQL Managed Instance?" — the answer includes a <em>delegated subnet</em> with a specific route table and NSG. The subnet cannot contain other resources.
+        </div>
+
+        <div class="collapsible">
+            <div class="collapsible-header">💡 Delegation vs Private Endpoints — When to Use Which?</div>
+            <div class="collapsible-body">
+                <ul>
+                    <li><strong>Delegation (VNet Integration):</strong> The PaaS service makes <em>outbound</em> calls from your VNet (e.g., App Service calling SQL via private IP). The service injects into your subnet.</li>
+                    <li><strong>Private Endpoints:</strong> You access a PaaS service <em>inbound</em> via a private IP in your VNet. A NIC is created in your subnet representing the PaaS resource.</li>
+                    <li><strong>Both together:</strong> App Service uses delegation for outbound VNet integration AND a Private Endpoint on Storage for inbound private access to blobs.</li>
+                </ul>
+            </div>
+        </div>
+    </section>
+
+    <!-- Section 5: DNS Architecture -->
+    <section id="dns-architecture" class="fade-in">
+        <h2>5. DNS Architecture: Private Resolver &amp; Conditional Forwarding</h2>
+
+        <div class="key-concept">
+            <h3>🔑 Azure DNS Private Resolver Eliminates Custom DNS VMs</h3>
+            <p>Before Private Resolver, you needed IaaS DNS forwarders (BIND/Windows DNS VMs) in the hub to resolve private DNS zones from on-premises. Private Resolver is a managed service that handles inbound (on-prem → Azure) and outbound (Azure → on-prem) DNS forwarding natively.</p>
+        </div>
+
+        <h3>Placement: Hub vs Spoke</h3>
+        <table class="compare-grid">
+            <thead>
+                <tr><th>Aspect</th><th>Resolver in Hub (Recommended)</th><th>Resolver in Each Spoke</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>Cost</td><td>1 resolver shared across all spokes</td><td>N resolvers — expensive</td></tr>
+                <tr><td>Management</td><td>Centralized ruleset &amp; forwarding rules</td><td>Duplicate config per spoke</td></tr>
+                <tr><td>On-prem forwarding</td><td>Single inbound endpoint IP for on-prem DNS to target</td><td>Multiple IPs to manage</td></tr>
+                <tr><td>Latency</td><td>+1 hop through peering (negligible for DNS)</td><td>Local resolution</td></tr>
+                <tr><td>Failure blast radius</td><td>Hub outage affects all DNS</td><td>Isolated per spoke</td></tr>
+                <tr><td>Best for</td><td>Most enterprises (centralized governance)</td><td>Highly isolated workloads (regulated)</td></tr>
+            </tbody>
+        </table>
+
+        <h3>Architecture Pattern</h3>
+        <ul>
+            <li><strong>Inbound endpoint</strong> (in hub subnet): On-prem DNS servers conditionally forward <code>*.privatelink.database.windows.net</code> etc. to this IP.</li>
+            <li><strong>Outbound endpoint</strong> (in hub subnet): Azure VMs forward queries for on-prem zones (e.g., <code>corp.contoso.com</code>) through this endpoint → on-prem DNS.</li>
+            <li><strong>DNS Forwarding Ruleset:</strong> Linked to spoke VNets via VNet links. Rules define which domains go where.</li>
+            <li><strong>Private DNS Zones:</strong> Linked to hub VNet; spokes resolve via the resolver (not direct zone links to every spoke).</li>
+        </ul>
+
+        <div class="collapsible">
+            <div class="collapsible-header">🔧 Conditional Forwarding Rule Examples</div>
+            <div class="collapsible-body">
+                <pre><code># Forwarding Ruleset attached to all spoke VNets
+Rule 1: *.blob.core.windows.net      → Azure DNS (168.63.129.16)
+Rule 2: *.database.windows.net       → Azure DNS (168.63.129.16)
+Rule 3: corp.contoso.com             → On-prem DNS (172.16.1.10, 172.16.1.11)
+Rule 4: legacy.internal              → On-prem DNS (172.16.1.10)
+Default: all other queries            → Azure DNS (168.63.129.16)</code></pre>
+            </div>
+        </div>
+
+        <div class="exam-tip">
+            <strong>AZ-305 Exam Tip:</strong> If a scenario says "on-premises servers need to resolve Azure Private Endpoint DNS names" — the answer is <em>Azure DNS Private Resolver inbound endpoint</em> (or legacy: IaaS DNS forwarder). On-prem DNS conditionally forwards privatelink zones to the inbound endpoint IP.
+        </div>
+    </section>
+
+    <!-- Section 6: Real-World -->
+    <section id="real-world" class="real-world-example fade-in">
+        <h2>6. Real-World: Planning Network for 50-App Migration with Hybrid</h2>
+
+        <h3>Scenario</h3>
+        <p>Contoso is migrating 50 applications from two on-premises data centers to Azure (East US primary, West Europe DR). On-prem uses 172.16.0.0/12. They need hub-spoke, hybrid connectivity via ExpressRoute, and private access to PaaS services.</p>
+
+        <h3>The Design</h3>
+        <ol>
+            <li><strong>IPAM allocation:</strong> Reserve 10.64.0.0/10 for Azure (~4M IPs). East US gets 10.64.0.0/12, West Europe gets 10.80.0.0/12.</li>
+            <li><strong>Hub sizing:</strong> Each regional hub = /16 (10.64.0.0/16 East, 10.80.0.0/16 West). Contains GatewaySubnet, AzureFirewallSubnet, BastionSubnet, DNS resolver subnets, and shared services.</li>
+            <li><strong>Spoke allocation:</strong> 50 apps grouped into ~15 spokes by business unit (3–4 apps per spoke). Each spoke = /20 (4K IPs). Leaves room for 40+ future spokes per region.</li>
+            <li><strong>Subnet template per spoke:</strong> snet-web /24, snet-app /24, snet-data /24, snet-pe /24, snet-delegation /24, reserved /24 ×11.</li>
+            <li><strong>DNS:</strong> Private Resolver in each hub. On-prem DNS forwards privatelink zones to hub inbound endpoint. Outbound rules forward corp.contoso.com to on-prem DCs.</li>
+            <li><strong>Delegation:</strong> 12 apps use App Service → each gets a delegated /27 subnet for VNet integration. 2 SQL MI instances → dedicated /27 delegated subnets in their respective spokes.</li>
+            <li><strong>Growth:</strong> 50% of each regional /12 block remains unallocated. New spokes follow the template without renumbering.</li>
+        </ol>
+
+        <h3>Key Decisions</h3>
+        <ul>
+            <li>Used /20 per spoke (not /24) even though most apps need &lt;100 IPs — future delegation subnets and PE subnets consume space fast.</li>
+            <li>Centralized all private DNS zone links at the hub level — avoids managing 50+ zone links per spoke.</li>
+            <li>Documented the CIDR plan in a shared IPAM tool with approval workflow for new allocations.</li>
+        </ul>
+    </section>
+
+    <!-- Lesson Summary -->
+    <section class="lesson-summary fade-in">
+        <h2>Summary</h2>
+        <ul>
+            <li>Use 10.x.x.x/8 as your cloud super-block; partition by region and environment to avoid overlaps.</li>
+            <li>Hub = /16, Spokes = /20, always reserve 50% for growth.</li>
+            <li>Name subnets by function; use required names (GatewaySubnet, AzureFirewallSubnet, AzureBastionSubnet) exactly.</li>
+            <li>Delegated subnets are exclusive — size them per service requirements (Container Apps needs /23!).</li>
+            <li>Place Azure DNS Private Resolver in the hub for centralized hybrid DNS forwarding.</li>
+            <li>Document everything in an IPAM tool — address conflicts at scale are the #1 networking regret.</li>
+        </ul>
+    </section>
+
+    <!-- Quiz -->
+    <section id="quiz" class="quiz fade-in">
+        <h2>Knowledge Check</h2>
+
+        <div class="quiz-question" data-answer="2">
+            <h4>Q1: You need to deploy Azure Container Apps with VNet integration. What is the minimum subnet size?</h4>
+            <div class="quiz-options">
+                <button>/26 (64 IPs)</button>
+                <button>/23 (512 IPs)</button>
+                <button>/27 (32 IPs)</button>
+                <button>/24 (256 IPs)</button>
+            </div>
+            <div class="quiz-feedback"></div>
+        </div>
+
+        <div class="quiz-question" data-answer="1">
+            <h4>Q2: On-premises DNS servers need to resolve Azure Private Endpoint names (e.g., mydb.privatelink.database.windows.net). What Azure service provides this without deploying IaaS VMs?</h4>
+            <div class="quiz-options">
+                <button>Azure DNS Private Resolver (inbound endpoint)</button>
+                <button>Azure Traffic Manager</button>
+                <button>Azure Private DNS Zone with VNet link to on-prem</button>
+                <button>Azure Front Door</button>
+            </div>
+            <div class="quiz-feedback"></div>
+        </div>
+
+        <div class="quiz-question" data-answer="3">
+            <h4>Q3: You are designing a hub VNet. Which subnet name is NOT a required exact name for an Azure platform service?</h4>
+            <div class="quiz-options">
+                <button>GatewaySubnet</button>
+                <button>AzureFirewallSubnet</button>
+                <button>PrivateEndpointSubnet</button>
+                <button>AzureBastionSubnet</button>
+            </div>
+            <div class="quiz-feedback"></div>
+        </div>
+
+        <div class="quiz-question" data-answer="4">
+            <h4>Q4: An enterprise allocates /20 per spoke VNet. How many spokes can fit in a /16 hub-region block (excluding the hub itself which uses the first /20)?</h4>
+            <div class="quiz-options">
+                <button>4 spokes</button>
+                <button>8 spokes</button>
+                <button>12 spokes</button>
+                <button>15 spokes</button>
+            </div>
+            <div class="quiz-feedback"></div>
+        </div>
+    </section>
+
+    <!-- Navigation -->
+    <nav class="lesson-nav">
+        <a href="0006-networking-fundamentals.html">&larr; Prev: Lesson 006</a>
+        <a href="0008-networking-vnet-design-subnets-nsg.html">Next: Lesson 008 &rarr;</a>
+    </nav>
+</div>
+<script src="../assets/diagrams.js"></script>
+</body>
+</html>

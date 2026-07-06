@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lesson 28 — Policy-as-Code: OPA Gatekeeper</title>
+  <link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+
+  <div class="lesson-meta">
+    <span class="number">LESSON 28</span> &middot; Architecture Pattern &middot; ~15 minutes
+  </div>
+
+  <h1>Policy-as-Code: Guardrails for Your Cluster</h1>
+  <p>You can't review every K8s manifest manually. Policy-as-code automatically enforces rules: no <code>latest</code> tags, resource limits required, no root containers. This lesson teaches OPA Gatekeeper — the Kubernetes policy engine.</p>
+
+  <div class="progress">
+    <span>Lesson 28 of 33</span>
+    <div class="progress-bar"><div class="progress-fill" style="width: 84%"></div></div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>What Policy-as-Code Does</h2>
+
+  <div class="diagram">
+    <svg viewBox="0 0 700 120" xmlns="http://www.w3.org/2000/svg">
+      <!-- Without -->
+      <rect x="20" y="10" width="310" height="95" rx="6" fill="#ffebee" stroke="#c62828"/>
+      <text x="175" y="30" text-anchor="middle" font-size="9" font-weight="bold" fill="#c62828">Without: Tribal knowledge</text>
+      <text x="175" y="48" text-anchor="middle" font-size="8" fill="#555">"Hey, remember to set resource limits"</text>
+      <text x="175" y="62" text-anchor="middle" font-size="8" fill="#555">"Don't use :latest in production"</text>
+      <text x="175" y="76" text-anchor="middle" font-size="8" fill="#555">"Make sure you don't run as root"</text>
+      <text x="175" y="93" text-anchor="middle" font-size="8" fill="#c62828">→ Humans forget. Drift happens.</text>
+      
+      <!-- With -->
+      <rect x="370" y="10" width="310" height="95" rx="6" fill="#e8f5e9" stroke="#388e3c"/>
+      <text x="525" y="30" text-anchor="middle" font-size="9" font-weight="bold" fill="#388e3c">With: Automated enforcement</text>
+      <text x="525" y="48" text-anchor="middle" font-size="8" fill="#555">Pod without limits → REJECTED at admission</text>
+      <text x="525" y="62" text-anchor="middle" font-size="8" fill="#555">:latest tag → REJECTED</text>
+      <text x="525" y="76" text-anchor="middle" font-size="8" fill="#555">Root container → REJECTED</text>
+      <text x="525" y="93" text-anchor="middle" font-size="8" fill="#388e3c">→ Impossible to violate. Enforced by the cluster itself.</text>
+    </svg>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>Essential Production Policies</h2>
+
+  <div class="exercise">
+    <h3>Install Gatekeeper</h3>
+<pre><code>helm repo add gatekeeper https://open-policy-agent.github.io/gatekeeper/charts
+helm install gatekeeper gatekeeper/gatekeeper \
+  -n gatekeeper-system --create-namespace
+</code></pre>
+
+    <h3>Policy 1: No <code>latest</code> Tag</h3>
+<pre><code>apiVersion: templates.gatekeeper.sh/v1
+kind: ConstraintTemplate
+metadata:
+  name: k8sdisallowedtags
+spec:
+  crd:
+    spec:
+      names:
+        kind: K8sDisallowedTags
+  targets:
+    - target: admission.k8s.gatekeeper.sh
+      rego: |
+        package k8sdisallowedtags
+        violation[{"msg": msg}] {
+          container := input.review.object.spec.containers[_]
+          endswith(container.image, ":latest")
+          msg := sprintf("Container '%v' uses :latest tag", [container.name])
+        }
+---
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: K8sDisallowedTags
+metadata:
+  name: no-latest
+spec:
+  match:
+    kinds: [{ apiGroups: [""], kinds: ["Pod"] }]
+    namespaces: ["production"]
+</code></pre>
+
+    <h3>Policy 2: Resource Limits Required</h3>
+<pre><code>apiVersion: templates.gatekeeper.sh/v1
+kind: ConstraintTemplate
+metadata:
+  name: k8srequiredresources
+spec:
+  crd:
+    spec:
+      names:
+        kind: K8sRequiredResources
+  targets:
+    - target: admission.k8s.gatekeeper.sh
+      rego: |
+        package k8srequiredresources
+        violation[{"msg": msg}] {
+          container := input.review.object.spec.containers[_]
+          not container.resources.limits
+          msg := sprintf("Container '%v' must have resource limits", [container.name])
+        }
+---
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: K8sRequiredResources
+metadata:
+  name: require-limits
+spec:
+  match:
+    kinds: [{ apiGroups: [""], kinds: ["Pod"] }]
+    namespaces: ["staging", "production"]
+</code></pre>
+
+    <h3>Policy 3: No Root Containers</h3>
+<pre><code>apiVersion: templates.gatekeeper.sh/v1
+kind: ConstraintTemplate
+metadata:
+  name: k8snoroot
+spec:
+  crd:
+    spec:
+      names:
+        kind: K8sNoRoot
+  targets:
+    - target: admission.k8s.gatekeeper.sh
+      rego: |
+        package k8snoroot
+        violation[{"msg": msg}] {
+          container := input.review.object.spec.containers[_]
+          not input.review.object.spec.securityContext.runAsNonRoot
+          msg := "Pods must set securityContext.runAsNonRoot: true"
+        }
+</code></pre>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>What Happens When a Policy Blocks</h2>
+
+  <div class="diagram">
+    <svg viewBox="0 0 650 80" xmlns="http://www.w3.org/2000/svg">
+      <rect x="20" y="10" width="610" height="60" rx="4" fill="#1e1e2e"/>
+      <text x="30" y="30" font-family="monospace" font-size="8" fill="#a6e3a1">$ kubectl apply -f deployment.yaml</text>
+      <text x="30" y="48" font-family="monospace" font-size="8" fill="#f47067">Error from server (Forbidden): admission webhook "validation.gatekeeper.sh" denied the request:</text>
+      <text x="30" y="62" font-family="monospace" font-size="8" fill="#f47067">[no-latest] Container 'api' uses :latest tag</text>
+    </svg>
+    <figcaption>Gatekeeper intercepts the API request and rejects it BEFORE the resource is created. Works with ArgoCD too — sync will fail and show the violation.</figcaption>
+  </div>
+
+  <div class="key-insight">
+    <strong>Policies are GitOps-managed too.</strong> Store your ConstraintTemplates and Constraints in the GitOps repo. ArgoCD syncs them. The policies themselves are version-controlled, reviewed, and deployed via the same process as everything else.
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>🧠 Recall Check</h2>
+
+  <div class="recall">
+    <ol>
+      <li>At what point does Gatekeeper enforce policies — build time or deploy time?</li>
+      <li>What's a ConstraintTemplate vs a Constraint?</li>
+      <li>If ArgoCD tries to sync a Deployment that violates a policy, what happens?</li>
+      <li>Name three policies every production cluster should have.</li>
+    </ol>
+    <details>
+      <summary>Reveal answers</summary>
+      <ol>
+        <li><strong>Deploy time (admission).</strong> Gatekeeper is a Kubernetes admission webhook — it intercepts API requests BEFORE resources are created/updated.</li>
+        <li><strong>ConstraintTemplate</strong> = the rule logic (Rego code). <strong>Constraint</strong> = where/when to apply it (which namespaces, which resource kinds).</li>
+        <li>The sync <strong>fails</strong>. ArgoCD shows the app as "Degraded" with the admission error. The violating resource is NOT created.</li>
+        <li>No <code>:latest</code> tags, resource limits required, no root containers. Also valuable: no LoadBalancer services (use Ingress), require labels, max replica limits.</li>
+      </ol>
+    </details>
+  </div>
+
+  <p><strong>Next lesson:</strong> Pipeline Optimization & Cost — making everything fast and cheap.</p>
+
+</body>
+</html>

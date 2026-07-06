@@ -1,0 +1,401 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lesson 006: Infrastructure as Code with Bicep | Azure Solutions Architect</title>
+    <link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<div class="lesson-wrap">
+
+    <header class="lesson-header">
+        <span class="lesson-number">006</span>
+        <h1>Infrastructure as Code with ARM & Bicep</h1>
+        <p class="subtitle">🟢 DEEP DIVE — Declarative infrastructure, module composition, deployment scopes, and enterprise IaC governance</p>
+        <div class="lesson-meta">~35 min read | Phase 1: Foundations</div>
+    </header>
+
+    <nav class="toc">
+        <h2>Contents</h2>
+        <ol>
+            <li><a href="#why-iac">Why IaC Matters Architecturally</a></li>
+            <li><a href="#decision">ARM vs Bicep vs Terraform</a></li>
+            <li><a href="#bicep">Bicep Deep Dive</a></li>
+            <li><a href="#scopes">Deployment Scopes</a></li>
+            <li><a href="#modules">Modules, Registries & Versioning</a></li>
+            <li><a href="#stacks">Template Specs & Deployment Stacks</a></li>
+            <li><a href="#whatif">What-If & Rollback</a></li>
+            <li><a href="#multi-env">Multi-Environment Patterns</a></li>
+            <li><a href="#case-study">Real-World: Enterprise IaC Governance</a></li>
+            <li><a href="#quiz">Quiz</a></li>
+        </ol>
+    </nav>
+
+    <!-- Section 1 -->
+    <section id="why-iac" class="fade-in">
+        <h2>Why IaC Matters Architecturally</h2>
+        <p>Infrastructure as Code isn't just automation — it's an <strong>architectural control plane</strong>. Without it, you have:</p>
+        <ul>
+            <li><strong>Configuration drift</strong> — prod diverges from what you think it is</li>
+            <li><strong>No review process</strong> — changes bypass pull requests and peer review</li>
+            <li><strong>No blast radius control</strong> — one click can delete everything</li>
+            <li><strong>No repeatability</strong> — recreating an environment means tribal knowledge</li>
+        </ul>
+
+        <div class="key-concept">
+            <h3>IaC as Architecture Governance</h3>
+            <p>When infrastructure is code, you get: version control, pull request reviews, automated testing, deployment gates, and audit trails. This makes your infrastructure <strong>as governable as your application code</strong>.</p>
+        </div>
+    </section>
+
+    <!-- Section 2 -->
+    <section id="decision" class="fade-in">
+        <h2>ARM vs Bicep vs Terraform — Decision Framework</h2>
+
+        <div class="compare-grid">
+            <table>
+                <thead><tr><th>Criterion</th><th>ARM JSON</th><th>Bicep</th><th>Terraform</th></tr></thead>
+                <tbody>
+                    <tr><td><strong>Syntax</strong></td><td>Verbose JSON</td><td>Clean, concise DSL</td><td>HCL (declarative)</td></tr>
+                    <tr><td><strong>Learning curve</strong></td><td>High (JSON nesting)</td><td>Low (transpiles to ARM)</td><td>Medium</td></tr>
+                    <tr><td><strong>State management</strong></td><td>None (stateless)</td><td>None (stateless)</td><td>Required (state file)</td></tr>
+                    <tr><td><strong>Multi-cloud</strong></td><td>Azure only</td><td>Azure only</td><td>Any cloud</td></tr>
+                    <tr><td><strong>Day-0 support</strong></td><td>Immediate</td><td>Immediate (same engine)</td><td>Delayed (provider updates)</td></tr>
+                    <tr><td><strong>Modularity</strong></td><td>Linked templates</td><td>Modules + registries</td><td>Modules + registry</td></tr>
+                    <tr><td><strong>Ecosystem</strong></td><td>Microsoft docs</td><td>Growing, Microsoft-backed</td><td>Massive (HashiCorp)</td></tr>
+                    <tr><td><strong>Best for</strong></td><td>Legacy, auto-generated</td><td>Azure-only shops</td><td>Multi-cloud or existing Terraform orgs</td></tr>
+                </tbody>
+            </table>
+        </div>
+
+        <div class="exam-tip">
+            <h3>AZ-305 Exam Tip</h3>
+            <p>The exam tests Bicep/ARM concepts (deployment scopes, what-if, template specs) — not Terraform. For exam prep, focus on Bicep. In real life, the choice depends on your org's multi-cloud strategy and existing tooling.</p>
+        </div>
+
+        <div class="key-concept">
+            <h3>Architect's Rule of Thumb</h3>
+            <ul>
+                <li><strong>Azure-only + greenfield</strong> → Bicep (first-class Azure support, no state to manage)</li>
+                <li><strong>Multi-cloud or existing Terraform</strong> → Terraform (unified tooling across providers)</li>
+                <li><strong>Never write raw ARM JSON</strong> — Bicep transpiles to it; use Bicep as your authoring format</li>
+            </ul>
+        </div>
+    </section>
+
+    <!-- Section 3 -->
+    <section id="bicep" class="fade-in">
+        <h2>Bicep Deep Dive</h2>
+
+        <h3>Core Syntax</h3>
+        <pre data-lang="bicep"><code>// Parameters with decorators
+@description('The Azure region for deployment')
+@allowed(['eastus', 'westeurope', 'southeastasia'])
+param location string = resourceGroup().location
+
+@minValue(1)
+@maxValue(10)
+param instanceCount int = 2
+
+// Variables
+var baseName = 'app-${uniqueString(resourceGroup().id)}'
+
+// Resource with conditions
+resource storageAccount 'Microsoft.Storage/storageAccounts@2023-01-01' = {
+  name: '${baseName}st'
+  location: location
+  kind: 'StorageV2'
+  sku: { name: 'Standard_ZRS' }
+  properties: {
+    minimumTlsVersion: 'TLS1_2'
+    supportsHttpsTrafficOnly: true
+  }
+}
+
+// Loops
+resource nsgRules 'Microsoft.Network/networkSecurityGroups/securityRules@2023-04-01' = [for (rule, i) in securityRules: {
+  name: rule.name
+  properties: rule.properties
+}]
+
+// Outputs
+output storageId string = storageAccount.id
+output storageName string = storageAccount.name</code></pre>
+
+        <h3>Key Language Features for Architects</h3>
+        <ul>
+            <li><strong>Decorators</strong> (<code>@allowed</code>, <code>@minValue</code>, <code>@secure</code>) — enforce guardrails at template level</li>
+            <li><strong>Conditions</strong> (<code>if</code>) — deploy resources conditionally based on environment</li>
+            <li><strong>Loops</strong> (<code>for</code>) — create multiple resources from arrays</li>
+            <li><strong>Existing resources</strong> (<code>existing</code>) — reference resources you don't own without recreating</li>
+            <li><strong>User-defined types</strong> — define complex parameter shapes for module interfaces</li>
+        </ul>
+    </section>
+
+    <!-- Section 4 -->
+    <section id="scopes" class="fade-in">
+        <h2>Deployment Scopes</h2>
+        <p>Bicep/ARM deployments target a <strong>scope</strong>. The scope determines what you can deploy. This is a critical architecture concept — you deploy different things at different levels.</p>
+
+        <div class="compare-grid">
+            <table>
+                <thead><tr><th>Scope</th><th>Target</th><th>What You Deploy</th><th>CLI Flag</th></tr></thead>
+                <tbody>
+                    <tr><td><strong>Resource Group</strong></td><td>Existing RG</td><td>Resources (VMs, storage, VNets)</td><td><code>az deployment group create</code></td></tr>
+                    <tr><td><strong>Subscription</strong></td><td>Existing subscription</td><td>Resource groups, policies, RBAC, budgets</td><td><code>az deployment sub create</code></td></tr>
+                    <tr><td><strong>Management Group</strong></td><td>Existing MG</td><td>Policies, RBAC, sub-management-groups</td><td><code>az deployment mg create</code></td></tr>
+                    <tr><td><strong>Tenant</strong></td><td>Entra ID tenant</td><td>Management groups, tenant-level policies</td><td><code>az deployment tenant create</code></td></tr>
+                </tbody>
+            </table>
+        </div>
+
+        <div class="diagram">
+            <div data-diagram='{"nodes":[{"id":"tenant","label":"Tenant Scope","x":270,"y":20,"w":160,"h":40,"shape":"rounded","icon":"🌐","tooltip":"Management groups, tenant policies"},{"id":"mg","label":"Management Group","x":270,"y":90,"w":160,"h":40,"shape":"rounded","icon":"🏛️","tooltip":"Policies, RBAC, child MGs"},{"id":"sub","label":"Subscription","x":270,"y":160,"w":160,"h":40,"shape":"rounded","icon":"📋","tooltip":"RGs, policies, budgets, RBAC"},{"id":"rg","label":"Resource Group","x":270,"y":230,"w":160,"h":40,"shape":"rounded","icon":"📦","tooltip":"All Azure resources"}],"edges":[{"from":"tenant","to":"mg","label":"contains"},{"from":"mg","to":"sub","label":"contains"},{"from":"sub","to":"rg","label":"contains"}]}'></div>
+            <figcaption>Deployment scope hierarchy — each level deploys different resource types</figcaption>
+        </div>
+
+        <div class="key-concept">
+            <h3>Platform Team vs App Team Scopes</h3>
+            <ul>
+                <li><strong>Platform team</strong> deploys at tenant/MG/subscription scope: governance, networking, shared services</li>
+                <li><strong>App teams</strong> deploy at resource group scope: their application resources</li>
+                <li>This separation enforces the <strong>principle of least privilege</strong> in IaC</li>
+            </ul>
+        </div>
+    </section>
+
+    <!-- Section 5 -->
+    <section id="modules" class="fade-in">
+        <h2>Modules, Registries & Versioning</h2>
+
+        <h3>Module Composition</h3>
+        <pre data-lang="bicep"><code>// main.bicep — composes modules for a 3-tier app
+module network './modules/network.bicep' = {
+  name: 'network-deploy'
+  params: {
+    vnetAddressSpace: '10.1.0.0/16'
+    location: location
+  }
+}
+
+module compute './modules/compute.bicep' = {
+  name: 'compute-deploy'
+  params: {
+    subnetId: network.outputs.appSubnetId
+    vmSize: 'Standard_D4s_v5'
+    instanceCount: instanceCount
+  }
+}
+
+module data './modules/database.bicep' = {
+  name: 'data-deploy'
+  params: {
+    subnetId: network.outputs.dataSubnetId
+    skuName: 'GP_Gen5_4'
+  }
+}</code></pre>
+
+        <div class="diagram">
+            <div data-diagram='{"nodes":[{"id":"main","label":"main.bicep","x":270,"y":20,"w":140,"h":40,"shape":"rounded","icon":"📄"},{"id":"net","label":"network.bicep","x":100,"y":110,"w":140,"h":40,"shape":"rect"},{"id":"comp","label":"compute.bicep","x":270,"y":110,"w":140,"h":40,"shape":"rect"},{"id":"data","label":"database.bicep","x":440,"y":110,"w":140,"h":40,"shape":"rect"},{"id":"reg","label":"ACR Module Registry","x":270,"y":200,"w":180,"h":40,"shape":"cylinder","icon":"📦"}],"edges":[{"from":"main","to":"net"},{"from":"main","to":"comp"},{"from":"main","to":"data"},{"from":"reg","to":"net","style":"dashed","label":"versioned"},{"from":"reg","to":"comp","style":"dashed","label":"versioned"},{"from":"reg","to":"data","style":"dashed","label":"versioned"}]}'></div>
+            <figcaption>Module composition: main orchestrates modules pulled from a versioned registry</figcaption>
+        </div>
+
+        <h3>Module Registry (Azure Container Registry)</h3>
+        <pre data-lang="bicep"><code>// Consuming a module from a private registry
+module network 'br:myregistry.azurecr.io/bicep/modules/network:v1.2.0' = {
+  name: 'network-deploy'
+  params: { ... }
+}
+
+// Publishing a module
+// az bicep publish --file ./modules/network.bicep \
+//   --target br:myregistry.azurecr.io/bicep/modules/network:v1.2.0</code></pre>
+
+        <div class="key-concept">
+            <h3>Versioning Strategy</h3>
+            <ul>
+                <li>Use <strong>semantic versioning</strong>: major.minor.patch</li>
+                <li><strong>Major</strong> = breaking changes (removed parameters, renamed outputs)</li>
+                <li><strong>Minor</strong> = new features (new optional parameters)</li>
+                <li><strong>Patch</strong> = bug fixes (no interface changes)</li>
+                <li>App teams pin to major version; platform team owns the registry</li>
+            </ul>
+        </div>
+    </section>
+
+    <!-- Section 6 -->
+    <section id="stacks" class="fade-in">
+        <h2>Template Specs & Deployment Stacks</h2>
+
+        <div class="compare-grid">
+            <table>
+                <thead><tr><th>Feature</th><th>Template Spec</th><th>Deployment Stack</th></tr></thead>
+                <tbody>
+                    <tr><td><strong>What it is</strong></td><td>Versioned ARM/Bicep template stored in Azure</td><td>Azure resource that tracks deployed resources</td></tr>
+                    <tr><td><strong>Purpose</strong></td><td>Share curated templates with RBAC</td><td>Lifecycle management + drift protection</td></tr>
+                    <tr><td><strong>Drift detection</strong></td><td>No</td><td>Yes — can deny out-of-band changes</td></tr>
+                    <tr><td><strong>Resource cleanup</strong></td><td>Manual</td><td>Automatic — deletes resources removed from template</td></tr>
+                    <tr><td><strong>Deny settings</strong></td><td>No</td><td>Yes — denyWriteAndDelete, denyDelete</td></tr>
+                    <tr><td><strong>Best for</strong></td><td>Self-service catalog ("deploy this approved pattern")</td><td>Platform team managing landing zones with drift protection</td></tr>
+                </tbody>
+            </table>
+        </div>
+
+        <div class="callout-warning">
+            <h3>Deployment Stacks Are New (GA 2024)</h3>
+            <p>Deployment Stacks solve the "I deleted a resource from my template but it still exists in Azure" problem. They track what was deployed and clean up orphaned resources. Expect this to appear on updated AZ-305 exams.</p>
+        </div>
+    </section>
+
+    <!-- Section 7 -->
+    <section id="whatif" class="fade-in">
+        <h2>What-If & Rollback</h2>
+
+        <h3>What-If Deployments</h3>
+        <pre data-lang="bash"><code># Preview changes before deploying
+az deployment group what-if \
+  --resource-group rg-app-prod \
+  --template-file main.bicep \
+  --parameters @params.prod.json</code></pre>
+        <p>What-if shows: Create, Delete, Modify, NoChange, Ignore. Use it in CI/CD as a <strong>mandatory gate</strong> before production deployments.</p>
+
+        <h3>Rollback Strategies</h3>
+        <ul>
+            <li><strong>Redeploy previous version</strong> — IaC is idempotent; just redeploy the last-known-good commit</li>
+            <li><strong>Deployment Stacks</strong> — automatic cleanup when you roll back template changes</li>
+            <li><strong>Feature flags in parameters</strong> — toggle features without changing templates</li>
+            <li><strong>Blue-green at infra level</strong> — deploy new resource group, switch traffic, delete old</li>
+        </ul>
+    </section>
+
+    <!-- Section 8 -->
+    <section id="multi-env" class="fade-in">
+        <h2>Multi-Environment Patterns</h2>
+
+        <h3>Parameter Files per Environment</h3>
+        <pre data-lang="text"><code>├── main.bicep              # Shared template
+├── modules/                # Reusable modules
+├── params.dev.json         # Dev: small SKUs, single instance
+├── params.staging.json     # Staging: prod-like but fewer replicas
+└── params.prod.json        # Prod: full scale, HA, geo-redundancy</code></pre>
+
+        <h3>CI/CD Pipeline Pattern</h3>
+        <div class="diagram">
+            <div data-diagram='{"nodes":[{"id":"pr","label":"Pull Request","x":50,"y":100,"w":120,"h":40,"shape":"rounded","icon":"🔀"},{"id":"lint","label":"Lint & Validate","x":200,"y":100,"w":130,"h":40,"shape":"rect"},{"id":"whatif","label":"What-If","x":360,"y":100,"w":110,"h":40,"shape":"rect"},{"id":"approve","label":"Approval Gate","x":500,"y":100,"w":130,"h":40,"shape":"diamond","icon":"✅"},{"id":"deploy","label":"Deploy","x":660,"y":100,"w":100,"h":40,"shape":"rect"},{"id":"verify","label":"Verify","x":790,"y":100,"w":100,"h":40,"shape":"rect"}],"edges":[{"from":"pr","to":"lint"},{"from":"lint","to":"whatif"},{"from":"whatif","to":"approve"},{"from":"approve","to":"deploy"},{"from":"deploy","to":"verify"}]}'></div>
+            <figcaption>IaC deployment pipeline: code → validate → preview → approve → deploy → verify</figcaption>
+        </div>
+    </section>
+
+    <!-- Section 9: Case Study -->
+    <section id="case-study" class="fade-in">
+        <div class="real-world-example">
+            <h3>Real-World: Platform Team IaC Governance at CloudScale Inc.</h3>
+            <p><strong>Scenario:</strong> Platform team serving 20 application teams. They need: consistent infrastructure patterns, security guardrails, and team autonomy for app-specific resources.</p>
+
+            <h4>Architecture</h4>
+            <ul>
+                <li><strong>Module registry</strong> (ACR): Platform team publishes approved modules (vnet, aks-cluster, sql-server, storage-secure) with semantic versioning</li>
+                <li><strong>App teams</strong> compose their <code>main.bicep</code> from registry modules — can't use raw resource definitions for governed resources</li>
+                <li><strong>Deployment Stacks</strong> at subscription scope: Platform team manages landing zone resources with <code>denyDelete</code> — app teams can't accidentally remove shared infra</li>
+                <li><strong>CI/CD gates</strong>: All PRs run <code>bicep lint</code> + <code>what-if</code>; prod deployments require platform team approval if the diff touches networking or identity</li>
+                <li><strong>Template specs</strong> for self-service: App teams can "Deploy a new microservice" from a catalog that provisions RG + AKS namespace + Key Vault + monitoring</li>
+            </ul>
+
+            <h4>Result</h4>
+            <p>Time-to-provision for a new service dropped from 2 weeks to 45 minutes. Zero drift incidents in production (Deployment Stacks + deny settings). App teams have autonomy within guardrails.</p>
+        </div>
+    </section>
+
+    <!-- Quiz -->
+    <section id="quiz" class="fade-in">
+        <div class="quiz">
+            <h2>Knowledge Check</h2>
+
+            <div class="quiz-question" data-correct="b">
+                <p><strong>1.</strong> Your organization is Azure-only and wants the simplest IaC approach with no state file to manage. Which tool?</p>
+                <div class="quiz-options">
+                    <label><input type="radio" name="q1" value="a"> Terraform with Azure backend</label>
+                    <label><input type="radio" name="q1" value="b"> Bicep</label>
+                    <label><input type="radio" name="q1" value="c"> Pulumi</label>
+                    <label><input type="radio" name="q1" value="d"> ARM JSON templates</label>
+                </div>
+                <div class="quiz-feedback" data-explanation="Bicep is Azure-native, requires no state file (ARM handles state), and has the cleanest syntax. ARM JSON works but is verbose. Terraform requires state management."></div>
+            </div>
+
+            <div class="quiz-question" data-correct="c">
+                <p><strong>2.</strong> You need to deploy Azure Policy assignments across all subscriptions in a management group. What deployment scope do you use?</p>
+                <div class="quiz-options">
+                    <label><input type="radio" name="q2" value="a"> Resource group scope</label>
+                    <label><input type="radio" name="q2" value="b"> Subscription scope</label>
+                    <label><input type="radio" name="q2" value="c"> Management group scope</label>
+                    <label><input type="radio" name="q2" value="d"> Tenant scope</label>
+                </div>
+                <div class="quiz-feedback" data-explanation="Policy assignments at management group scope automatically apply to all child subscriptions. This is how platform teams enforce governance at scale."></div>
+            </div>
+
+            <div class="quiz-question" data-correct="d">
+                <p><strong>3.</strong> A platform team wants to prevent app teams from deleting shared networking resources deployed via IaC. What should they use?</p>
+                <div class="quiz-options">
+                    <label><input type="radio" name="q3" value="a"> Resource locks</label>
+                    <label><input type="radio" name="q3" value="b"> Azure Policy with deny effect</label>
+                    <label><input type="radio" name="q3" value="c"> Template specs</label>
+                    <label><input type="radio" name="q3" value="d"> Deployment Stacks with denyDelete</label>
+                </div>
+                <div class="quiz-feedback" data-explanation="Deployment Stacks with deny settings provide IaC-native protection. Resource locks work but are disconnected from the IaC lifecycle. Deployment Stacks also handle cleanup when resources are removed from templates."></div>
+            </div>
+
+            <div class="quiz-question" data-correct="a">
+                <p><strong>4.</strong> What is the primary advantage of a Bicep module registry over local module files?</p>
+                <div class="quiz-options">
+                    <label><input type="radio" name="q4" value="a"> Versioning and sharing across teams without copy-pasting</label>
+                    <label><input type="radio" name="q4" value="b"> Faster deployment execution</label>
+                    <label><input type="radio" name="q4" value="c"> Automatic parameter validation</label>
+                    <label><input type="radio" name="q4" value="d"> Multi-cloud support</label>
+                </div>
+                <div class="quiz-feedback" data-explanation="A module registry (hosted in ACR) enables semantic versioning, centralized updates, and consumption by multiple teams without file duplication. It's the foundation of enterprise IaC governance."></div>
+            </div>
+
+            <div class="quiz-question" data-correct="b">
+                <p><strong>5.</strong> In a CI/CD pipeline, what should run BEFORE the approval gate for a production deployment?</p>
+                <div class="quiz-options">
+                    <label><input type="radio" name="q5" value="a"> The actual deployment</label>
+                    <label><input type="radio" name="q5" value="b"> Lint, validate, and what-if preview</label>
+                    <label><input type="radio" name="q5" value="c"> Only unit tests</label>
+                    <label><input type="radio" name="q5" value="d"> Nothing — approvers review the code diff only</label>
+                </div>
+                <div class="quiz-feedback" data-explanation="Approvers should see the what-if output (what will actually change in Azure) alongside the code diff. This catches issues that code review alone misses — like unintended resource deletions."></div>
+            </div>
+        </div>
+    </section>
+
+    <!-- Nav -->
+    <div class="lesson-summary">
+        <h2>Key Takeaways</h2>
+        <ul>
+            <li>IaC is governance infrastructure — it enables review, audit, and blast radius control</li>
+            <li>Bicep for Azure-only; Terraform for multi-cloud. Never write raw ARM JSON.</li>
+            <li>Deploy at the right scope: platform team owns MG/sub, app teams own RG</li>
+            <li>Module registries + semantic versioning = enterprise IaC at scale</li>
+            <li>Deployment Stacks solve drift and orphan cleanup — the future of Azure IaC</li>
+        </ul>
+    </div>
+
+    <nav class="lesson-nav">
+        <a href="0005-azure-cli-powershell-portal.html">← 005: CLI & Portal</a>
+        <a href="0007-virtual-networks-subnets.html">007: Virtual Networks →</a>
+    </nav>
+
+</div>
+
+<script src="../assets/diagrams.js"></script>
+<script>
+    document.addEventListener('DOMContentLoaded', function() {
+        AzureLessons.Diagrams.renderAll();
+        AzureLessons.Quiz.init();
+        AzureLessons.ScrollReveal.init();
+        AzureLessons.Collapsible.init();
+    });
+</script>
+</body>
+</html>

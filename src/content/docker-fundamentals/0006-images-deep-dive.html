@@ -1,0 +1,374 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lesson 6: Images Deep Dive — What IS an Image?</title>
+  <link rel="stylesheet" href="../assets/lesson-style.css">
+</head>
+<body>
+
+  <div class="lesson-meta">
+    <span>📦 Lesson 6 of 12</span>
+    <span>⏱️ 14–18 minutes</span>
+    <span>🔬 Deep Internals</span>
+  </div>
+
+  <h1>Images Deep Dive — What <em>IS</em> an Image?</h1>
+  <p class="subtitle">An image is not a file. It is not a disk snapshot. It is a <strong>manifest</strong> — a recipe card that references a stack of content-addressable layers. Understanding this changes how you think about everything Docker does.</p>
+
+  <!-- ============================================================ -->
+  <h2>1. The Mental Model</h2>
+
+  <p>Most people think of an image as "a file you download, like an ISO." That model is wrong and will mislead you repeatedly. Here is the correct mental model:</p>
+
+  <div class="callout callout-info">
+    <strong>Analogy:</strong> An image is a <em>recipe card</em> (the manifest) that references pre-made ingredients (the layers). The recipe card says "stack these ingredients in this order, set oven to 350°F" — it does not contain the ingredients themselves. Two recipe cards can reference the same flour bag.
+  </div>
+
+  <p>Concretely, when you <code>docker pull nginx</code>, Docker downloads:</p>
+  <ol>
+    <li>A <strong>manifest</strong> — a small JSON document (~2 KB)</li>
+    <li>A <strong>config blob</strong> — another JSON document with environment vars, entrypoint, etc.</li>
+    <li><strong>Layer blobs</strong> — compressed tar archives of filesystem diffs</li>
+  </ol>
+
+  <p>The manifest is the image. Everything else is referenced <em>by hash</em>.</p>
+
+  <!-- ============================================================ -->
+  <h2>2. Content-Addressable Storage</h2>
+
+  <p>Every layer is identified by its <strong>SHA256 hash</strong>. The name IS the content. If even one byte changes, the hash changes, and it becomes a different layer.</p>
+
+  <pre><code># Two images sharing a layer — the hash is identical:
+sha256:a1b2c3d4...  ← Debian base layer (75 MB)
+
+nginx   → uses sha256:a1b2c3d4... + sha256:e5f6a7b8... + sha256:c9d0e1f2...
+node:18 → uses sha256:a1b2c3d4... + sha256:f3a4b5c6... + sha256:d7e8f9a0...</code></pre>
+
+  <p>Because both images reference the same Debian base layer hash, Docker stores it <strong>once</strong> on disk. When you pull the second image, that 75 MB layer is already there — zero network transfer, zero extra disk.</p>
+
+  <!-- SVG: Content-addressable storage diagram -->
+  <svg viewBox="0 0 520 220" style="max-width:520px;width:100%;margin:1.5rem auto;display:block;" xmlns="http://www.w3.org/2000/svg" font-family="system-ui,sans-serif" font-size="12">
+    <!-- nginx image -->
+    <rect x="10" y="10" width="120" height="40" rx="4" fill="#e0f2fe" stroke="#0369a1"/>
+    <text x="70" y="35" text-anchor="middle" font-weight="bold">nginx</text>
+    <!-- node image -->
+    <rect x="390" y="10" width="120" height="40" rx="4" fill="#dcfce7" stroke="#16a34a"/>
+    <text x="450" y="35" text-anchor="middle" font-weight="bold">node:18</text>
+    <!-- shared layer -->
+    <rect x="180" y="160" width="160" height="40" rx="4" fill="#fef3c7" stroke="#d97706"/>
+    <text x="260" y="183" text-anchor="middle" font-size="11">sha256:a1b2… (Debian)</text>
+    <!-- nginx-only layer -->
+    <rect x="30" y="100" width="140" height="35" rx="4" fill="#e0f2fe" stroke="#0369a1"/>
+    <text x="100" y="122" text-anchor="middle" font-size="11">sha256:e5f6… (nginx)</text>
+    <!-- node-only layer -->
+    <rect x="350" y="100" width="140" height="35" rx="4" fill="#dcfce7" stroke="#16a34a"/>
+    <text x="420" y="122" text-anchor="middle" font-size="11">sha256:f3a4… (node)</text>
+    <!-- arrows from nginx -->
+    <line x1="70" y1="50" x2="100" y2="100" stroke="#0369a1" stroke-width="1.5" marker-end="url(#arr)"/>
+    <line x1="70" y1="50" x2="240" y2="160" stroke="#d97706" stroke-width="1.5" marker-end="url(#arr)"/>
+    <!-- arrows from node -->
+    <line x1="450" y1="50" x2="420" y2="100" stroke="#16a34a" stroke-width="1.5" marker-end="url(#arr)"/>
+    <line x1="450" y1="50" x2="280" y2="160" stroke="#d97706" stroke-width="1.5" marker-end="url(#arr)"/>
+    <!-- arrowhead def -->
+    <defs><marker id="arr" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 Z" fill="#555"/></marker></defs>
+    <text x="260" y="215" text-anchor="middle" font-size="10" fill="#6b7280">Stored ONCE on disk — shared by both images</text>
+  </svg>
+
+  <p>This principle applies at every level — your local disk, the registry, and network transfers between them. A registry serving millions of images deduplicates aggressively using this mechanism.</p>
+
+  <div class="callout callout-warning">
+    <strong>🏭 Industry insight:</strong> Docker Hub stores tens of millions of images, but the actual layer storage is a fraction of what you'd expect. When you push an image, the registry checks each layer hash — if it already exists, the upload is skipped entirely ("layer already exists"). This is why pushes of rebuilt images are often fast: only the changed layers transfer.
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>3. Image Manifest</h2>
+
+  <p>The manifest is the "recipe card." It's a JSON document conforming to the OCI Image Spec:</p>
+
+  <pre><code>{
+  "schemaVersion": 2,
+  "mediaType": "application/vnd.oci.image.manifest.v1+json",
+  "config": {
+    "mediaType": "application/vnd.oci.image.config.v1+json",
+    "digest": "sha256:9e2b3c...config-hash...",
+    "size": 7023
+  },
+  "layers": [
+    {
+      "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+      "digest": "sha256:a1b2c3d4...base-layer...",
+      "size": 32654321
+    },
+    {
+      "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+      "digest": "sha256:e5f6a7b8...app-layer...",
+      "size": 1547892
+    },
+    {
+      "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+      "digest": "sha256:c9d0e1f2...config-layer...",
+      "size": 423
+    }
+  ]
+}</code></pre>
+
+  <p>Key observations:</p>
+  <ul>
+    <li><strong>config</strong> — points to a JSON blob with env vars, entrypoint, exposed ports, working dir</li>
+    <li><strong>layers</strong> — an <em>ordered</em> list. Order matters: layer 0 is the base, each subsequent layer overlays the one below</li>
+    <li>Everything is referenced by <strong>digest</strong> (content hash). Change the content → different hash → different image</li>
+  </ul>
+
+  <!-- SVG: Image structure diagram -->
+  <svg viewBox="0 0 440 260" style="max-width:440px;width:100%;margin:1.5rem auto;display:block;" xmlns="http://www.w3.org/2000/svg" font-family="system-ui,sans-serif" font-size="12">
+    <!-- Manifest box -->
+    <rect x="150" y="10" width="140" height="45" rx="5" fill="#e0f2fe" stroke="#0369a1" stroke-width="2"/>
+    <text x="220" y="28" text-anchor="middle" font-weight="bold" font-size="13">Manifest</text>
+    <text x="220" y="44" text-anchor="middle" font-size="10" fill="#6b7280">(JSON document)</text>
+    <!-- Config box -->
+    <rect x="10" y="100" width="130" height="50" rx="4" fill="#dcfce7" stroke="#16a34a"/>
+    <text x="75" y="120" text-anchor="middle" font-weight="bold">Config</text>
+    <text x="75" y="136" text-anchor="middle" font-size="10" fill="#6b7280">ENV, CMD, EXPOSE</text>
+    <!-- Layers stack -->
+    <rect x="200" y="90" width="220" height="35" rx="4" fill="#fef3c7" stroke="#d97706"/>
+    <text x="310" y="112" text-anchor="middle">Layer 3: config files (423 B)</text>
+    <rect x="200" y="130" width="220" height="35" rx="4" fill="#fef3c7" stroke="#d97706"/>
+    <text x="310" y="152" text-anchor="middle">Layer 2: app code (1.5 MB)</text>
+    <rect x="200" y="170" width="220" height="35" rx="4" fill="#fef3c7" stroke="#d97706"/>
+    <text x="310" y="192" text-anchor="middle">Layer 1: base OS (32 MB)</text>
+    <!-- Arrows -->
+    <defs><marker id="ar2" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 Z" fill="#555"/></marker></defs>
+    <line x1="190" y1="55" x2="100" y2="100" stroke="#555" stroke-width="1.5" marker-end="url(#ar2)"/>
+    <line x1="250" y1="55" x2="300" y2="90" stroke="#555" stroke-width="1.5" marker-end="url(#ar2)"/>
+    <!-- Labels -->
+    <text x="220" y="240" text-anchor="middle" font-size="11" fill="#6b7280">Manifest references config + ordered layer stack by hash</text>
+  </svg>
+
+  <!-- ============================================================ -->
+  <h2>4. Layers in Detail</h2>
+
+  <p>Each layer is a <strong>tar archive of filesystem changes</strong> relative to the layer below. Think of it as a diff — it contains only what was added, modified, or deleted in that build step.</p>
+
+  <pre><code># Layer 1 (base): Debian minimal
+/bin/sh
+/bin/ls
+/usr/lib/...
+/etc/passwd
+/etc/apt/...
+
+# Layer 2: Install Node.js (adds/modifies files)
+/usr/local/bin/node
+/usr/local/bin/npm
+/usr/local/lib/node_modules/...
+
+# Layer 3: Copy application code
+/app/server.js
+/app/package.json
+
+# Layer 4: Install dependencies
+/app/node_modules/express/...
+/app/node_modules/lodash/...</code></pre>
+
+  <p>Deletions are represented with special "whiteout" files. If layer 3 removes <code>/tmp/build-cache</code>, the tar contains a file named <code>/tmp/.wh.build-cache</code> — the union filesystem interprets this as "hide that path."</p>
+
+  <div class="callout callout-info">
+    <strong>Why this matters:</strong> If you install a 200 MB package in layer 3 and delete it in layer 4, the image is still ~200 MB larger than it needs to be. The delete only <em>hides</em> the file — the bytes are still in layer 3. This is why Dockerfile optimization matters (covered in the next lesson).
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>5. How Images Become Containers</h2>
+
+  <p>When you run <code>docker run nginx</code>, three things happen:</p>
+
+  <ol>
+    <li><strong>Layer stacking:</strong> The read-only image layers are stacked using a union filesystem (usually <code>overlay2</code> on Linux). The result looks like a single coherent filesystem.</li>
+    <li><strong>Writable layer:</strong> A thin, empty writable layer is placed on top. All container writes (new files, modifications) go here.</li>
+    <li><strong>Process launch:</strong> The container's entrypoint process starts inside its namespaces, seeing the merged filesystem.</li>
+  </ol>
+
+  <p><strong>The image is never modified.</strong> Multiple containers can share the same image layers simultaneously — each has its own writable layer on top.</p>
+
+  <!-- SVG: Containers sharing image layers -->
+  <svg viewBox="0 0 480 240" style="max-width:480px;width:100%;margin:1.5rem auto;display:block;" xmlns="http://www.w3.org/2000/svg" font-family="system-ui,sans-serif" font-size="11">
+    <!-- Shared read-only layers -->
+    <rect x="90" y="140" width="300" height="30" rx="3" fill="#fef3c7" stroke="#d97706"/>
+    <text x="240" y="160" text-anchor="middle">Layer 3 (read-only)</text>
+    <rect x="90" y="175" width="300" height="30" rx="3" fill="#fef3c7" stroke="#d97706"/>
+    <text x="240" y="195" text-anchor="middle">Layer 2 (read-only)</text>
+    <rect x="90" y="210" width="300" height="25" rx="3" fill="#fef3c7" stroke="#d97706"/>
+    <text x="240" y="227" text-anchor="middle">Layer 1 — base (read-only)</text>
+    <!-- Container A writable -->
+    <rect x="30" y="60" width="130" height="35" rx="3" fill="#fee2e2" stroke="#dc2626"/>
+    <text x="95" y="82" text-anchor="middle" font-weight="bold">Container A</text>
+    <text x="95" y="95" text-anchor="middle" font-size="9" fill="#6b7280">writable layer</text>
+    <!-- Container B writable -->
+    <rect x="180" y="60" width="130" height="35" rx="3" fill="#fee2e2" stroke="#dc2626"/>
+    <text x="245" y="82" text-anchor="middle" font-weight="bold">Container B</text>
+    <text x="245" y="95" text-anchor="middle" font-size="9" fill="#6b7280">writable layer</text>
+    <!-- Container C writable -->
+    <rect x="330" y="60" width="130" height="35" rx="3" fill="#fee2e2" stroke="#dc2626"/>
+    <text x="395" y="82" text-anchor="middle" font-weight="bold">Container C</text>
+    <text x="395" y="95" text-anchor="middle" font-size="9" fill="#6b7280">writable layer</text>
+    <!-- Arrows down -->
+    <defs><marker id="ar3" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto"><path d="M0,0 L7,2.5 L0,5 Z" fill="#555"/></marker></defs>
+    <line x1="95" y1="95" x2="150" y2="140" stroke="#555" stroke-width="1" marker-end="url(#ar3)"/>
+    <line x1="245" y1="95" x2="240" y2="140" stroke="#555" stroke-width="1" marker-end="url(#ar3)"/>
+    <line x1="395" y1="95" x2="330" y2="140" stroke="#555" stroke-width="1" marker-end="url(#ar3)"/>
+    <!-- Label -->
+    <text x="240" y="20" text-anchor="middle" font-size="12" font-weight="bold">3 containers, 1 image — layers shared</text>
+    <text x="240" y="36" text-anchor="middle" font-size="10" fill="#6b7280">Each container only uses extra disk for its own writes</text>
+  </svg>
+
+  <p>This is why starting a container is nearly instantaneous — there's no copying of the image. It's just a mount operation plus a process fork.</p>
+
+  <!-- ============================================================ -->
+  <h2>6. Image IDs vs Tags</h2>
+
+  <p>Two completely different concepts that people constantly confuse:</p>
+
+  <table>
+    <thead>
+      <tr><th>Concept</th><th>Example</th><th>Properties</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>Image ID</strong></td>
+        <td><code>sha256:9e2b3c4d...</code></td>
+        <td>Content hash. Immutable. If the image changes, the ID changes.</td>
+      </tr>
+      <tr>
+        <td><strong>Tag</strong></td>
+        <td><code>nginx:1.25</code>, <code>nginx:latest</code></td>
+        <td>Human-readable pointer. <strong>Mutable!</strong> Can be moved to point at a different ID at any time.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="callout callout-warning">
+    <strong>⚠️ Critical:</strong> <code>latest</code> is just a tag name. It does NOT automatically mean "the newest version." It's simply the default tag applied when no tag is specified. A maintainer can point <code>latest</code> at any image they choose — or never update it at all.
+  </div>
+
+  <p>For reproducible deployments, always reference images by <strong>digest</strong>:</p>
+  <pre><code># Mutable — could change tomorrow:
+FROM nginx:1.25
+
+# Immutable — will ALWAYS be exactly this image:
+FROM nginx@sha256:9e2b3c4d5e6f7a8b...</code></pre>
+
+  <!-- ============================================================ -->
+  <h2>7. Inspecting Images</h2>
+
+  <p>Docker gives you tools to explore everything we've discussed:</p>
+
+  <pre><code># See the layer history (what each layer added)
+$ docker history nginx
+IMAGE          CREATED       CREATED BY                                      SIZE
+9e2b3c4d5e6f   2 weeks ago   CMD ["nginx" "-g" "daemon off;"]                 0B
+&lt;missing&gt;      2 weeks ago   EXPOSE map[80/tcp:{}]                            0B
+&lt;missing&gt;      2 weeks ago   COPY conf /etc/nginx  # buildkit                 2.3kB
+&lt;missing&gt;      2 weeks ago   RUN /bin/sh -c apt-get update &amp;&amp; ...            58MB
+&lt;missing&gt;      2 weeks ago   ADD debian-slim / # buildkit                     74MB
+
+# Deep inspection — full JSON config, layer digests, env vars
+$ docker image inspect nginx
+
+# Remote manifest (without pulling)
+$ docker manifest inspect nginx:latest</code></pre>
+
+  <!-- ============================================================ -->
+  <h2>🧪 Hands-On Task 1: Inspect Image Layers</h2>
+
+  <div class="callout callout-info">
+    <strong>Do this now:</strong>
+  </div>
+
+  <pre><code># Pull nginx and examine its structure
+docker pull nginx
+
+# View layer history
+docker history nginx
+
+# Inspect full metadata (pipe to less or jq)
+docker image inspect nginx | head -80
+
+# Look specifically at the layer digests:
+docker image inspect nginx --format '{{json .RootFS.Layers}}' | python3 -m json.tool</code></pre>
+
+  <p>Questions to answer:</p>
+  <ul>
+    <li>How many layers does the nginx image have?</li>
+    <li>What is the total size vs the largest single layer?</li>
+    <li>What environment variables are baked into the image?</li>
+  </ul>
+
+  <!-- ============================================================ -->
+  <h2>🧪 Hands-On Task 2: Prove Containers Don't Share Writes</h2>
+
+  <div class="callout callout-info">
+    <strong>Do this now:</strong>
+  </div>
+
+  <pre><code># Run two containers from the same image
+docker run -d --name box1 nginx
+docker run -d --name box2 nginx
+
+# Write a file in box1
+docker exec box1 sh -c 'echo "hello from box1" > /tmp/proof.txt'
+
+# Verify it exists in box1
+docker exec box1 cat /tmp/proof.txt
+# Output: hello from box1
+
+# Prove it does NOT exist in box2
+docker exec box2 cat /tmp/proof.txt
+# Output: cat: /tmp/proof.txt: No such file or directory
+
+# Clean up
+docker rm -f box1 box2</code></pre>
+
+  <p>This proves that each container has its own writable layer. The shared image layers below are untouched.</p>
+
+  <!-- ============================================================ -->
+  <h2>🧠 Quiz Time</h2>
+
+  <div class="quiz" data-question="What is a Docker image, fundamentally?" data-options='["A single compressed file like a ZIP archive","A manifest (JSON) referencing content-addressable layers by hash","A virtual disk snapshot stored in /var/lib/docker","A complete copy of the operating system"]' data-answer="1" data-explanation="An image is a manifest — a JSON document that references a config blob and ordered layer blobs by their SHA256 digests. It is not a single file."></div>
+
+  <div class="quiz" data-question="If two images share the same base layer (same SHA256 hash), how many times is that layer stored on disk?" data-options='["Twice — one copy per image","Once — content-addressable storage deduplicates it","It depends on the storage driver","Once per container that uses it"]' data-answer="1" data-explanation="Content-addressable storage means identical content (same hash) is stored exactly once, regardless of how many images or containers reference it."></div>
+
+  <div class="quiz" data-question="You install a 500 MB package in layer 3 of your Dockerfile, then delete it in layer 4. What happens to image size?" data-options='["The image is 500 MB smaller because the delete removes the data","The image stays ~500 MB larger — the data still exists in layer 3, layer 4 only hides it","Docker automatically squashes the layers to save space","The delete fails because image layers are read-only"]' data-answer="1" data-explanation="Each layer is immutable. Deleting a file in a later layer creates a whiteout marker that hides it, but the bytes remain in the earlier layer. This is why multi-stage builds and careful layer ordering matter."></div>
+
+  <div class="quiz" data-question="What does the tag 'latest' guarantee?" data-options='["It always points to the most recently built version","It points to the most recently pushed version","Nothing — it is just a mutable tag name with no special behavior","It is automatically updated by Docker Hub nightly"]' data-answer="2" data-explanation="'latest' is simply the default tag name used when no tag is specified. It has zero special semantics — it can point to any image, and may be stale or never updated."></div>
+
+  <!-- ============================================================ -->
+  <h2>🌍 Not Just Docker</h2>
+
+  <div class="callout callout-info">
+    <strong>OCI Image Specification:</strong> Everything described in this lesson — manifests, content-addressable layers, config blobs — is defined by the <strong>Open Container Initiative (OCI) Image Spec</strong>. It's not proprietary to Docker.
+    <br><br>
+    <strong>Buildah</strong> can create OCI-compliant images without a Docker daemon running. <strong>Podman</strong> can pull and run them. <strong>Skopeo</strong> can inspect and copy them between registries. The image format is an open standard.
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>📋 Key Takeaways</h2>
+
+  <ul>
+    <li>An image is a <strong>manifest</strong> pointing to a config + ordered layers, all referenced by SHA256 hash</li>
+    <li><strong>Content-addressable storage</strong> means shared layers are stored once — saving disk and bandwidth</li>
+    <li>Each layer is a <strong>tar of filesystem diffs</strong> — additions, modifications, and whiteout deletions</li>
+    <li>Containers get a <strong>thin writable layer on top</strong> of the read-only image stack — the image is never modified</li>
+    <li>Multiple containers share image layers simultaneously — containers are cheap</li>
+    <li><strong>Tags are mutable pointers</strong>; image IDs (digests) are immutable content hashes. Use digests for reproducibility.</li>
+    <li><code>docker history</code> and <code>docker image inspect</code> let you explore all of this yourself</li>
+  </ul>
+
+  <!-- ============================================================ -->
+  <nav class="lesson-nav">
+    <a href="0005-anatomy-of-a-running-container.html">← Prev: Anatomy of a Running Container</a>
+    <a href="0007-your-first-dockerfile.html">Next: Your First Dockerfile →</a>
+  </nav>
+
+  <script src="../assets/quiz.js"></script>
+</body>
+</html>

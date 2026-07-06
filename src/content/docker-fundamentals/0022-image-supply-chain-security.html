@@ -1,0 +1,482 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lesson 22: Image Supply Chain Security</title>
+  <link rel="stylesheet" href="../assets/lesson-style.css">
+</head>
+<body>
+
+  <div class="lesson-meta">
+    <span>📦 Lesson 22 of 30</span>
+    <span>⏱️ 18–22 minutes</span>
+    <span>🔐 Supply Chain Security</span>
+  </div>
+
+  <h1>Image Supply Chain Security</h1>
+  <p class="subtitle">Your container image is only as secure as the weakest link in its supply chain. From base images and package managers to build systems and registries — every step is a potential attack vector. This lesson covers how to scan, sign, attest, and enforce trust across the entire pipeline.</p>
+
+  <!-- ============================================================ -->
+  <h2>1. The Supply Chain Problem</h2>
+
+  <p>A typical container image depends on dozens of components you didn't write:</p>
+
+  <ul>
+    <li><strong>Base image</strong> — an OS layer maintained by someone else</li>
+    <li><strong>OS packages</strong> — apt/apk/yum packages pulled at build time</li>
+    <li><strong>Application dependencies</strong> — npm, pip, Maven packages</li>
+    <li><strong>Build tools</strong> — compilers, CI plugins, Dockerfile instructions</li>
+  </ul>
+
+  <p>Each of these is an attack vector. The SolarWinds attack (2020) showed how adversaries inject malicious code into trusted build pipelines. Supply chain compromises in <code>event-stream</code> (npm), <code>codecov</code> (CI), and <code>ua-parser-js</code> demonstrated the same pattern: attack the dependency, compromise everyone downstream.</p>
+
+  <div class="callout">
+    <strong>Trust AND Verify:</strong> It's not enough to use "official" images. You need automated, continuous verification — scanning, signing, attestation — applied at every stage.
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>2. Vulnerability Scanning</h2>
+
+  <p>Scanners compare the packages in your image against known vulnerability databases (NVD, OSV, vendor advisories).</p>
+
+  <h3>What Gets Scanned</h3>
+  <ul>
+    <li><strong>OS packages</strong> — CVEs in libc, openssl, curl, etc.</li>
+    <li><strong>Application dependencies</strong> — npm audit, pip safety, Go vulncheck</li>
+    <li><strong>Misconfigurations</strong> — running as root, exposed secrets, unnecessary capabilities</li>
+  </ul>
+
+  <h3>Tools Comparison</h3>
+
+  <table>
+    <thead>
+      <tr>
+        <th>Tool</th>
+        <th>Type</th>
+        <th>OS Pkgs</th>
+        <th>App Deps</th>
+        <th>SBOM</th>
+        <th>CI Integration</th>
+        <th>Cost</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>Trivy</strong></td>
+        <td>CLI / CI</td>
+        <td>✅</td>
+        <td>✅</td>
+        <td>✅</td>
+        <td>GitHub Actions, GitLab, Jenkins</td>
+        <td>Free (OSS)</td>
+      </tr>
+      <tr>
+        <td><strong>Grype</strong></td>
+        <td>CLI / CI</td>
+        <td>✅</td>
+        <td>✅</td>
+        <td>Via Syft</td>
+        <td>GitHub Actions, any CI</td>
+        <td>Free (OSS)</td>
+      </tr>
+      <tr>
+        <td><strong>Docker Scout</strong></td>
+        <td>CLI / Docker Desktop</td>
+        <td>✅</td>
+        <td>✅</td>
+        <td>✅</td>
+        <td>Docker Build Cloud</td>
+        <td>Free tier + paid</td>
+      </tr>
+      <tr>
+        <td><strong>Snyk Container</strong></td>
+        <td>SaaS + CLI</td>
+        <td>✅</td>
+        <td>✅</td>
+        <td>✅</td>
+        <td>All major CI systems</td>
+        <td>Free tier + paid</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>Example: Trivy Scan Output</h3>
+
+  <pre><code>$ trivy image myapp:latest
+
+myapp:latest (debian 12.4)
+===========================
+Total: 23 (UNKNOWN: 0, LOW: 12, MEDIUM: 7, HIGH: 3, CRITICAL: 1)
+
+┌──────────────┬──────────────────┬──────────┬─────────────────────┐
+│   Library    │  Vulnerability   │ Severity │   Fixed Version     │
+├──────────────┼──────────────────┼──────────┼─────────────────────┤
+│ libssl3      │ CVE-2024-0727    │ CRITICAL │ 3.0.13-1~deb12u1    │
+│ libcurl4     │ CVE-2024-2004    │ HIGH     │ 7.88.1-10+deb12u5   │
+│ zlib1g       │ CVE-2023-45853   │ HIGH     │ 1:1.2.13.dfsg-1+1   │
+│ libc6        │ CVE-2024-2961    │ HIGH     │ 2.36-9+deb12u7      │
+└──────────────┴──────────────────┴──────────┴─────────────────────┘</code></pre>
+
+  <h3>CI Integration: Fail on Critical</h3>
+
+  <pre><code># GitHub Actions step
+- name: Scan image
+  run: |
+    trivy image --exit-code 1 --severity CRITICAL,HIGH myapp:${{ github.sha }}
+# Exit code 1 = vulnerabilities found → build fails</code></pre>
+
+  <!-- ============================================================ -->
+  <h2>3. Software Bill of Materials (SBOM)</h2>
+
+  <p>An SBOM is a complete inventory of everything inside your image — every package, library, and version. Think of it as an ingredient list for software.</p>
+
+  <h3>Why SBOMs Matter</h3>
+  <ul>
+    <li><strong>Incident response</strong> — When Log4Shell hit, teams with SBOMs knew in minutes which images were affected</li>
+    <li><strong>Compliance</strong> — Regulations now mandate SBOMs (see callout below)</li>
+    <li><strong>License auditing</strong> — Know what licenses you're shipping</li>
+    <li><strong>Dependency tracking</strong> — Understand your full transitive dependency tree</li>
+  </ul>
+
+  <h3>Formats</h3>
+  <ul>
+    <li><strong>SPDX</strong> — Linux Foundation standard, ISO/IEC 5962:2021</li>
+    <li><strong>CycloneDX</strong> — OWASP standard, designed for security use cases</li>
+  </ul>
+
+  <h3>Generating an SBOM</h3>
+
+  <pre><code># Using syft (Anchore)
+$ syft myapp:latest -o spdx-json > sbom.spdx.json
+
+# Using Docker
+$ docker sbom myapp:latest --format cyclonedx-json > sbom.cdx.json
+
+# Output includes every package:
+# { "name": "openssl", "version": "3.0.13", "type": "deb", ... }</code></pre>
+
+  <div class="callout callout-industry">
+    <strong>🏛️ Industry: Executive Order 14028 (US, 2021)</strong><br>
+    The US federal government now requires SBOMs from all software vendors selling to federal agencies. This cascades to the private sector: if you supply software to enterprises or government, you need SBOM generation in your pipeline. The EU Cyber Resilience Act introduces similar requirements for the European market.
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>4. Image Signing</h2>
+
+  <p>Signing proves that an image came from a trusted source and hasn't been tampered with. The leading tool is <strong>cosign</strong> from the Sigstore project.</p>
+
+  <h3>How It Works</h3>
+  <ol>
+    <li>Build the image and push to registry</li>
+    <li>Sign the <strong>digest</strong> (not the tag!) with cosign</li>
+    <li>Signature is stored in the registry alongside the image</li>
+    <li>At deploy time, verify the signature before pulling</li>
+  </ol>
+
+  <div class="callout callout-warning">
+    <strong>⚠️ Why sign the digest, not the tag?</strong><br>
+    Tags are mutable — <code>myapp:latest</code> can point to different images over time. A digest (<code>sha256:abc123...</code>) is immutable and content-addressed. Signing the digest guarantees you're verifying the exact bytes of the image, not just a name that could be reassigned.
+  </div>
+
+  <h3>Cosign in Practice</h3>
+
+  <pre><code># Generate a key pair (once)
+$ cosign generate-key-pair
+
+# Sign after push
+$ cosign sign --key cosign.key registry.example.com/myapp@sha256:abc123...
+
+# Verify before deploy
+$ cosign verify --key cosign.pub registry.example.com/myapp@sha256:abc123...
+
+Verification for registry.example.com/myapp@sha256:abc123... --
+The following checks were performed:
+- The cosign claims were validated
+- The signatures were verified against the specified public key</code></pre>
+
+  <h3>Keyless Signing (OIDC)</h3>
+  <p>In CI environments, cosign supports <strong>keyless signing</strong> — no long-lived keys to manage. Instead, it uses your CI system's OIDC identity (e.g., GitHub Actions' token) to get a short-lived certificate from Sigstore's Fulcio CA. The signature is recorded in a transparency log (Rekor).</p>
+
+  <pre><code># In GitHub Actions — no keys needed!
+- name: Sign image
+  run: cosign sign registry.example.com/myapp@${{ steps.build.outputs.digest }}
+  env:
+    COSIGN_EXPERIMENTAL: 1  # enables keyless</code></pre>
+
+  <h3>Docker Content Trust (Notary)</h3>
+  <p>Docker's built-in signing mechanism. Enable with <code>export DOCKER_CONTENT_TRUST=1</code>. Less flexible than cosign but integrated into the Docker CLI. Being superseded by Notary v2 (notation).</p>
+
+  <!-- ============================================================ -->
+  <h2>5. Provenance &amp; Attestation</h2>
+
+  <p>Signing tells you WHO built an image. Provenance tells you WHERE and HOW.</p>
+
+  <h3>SLSA Framework</h3>
+  <p><strong>SLSA</strong> (Supply-chain Levels for Software Artifacts) defines increasing levels of build integrity:</p>
+
+  <ul>
+    <li><strong>Level 1</strong> — Build process is documented</li>
+    <li><strong>Level 2</strong> — Build service generates provenance</li>
+    <li><strong>Level 3</strong> — Build runs on hardened, isolated infrastructure</li>
+  </ul>
+
+  <h3>Build Provenance</h3>
+  <p>Provenance attestation records:</p>
+  <ul>
+    <li>Which CI system ran the build</li>
+    <li>Which source commit triggered it</li>
+    <li>Which Dockerfile was used</li>
+    <li>Build parameters and environment</li>
+  </ul>
+
+  <pre><code># Generate provenance with BuildKit
+$ docker buildx build --provenance=true --push -t registry.example.com/myapp:v1.2 .
+
+# Inspect provenance
+$ docker buildx imagetools inspect registry.example.com/myapp:v1.2 --format '{{json .Provenance}}'
+{
+  "buildType": "https://mobyproject.org/buildkit@v1",
+  "builder": { "id": "https://github.com/actions/runner" },
+  "metadata": {
+    "buildInvocationID": "run-12345",
+    "completeness": { "parameters": true, "environment": true }
+  },
+  "materials": [
+    { "uri": "git+https://github.com/org/repo@refs/heads/main", "digest": {"sha1": "abc..."} }
+  ]
+}</code></pre>
+
+  <!-- ============================================================ -->
+  <h2>6. Admission Control</h2>
+
+  <p>All the scanning, signing, and attesting is pointless if nothing <strong>enforces</strong> policies at deploy time. Admission controllers are the gatekeepers.</p>
+
+  <h3>What They Enforce</h3>
+  <ul>
+    <li>Only <strong>signed images</strong> may be deployed</li>
+    <li>Only images from <strong>approved registries</strong></li>
+    <li>No images with <strong>critical CVEs</strong></li>
+    <li>SBOM must be <strong>present and valid</strong></li>
+    <li>Provenance must match <strong>expected build system</strong></li>
+  </ul>
+
+  <h3>Tools</h3>
+  <ul>
+    <li><strong>Kyverno</strong> — Kubernetes-native policy engine; YAML-based rules</li>
+    <li><strong>OPA Gatekeeper</strong> — Open Policy Agent for Kubernetes; Rego language</li>
+    <li><strong>Sigstore policy-controller</strong> — Validates cosign signatures and attestations</li>
+  </ul>
+
+  <pre><code># Kyverno policy: only allow signed images
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: verify-image-signature
+spec:
+  validationFailureAction: Enforce
+  rules:
+  - name: check-signature
+    match:
+      any:
+      - resources:
+          kinds: ["Pod"]
+    verifyImages:
+    - imageReferences: ["registry.example.com/*"]
+      attestors:
+      - entries:
+        - keys:
+            publicKeys: |-
+              -----BEGIN PUBLIC KEY-----
+              MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE...
+              -----END PUBLIC KEY-----</code></pre>
+
+  <!-- ============================================================ -->
+  <h2>7. Base Image Policies</h2>
+
+  <h3>Golden Base Images</h3>
+  <p>Enterprises maintain <strong>golden base images</strong>: company-approved, pre-hardened, regularly rebuilt images that all teams must use.</p>
+
+  <ul>
+    <li>Pre-scanned and signed by the security team</li>
+    <li>Stripped of unnecessary packages</li>
+    <li>Automatically rebuilt when upstream patches land</li>
+    <li>Published to an internal registry with enforced freshness</li>
+  </ul>
+
+  <h3>Distroless &amp; Minimal Alternatives</h3>
+  <ul>
+    <li><strong>Chainguard Images</strong> — Minimal, SBOM-included, daily-rebuilt, zero-CVE target</li>
+    <li><strong>Wolfi</strong> — Chainguard's undistro: an OS designed for containers with apk and no glibc baggage</li>
+    <li><strong>Google Distroless</strong> — No shell, no package manager, minimal attack surface</li>
+  </ul>
+
+  <h3>Automated Rebuilds</h3>
+  <pre><code># Rebuild when base image updates (GitHub Actions)
+on:
+  schedule:
+    - cron: '0 3 * * *'  # daily at 3am
+  repository_dispatch:
+    types: [base-image-updated]
+
+jobs:
+  rebuild:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - name: Build and push
+      run: |
+        docker buildx build --pull --push \
+          --provenance=true \
+          -t registry.example.com/myapp:latest .</code></pre>
+
+  <!-- ============================================================ -->
+  <h2>Supply Chain Flow</h2>
+
+  <svg viewBox="0 0 800 320" xmlns="http://www.w3.org/2000/svg" style="width:100%;max-width:800px;margin:1.5rem auto;display:block;" role="img" aria-label="Supply chain flow diagram showing trust checkpoints from source to deploy">
+    <defs>
+      <marker id="arrow22" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+        <polygon points="0 0, 8 3, 0 6" fill="#64748b"/>
+      </marker>
+    </defs>
+
+    <!-- Stages -->
+    <g font-family="system-ui, sans-serif" font-size="13" text-anchor="middle">
+      <!-- Source -->
+      <rect x="20" y="100" width="100" height="60" rx="8" fill="#e0f2fe" stroke="#0284c7" stroke-width="2"/>
+      <text x="70" y="126" font-weight="bold" fill="#0c4a6e">Source</text>
+      <text x="70" y="144" fill="#0c4a6e" font-size="11">Code + Deps</text>
+
+      <!-- Build -->
+      <rect x="160" y="100" width="100" height="60" rx="8" fill="#fef3c7" stroke="#d97706" stroke-width="2"/>
+      <text x="210" y="126" font-weight="bold" fill="#92400e">Build</text>
+      <text x="210" y="144" fill="#92400e" font-size="11">Dockerfile</text>
+
+      <!-- Scan -->
+      <rect x="300" y="100" width="100" height="60" rx="8" fill="#fce7f3" stroke="#db2777" stroke-width="2"/>
+      <text x="350" y="126" font-weight="bold" fill="#9d174d">Scan</text>
+      <text x="350" y="144" fill="#9d174d" font-size="11">Trivy / SBOM</text>
+
+      <!-- Sign -->
+      <rect x="440" y="100" width="100" height="60" rx="8" fill="#d1fae5" stroke="#059669" stroke-width="2"/>
+      <text x="490" y="126" font-weight="bold" fill="#065f46">Sign</text>
+      <text x="490" y="144" fill="#065f46" font-size="11">Cosign</text>
+
+      <!-- Store -->
+      <rect x="580" y="100" width="100" height="60" rx="8" fill="#ede9fe" stroke="#7c3aed" stroke-width="2"/>
+      <text x="630" y="126" font-weight="bold" fill="#5b21b6">Store</text>
+      <text x="630" y="144" fill="#5b21b6" font-size="11">Registry</text>
+
+      <!-- Verify + Deploy -->
+      <rect x="720" y="100" width="60" height="60" rx="8" fill="#dcfce7" stroke="#16a34a" stroke-width="2"/>
+      <text x="750" y="126" font-weight="bold" fill="#166534" font-size="12">Deploy</text>
+      <text x="750" y="144" fill="#166534" font-size="10">Verify</text>
+
+      <!-- Arrows -->
+      <line x1="120" y1="130" x2="156" y2="130" stroke="#64748b" stroke-width="2" marker-end="url(#arrow22)"/>
+      <line x1="260" y1="130" x2="296" y2="130" stroke="#64748b" stroke-width="2" marker-end="url(#arrow22)"/>
+      <line x1="400" y1="130" x2="436" y2="130" stroke="#64748b" stroke-width="2" marker-end="url(#arrow22)"/>
+      <line x1="540" y1="130" x2="576" y2="130" stroke="#64748b" stroke-width="2" marker-end="url(#arrow22)"/>
+      <line x1="680" y1="130" x2="716" y2="130" stroke="#64748b" stroke-width="2" marker-end="url(#arrow22)"/>
+
+      <!-- Trust checkpoints -->
+      <g fill="#dc2626" font-size="11" font-weight="bold">
+        <text x="210" y="85">🛡️ CHECKPOINT</text>
+        <text x="350" y="85">🛡️ CHECKPOINT</text>
+        <text x="490" y="85">🛡️ CHECKPOINT</text>
+        <text x="750" y="85">🛡️ CHECKPOINT</text>
+      </g>
+
+      <!-- Checkpoint lines -->
+      <line x1="210" y1="88" x2="210" y2="100" stroke="#dc2626" stroke-width="1.5" stroke-dasharray="3,2"/>
+      <line x1="350" y1="88" x2="350" y2="100" stroke="#dc2626" stroke-width="1.5" stroke-dasharray="3,2"/>
+      <line x1="490" y1="88" x2="490" y2="100" stroke="#dc2626" stroke-width="1.5" stroke-dasharray="3,2"/>
+      <line x1="750" y1="88" x2="750" y2="100" stroke="#dc2626" stroke-width="1.5" stroke-dasharray="3,2"/>
+
+      <!-- Descriptions below -->
+      <text x="210" y="185" fill="#92400e" font-size="10">Reproducible</text>
+      <text x="210" y="198" fill="#92400e" font-size="10">+ Provenance</text>
+      <text x="350" y="185" fill="#9d174d" font-size="10">No critical CVEs</text>
+      <text x="350" y="198" fill="#9d174d" font-size="10">+ SBOM generated</text>
+      <text x="490" y="185" fill="#065f46" font-size="10">Digest signed</text>
+      <text x="490" y="198" fill="#065f46" font-size="10">+ Attestation</text>
+      <text x="750" y="185" fill="#166534" font-size="10">Admission</text>
+      <text x="750" y="198" fill="#166534" font-size="10">control</text>
+    </g>
+
+    <!-- Title -->
+    <text x="400" y="260" text-anchor="middle" font-family="system-ui, sans-serif" font-size="14" fill="#475569">Each 🛡️ checkpoint must pass before the artifact moves forward</text>
+  </svg>
+
+  <!-- ============================================================ -->
+  <h2>🧪 Hands-On: The Full Supply Chain</h2>
+
+  <div class="hands-on">
+    <p>Practice the complete supply chain workflow: generate SBOM, scan, and sign.</p>
+
+    <pre><code># Prerequisites: install syft, trivy, cosign
+# (On macOS: brew install syft trivy cosign)
+
+# 1. Build an image
+$ docker build -t myapp:v1 .
+
+# 2. Generate SBOM
+$ syft myapp:v1 -o cyclonedx-json > sbom.cdx.json
+$ echo "SBOM contains $(cat sbom.cdx.json | jq '.components | length') components"
+
+# 3. Scan for vulnerabilities
+$ trivy image --severity HIGH,CRITICAL myapp:v1
+# Review results — fix critical issues before continuing
+
+# 4. Push to registry (use local registry for practice)
+$ docker run -d -p 5000:5000 --name registry registry:2
+$ docker tag myapp:v1 localhost:5000/myapp:v1
+$ docker push localhost:5000/myapp:v1
+
+# 5. Sign the image digest
+$ DIGEST=$(docker inspect --format='{{index .RepoDigests 0}}' localhost:5000/myapp:v1)
+$ cosign generate-key-pair  # creates cosign.key + cosign.pub
+$ cosign sign --key cosign.key $DIGEST
+
+# 6. Verify the signature
+$ cosign verify --key cosign.pub $DIGEST
+
+# ✅ You now have: SBOM + Scan results + Signed image</code></pre>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>🧠 Knowledge Check</h2>
+
+  <div class="quiz" data-question="What does an SBOM contain?" data-options="Only the base image name|A list of known vulnerabilities|A complete inventory of all packages, libraries, and versions in the image|The Dockerfile used to build the image" data-answer="2" data-explanation="An SBOM (Software Bill of Materials) is a complete ingredient list — every package, library, version, and sometimes license — contained in the image. It's not the vulnerability list itself (that comes from scanning the SBOM against CVE databases)."></div>
+
+  <div class="quiz" data-question="Why should you sign the image digest rather than the tag?" data-options="Digests are shorter and easier to type|Tags can be reassigned to different images, making signatures meaningless|Registries don't support signing tags|Digests include the image name" data-answer="1" data-explanation="Tags are mutable — 'latest' or 'v1.0' can point to completely different image content over time. A digest (sha256:...) is a content hash that uniquely identifies exact image bytes. Signing the digest ensures you're attesting to specific, immutable content."></div>
+
+  <div class="quiz" data-question="What is the primary purpose of admission control in the supply chain?" data-options="To speed up image pulls from the registry|To enforce security policies at deploy time (e.g., only signed images)|To compress images for faster startup|To automatically fix vulnerabilities in running containers" data-answer="1" data-explanation="Admission controllers are gatekeepers that enforce policies when workloads are deployed. They can reject pods that use unsigned images, images from unapproved registries, or images with critical vulnerabilities — ensuring only trusted artifacts run in production."></div>
+
+  <!-- ============================================================ -->
+  <div class="callout callout-info">
+    <strong>🌐 Not Just Docker:</strong> Sigstore (cosign, Rekor, Fulcio) is completely runtime-agnostic. It works with any OCI-compliant image — whether you run it with Docker, Podman, containerd, CRI-O, or any other runtime. The signatures and attestations are stored as OCI artifacts in standard registries.
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>Key Takeaways</h2>
+
+  <ul class="takeaways">
+    <li><strong>Every dependency is an attack vector</strong> — base images, OS packages, app libraries, build tools</li>
+    <li><strong>Scan continuously</strong> — integrate Trivy/Grype in CI; fail builds on critical vulnerabilities</li>
+    <li><strong>Generate SBOMs</strong> — know what's inside your images; comply with regulations</li>
+    <li><strong>Sign digests, not tags</strong> — use cosign for immutable, verifiable trust</li>
+    <li><strong>Attest provenance</strong> — prove where and how the image was built (SLSA)</li>
+    <li><strong>Enforce at deploy time</strong> — admission controllers make policies actionable, not advisory</li>
+    <li><strong>Use golden base images</strong> — pre-hardened, pre-scanned, automatically rebuilt</li>
+  </ul>
+
+  <!-- ============================================================ -->
+  <nav class="prev-next">
+    <a href="0021-security-least-privilege.html">← Prev: Security &amp; Least Privilege</a>
+    <a href="0023-why-orchestration.html">Next: Why Orchestration →</a>
+  </nav>
+
+  <script src="../assets/quiz.js"></script>
+</body>
+</html>

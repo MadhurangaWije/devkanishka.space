@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lesson 32: ResourceQuotas</title>
+    <style>
+        :root {
+            --bg: #fafafa; --text: #1a1a1a; --accent: #326ce5;
+            --accent-light: #e8f0fe; --border: #e0e0e0; --code-bg: #f5f5f5;
+            --success: #2e7d32; --warn: #f57c00;
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: 'Georgia', serif; line-height: 1.7; color: var(--text); background: var(--bg); max-width: 780px; margin: 0 auto; padding: 2rem 1.5rem; }
+        h1 { font-size: 2rem; margin-bottom: 0.5rem; color: var(--accent); }
+        h2 { font-size: 1.4rem; margin-top: 2.5rem; margin-bottom: 0.8rem; border-bottom: 2px solid var(--accent); padding-bottom: 0.3rem; }
+        h3 { font-size: 1.1rem; margin-top: 1.5rem; margin-bottom: 0.5rem; }
+        p { margin-bottom: 1rem; }
+        .meta { color: #666; font-size: 0.9rem; margin-bottom: 2rem; }
+        .key-insight { background: var(--accent-light); border-left: 4px solid var(--accent); padding: 1rem 1.2rem; margin: 1.5rem 0; border-radius: 0 4px 4px 0; }
+        .key-insight strong { color: var(--accent); }
+        .production-note { background: #fff3e0; border-left: 4px solid var(--warn); padding: 1rem 1.2rem; margin: 1.5rem 0; border-radius: 0 4px 4px 0; }
+        .production-note::before { content: "🏭 Production: "; font-weight: bold; }
+        .exam-tip { background: #e8f5e9; border-left: 4px solid var(--success); padding: 1rem 1.2rem; margin: 1.5rem 0; border-radius: 0 4px 4px 0; }
+        .exam-tip::before { content: "🎯 Exam Tip: "; font-weight: bold; color: var(--success); }
+        code { font-family: 'Menlo', 'Consolas', monospace; font-size: 0.85em; background: var(--code-bg); padding: 0.15em 0.4em; border-radius: 3px; }
+        pre { background: var(--code-bg); padding: 1rem; border-radius: 4px; overflow-x: auto; margin: 1rem 0; font-size: 0.85rem; line-height: 1.5; }
+        ul, ol { margin: 0.5rem 0 1rem 1.5rem; }
+        li { margin-bottom: 0.4rem; }
+        table { width: 100%; border-collapse: collapse; margin: 1rem 0; font-size: 0.9rem; }
+        th, td { border: 1px solid var(--border); padding: 0.6rem 0.8rem; text-align: left; }
+        th { background: var(--accent-light); font-weight: bold; }
+        .cert-badge { display: inline-block; background: var(--accent); color: white; font-size: 0.7rem; padding: 0.15rem 0.5rem; border-radius: 10px; margin-left: 0.5rem; }
+        .quiz { background: #f9f9f9; border: 1px solid var(--border); border-radius: 8px; padding: 1.5rem; margin-top: 2rem; }
+        .quiz h2 { border-bottom: none; margin-top: 0; }
+        .quiz-q { margin-bottom: 1.2rem; }
+        .quiz-q p { font-weight: bold; margin-bottom: 0.3rem; }
+        .quiz-answer { display: none; background: #e8f5e9; padding: 0.5rem 0.8rem; border-radius: 4px; margin-top: 0.5rem; }
+        .reveal-btn { background: var(--accent); color: white; border: none; padding: 0.3rem 0.8rem; border-radius: 4px; cursor: pointer; font-size: 0.8rem; }
+        .reveal-btn:hover { opacity: 0.85; }
+    </style>
+</head>
+<body>
+
+<h1>Lesson 32: ResourceQuotas</h1>
+<p class="meta">Chapter 6: Scheduling & Resource Management · <span class="cert-badge">CKA</span> <span class="cert-badge">CKAD</span> · ~16 min</p>
+
+<p>ResourceQuotas are the <strong>namespace-level spending limit</strong>. They cap the total amount of resources (CPU, memory, storage, object count) that all Pods in a namespace can collectively consume. This prevents one team from monopolizing the cluster.</p>
+
+<h2>1. Compute Resource Quotas</h2>
+
+<pre>apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: compute-quota
+  namespace: team-alpha
+spec:
+  hard:
+    requests.cpu: "8"              # Total CPU requests across all Pods
+    requests.memory: 16Gi          # Total memory requests
+    limits.cpu: "16"               # Total CPU limits
+    limits.memory: 32Gi            # Total memory limits
+    pods: "20"                     # Maximum number of Pods</pre>
+
+<h3>How It Works</h3>
+
+<pre># Current state:
+kubectl describe quota compute-quota -n team-alpha
+# Name:            compute-quota
+# Resource         Used    Hard
+# --------         ----    ----
+# limits.cpu       6       16
+# limits.memory    12Gi    32Gi
+# pods             8       20
+# requests.cpu     3       8
+# requests.memory  8Gi     16Gi
+
+# If a developer tries to create a Pod requesting 6 CPU (would total 9):
+# → REJECTED: exceeded quota (requests.cpu: 9 > hard limit 8)</pre>
+
+<div class="key-insight">
+    <strong>ResourceQuota enforces at creation time.</strong> When you create a Pod (or a controller creates one), the quota admission controller checks if the namespace's total would exceed the hard limit. If yes, the request is rejected. Existing Pods are NOT killed — the quota only blocks new creations.
+</div>
+
+<h3>The LimitRange Requirement</h3>
+
+<p>When a ResourceQuota for compute resources exists, <strong>every Pod must specify requests and limits</strong>. Otherwise the quota can't account for the Pod's usage. If a Pod doesn't specify them, it's rejected.</p>
+
+<pre># Common error:
+# "Error: pods "web" is forbidden: failed quota: compute-quota:
+#  must specify limits.cpu, limits.memory, requests.cpu, requests.memory"
+
+# Solution: Pair ResourceQuota with a LimitRange that provides defaults:
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: default-resources
+  namespace: team-alpha
+spec:
+  limits:
+    - type: Container
+      defaultRequest:
+        cpu: 100m
+        memory: 128Mi
+      default:
+        cpu: 500m
+        memory: 256Mi</pre>
+
+<div class="exam-tip">
+    CKA exam pattern: If you create a ResourceQuota on compute resources, you almost always need a LimitRange too. Without it, Pods without explicit resource specs are rejected. The LimitRange injects defaults so existing manifests continue to work.
+</div>
+
+<h2>2. Object Count Quotas</h2>
+
+<p>Limit how many objects of each type can exist in a namespace:</p>
+
+<pre>apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: object-counts
+  namespace: team-alpha
+spec:
+  hard:
+    pods: "20"
+    services: "10"
+    services.loadbalancers: "2"     # Expensive! Limit these
+    services.nodeports: "5"
+    secrets: "50"
+    configmaps: "50"
+    persistentvolumeclaims: "10"
+    count/deployments.apps: "10"    # Generic format: count/<resource>.<group>
+    count/jobs.batch: "5"
+    count/cronjobs.batch: "3"</pre>
+
+<h3>Generic Count Syntax</h3>
+
+<pre># Format: count/<resource>.<api-group>
+count/deployments.apps         # Deployments in apps group
+count/statefulsets.apps        # StatefulSets
+count/ingresses.networking.k8s.io  # Ingresses
+count/roles.rbac.authorization.k8s.io  # Roles</pre>
+
+<h2>3. Storage Quotas</h2>
+
+<pre>apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: storage-quota
+  namespace: team-alpha
+spec:
+  hard:
+    requests.storage: 500Gi              # Total PVC storage requests
+    persistentvolumeclaims: "10"         # Max number of PVCs
+    
+    # Per-StorageClass quotas:
+    gp3-encrypted.storageclass.storage.k8s.io/requests.storage: 200Gi
+    gp3-encrypted.storageclass.storage.k8s.io/persistentvolumeclaims: "5"
+    
+    premium-iops.storageclass.storage.k8s.io/requests.storage: 100Gi
+    premium-iops.storageclass.storage.k8s.io/persistentvolumeclaims: "2"</pre>
+
+<div class="production-note">
+    Storage quotas per StorageClass are critical in multi-tenant clusters. Without them, one team could provision unlimited premium IOPS volumes (expensive) or exhaust the cluster's storage capacity. Set generous quotas for standard storage, tight quotas for premium.
+</div>
+
+<h2>4. Quota Scopes — Targeting Specific Pods</h2>
+
+<p>Scopes let you apply quotas only to Pods matching certain criteria:</p>
+
+<table>
+    <tr><th>Scope</th><th>Matches Pods That...</th><th>Use Case</th></tr>
+    <tr><td><code>BestEffort</code></td><td>Have QoS class BestEffort</td><td>Limit low-priority workloads</td></tr>
+    <tr><td><code>NotBestEffort</code></td><td>Have QoS class Guaranteed or Burstable</td><td>Limit "real" workloads</td></tr>
+    <tr><td><code>Terminating</code></td><td>Have activeDeadlineSeconds set</td><td>Limit Jobs/short-lived Pods</td></tr>
+    <tr><td><code>NotTerminating</code></td><td>Don't have activeDeadlineSeconds</td><td>Limit long-running services</td></tr>
+    <tr><td><code>PriorityClass</code></td><td>Match a specific PriorityClass</td><td>Per-priority budgets</td></tr>
+</table>
+
+<h3>Priority Class Scoped Quotas</h3>
+
+<pre># Different budgets for different priority levels:
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: high-priority-quota
+  namespace: team-alpha
+spec:
+  hard:
+    requests.cpu: "4"
+    requests.memory: 8Gi
+    pods: "5"
+  scopeSelector:
+    matchExpressions:
+      - scopeName: PriorityClass
+        operator: In
+        values: ["high"]
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: low-priority-quota
+  namespace: team-alpha
+spec:
+  hard:
+    requests.cpu: "2"
+    requests.memory: 4Gi
+    pods: "20"
+  scopeSelector:
+    matchExpressions:
+      - scopeName: PriorityClass
+        operator: In
+        values: ["low", "batch"]</pre>
+
+<div class="key-insight">
+    <strong>Priority-scoped quotas enable fair sharing.</strong> A team gets 4 CPU for critical services (high priority) and 2 CPU for batch work (low priority). They can't use their batch quota for critical services or vice versa. This prevents one workload type from crowding out another.
+</div>
+
+<h2>5. Multi-Tenancy Pattern</h2>
+
+<pre># For a shared cluster with 3 teams:
+# Total cluster: 48 CPU, 128Gi memory
+
+# team-alpha namespace:    16 CPU, 40Gi   (33% of cluster)
+# team-beta namespace:     16 CPU, 40Gi   (33% of cluster)
+# platform namespace:      8 CPU, 32Gi    (shared services)
+# Buffer (unallocated):    8 CPU, 16Gi    (headroom for bursting)
+
+# Each namespace gets a ResourceQuota + LimitRange:
+# Quota = budget ceiling
+# LimitRange = per-Pod guardrails (min/max/defaults)</pre>
+
+<div class="production-note">
+    Quotas don't guarantee fair scheduling — they only limit creation. If team-alpha's Pods are scheduled first and fill nodes, team-beta's Pods might stay Pending even within quota. For true fairness, combine ResourceQuotas with PriorityClasses and the cluster autoscaler (new nodes spin up when resources are tight).
+</div>
+
+<h2>Summary</h2>
+
+<table>
+    <tr><th>Concept</th><th>Key Point</th></tr>
+    <tr><td>ResourceQuota</td><td>Namespace-level hard cap on total resources consumed</td></tr>
+    <tr><td>Compute quotas</td><td>Cap requests.cpu/memory, limits.cpu/memory, pod count</td></tr>
+    <tr><td>Object count quotas</td><td>Cap number of Services, PVCs, Secrets, etc.</td></tr>
+    <tr><td>Storage quotas</td><td>Cap total PVC storage — can be per-StorageClass</td></tr>
+    <tr><td>Enforcement</td><td>At creation time only — existing Pods are not killed</td></tr>
+    <tr><td>LimitRange pairing</td><td>Required when compute quota exists (Pods must have resource specs)</td></tr>
+    <tr><td>Scopes</td><td>Apply quotas to subsets (BestEffort, PriorityClass, Terminating)</td></tr>
+    <tr><td>Multi-tenancy</td><td>Quota per namespace = budget per team</td></tr>
+</table>
+
+<!-- Quiz -->
+<div class="quiz">
+    <h2>📝 Quiz: ResourceQuotas</h2>
+    
+    <div class="quiz-q">
+        <p>Q1: A namespace has a quota of <code>requests.cpu: 4</code>. Current total usage is 3.5 CPU. A developer tries to create a Pod with <code>requests.cpu: 600m</code>. What happens?</p>
+        <button class="reveal-btn" onclick="this.nextElementSibling.style.display='block'">Show Answer</button>
+        <div class="quiz-answer"><strong>Rejected.</strong> 3.5 + 0.6 = 4.1, which exceeds the hard limit of 4. The Pod creation is denied by the quota admission controller with an error: "exceeded quota: requests.cpu used=3500m, requested=600m, limited=4000m."</div>
+    </div>
+    
+    <div class="quiz-q">
+        <p>Q2: You create a ResourceQuota with <code>limits.memory: 8Gi</code>. A developer creates a Pod without any resource spec. What happens?</p>
+        <button class="reveal-btn" onclick="this.nextElementSibling.style.display='block'">Show Answer</button>
+        <div class="quiz-answer"><strong>Rejected</strong> with an error saying the Pod must specify limits.memory. When a compute ResourceQuota exists, every Pod must declare the corresponding resource fields so the quota can track them. Fix: add a LimitRange with <code>default</code> values — the LimitRanger injects them automatically.</div>
+    </div>
+    
+    <div class="quiz-q">
+        <p>Q3: The quota is reached (pods: 20). An existing Pod crashes (CrashLoopBackOff). Does the controller create a replacement?</p>
+        <button class="reveal-btn" onclick="this.nextElementSibling.style.display='block'">Show Answer</button>
+        <div class="quiz-answer"><strong>A crashed Pod is still a Pod</strong> — it counts toward the quota (it hasn't been deleted). The kubelet restarts the container within the existing Pod, which doesn't create a new Pod object. Quota is not an issue here. But if the Pod is <em>deleted</em> and a Deployment tries to create a replacement while at 20/20, the new Pod creation succeeds (now 20/20 again after the delete freed a slot).</div>
+    </div>
+    
+    <div class="quiz-q">
+        <p>Q4: Can a ResourceQuota kill running Pods if the quota is reduced below current usage?</p>
+        <button class="reveal-btn" onclick="this.nextElementSibling.style.display='block'">Show Answer</button>
+        <div class="quiz-answer"><strong>No.</strong> ResourceQuotas only enforce at creation time. If you reduce the quota below current usage, existing Pods continue running. No new Pods can be created until usage drops below the new limit (through natural scaling/termination). Quotas never actively kill Pods.</div>
+    </div>
+    
+    <div class="quiz-q">
+        <p>Q5: What's the format for limiting the number of Deployments in a namespace via ResourceQuota?</p>
+        <button class="reveal-btn" onclick="this.nextElementSibling.style.display='block'">Show Answer</button>
+        <div class="quiz-answer"><code>count/deployments.apps</code>. The generic format is <code>count/&lt;resource&gt;.&lt;api-group&gt;</code>. For core group resources (Pods, Services), use the short names directly (<code>pods</code>, <code>services</code>). For non-core groups, use the full format.</div>
+    </div>
+    
+    <div class="quiz-q">
+        <p>Q6: Team Alpha has a quota of 8 CPU. They deploy 4 Pods at 2 CPU request each (total: 8). Now their cluster autoscaler wants to add a 5th Pod. Can they use a PriorityClass-scoped quota to get more?</p>
+        <button class="reveal-btn" onclick="this.nextElementSibling.style.display='block'">Show Answer</button>
+        <div class="quiz-answer"><strong>Only if there are separate scoped quotas.</strong> If the 8 CPU quota has no scope (applies to all Pods), the 5th Pod is rejected regardless of priority. But if you split into two quotas — e.g., 6 CPU for "normal" priority and 4 CPU for "high" priority — the team gets a total of 10 CPU budget, partitioned by priority. Scoped quotas create independent pools.</div>
+    </div>
+</div>
+
+</body>
+</html>

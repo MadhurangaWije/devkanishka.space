@@ -1,0 +1,999 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>L46 · Metaclasses &amp; the Class Creation Protocol — Python A→Z</title>
+<link rel="stylesheet" href="../assets/style.css" />
+</head>
+<body>
+<div id="sidebar-placeholder"></div>
+<div id="main">
+  <div id="lesson-header">
+    <div class="lesson-track track-internals">🟠 Python Internals</div>
+    <h1>Metaclasses &amp; the Class Creation Protocol</h1>
+    <div class="lesson-meta">
+      <span>📖 Lesson 46</span>
+      <span>⏱ 60 min</span>
+      <span>🧪 5 questions</span>
+      <span>💻 3 exercises</span>
+    </div>
+  </div>
+  <div id="content">
+
+    <div class="objectives"><h4>🎯 Learning Objectives</h4><ul>
+      <li>Explain the type hierarchy: <code>type</code> is both a class and its own metaclass; every class is an instance of <code>type</code></li>
+      <li>Trace the class creation protocol step-by-step: <code>__prepare__</code>, <code>__new__</code>, <code>__init__</code></li>
+      <li>Write a custom metaclass that enforces structural rules (abstract methods, naming conventions, required attributes)</li>
+      <li>Use <code>__init_subclass__</code> as a lightweight alternative to metaclasses for subclass hooks</li>
+      <li>Use <code>__class_getitem__</code> to implement generic-style syntax (<code>MyClass[T]</code>)</li>
+      <li>Build a plugin/registry system using metaclass hooks</li>
+      <li>Understand the metaclass conflict problem and resolution with <code>__mro_entries__</code></li>
+    </ul></div>
+
+    <!-- ═══════════════════════════════════════════════════════════════ -->
+    <h2 id="everything-is-instance-of-type">1 · Everything is an Instance of <code>type</code></h2>
+
+    <p>In Python, classes are first-class objects — instances of <code>type</code>. This is the foundation of the entire metaclass system. Every class you define (or that ships with the standard library) is literally an object whose type is <code>type</code>.</p>
+
+    <div style="position:relative"><pre><code class="language-python"># Every class is an instance of type
+print(type(int))      # &lt;class 'type'&gt;
+print(type(str))      # &lt;class 'type'&gt;
+print(type(list))     # &lt;class 'type'&gt;
+
+class MyClass:
+    pass
+
+print(type(MyClass))  # &lt;class 'type'&gt;
+print(isinstance(MyClass, type))  # True
+
+# type is its own metaclass
+print(type(type))     # &lt;class 'type'&gt;
+
+# The type hierarchy
+print(issubclass(type, object))   # True
+print(issubclass(object, type))   # False
+print(isinstance(type, object))   # True — type is an instance of object</code></pre><span class="code-label">type_hierarchy.py</span></div>
+
+    <p>The relationship between <code>type</code> and <code>object</code> forms a curious loop: <code>type</code> is a subclass of <code>object</code>, but <code>object</code> is an <em>instance</em> of <code>type</code>. This bootstrap cycle is hard-wired into the CPython interpreter at the C level.</p>
+
+    <pre style="background:#1a1a2e;padding:16px;border-radius:8px;overflow-x:auto;font-size:0.82rem;color:#e0e0f0;">
+┌─────────────────────────────────────────────┐
+│  instance-of (type)        subclass-of (is-a)│
+├─────────────────────────────────────────────┤
+│                                              │
+│  int  ──instance-of──▶  type                │
+│  str  ──instance-of──▶  type                │
+│  MyClass ─instance-of──▶ type               │
+│  type ──instance-of──▶  type  (self-ref!)   │
+│                                              │
+│  int  ──subclass-of──▶  object              │
+│  str  ──subclass-of──▶  object              │
+│  type ──subclass-of──▶  object              │
+│  object ──instance-of──▶ type               │
+└─────────────────────────────────────────────┘</pre>
+
+    <p>Because <code>type</code> is itself callable, you can use it directly to create classes dynamically — no <code>class</code> statement needed:</p>
+
+    <div style="position:relative"><pre><code class="language-python"># type(name, bases, namespace) creates a new class
+MyDynamic = type("MyDynamic", (object,), {
+    "x": 42,
+    "greet": lambda self: f"Hello from {type(self).__name__}",
+})
+
+obj = MyDynamic()
+print(obj.greet())   # Hello from MyDynamic
+print(obj.x)         # 42
+print(type(MyDynamic))   # &lt;class 'type'&gt;
+
+# This is EXACTLY what the `class` statement does internally</code></pre><span class="code-label">dynamic_class.py</span></div>
+
+    <div class="callout callout-concept"><strong>Key insight:</strong> The <code>class</code> statement is syntactic sugar for a <code>type()</code> call (or a custom metaclass call). When Python sees <code>class Foo(Bar):</code>, it: (1) collects the class body namespace, (2) determines the metaclass, (3) calls <code>metaclass(name, bases, namespace)</code>. The default metaclass is <code>type</code>.</div>
+
+    <!-- ═══════════════════════════════════════════════════════════════ -->
+    <h2 id="class-creation-protocol">2 · The Class Creation Protocol</h2>
+
+    <p>When Python executes a <code>class</code> statement, the following sequence runs internally. Understanding this protocol is essential for writing correct metaclasses:</p>
+
+    <pre style="background:#1a1a2e;padding:16px;border-radius:8px;overflow-x:auto;font-size:0.82rem;color:#e0e0f0;">
+class Foo(Base, metaclass=Meta):
+    body...
+
+Internally:
+  1. Determine metaclass:
+       meta = Meta (explicit) or type(Base) or type
+
+  2. Prepare namespace:
+       namespace = meta.__prepare__("Foo", (Base,), **kwargs)
+       # Returns a dict (or custom mapping) used to execute the class body
+
+  3. Execute class body:
+       exec(body, globals, namespace)
+       # All assignments in the body land in `namespace`
+
+  4. Create the class object:
+       Foo = meta.__new__(meta, "Foo", (Base,), namespace)
+
+  5. Initialise the class object:
+       meta.__init__(Foo, "Foo", (Base,), namespace)
+
+  6. Call __set_name__ on all descriptors in namespace
+  7. Call Base.__init_subclass__(cls=Foo, **kwargs) on each base</pre>
+
+    <p>We can observe every step by writing a tracing metaclass:</p>
+
+    <div style="position:relative"><pre><code class="language-python">class TracingMeta(type):
+    @classmethod
+    def __prepare__(mcs, name, bases, **kwargs):
+        print(f"  __prepare__({name!r}, {[b.__name__ for b in bases]})")
+        return super().__prepare__(name, bases, **kwargs)   # returns a dict
+
+    def __new__(mcs, name, bases, namespace, **kwargs):
+        print(f"  __new__({name!r}, attrs={list(namespace.keys())})")
+        return super().__new__(mcs, name, bases, namespace)
+
+    def __init__(cls, name, bases, namespace, **kwargs):
+        print(f"  __init__({name!r})")
+        super().__init__(name, bases, namespace)
+
+class Base(metaclass=TracingMeta):
+    x = 1
+
+# Output:
+#   __prepare__('Base', [])
+#   __new__('Base', attrs=['__module__', '__qualname__', 'x'])
+#   __init__('Base')
+
+class Child(Base):
+    y = 2
+
+# Output:
+#   __prepare__('Child', ['Base'])
+#   __new__('Child', attrs=['__module__', '__qualname__', 'y'])
+#   __init__('Child')</code></pre><span class="code-label">tracing_meta.py</span></div>
+
+    <div class="callout callout-concept"><strong>Why <code>__prepare__</code> matters:</strong> It is called <em>before</em> the class body executes and returns the namespace dict that will be populated. This is how <code>OrderedDict</code>-based metaclasses preserve field declaration order — and how the <code>enum</code> module tracks insertion order of members.</div>
+
+    <!-- ═══════════════════════════════════════════════════════════════ -->
+    <h2 id="writing-a-metaclass">3 · Writing a Metaclass</h2>
+
+    <p>A practical metaclass enforces structural rules at class-creation time — before any instance is ever created. This moves many categories of bugs from runtime to definition time:</p>
+
+    <div style="position:relative"><pre><code class="language-python">import re
+
+class InterfaceMeta(type):
+    """
+    Enforces that every concrete (non-abstract) subclass:
+    1. Implements all methods listed in `__required_methods__`
+    2. Uses snake_case names for public methods
+    3. Has a docstring
+    """
+    _SNAKE = re.compile(r'^[a-z_][a-z0-9_]*$')
+
+    def __new__(mcs, name, bases, namespace, **kwargs):
+        cls = super().__new__(mcs, name, bases, namespace)
+
+        # Skip the base class itself
+        if not bases:
+            return cls
+
+        required = set()
+        for base in bases:
+            required.update(getattr(base, '__required_methods__', []))
+
+        # Check all required methods are implemented
+        for method_name in required:
+            if not callable(getattr(cls, method_name, None)):
+                raise TypeError(
+                    f"Class '{name}' must implement '{method_name}()'"
+                )
+
+        # Enforce snake_case on public methods
+        for attr, val in namespace.items():
+            if callable(val) and not attr.startswith('_'):
+                if not mcs._SNAKE.match(attr):
+                    raise NameError(
+                        f"Method '{attr}' in '{name}' must be snake_case"
+                    )
+
+        # Enforce docstring
+        if not cls.__doc__:
+            raise TypeError(f"Class '{name}' must have a docstring")
+
+        return cls
+
+
+class Storage(metaclass=InterfaceMeta):
+    """Abstract base for storage backends."""
+    __required_methods__ = ["read", "write", "delete"]
+
+
+class FileStorage(Storage):
+    """File-based storage backend."""
+
+    def read(self, key: str) -&gt; bytes:
+        """Read bytes from file."""
+        return open(key, "rb").read()
+
+    def write(self, key: str, data: bytes) -&gt; None:
+        """Write bytes to file."""
+        open(key, "wb").write(data)
+
+    def delete(self, key: str) -&gt; None:
+        """Delete a file."""
+        import os; os.unlink(key)
+
+
+# This will raise TypeError — missing `delete`
+try:
+    class BadStorage(Storage):
+        """Missing delete method."""
+        def read(self, key): pass
+        def write(self, key, data): pass
+except TypeError as e:
+    print(e)  # Class 'BadStorage' must implement 'delete()'</code></pre><span class="code-label">interface_meta.py</span></div>
+
+    <div class="callout callout-tip"><strong>Tip:</strong> Keep metaclass logic in <code>__new__</code> (not <code>__init__</code>) when you need to modify or reject the class before it fully exists. Use <code>__init__</code> for post-creation setup that doesn't need to alter the class object itself.</div>
+
+    <!-- ═══════════════════════════════════════════════════════════════ -->
+    <h2 id="init-subclass">4 · <code>__init_subclass__</code>: The Lightweight Alternative</h2>
+
+    <p>Python 3.6+ provides <code>__init_subclass__</code> — called on the parent class each time it is subclassed. It handles 90% of metaclass use cases without the complexity of writing a full metaclass.</p>
+
+    <div style="position:relative"><pre><code class="language-python">class PluginBase:
+    """
+    Subclasses automatically register themselves in _registry
+    via __init_subclass__.
+    """
+    _registry: dict[str, type] = {}
+
+    def __init_subclass__(cls, plugin_name: str = None, **kwargs):
+        super().__init_subclass__(**kwargs)   # always call super()
+        name = plugin_name or cls.__name__.lower()
+        if name in PluginBase._registry:
+            raise ValueError(f"Plugin '{name}' already registered")
+        PluginBase._registry[name] = cls
+        print(f"  Registered plugin: '{name}' → {cls.__name__}")
+
+class JSONPlugin(PluginBase, plugin_name="json"):
+    def process(self, data): return f"JSON: {data}"
+
+class XMLPlugin(PluginBase, plugin_name="xml"):
+    def process(self, data): return f"XML: {data}"
+
+class CSVPlugin(PluginBase):          # uses class name as key: 'csvplugin'
+    def process(self, data): return f"CSV: {data}"
+
+print(PluginBase._registry)
+# {'json': JSONPlugin, 'xml': XMLPlugin, 'csvplugin': CSVPlugin}
+
+plugin = PluginBase._registry["json"]()
+print(plugin.process({"key": "value"}))</code></pre><span class="code-label">plugin_registry.py</span></div>
+
+    <p>Notice how <code>__init_subclass__</code> receives keyword arguments directly from the <code>class</code> statement — no metaclass machinery required:</p>
+
+    <div style="position:relative"><pre><code class="language-python">class Validator(PluginBase, plugin_name="validate"):
+    """Receives plugin_name='validate' from the class statement."""
+    def process(self, data): return f"VALID: {data}"</code></pre><span class="code-label">plugin_kwargs.py</span></div>
+
+    <div class="callout callout-concept"><strong>Why prefer <code>__init_subclass__</code>?</strong> It is simpler than metaclasses because: it lives on the class itself (no separate metaclass hierarchy), it receives keyword arguments from the <code>class</code> statement, it always calls <code>super().__init_subclass__(**kwargs)</code> to propagate to other classes in the MRO, and it avoids metaclass conflict issues entirely.</div>
+
+    <!-- ═══════════════════════════════════════════════════════════════ -->
+    <h2 id="class-getitem">5 · <code>__class_getitem__</code> for Generic Syntax</h2>
+
+    <p><code>__class_getitem__</code> enables <code>MyClass[T]</code> syntax without importing anything from <code>typing</code>. This is the mechanism that powers <code>list[int]</code> and <code>dict[str, int]</code> in Python 3.9+:</p>
+
+    <div style="position:relative"><pre><code class="language-python">from __future__ import annotations
+from typing import TypeVar, Generic
+
+T = TypeVar("T")
+
+# ── Standard library Generic uses __class_getitem__ ──
+# list[int], dict[str, int] work because list.__class_getitem__ returns a GenericAlias
+
+print(list[int])         # list[int]   — a types.GenericAlias
+print(dict[str, int])    # dict[str, int]
+
+# ── Custom generic class ──
+class Stack:
+    """A typed stack using __class_getitem__."""
+
+    def __class_getitem__(cls, item):
+        """Called when Stack[int] is written."""
+        # Return a GenericAlias — allows Stack[int] as a type hint
+        import types
+        return types.GenericAlias(cls, (item,))
+
+    def __init__(self):
+        self._data: list = []
+
+    def push(self, item) -&gt; None:
+        self._data.append(item)
+
+    def pop(self):
+        return self._data.pop()
+
+    def __repr__(self):
+        return f"Stack({self._data!r})"
+
+# Now Stack[int] is valid in type hints
+def process(stack: Stack[int]) -&gt; int:
+    return stack.pop()
+
+s: Stack[int] = Stack()
+s.push(1); s.push(2)
+print(process(s))        # 2
+print(Stack[int])        # stack.Stack[int]</code></pre><span class="code-label">class_getitem_basic.py</span></div>
+
+    <p>For more advanced use cases, <code>__class_getitem__</code> can return a dynamically-created class that carries metadata about the type parameter:</p>
+
+    <div style="position:relative"><pre><code class="language-python"># ── Metadata-carrying generic alias ──
+class TypedCollection:
+    _item_type: type = object
+
+    def __class_getitem__(cls, item_type):
+        new_cls = type(
+            f"{cls.__name__}[{item_type.__name__}]",
+            (cls,),
+            {"_item_type": item_type},
+        )
+        return new_cls
+
+    def append(self, item):
+        if not isinstance(item, type(self)._item_type):
+            raise TypeError(
+                f"Expected {type(self)._item_type.__name__}, "
+                f"got {type(item).__name__}"
+            )
+        self._items = getattr(self, "_items", [])
+        self._items.append(item)
+
+IntCollection = TypedCollection[int]
+c = IntCollection()
+c.append(42)
+try:
+    c.append("hello")
+except TypeError as e:
+    print(e)  # Expected int, got str</code></pre><span class="code-label">typed_collection.py</span></div>
+
+    <!-- ═══════════════════════════════════════════════════════════════ -->
+    <h2 id="prepare-ordered-namespaces">6 · <code>__prepare__</code> and Ordered Namespaces</h2>
+
+    <p><code>__prepare__</code> lets you substitute the default <code>dict</code> namespace with a custom mapping before the class body executes. This is how <code>enum.EnumType</code> tracks member insertion order:</p>
+
+    <div style="position:relative"><pre><code class="language-python">from collections import OrderedDict
+
+class OrderedMeta(type):
+    """Metaclass that preserves declaration order of all attributes."""
+
+    @classmethod
+    def __prepare__(mcs, name, bases, **kwargs):
+        return OrderedDict()   # class body written into an OrderedDict
+
+    def __new__(mcs, name, bases, namespace, **kwargs):
+        # namespace is the OrderedDict we returned from __prepare__
+        cls = super().__new__(mcs, name, bases, dict(namespace))
+        cls._field_order = [
+            k for k in namespace
+            if not k.startswith("__") and not callable(namespace[k])
+        ]
+        return cls
+
+class Schema(metaclass=OrderedMeta):
+    """Preserves field declaration order."""
+    first_name: str = ""
+    last_name:  str = ""
+    age:        int = 0
+    email:      str = ""
+
+    def full_name(self):
+        return f"{self.first_name} {self.last_name}"
+
+print(Schema._field_order)
+# ['first_name', 'last_name', 'age', 'email'] — guaranteed order</code></pre><span class="code-label">ordered_meta.py</span></div>
+
+    <p>A more powerful pattern: intercept every attribute assignment <em>during</em> class body execution using a custom namespace that overrides <code>__setitem__</code>:</p>
+
+    <div style="position:relative"><pre><code class="language-python"># ── Counting class: use a custom namespace to auto-number fields ──
+class NumberedNamespace(dict):
+    def __init__(self):
+        super().__init__()
+        self._counter = 0
+
+    def __setitem__(self, key, value):
+        if not key.startswith("_") and isinstance(value, str) and value == "auto":
+            value = self._counter
+            self._counter += 1
+        super().__setitem__(key, value)
+
+class NumberedMeta(type):
+    @classmethod
+    def __prepare__(mcs, name, bases, **kwargs):
+        return NumberedNamespace()
+
+class Fields(metaclass=NumberedMeta):
+    first = "auto"
+    second = "auto"
+    third = "auto"
+
+print(Fields.first, Fields.second, Fields.third)   # 0 1 2</code></pre><span class="code-label">numbered_namespace.py</span></div>
+
+    <div class="callout callout-concept"><strong>Note on Python 3.7+:</strong> Regular class namespaces already preserve insertion order (since <code>dict</code> became ordered). <code>__prepare__</code> is now mainly needed when you want a <em>custom</em> mapping type — e.g. to intercept attribute assignments during class body execution (as shown in the <code>NumberedNamespace</code> example above).</div>
+
+    <!-- ═══════════════════════════════════════════════════════════════ -->
+    <h2 id="metaclass-conflict">7 · Metaclass Conflict &amp; <code>__mro_entries__</code></h2>
+
+    <p>When inheriting from two classes with different metaclasses, Python raises a <code>TypeError</code>. This is the infamous "metaclass conflict" — the metaclass of a derived class must be a (non-strict) subclass of the metaclasses of all its bases:</p>
+
+    <div style="position:relative"><pre><code class="language-python">class MetaA(type):
+    def __new__(mcs, name, bases, ns):
+        print(f"MetaA creating {name}")
+        return super().__new__(mcs, name, bases, ns)
+
+class MetaB(type):
+    def __new__(mcs, name, bases, ns):
+        print(f"MetaB creating {name}")
+        return super().__new__(mcs, name, bases, ns)
+
+class A(metaclass=MetaA): pass
+class B(metaclass=MetaB): pass
+
+# This raises: TypeError: metaclass conflict: the metaclass of a derived class
+# must be a (non-strict) subclass of the metaclasses of all its bases
+try:
+    class C(A, B): pass
+except TypeError as e:
+    print(e)
+
+# Fix: create a combined metaclass
+class MetaAB(MetaA, MetaB): pass   # inherits from both
+
+class C(A, B, metaclass=MetaAB): pass   # now works</code></pre><span class="code-label">metaclass_conflict.py</span></div>
+
+    <p><code>__mro_entries__</code> is a lesser-known protocol that lets non-class objects appear in base class lists. When Python encounters an object in the bases tuple that is not a class, it calls <code>obj.__mro_entries__(bases)</code> to get the actual classes to insert into the MRO:</p>
+
+    <div style="position:relative"><pre><code class="language-python">class GenericBase:
+    """Supports MyClass[T] in inheritance: class Foo(GenericBase[int])."""
+
+    def __class_getitem__(cls, params):
+        class _GenericAlias:
+            def __mro_entries__(self, bases):
+                # Replace this alias with the actual class in the MRO
+                return (cls,)
+            def __repr__(self):
+                return f"{cls.__name__}[{params!r}]"
+        return _GenericAlias()
+
+class IntList(GenericBase[int]):
+    """MRO resolves to: IntList → GenericBase → object."""
+    pass
+
+print(IntList.__bases__)    # (&lt;class 'GenericBase'&gt;,)
+print(IntList.__mro__)      # (IntList, GenericBase, object)</code></pre><span class="code-label">mro_entries.py</span></div>
+
+    <div class="callout callout-warn"><strong>When to use metaclasses:</strong> Metaclasses are powerful but add significant cognitive overhead. Python core developers (including Guido) recommend reaching for them only when <code>__init_subclass__</code>, class decorators, or <code>__set_name__</code> cannot solve the problem. The bar is: "Does this need to run at class creation time and affect the class object itself?" If the answer is yes, and simpler hooks won't do, then a metaclass is justified.</div>
+
+    <!-- ── 8. Singleton & Borg Patterns via Metaclass ── -->
+    <h2 id="singleton-borg">Singleton &amp; Borg Patterns via Metaclass</h2>
+    <p>
+      Metaclasses are the cleanest way to implement the Singleton pattern in Python —
+      no module-level tricks or <code>__new__</code> hacks needed.
+    </p>
+    <div style="position:relative">
+      <pre><code class="language-python">class SingletonMeta(type):
+    """Metaclass that ensures only one instance per class."""
+    _instances: dict = {}
+
+    def __call__(cls, *args, **kwargs):
+        # __call__ on the metaclass intercepts instance creation
+        if cls not in cls._instances:
+            # super().__call__ runs cls.__new__ then cls.__init__
+            cls._instances[cls] = super().__call__(*args, **kwargs)
+        return cls._instances[cls]
+
+
+class Config(metaclass=SingletonMeta):
+    def __init__(self, debug: bool = False):
+        self.debug = debug
+
+c1 = Config(debug=True)
+c2 = Config()
+print(c1 is c2)    # True — same object
+print(c2.debug)    # True — init only ran once
+
+# Reset for testing
+del SingletonMeta._instances[Config]
+c3 = Config(debug=False)
+print(c3 is c1)    # False — fresh instance
+
+
+class BorgMeta(type):
+    """
+    Borg pattern: every instance is distinct but shares __dict__.
+    All instances share state without being the same object.
+    """
+    def __new__(mcs, name, bases, namespace):
+        cls = super().__new__(mcs, name, bases, namespace)
+        cls._shared_state: dict = {}
+        return cls
+
+    def __call__(cls, *args, **kwargs):
+        instance = cls.__new__(cls, *args, **kwargs)
+        instance.__dict__ = cls._shared_state   # share the dict
+        instance.__init__(*args, **kwargs)
+        return instance
+
+
+class AppState(metaclass=BorgMeta):
+    def __init__(self, **kw):
+        self.__dict__.update(kw)
+
+s1 = AppState(x=1)
+s2 = AppState(y=2)
+print(s1 is s2)     # False — distinct objects
+print(s1.y)         # 2 — shared state
+print(s2.x)         # 1 — shared state</code></pre>
+      <span class="code-label">singleton_borg.py</span>
+    </div>
+    <div class="callout callout-tip">
+      In practice, the simplest singleton in Python is a <strong>module</strong> —
+      Python imports each module only once and caches it in <code>sys.modules</code>,
+      so module-level state is effectively a singleton. Reach for <code>SingletonMeta</code>
+      only when you need multiple distinct singleton classes or testability via
+      <code>_instances</code> reset.
+    </div>
+
+    <!-- ── 9. Abstract Base Classes Without abc ── -->
+    <h2 id="abstract-without-abc">Abstract Base Classes Without <code>abc</code></h2>
+    <p>
+      The <code>abc</code> module is itself built on metaclasses. Here is how to
+      build the same mechanism from first principles — and then how to use
+      <code>abc.ABCMeta</code> properly.
+    </p>
+    <div style="position:relative">
+      <pre><code class="language-python">class AbstractMeta(type):
+    """
+    Marks methods decorated with @abstract as requiring implementation.
+    Raises TypeError when an abstract class is instantiated directly.
+    """
+    def __new__(mcs, name, bases, namespace):
+        abstract_methods = set()
+
+        # Collect from bases
+        for base in bases:
+            abstract_methods.update(getattr(base, "_abstract_methods", set()))
+
+        # Add newly marked abstracts, remove ones that are implemented
+        for k, v in namespace.items():
+            if getattr(v, "_abstract", False):
+                abstract_methods.add(k)
+            elif k in abstract_methods:
+                abstract_methods.discard(k)
+
+        cls = super().__new__(mcs, name, bases, namespace)
+        cls._abstract_methods = frozenset(abstract_methods)
+        return cls
+
+    def __call__(cls, *args, **kwargs):
+        if cls._abstract_methods:
+            raise TypeError(
+                f"Cannot instantiate abstract class '{cls.__name__}' — "
+                f"unimplemented: {sorted(cls._abstract_methods)}"
+            )
+        return super().__call__(*args, **kwargs)
+
+
+def abstract(fn):
+    """Decorator to mark a method as abstract."""
+    fn._abstract = True
+    return fn
+
+
+class Shape(metaclass=AbstractMeta):
+    @abstract
+    def area(self) -> float: ...
+
+    @abstract
+    def perimeter(self) -> float: ...
+
+    def describe(self) -> str:
+        return f"{type(self).__name__}: area={self.area():.2f}"
+
+
+class Circle(Shape):
+    def __init__(self, r: float): self.r = r
+    def area(self)      -> float: import math; return math.pi * self.r ** 2
+    def perimeter(self) -> float: import math; return 2 * math.pi * self.r
+
+
+c = Circle(5)
+print(c.describe())   # Circle: area=78.54
+
+try:
+    Shape()
+except TypeError as e:
+    print(e)   # Cannot instantiate abstract class 'Shape' — unimplemented: ['area', 'perimeter']
+
+# ── Real ABCMeta (stdlib) ──
+from abc import ABCMeta, abstractmethod
+
+class Repository(metaclass=ABCMeta):
+    @abstractmethod
+    def find(self, id: int): ...
+
+    @abstractmethod
+    def save(self, entity) -> None: ...
+
+    def find_all(self) -> list:   # concrete method
+        return []</code></pre>
+      <span class="code-label">abstract_meta.py</span>
+    </div>
+
+    <!-- ── 10. Real-World Metaclass: Django-Style Model ── -->
+    <h2 id="django-style-model">Real-World Example: Django-Style Model Metaclass</h2>
+    <p>
+      Django's <code>ModelBase</code> metaclass is one of the most studied metaclasses
+      in Python. Here is a stripped-down version showing the core techniques:
+    </p>
+    <div style="position:relative">
+      <pre><code class="language-python">class FieldDescriptor:
+    """Data descriptor for a model field."""
+    def __set_name__(self, owner, name):
+        self.name = name
+        self.private = f"_{name}"
+
+    def __init__(self, field_type: type, **opts):
+        self.field_type = field_type
+        self.opts = opts
+
+    def __get__(self, obj, objtype=None):
+        if obj is None: return self
+        return getattr(obj, self.private, None)
+
+    def __set__(self, obj, value):
+        if value is not None and not isinstance(value, self.field_type):
+            raise TypeError(f"Field '{self.name}': expected {self.field_type.__name__}")
+        setattr(obj, self.private, value)
+
+
+class ModelMeta(type):
+    """
+    Metaclass that:
+    1. Collects all FieldDescriptor declarations into _meta.fields
+    2. Injects a primary key if none is declared
+    3. Generates __repr__ automatically
+    4. Provides a classmethod .objects.all() stub
+    """
+
+    def __new__(mcs, name, bases, namespace, **kwargs):
+        fields = {}
+
+        # Inherit fields from base classes
+        for base in bases:
+            fields.update(getattr(base, "_fields", {}))
+
+        # Collect FieldDescriptor instances from current namespace
+        for k, v in list(namespace.items()):
+            if isinstance(v, FieldDescriptor):
+                fields[k] = v
+
+        # Auto-inject 'id' primary key if not declared
+        if "id" not in fields and name != "Model":
+            id_field = FieldDescriptor(int, primary_key=True)
+            id_field.name    = "id"
+            id_field.private = "_id"
+            namespace["id"]  = id_field
+            fields["id"]     = id_field
+
+        namespace["_fields"] = fields
+        cls = super().__new__(mcs, name, bases, namespace)
+
+        # Inject __repr__
+        def _repr(self):
+            parts = ", ".join(
+                f"{k}={getattr(self, k)!r}"
+                for k in self._fields
+                if getattr(self, k) is not None
+            )
+            return f"{type(self).__name__}({parts})"
+        cls.__repr__ = _repr
+
+        return cls
+
+
+class Model(metaclass=ModelMeta):
+    """Base model class."""
+    def __init__(self, **kwargs):
+        for k, v in kwargs.items():
+            setattr(self, k, v)
+
+
+class User(Model):
+    username = FieldDescriptor(str)
+    email    = FieldDescriptor(str)
+    age      = FieldDescriptor(int)
+
+
+class Post(Model):
+    title   = FieldDescriptor(str)
+    body    = FieldDescriptor(str)
+    user_id = FieldDescriptor(int)
+
+
+u = User(username="alice", email="alice@example.com", age=30)
+print(u)           # User(id=None, username='alice', email='alice@example.com', age=30)
+
+p = Post(title="Hello", body="World", user_id=1)
+print(p)           # Post(id=None, title='Hello', body='World', user_id=1)
+
+print(User._fields.keys())   # dict_keys(['id', 'username', 'email', 'age'])</code></pre>
+      <span class="code-label">django_style.py</span>
+    </div>
+    <div class="callout callout-concept">
+      This is essentially how Django's <code>ModelBase</code> works: it iterates the
+      namespace collecting <code>Field</code> objects, builds <code>_meta.fields</code>,
+      auto-injects <code>pk</code>, and contributes each field to the class.
+      SQLAlchemy's <code>DeclarativeMeta</code> uses the same pattern to collect
+      <code>Column</code> objects and map them to database columns.
+    </div>
+
+    <!-- ── Best Practices ── -->
+    <h2 id="best-practices">Best Practices</h2>
+    <ul>
+      <li><strong>Prefer <code>__init_subclass__</code> over metaclasses</strong> for most subclass hooks — it is simpler, avoids metaclass conflicts, and is easier to test. Only use a metaclass when you need to intercept <code>__prepare__</code>, modify the class object itself in <code>__new__</code>, or hook into <code>__call__</code> (instance creation).</li>
+      <li><strong>Always call <code>super()</code> in every metaclass hook</strong> — <code>super().__prepare__</code>, <code>super().__new__</code>, <code>super().__init__</code> — to stay cooperative with other metaclasses in the chain.</li>
+      <li><strong>Always call <code>super().__init_subclass__(**kwargs)</code></strong> and forward all unused kwargs — this enables cooperative multiple inheritance with other <code>__init_subclass__</code> hooks higher in the MRO.</li>
+      <li><strong>Use <code>__set_name__</code> instead of metaclass field-collection</strong> when descriptors just need their own name — <code>__set_name__</code> is called automatically and needs no metaclass at all.</li>
+      <li><strong>Resolve metaclass conflicts early</strong> — create a combined metaclass (<code>class CombinedMeta(MetaA, MetaB): pass</code>) and pass it explicitly rather than letting Python raise <code>TypeError</code> at class creation time.</li>
+      <li><strong>Document metaclass behaviour prominently</strong> — metaclasses work at class-creation time, which is non-obvious. A clear docstring explaining what the metaclass injects or enforces is essential for maintainability.</li>
+      <li><strong>Use <code>type.__new__</code> carefully</strong> — do all structural modifications (adding methods, registering fields) in <code>__new__</code>, not <code>__init__</code>, because <code>__new__</code> receives the namespace before descriptors run <code>__set_name__</code>.</li>
+      <li><strong>Test metaclass behaviour with minimal classes</strong> — write unit tests that create tiny classes using the metaclass and assert on their structure; do not rely on integration tests to catch metaclass bugs.</li>
+    </ul>
+
+    <!-- ── Exercises ── -->
+    <h2 id="exercises">Exercises</h2>
+    <div class="exercise-section">
+
+      <div class="exercise">
+        <h3>Exercise 1 — Registry Metaclass</h3>
+        <p>
+          Build a <code>HandlerMeta</code> metaclass that automatically registers
+          subclasses in a central registry, keyed by a <code>command</code> class
+          attribute:
+        </p>
+        <ul>
+          <li>The metaclass maintains a class-level <code>_registry: dict[str, type]</code>.</li>
+          <li>When any subclass of <code>BaseHandler</code> is created, if it has a <code>command</code> attribute, register it under that key.</li>
+          <li>Provide a <code>get_handler(command: str) -&gt; BaseHandler</code> classmethod that looks up and instantiates the handler.</li>
+          <li>Raise <code>KeyError</code> with a helpful message if the command is not registered.</li>
+          <li>Test: define three handler subclasses; verify all three are in the registry; verify <code>get_handler("list")()</code> returns the right instance.</li>
+        </ul>
+        <details>
+          <summary>💡 Hint</summary>
+          <pre><code class="language-python">class HandlerMeta(type):
+    _registry: dict[str, type] = {}
+
+    def __new__(mcs, name, bases, namespace, **kwargs):
+        cls = super().__new__(mcs, name, bases, namespace)
+        if "command" in namespace:
+            cmd = namespace["command"]
+            if cmd in mcs._registry:
+                raise ValueError(f"Command '{cmd}' already registered")
+            mcs._registry[cmd] = cls
+        return cls
+
+class BaseHandler(metaclass=HandlerMeta):
+    @classmethod
+    def get_handler(cls, command: str) -> "BaseHandler":
+        try:
+            return HandlerMeta._registry[command]()
+        except KeyError:
+            available = sorted(HandlerMeta._registry.keys())
+            raise KeyError(f"Unknown command {command!r}. Available: {available}")
+
+class ListHandler(BaseHandler):
+    command = "list"
+    def run(self): return "listing items"
+
+class CreateHandler(BaseHandler):
+    command = "create"
+    def run(self): return "creating item"
+
+h = BaseHandler.get_handler("list")
+print(h.run())   # listing items</code></pre>
+        </details>
+      </div>
+
+      <div class="exercise">
+        <h3>Exercise 2 — Declarative Schema with <code>__prepare__</code></h3>
+        <p>
+          Build a <code>SchemaMeta</code> metaclass that uses a custom
+          <code>__prepare__</code> namespace to track field declaration order
+          and auto-generate <code>__init__</code>, <code>__repr__</code>, and
+          <code>validate()</code>:
+        </p>
+        <ul>
+          <li>The custom namespace records the order that <code>Field</code> objects are assigned.</li>
+          <li><code>__init__</code> accepts keyword arguments for every declared <code>Field</code>.</li>
+          <li><code>validate()</code> checks that all non-optional fields have values.</li>
+          <li>Test with a <code>UserSchema</code> having <code>name</code> (required) and <code>age</code> (optional, default=None).</li>
+        </ul>
+        <details>
+          <summary>💡 Hint</summary>
+          <pre><code class="language-python">from collections import OrderedDict
+
+class Field:
+    def __init__(self, typ, *, required=True, default=None):
+        self.typ = typ
+        self.required = required
+        self.default = default
+
+class FieldOrderNamespace(OrderedDict):
+    def __init__(self):
+        super().__init__()
+        self._fields = OrderedDict()
+    def __setitem__(self, k, v):
+        if isinstance(v, Field):
+            self._fields[k] = v
+        super().__setitem__(k, v)
+
+class SchemaMeta(type):
+    @classmethod
+    def __prepare__(mcs, name, bases, **kw):
+        return FieldOrderNamespace()
+
+    def __new__(mcs, name, bases, ns, **kw):
+        fields = dict(ns._fields)
+        cls = super().__new__(mcs, name, bases, dict(ns))
+        cls._schema_fields = fields
+
+        def __init__(self, **kwargs):
+            for fname, field in fields.items():
+                setattr(self, fname, kwargs.get(fname, field.default))
+        def __repr__(self):
+            parts = ", ".join(f"{k}={getattr(self,k)!r}" for k in fields)
+            return f"{type(self).__name__}({parts})"
+        def validate(self):
+            for fname, field in fields.items():
+                if field.required and getattr(self, fname) is None:
+                    raise ValueError(f"Field '{fname}' is required")
+        cls.__init__ = __init__
+        cls.__repr__ = __repr__
+        cls.validate = validate
+        return cls
+
+class Schema(metaclass=SchemaMeta): pass
+
+class UserSchema(Schema):
+    name = Field(str, required=True)
+    age  = Field(int, required=False, default=None)
+
+u = UserSchema(name="Alice", age=30)
+print(u)          # UserSchema(name='Alice', age=30)
+u.validate()      # passes
+
+u2 = UserSchema()
+try:
+    u2.validate()
+except ValueError as e:
+    print(e)      # Field 'name' is required</code></pre>
+        </details>
+      </div>
+
+      <div class="exercise">
+        <h3>Exercise 3 — Metaclass vs <code>__init_subclass__</code> Comparison</h3>
+        <p>
+          Implement the same interface-enforcement system two ways and compare:
+        </p>
+        <ul>
+          <li><strong>Version A — Metaclass:</strong> <code>InterfaceMeta</code> that checks for required methods in <code>__new__</code> and raises <code>TypeError</code> if any are missing.</li>
+          <li><strong>Version B — <code>__init_subclass__</code>:</strong> <code>Interface</code> base class that uses <code>__init_subclass__</code> to enforce the same check.</li>
+          <li>Both versions must enforce: all methods in <code>__required__ = [...]</code> are implemented in concrete subclasses.</li>
+          <li>Write identical test cases for both versions: valid subclass passes; missing-method subclass raises <code>TypeError</code>.</li>
+          <li>Write a brief comparison: which is simpler? Which handles multiple inheritance more cleanly?</li>
+        </ul>
+        <details>
+          <summary>💡 Hint — Version B</summary>
+          <pre><code class="language-python">class Interface:
+    __required__: list[str] = []
+
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
+        required = set()
+        for base in cls.__mro__:
+            required.update(getattr(base, "__required__", []))
+        missing = [m for m in required if not callable(getattr(cls, m, None))]
+        # Only enforce on concrete classes (no further required methods)
+        if missing and not getattr(cls, "__abstract__", False):
+            raise TypeError(f"{cls.__name__} must implement: {missing}")
+
+class DataStore(Interface):
+    __required__ = ["read", "write"]
+    __abstract__ = True   # skip check for this abstract class
+
+class FileStore(DataStore):
+    def read(self, k): return b""
+    def write(self, k, v): pass   # passes — both methods present
+
+try:
+    class BadStore(DataStore): pass   # raises TypeError
+except TypeError as e:
+    print(e)</code></pre>
+        </details>
+      </div>
+
+    </div><!-- /exercise-section -->
+
+    <div id="quiz-section"></div>
+    <div id="lesson-nav-footer"></div>
+  </div><!-- /content -->
+</div><!-- /main -->
+
+<script src="../assets/nav-data.js"></script>
+<script src="../assets/nav.js"></script>
+<script src="../assets/quiz.js"></script>
+<script src="../assets/highlight.js"></script>
+
+<script>
+buildLessonFooter();
+
+QuizWidget.render("quiz-section", [
+  {
+    question: "What is the correct order of steps when Python executes a `class` statement?",
+    options: [
+      "__init__ → __new__ → __prepare__ → class body execution",
+      "__prepare__ → class body execution → __new__ → __init__ → __set_name__ → __init_subclass__",
+      "class body execution → __prepare__ → __new__ → __init__",
+      "__new__ → __prepare__ → class body execution → __init__"
+    ],
+    correct: 1,
+    explanation: "The full class creation sequence is: (1) __prepare__ is called on the metaclass to create the namespace mapping that will hold the class body; (2) the class body is executed with assignments going into that namespace; (3) __new__ is called on the metaclass to create the actual class object from the populated namespace; (4) __init__ is called on the metaclass to initialise the class; (5) __set_name__ is called on each descriptor in the namespace; (6) __init_subclass__ is called on each base class. Missing any super() call in steps 3-6 will break this chain."
+  },
+  {
+    question: "What is `__prepare__` used for, and what does it return?",
+    options: [
+      "It prepares the instance namespace before __init__ runs, returning a pre-populated dict",
+      "It is called before the class body executes and returns the mapping object that the class body's assignments will be written into — allowing a custom dict (e.g. OrderedDict) to intercept or reorder attribute assignments",
+      "It prepares the MRO before class creation by pre-loading base class attributes",
+      "It returns the metaclass to use for the class, overriding the metaclass= keyword"
+    ],
+    correct: 1,
+    explanation: "__prepare__ is a classmethod called on the metaclass before the class body executes. It returns a mapping (usually a dict or dict subclass) that will serve as the class body's local namespace. Every assignment in the class body (def method, x = 42, etc.) lands in this mapping. By returning a custom mapping like OrderedDict or a subclass that intercepts __setitem__, you can observe or modify assignments as they happen. This is how enum.EnumType tracks member insertion order and how counted/auto-numbered field systems work."
+  },
+  {
+    question: "Why should you prefer `__init_subclass__` over a metaclass for most subclass hooks?",
+    options: [
+      "__init_subclass__ is faster at runtime; metaclasses add significant per-call overhead",
+      "__init_subclass__ lives on the class itself (no separate metaclass), avoids metaclass conflicts when multiple inheritance is involved, receives keyword arguments from the class statement, and is simpler to understand and test",
+      "__init_subclass__ can modify the MRO; metaclasses cannot",
+      "Metaclasses are deprecated in Python 3.10+ in favour of __init_subclass__"
+    ],
+    correct: 1,
+    explanation: "__init_subclass__ is called automatically on the parent class each time it is subclassed, making it ideal for plugin registration, interface enforcement, and configuration injection. It avoids the main pain points of metaclasses: (1) no metaclass conflict when two base classes have different metaclasses; (2) no need to understand __prepare__/__new__/__init__ on type; (3) keyword arguments from the class statement are passed directly. The only things only a metaclass can do: intercept __prepare__, modify the class object itself in __new__, and hook __call__ (instance creation)."
+  },
+  {
+    question: "What is the metaclass conflict and how is it resolved?",
+    options: [
+      "A metaclass conflict occurs when two metaclasses define the same method; resolved by method resolution order",
+      "A metaclass conflict occurs when a class inherits from two bases whose metaclasses are unrelated — Python requires the metaclass of the derived class to be a subclass of all base metaclasses; it is resolved by creating a combined metaclass that inherits from both",
+      "A metaclass conflict occurs when the metaclass defines __new__ and the class also defines __new__; resolved by removing one",
+      "A metaclass conflict occurs when more than three levels of metaclass inheritance exist; resolved by flattening the hierarchy"
+    ],
+    correct: 1,
+    explanation: "Python enforces that the metaclass of a derived class must be a subclass of all its bases' metaclasses. If class C(A, B) where type(A) is MetaA and type(B) is MetaB, Python checks whether MetaA is a subclass of MetaB or vice versa. If neither is a subclass of the other, it raises TypeError: metaclass conflict. The fix is to create class CombinedMeta(MetaA, MetaB): pass and pass it explicitly: class C(A, B, metaclass=CombinedMeta). CombinedMeta satisfies the requirement by being a subclass of both MetaA and MetaB."
+  },
+  {
+    question: "How does `SingletonMeta` ensure only one instance is created by intercepting `__call__`?",
+    options: [
+      "It overrides __new__ on the class to return an existing instance if one exists",
+      "The metaclass's __call__ is invoked when the class is called (e.g. MyClass()); by checking a _instances dict before calling super().__call__() — which runs __new__ and __init__ — it can return an existing instance instead of creating a new one",
+      "It overrides __init__ to skip initialisation if an instance already exists in the registry",
+      "It uses __prepare__ to inject a _singleton attribute before the class body runs"
+    ],
+    correct: 1,
+    explanation: "When you call MyClass(), Python invokes type.__call__(MyClass, ...), which in turn calls MyClass.__new__ then MyClass.__init__. By overriding __call__ on the metaclass (SingletonMeta.__call__), you intercept this before any instance creation happens. The override checks a _instances dict: if the class key already exists, it returns the stored instance; otherwise it calls super().__call__() to create a new one and stores it. This is cleaner than overriding __new__ on the class itself because it does not require the class to know about its own singleton nature."
+  }
+]);
+</script>
+</body>
+</html>

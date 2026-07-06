@@ -1,0 +1,521 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lesson 15: Docker Compose — Multi-Container Applications</title>
+  <link rel="stylesheet" href="../assets/lesson-style.css">
+</head>
+<body>
+
+  <div class="lesson-meta">
+    <span>🐙 Lesson 15 of 20</span>
+    <span>⏱️ 16–22 minutes</span>
+    <span>🔧 Multi-Container Orchestration</span>
+  </div>
+
+  <h1>Docker Compose — Multi-Container Applications</h1>
+  <p class="subtitle">Real applications aren't a single container. They're a web of services — APIs, databases, caches, workers — that must start together, talk to each other, and shut down cleanly. Compose gives you declarative, reproducible multi-container environments in a single file.</p>
+
+  <!-- ============================================================ -->
+  <h2>1. The Problem</h2>
+
+  <p>A typical web application needs at minimum:</p>
+  <ul>
+    <li>An <strong>API server</strong> (Node, Python, Go…)</li>
+    <li>A <strong>database</strong> (Postgres, MySQL, MongoDB…)</li>
+    <li>A <strong>cache</strong> (Redis, Memcached…)</li>
+    <li>Maybe a <strong>background worker</strong>, a <strong>message queue</strong>, or a <strong>reverse proxy</strong></li>
+  </ul>
+
+  <p>Running each manually with <code>docker run</code> means:</p>
+
+  <pre><code># Create network
+docker network create myapp
+
+# Start database
+docker run -d --name db --network myapp \
+  -e POSTGRES_PASSWORD=secret \
+  -v pgdata:/var/lib/postgresql/data \
+  postgres:16
+
+# Start Redis
+docker run -d --name redis --network myapp redis:7-alpine
+
+# Build and start API
+docker build -t myapi ./api
+docker run -d --name api --network myapp \
+  -p 3000:3000 \
+  -e DATABASE_URL=postgres://db:5432/app \
+  myapi</code></pre>
+
+  <p>That's three commands just to start — plus you need to remember the order, the flags, the environment variables, and to create the network first. Now imagine tearing it all down, or sharing this setup with a teammate. It's tedious, error-prone, and undocumented.</p>
+
+  <div class="callout warning">
+    <div class="callout-title">The Real Cost</div>
+    <p>The problem isn't typing — it's <em>knowledge loss</em>. Two weeks later, you won't remember which env vars the API needs, which ports to map, or what volume name you used. The setup lives in your shell history, not in version control.</p>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>2. What is Compose?</h2>
+
+  <p>Docker Compose is a tool that reads a YAML file (<code>compose.yaml</code>) describing your multi-container application and manages its entire lifecycle with simple commands.</p>
+
+  <ul>
+    <li><strong>Declarative</strong> — you describe the desired state, Compose figures out what to create/start/stop</li>
+    <li><strong>Single file</strong> — all services, networks, and volumes defined in one place</li>
+    <li><strong>Single command</strong> — <code>docker compose up</code> starts everything; <code>docker compose down</code> stops everything</li>
+    <li><strong>Version-controlled</strong> — the file lives in your repo, documenting your stack</li>
+  </ul>
+
+  <div class="callout info">
+    <div class="callout-title">Compose is NOT an Orchestrator</div>
+    <p>Compose runs containers on a <strong>single host</strong>. It doesn't handle multi-node scheduling, rolling updates, or self-healing. It's designed for <strong>local development</strong> and <strong>testing</strong>. For production multi-host workloads, you need Kubernetes or Docker Swarm.</p>
+  </div>
+
+  <p><strong>File naming:</strong> The modern standard is <code>compose.yaml</code>. The older <code>docker-compose.yml</code> still works but is legacy. No <code>version:</code> key is needed in modern Compose files.</p>
+
+  <!-- ============================================================ -->
+  <h2>3. The compose.yaml Anatomy</h2>
+
+  <p>Here's a complete, annotated example — a Node API backed by Postgres and Redis:</p>
+
+  <pre><code># compose.yaml — Full-stack application
+services:
+  api:
+    build: ./api                              # Build from Dockerfile in ./api
+    ports:
+      - "3000:3000"                           # Expose to host
+    environment:
+      DATABASE_URL: postgres://postgres:secret@db:5432/app
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      - db
+      - redis
+    develop:
+      watch:
+        - action: sync
+          path: ./api/src
+          target: /app/src
+
+  db:
+    image: postgres:16                        # Use pre-built image
+    volumes:
+      - pgdata:/var/lib/postgresql/data       # Persist data
+    environment:
+      POSTGRES_PASSWORD: secret
+      POSTGRES_DB: app
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine                     # Lightweight Redis
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  pgdata:                                     # Named volume declaration</code></pre>
+
+  <h3>Key Breakdown</h3>
+
+  <table>
+    <thead>
+      <tr><th>Key</th><th>Purpose</th><th>Example</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>services</code></td><td>Top-level map of all containers in the app</td><td><code>services: { api, db, redis }</code></td></tr>
+      <tr><td><code>image</code></td><td>Use a pre-built image from a registry</td><td><code>image: postgres:16</code></td></tr>
+      <tr><td><code>build</code></td><td>Build an image from a Dockerfile path</td><td><code>build: ./api</code></td></tr>
+      <tr><td><code>ports</code></td><td>Map host port → container port (external access)</td><td><code>"3000:3000"</code></td></tr>
+      <tr><td><code>environment</code></td><td>Set environment variables in the container</td><td><code>POSTGRES_PASSWORD: secret</code></td></tr>
+      <tr><td><code>volumes</code></td><td>Mount named volumes or bind mounts for persistence</td><td><code>pgdata:/var/lib/postgresql/data</code></td></tr>
+      <tr><td><code>depends_on</code></td><td>Control startup order (not readiness!)</td><td><code>depends_on: [db, redis]</code></td></tr>
+      <tr><td><code>healthcheck</code></td><td>Define how to test if the service is ready</td><td><code>test: ["CMD", "redis-cli", "ping"]</code></td></tr>
+    </tbody>
+  </table>
+
+  <!-- ============================================================ -->
+  <h2>4. Networking in Compose</h2>
+
+  <p>Compose automatically creates a <strong>default network</strong> for your project. Every service joins it. The magic:</p>
+
+  <ul>
+    <li>Services resolve each other by <strong>service name</strong> — <code>db</code>, <code>redis</code>, <code>api</code> are DNS names</li>
+    <li><strong>No port mapping</strong> needed between services — they communicate on internal ports directly</li>
+    <li><code>ports:</code> is only needed for <strong>external access</strong> (host → container)</li>
+    <li>The network is named <code>&lt;project&gt;_default</code> (project = directory name by default)</li>
+  </ul>
+
+  <!-- SVG: Three-service architecture on a shared Compose network -->
+  <svg viewBox="0 0 700 360" xmlns="http://www.w3.org/2000/svg" style="max-width:700px; width:100%; height:auto; display:block; margin:2rem auto;">
+    <!-- Background: Compose network -->
+    <rect x="40" y="80" width="620" height="240" rx="16" fill="#e8f4fd" stroke="#2196F3" stroke-width="2" stroke-dasharray="8 4"/>
+    <text x="350" y="108" text-anchor="middle" font-size="13" fill="#1565C0" font-weight="bold">Compose Default Network (myapp_default)</text>
+
+    <!-- API Service -->
+    <rect x="80" y="140" width="160" height="100" rx="10" fill="#fff" stroke="#4CAF50" stroke-width="2"/>
+    <text x="160" y="170" text-anchor="middle" font-size="14" font-weight="bold" fill="#2E7D32">api</text>
+    <text x="160" y="192" text-anchor="middle" font-size="11" fill="#555">Node.js :3000</text>
+    <text x="160" y="210" text-anchor="middle" font-size="10" fill="#888">build: ./api</text>
+
+    <!-- DB Service -->
+    <rect x="360" y="130" width="160" height="100" rx="10" fill="#fff" stroke="#FF9800" stroke-width="2"/>
+    <text x="440" y="160" text-anchor="middle" font-size="14" font-weight="bold" fill="#E65100">db</text>
+    <text x="440" y="182" text-anchor="middle" font-size="11" fill="#555">Postgres :5432</text>
+    <text x="440" y="200" text-anchor="middle" font-size="10" fill="#888">image: postgres:16</text>
+    <!-- Volume indicator -->
+    <rect x="390" y="212" width="100" height="16" rx="4" fill="#FFF3E0" stroke="#FF9800" stroke-width="1"/>
+    <text x="440" y="224" text-anchor="middle" font-size="9" fill="#E65100">pgdata volume</text>
+
+    <!-- Redis Service -->
+    <rect x="360" y="250" width="160" height="60" rx="10" fill="#fff" stroke="#F44336" stroke-width="2"/>
+    <text x="440" y="275" text-anchor="middle" font-size="14" font-weight="bold" fill="#C62828">redis</text>
+    <text x="440" y="295" text-anchor="middle" font-size="11" fill="#555">Redis :6379</text>
+
+    <!-- Arrows: API → DB -->
+    <line x1="240" y1="175" x2="360" y2="175" stroke="#333" stroke-width="2" marker-end="url(#arrowhead15)"/>
+    <text x="300" y="166" text-anchor="middle" font-size="10" fill="#333">db:5432</text>
+
+    <!-- Arrows: API → Redis -->
+    <line x1="220" y1="240" x2="360" y2="270" stroke="#333" stroke-width="2" marker-end="url(#arrowhead15)"/>
+    <text x="278" y="264" text-anchor="middle" font-size="10" fill="#333">redis:6379</text>
+
+    <!-- External access arrow -->
+    <line x1="160" y1="80" x2="160" y2="140" stroke="#4CAF50" stroke-width="2" marker-end="url(#arrowhead15)"/>
+    <text x="160" y="70" text-anchor="middle" font-size="11" fill="#2E7D32" font-weight="bold">Host :3000</text>
+
+    <!-- Arrow marker -->
+    <defs>
+      <marker id="arrowhead15" markerWidth="10" markerHeight="7" refX="10" refY="3.5" orient="auto">
+        <polygon points="0 0, 10 3.5, 0 7" fill="#333"/>
+      </marker>
+    </defs>
+  </svg>
+
+  <div class="callout info">
+    <div class="callout-title">DNS Resolution</div>
+    <p>When the API connects to <code>postgres://db:5432/app</code>, Docker's embedded DNS resolves <code>db</code> to the container's IP on the Compose network. No hardcoded IPs, no <code>--link</code> (deprecated), no manual network creation.</p>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>5. Key Commands</h2>
+
+  <table>
+    <thead>
+      <tr><th>Command</th><th>Purpose</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>docker compose up -d</code></td><td>Start all services in detached mode</td></tr>
+      <tr><td><code>docker compose down</code></td><td>Stop and remove containers, networks</td></tr>
+      <tr><td><code>docker compose down -v</code></td><td>Also remove named volumes (data loss!)</td></tr>
+      <tr><td><code>docker compose ps</code></td><td>List running services and their status</td></tr>
+      <tr><td><code>docker compose logs -f api</code></td><td>Follow logs for a specific service</td></tr>
+      <tr><td><code>docker compose exec db psql -U postgres</code></td><td>Run a command inside a running service</td></tr>
+      <tr><td><code>docker compose build</code></td><td>Rebuild images (when Dockerfiles change)</td></tr>
+      <tr><td><code>docker compose pull</code></td><td>Pull latest images for services using <code>image:</code></td></tr>
+      <tr><td><code>docker compose restart api</code></td><td>Restart a single service</td></tr>
+    </tbody>
+  </table>
+
+  <pre><code><span class="comment"># Typical workflow</span>
+$ docker compose up -d
+[+] Running 4/4
+ ✔ Network myapp_default   Created
+ ✔ Volume "myapp_pgdata"   Created
+ ✔ Container myapp-db-1    Started
+ ✔ Container myapp-redis-1 Started
+ ✔ Container myapp-api-1   Started
+
+$ docker compose ps
+NAME              SERVICE   STATUS    PORTS
+myapp-api-1       api       running   0.0.0.0:3000->3000/tcp
+myapp-db-1        db        running   5432/tcp
+myapp-redis-1     redis     running   6379/tcp
+
+$ docker compose logs api --tail 5
+myapp-api-1  | Server listening on port 3000
+myapp-api-1  | Connected to PostgreSQL
+myapp-api-1  | Connected to Redis
+
+$ docker compose down
+[+] Running 4/4
+ ✔ Container myapp-api-1    Removed
+ ✔ Container myapp-redis-1  Removed
+ ✔ Container myapp-db-1     Removed
+ ✔ Network myapp_default    Removed</code></pre>
+
+  <!-- ============================================================ -->
+  <h2>6. depends_on & Startup Order</h2>
+
+  <p>The <code>depends_on</code> key controls <strong>startup order</strong> — but has a critical subtlety:</p>
+
+  <div class="callout warning">
+    <div class="callout-title">depends_on ≠ "ready"</div>
+    <p>By default, <code>depends_on</code> only waits for the dependency container to <strong>start</strong> — not for the service inside to be <strong>ready</strong>. Postgres takes seconds to initialize; your API might crash connecting before it's ready.</p>
+  </div>
+
+  <h3>The Fix: Health-Based Dependencies</h3>
+
+  <pre><code>services:
+  api:
+    build: ./api
+    depends_on:
+      db:
+        condition: service_healthy        # Wait for healthcheck to pass
+      redis:
+        condition: service_healthy
+
+  db:
+    image: postgres:16
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 5</code></pre>
+
+  <p>With <code>condition: service_healthy</code>, Compose waits until the dependency's healthcheck passes before starting the dependent service. This is the <strong>correct</strong> way to handle startup ordering.</p>
+
+  <table>
+    <thead>
+      <tr><th>Condition</th><th>Waits For</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>service_started</code></td><td>Container started (default)</td></tr>
+      <tr><td><code>service_healthy</code></td><td>Healthcheck passing</td></tr>
+      <tr><td><code>service_completed_successfully</code></td><td>Container exited with code 0 (for init tasks)</td></tr>
+    </tbody>
+  </table>
+
+  <!-- ============================================================ -->
+  <h2>7. Profiles & Overrides</h2>
+
+  <h3>Override Files</h3>
+
+  <p>Compose automatically merges <code>compose.yaml</code> with <code>compose.override.yaml</code> if present. Use this for dev-specific configuration:</p>
+
+  <pre><code># compose.override.yaml — dev overrides (auto-loaded)
+services:
+  api:
+    build:
+      target: development                # Use dev stage of multi-stage build
+    volumes:
+      - ./api/src:/app/src               # Hot reload with bind mount
+    environment:
+      DEBUG: "true"
+
+  db:
+    ports:
+      - "5432:5432"                      # Expose DB to host for GUI tools</code></pre>
+
+  <h3>Profiles</h3>
+
+  <p>Profiles let you define optional services that only start when explicitly requested:</p>
+
+  <pre><code>services:
+  api:
+    build: ./api
+    ports: ["3000:3000"]
+
+  db:
+    image: postgres:16
+
+  # Only starts with --profile debug
+  pgadmin:
+    image: dpage/pgadmin4
+    ports: ["8080:80"]
+    profiles: [debug]
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@local.dev
+      PGADMIN_DEFAULT_PASSWORD: admin
+
+  # Only starts with --profile monitoring
+  prometheus:
+    image: prom/prometheus
+    profiles: [monitoring]
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml</code></pre>
+
+  <pre><code><span class="comment"># Start core services only</span>
+$ docker compose up -d
+
+<span class="comment"># Start core + debugging tools</span>
+$ docker compose --profile debug up -d
+
+<span class="comment"># Start everything</span>
+$ docker compose --profile debug --profile monitoring up -d</code></pre>
+
+  <!-- ============================================================ -->
+  <h2>Interactive Quizzes</h2>
+
+  <!-- Quiz 1: Networking -->
+  <div class="quiz" data-quiz='{"question":"In a Compose file, how does the API service connect to a Postgres service named `db`?","options":["By using the host IP and mapped port","By using the service name `db` as the hostname (e.g., db:5432)","By using localhost:5432","By looking up the container ID"],"correct":1,"explanation":"Compose creates a default network where each service is reachable by its service name via DNS. The API connects to `db:5432` — no port mapping or IP addresses needed between services."}'>
+  </div>
+
+  <!-- Quiz 2: depends_on behavior -->
+  <div class="quiz" data-quiz='{"question":"What does `depends_on: [db]` (without conditions) guarantee?","options":["The db service is fully ready to accept connections","The db container has started (but may not be ready yet)","The db service healthcheck is passing","The db data is initialized and migrated"],"correct":1,"explanation":"Plain `depends_on` only ensures the dependency container has started. It does NOT wait for the service to be ready. Use `condition: service_healthy` with a healthcheck for true readiness ordering."}'>
+  </div>
+
+  <!-- Quiz 3: When NOT to use Compose -->
+  <div class="quiz" data-quiz='{"question":"Which scenario is NOT a good fit for Docker Compose?","options":["Local development with multiple services","Running integration tests in CI","Production deployment across multiple servers","Demoing an application on a single machine"],"correct":2,"explanation":"Compose is a single-host tool. For production deployments across multiple servers, you need an orchestrator like Kubernetes or Docker Swarm that handles scheduling, replication, failover, and rolling updates."}'>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>Hands-On Task</h2>
+
+  <div class="callout task">
+    <div class="callout-title">🧪 Build a Full-Stack App with Compose</div>
+    <p>Create a three-service application: a Node.js API, Postgres database, and Redis cache.</p>
+
+    <p><strong>Step 1: Create the project structure</strong></p>
+    <pre><code>mkdir compose-lab && cd compose-lab
+mkdir api</code></pre>
+
+    <p><strong>Step 2: Create <code>api/package.json</code></strong></p>
+    <pre><code>{
+  "name": "compose-lab-api",
+  "scripts": { "start": "node server.js" },
+  "dependencies": { "express": "^4.18.0", "pg": "^8.11.0", "redis": "^4.6.0" }
+}</code></pre>
+
+    <p><strong>Step 3: Create <code>api/server.js</code></strong></p>
+    <pre><code>const express = require('express');
+const { Pool } = require('pg');
+const { createClient } = require('redis');
+
+const app = express();
+const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+const redis = createClient({ url: process.env.REDIS_URL });
+
+async function start() {
+  await redis.connect();
+  app.get('/', async (req, res) => {
+    const dbResult = await pool.query('SELECT NOW() as time');
+    await redis.incr('hits');
+    const hits = await redis.get('hits');
+    res.json({ db_time: dbResult.rows[0].time, hits });
+  });
+  app.listen(3000, () => console.log('API on :3000'));
+}
+start();</code></pre>
+
+    <p><strong>Step 4: Create <code>api/Dockerfile</code></strong></p>
+    <pre><code>FROM node:20-alpine
+WORKDIR /app
+COPY package*.json ./
+RUN npm install --production
+COPY . .
+EXPOSE 3000
+CMD ["npm", "start"]</code></pre>
+
+    <p><strong>Step 5: Create <code>compose.yaml</code></strong></p>
+    <pre><code>services:
+  api:
+    build: ./api
+    ports: ["3000:3000"]
+    environment:
+      DATABASE_URL: postgres://postgres:secret@db:5432/app
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_PASSWORD: secret
+      POSTGRES_DB: app
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  pgdata:</code></pre>
+
+    <p><strong>Step 6: Run it</strong></p>
+    <pre><code># Start everything
+docker compose up -d
+
+# Check status
+docker compose ps
+
+# Test the API
+curl http://localhost:3000
+# → {"db_time":"2024-...","hits":"1"}
+
+# Hit it again
+curl http://localhost:3000
+# → {"db_time":"2024-...","hits":"2"}
+
+# Check logs
+docker compose logs api
+
+# Connect to Postgres
+docker compose exec db psql -U postgres -d app -c "SELECT NOW();"
+
+# Tear it all down
+docker compose down</code></pre>
+
+    <p><strong>✅ Success criteria:</strong> The API returns database time and an incrementing hit counter from Redis. All three services start with one command and stop with one command.</p>
+  </div>
+
+  <!-- ============================================================ -->
+  <div class="callout info">
+    <div class="callout-title">🌐 Not Just Docker</div>
+    <p><strong>Podman Compose</strong> — a drop-in replacement that uses Podman instead of Docker. Same <code>compose.yaml</code>, same commands, rootless by default.</p>
+    <p><strong>Podman play kube</strong> — Podman can also run Kubernetes YAML directly: <code>podman play kube compose.yaml</code>. This creates pods (groups of containers sharing a network namespace) — closer to how Kubernetes works.</p>
+    <p><strong>Nerdctl</strong> — containerd's CLI also supports <code>nerdctl compose up</code> with the same file format.</p>
+  </div>
+
+  <div class="callout info">
+    <div class="callout-title">🏭 Industry Pattern: Compose → Kubernetes</div>
+    <p>The dominant workflow in the industry:</p>
+    <ul>
+      <li><strong>Local dev:</strong> <code>compose.yaml</code> — fast iteration, simple commands</li>
+      <li><strong>CI/testing:</strong> <code>docker compose up</code> in a pipeline for integration tests</li>
+      <li><strong>Production:</strong> Kubernetes manifests (Deployments, Services, ConfigMaps) — multi-node, self-healing, scalable</li>
+    </ul>
+    <p>Tools like <strong>Kompose</strong> can convert a <code>compose.yaml</code> into Kubernetes manifests as a starting point. But production configs always diverge — don't expect a 1:1 translation.</p>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>Key Takeaways</h2>
+
+  <ul>
+    <li><strong>Compose = declarative multi-container</strong> — one YAML file defines your entire local stack</li>
+    <li><strong>Service names are DNS names</strong> — containers reach each other by service name, no manual networking</li>
+    <li><strong>ports: is for external access only</strong> — services communicate internally without port mapping</li>
+    <li><strong>depends_on ≠ ready</strong> — use <code>condition: service_healthy</code> with healthchecks for real ordering</li>
+    <li><strong>Named volumes persist data</strong> — survive <code>docker compose down</code> (unless you add <code>-v</code>)</li>
+    <li><strong>Profiles for optional services</strong> — keep your default startup fast, add debugging/monitoring on demand</li>
+    <li><strong>Compose is single-host only</strong> — for production multi-node, graduate to Kubernetes or Swarm</li>
+    <li><strong>Version control your compose.yaml</strong> — it's documentation, reproducibility, and onboarding in one file</li>
+  </ul>
+
+  <!-- ============================================================ -->
+  <nav class="lesson-nav">
+    <a href="0014-container-networking-fundamentals.html">← Prev: Container Networking Fundamentals</a>
+    <a href="0016-health-checks-and-restart-policies.html">Next: Health Checks &amp; Restart Policies →</a>
+  </nav>
+
+  <script src="../assets/quiz.js"></script>
+</body>
+</html>

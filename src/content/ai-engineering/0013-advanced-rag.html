@@ -1,0 +1,595 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lesson 13: Advanced RAG | AI Engineering</title>
+    <link rel="stylesheet" href="../assets/lesson.css">
+    <link rel="stylesheet" href="../assets/prism-theme.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-python.min.js"></script>
+    <script src="../assets/diagrams.js"></script>
+</head>
+<body>
+    <div class="lesson-header">
+        <div class="module-badge">Module 3: RAG Pipeline</div>
+        <h1>Advanced RAG</h1>
+        <p class="lesson-subtitle">Move beyond naive retrieve-and-generate with hybrid search, reranking, query expansion, HyDE, and multi-step retrieval for production-grade accuracy.</p>
+    </div>
+
+    <div class="lesson-meta">
+        <span class="pill">Lesson 13</span>
+        <span class="pill">~25 min</span>
+        <span class="pill">Advanced</span>
+    </div>
+
+    <main class="lesson-content">
+        <!-- Section 1: Why Naive RAG Fails -->
+        <section>
+            <h2>Why Naive RAG Isn't Enough</h2>
+            <div class="concept-box">
+                <h3>Naive RAG Limitations</h3>
+                <p>The basic pipeline (embed query → vector search → stuff context → generate) has fundamental weaknesses:</p>
+                <ul>
+                    <li><strong>Vocabulary mismatch:</strong> User says "auth issues" but docs say "authentication errors"</li>
+                    <li><strong>Semantic gap:</strong> Questions and answers have different embedding representations</li>
+                    <li><strong>Noisy retrieval:</strong> Top-K includes irrelevant chunks that confuse the LLM</li>
+                    <li><strong>Single-hop limit:</strong> Can't answer questions requiring info from multiple chunks</li>
+                    <li><strong>Lost context:</strong> Small chunks miss surrounding information needed for full answers</li>
+                </ul>
+            </div>
+
+            <p>Advanced RAG techniques address each failure mode. Let's build a production pipeline step by step.</p>
+
+            <div class="diagram-container" id="naive-vs-advanced"></div>
+        </section>
+
+        <!-- Section 2: Hybrid Search -->
+        <section>
+            <h2>Hybrid Search: Dense + Sparse</h2>
+            <p>Combine semantic search (embeddings) with keyword search (BM25) for the best of both worlds:</p>
+
+            <div class="concept-box">
+                <h3>Why Hybrid?</h3>
+                <ul>
+                    <li><strong>Dense (vector) search:</strong> Captures meaning — "automobile" matches "car"</li>
+                    <li><strong>Sparse (BM25) search:</strong> Captures exact terms — "error code 403" matches exactly</li>
+                    <li><strong>Combined:</strong> Handles both semantic and keyword queries reliably</li>
+                </ul>
+            </div>
+
+            <div class="code-block">
+                <pre><code class="language-python">"""Hybrid Search: BM25 + Vector Search with Reciprocal Rank Fusion"""
+from rank_bm25 import BM25Okapi
+import numpy as np
+from openai import OpenAI
+import chromadb
+
+client = OpenAI()
+
+class HybridSearcher:
+    def __init__(self, documents: list[dict]):
+        """
+        documents: list of {"content": str, "metadata": dict}
+        """
+        self.documents = documents
+        self.contents = [d["content"] for d in documents]
+        
+        # Build BM25 index (sparse/keyword search)
+        tokenized = [doc.lower().split() for doc in self.contents]
+        self.bm25 = BM25Okapi(tokenized)
+        
+        # Build vector index
+        self.chroma = chromadb.Client()
+        self.collection = self.chroma.create_collection("hybrid")
+        
+        # Embed and store
+        embeddings = self._embed(self.contents)
+        self.collection.add(
+            ids=[f"doc_{i}" for i in range(len(documents))],
+            documents=self.contents,
+            embeddings=embeddings,
+            metadatas=[d["metadata"] for d in documents]
+        )
+    
+    def _embed(self, texts: list[str]) -> list[list[float]]:
+        response = client.embeddings.create(
+            input=texts, model="text-embedding-3-small"
+        )
+        return [d.embedding for d in response.data]
+    
+    def search(self, query: str, top_k: int = 10, alpha: float = 0.7) -> list[dict]:
+        """
+        Hybrid search with Reciprocal Rank Fusion (RRF).
+        
+        alpha: weight for vector search (1-alpha for BM25)
+        """
+        # --- Sparse search (BM25) ---
+        bm25_scores = self.bm25.get_scores(query.lower().split())
+        bm25_ranked = np.argsort(bm25_scores)[::-1][:top_k * 2]
+        
+        # --- Dense search (vector) ---
+        vector_results = self.collection.query(
+            query_texts=[query], n_results=top_k * 2
+        )
+        # Map IDs back to indices
+        vector_ranked = [
+            int(id.split("_")[1]) for id in vector_results["ids"][0]
+        ]
+        
+        # --- Reciprocal Rank Fusion ---
+        k = 60  # RRF constant
+        scores = {}
+        
+        for rank, doc_idx in enumerate(bm25_ranked):
+            scores[doc_idx] = scores.get(doc_idx, 0) + (1 - alpha) / (k + rank + 1)
+        
+        for rank, doc_idx in enumerate(vector_ranked):
+            scores[doc_idx] = scores.get(doc_idx, 0) + alpha / (k + rank + 1)
+        
+        # Sort by combined score
+        ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)[:top_k]
+        
+        return [
+            {
+                "content": self.contents[idx],
+                "metadata": self.documents[idx]["metadata"],
+                "score": score,
+                "rank": i + 1
+            }
+            for i, (idx, score) in enumerate(ranked)
+        ]
+
+# Usage
+searcher = HybridSearcher(documents)
+results = searcher.search("authentication error 403", alpha=0.6)
+</code></pre>
+            </div>
+        </section>
+
+        <!-- Section 3: Cross-Encoder Reranking -->
+        <section>
+            <h2>Cross-Encoder Reranking</h2>
+            <p>Bi-encoders (embedding models) are fast but approximate. Cross-encoders see query+document together for much more accurate relevance scoring.</p>
+
+            <div class="diagram-container" id="rerank-flow"></div>
+
+            <div class="code-block">
+                <pre><code class="language-python">"""Reranking with Cross-Encoders"""
+from sentence_transformers import CrossEncoder
+
+# Load a cross-encoder reranker
+reranker = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
+
+def retrieve_and_rerank(
+    query: str, 
+    initial_results: list[dict],  # From hybrid search
+    top_k: int = 5
+) -> list[dict]:
+    """
+    Two-stage retrieval:
+    1. Fast retrieval (bi-encoder/BM25) → top 20-50 candidates
+    2. Accurate reranking (cross-encoder) → top 5 final results
+    """
+    # Prepare pairs for cross-encoder
+    pairs = [(query, r["content"]) for r in initial_results]
+    
+    # Score all pairs (cross-encoder sees query + doc together)
+    scores = reranker.predict(pairs)
+    
+    # Attach scores and sort
+    for result, score in zip(initial_results, scores):
+        result["rerank_score"] = float(score)
+    
+    reranked = sorted(
+        initial_results, 
+        key=lambda x: x["rerank_score"], 
+        reverse=True
+    )
+    
+    return reranked[:top_k]
+
+# --- Full pipeline ---
+# Stage 1: Fast retrieval (get 20 candidates)
+candidates = searcher.search(query="How to fix memory leaks?", top_k=20)
+
+# Stage 2: Accurate reranking (narrow to top 5)
+final_results = retrieve_and_rerank(
+    query="How to fix memory leaks?",
+    initial_results=candidates,
+    top_k=5
+)
+
+for r in final_results:
+    print(f"[{r['rerank_score']:.3f}] {r['content'][:80]}...")
+</code></pre>
+            </div>
+
+            <div class="callout">
+                <strong>⚡ Performance:</strong> Cross-encoders are ~100x slower than bi-encoders. That's why we use two stages: bi-encoder to get 20–50 candidates fast, then cross-encoder to pick the best 5. Never run a cross-encoder over your entire corpus.
+            </div>
+        </section>
+
+        <!-- Section 4: Query Expansion & HyDE -->
+        <section>
+            <h2>Query Expansion & HyDE</h2>
+            
+            <div class="concept-box">
+                <h3>HyDE: Hypothetical Document Embeddings</h3>
+                <p>Instead of embedding the <em>question</em>, ask an LLM to generate a hypothetical answer, then embed <em>that</em>. The hypothetical answer is closer in embedding space to real answers than the question is.</p>
+            </div>
+
+            <div class="code-block">
+                <pre><code class="language-python">"""Query Expansion and HyDE"""
+from openai import OpenAI
+
+client = OpenAI()
+
+def expand_query(query: str, n_expansions: int = 3) -> list[str]:
+    """Generate multiple query variations to improve recall."""
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{
+            "role": "user",
+            "content": (
+                f"Generate {n_expansions} different ways to ask this question. "
+                f"Include synonyms and related terms.\n\n"
+                f"Original: {query}\n\n"
+                f"Variations (one per line):"
+            )
+        }],
+        temperature=0.7
+    )
+    
+    variations = response.choices[0].message.content.strip().split("\n")
+    return [query] + [v.strip("- 123.") for v in variations if v.strip()]
+
+
+def hyde_search(query: str, collection, top_k: int = 5):
+    """HyDE: Generate hypothetical answer, embed that instead."""
+    # Generate hypothetical answer
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{
+            "role": "user",
+            "content": (
+                f"Write a short, factual paragraph that would answer "
+                f"this question:\n\n{query}\n\n"
+                f"Write as if you're a technical documentation page."
+            )
+        }],
+        temperature=0.3
+    )
+    
+    hypothetical_answer = response.choices[0].message.content
+    
+    # Search using the hypothetical answer (closer to real docs)
+    results = collection.query(
+        query_texts=[hypothetical_answer],
+        n_results=top_k
+    )
+    
+    return results, hypothetical_answer
+
+
+# --- Multi-query retrieval ---
+def multi_query_retrieve(query: str, collection, top_k: int = 5):
+    """Retrieve using multiple query variations, deduplicate."""
+    queries = expand_query(query)
+    
+    all_results = {}  # doc_id → (content, best_score)
+    
+    for q in queries:
+        results = collection.query(query_texts=[q], n_results=top_k)
+        for doc_id, doc, dist in zip(
+            results["ids"][0], 
+            results["documents"][0],
+            results["distances"][0]
+        ):
+            score = 1 - dist
+            if doc_id not in all_results or score > all_results[doc_id][1]:
+                all_results[doc_id] = (doc, score)
+    
+    # Sort by best score, return top_k
+    ranked = sorted(all_results.items(), key=lambda x: x[1][1], reverse=True)
+    return [{"id": k, "content": v[0], "score": v[1]} for k, v in ranked[:top_k]]
+</code></pre>
+            </div>
+        </section>
+
+        <!-- Section 5: Contextual Compression -->
+        <section>
+            <h2>Contextual Compression</h2>
+            <p>Retrieved chunks often contain irrelevant padding. Compression extracts only the relevant parts:</p>
+
+            <div class="code-block">
+                <pre><code class="language-python">def compress_context(query: str, chunks: list[str]) -> list[str]:
+    """Extract only query-relevant portions from retrieved chunks."""
+    compressed = []
+    
+    for chunk in chunks:
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{
+                "role": "user",
+                "content": (
+                    f"Extract ONLY the parts of this text that are relevant "
+                    f"to answering: '{query}'\n\n"
+                    f"Text: {chunk}\n\n"
+                    f"Relevant extract (or 'IRRELEVANT' if nothing matches):"
+                )
+            }],
+            temperature=0,
+            max_tokens=200
+        )
+        
+        extract = response.choices[0].message.content.strip()
+        if extract != "IRRELEVANT":
+            compressed.append(extract)
+    
+    return compressed
+
+# Reduces 5 chunks of 500 tokens each → maybe 3 chunks of 100 tokens
+# More focused context = better generation quality
+</code></pre>
+            </div>
+        </section>
+
+        <!-- Section 6: Parent-Child Chunks -->
+        <section>
+            <h2>Parent-Child Chunk Strategy</h2>
+            <div class="concept-box">
+                <h3>The Idea</h3>
+                <p>Embed <strong>small chunks</strong> (high precision retrieval) but return their <strong>parent chunks</strong> (more context for generation). Best of both worlds: precise matching + rich context.</p>
+            </div>
+
+            <div class="code-block">
+                <pre><code class="language-python">"""Parent-Child Chunking Strategy"""
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+
+# Create parent chunks (large, for context)
+parent_splitter = RecursiveCharacterTextSplitter(
+    chunk_size=1500, chunk_overlap=200
+)
+
+# Create child chunks (small, for retrieval)
+child_splitter = RecursiveCharacterTextSplitter(
+    chunk_size=300, chunk_overlap=50
+)
+
+def build_parent_child_index(documents: list[str], collection):
+    """Index child chunks but store parent references."""
+    all_children = []
+    parent_store = {}  # parent_id → parent_text
+    
+    for doc_idx, doc in enumerate(documents):
+        # Split into parents
+        parents = parent_splitter.split_text(doc)
+        
+        for p_idx, parent in enumerate(parents):
+            parent_id = f"doc{doc_idx}_parent{p_idx}"
+            parent_store[parent_id] = parent
+            
+            # Split parent into children
+            children = child_splitter.split_text(parent)
+            
+            for c_idx, child in enumerate(children):
+                all_children.append({
+                    "id": f"{parent_id}_child{c_idx}",
+                    "content": child,
+                    "parent_id": parent_id
+                })
+    
+    # Index children (what we search against)
+    collection.add(
+        ids=[c["id"] for c in all_children],
+        documents=[c["content"] for c in all_children],
+        metadatas=[{"parent_id": c["parent_id"]} for c in all_children]
+    )
+    
+    return parent_store
+
+def search_with_parents(query: str, collection, parent_store, top_k: int = 3):
+    """Search children, return parents (deduped)."""
+    results = collection.query(query_texts=[query], n_results=top_k * 2)
+    
+    # Get unique parents
+    seen_parents = set()
+    parent_chunks = []
+    
+    for meta in results["metadatas"][0]:
+        parent_id = meta["parent_id"]
+        if parent_id not in seen_parents:
+            seen_parents.add(parent_id)
+            parent_chunks.append(parent_store[parent_id])
+        
+        if len(parent_chunks) >= top_k:
+            break
+    
+    return parent_chunks
+</code></pre>
+            </div>
+        </section>
+
+        <!-- Section 7: Comparison - Naive vs Advanced -->
+        <section>
+            <h2>Naive RAG vs Advanced RAG: Performance</h2>
+            <div class="diagram-container" id="comparison-bars"></div>
+
+            <div class="comparison-table">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Technique</th>
+                            <th>Precision Gain</th>
+                            <th>Recall Gain</th>
+                            <th>Latency Cost</th>
+                            <th>Complexity</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><strong>Hybrid Search</strong></td>
+                            <td>+10-15%</td>
+                            <td>+20-30%</td>
+                            <td>+5ms</td>
+                            <td>Low</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Reranking</strong></td>
+                            <td>+15-25%</td>
+                            <td>+5%</td>
+                            <td>+50-200ms</td>
+                            <td>Medium</td>
+                        </tr>
+                        <tr>
+                            <td><strong>HyDE</strong></td>
+                            <td>+10-20%</td>
+                            <td>+15%</td>
+                            <td>+500ms (LLM call)</td>
+                            <td>Low</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Query Expansion</strong></td>
+                            <td>+5%</td>
+                            <td>+25-35%</td>
+                            <td>+300ms</td>
+                            <td>Low</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Parent-Child</strong></td>
+                            <td>+10%</td>
+                            <td>+10%</td>
+                            <td>+0ms</td>
+                            <td>Medium</td>
+                        </tr>
+                        <tr>
+                            <td><strong>All Combined</strong></td>
+                            <td>+30-40%</td>
+                            <td>+40-50%</td>
+                            <td>+700ms</td>
+                            <td>High</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <!-- Mini Project -->
+        <section>
+            <div class="project-box">
+                <h2>🛠️ Mini-Project: Advanced RAG with Reranking</h2>
+                <p>Upgrade your basic RAG pipeline with hybrid search and cross-encoder reranking.</p>
+
+                <div class="step-list">
+                    <h4>Steps:</h4>
+                    <ol>
+                        <li>Install dependencies: <code>pip install rank-bm25 sentence-transformers</code></li>
+                        <li>Implement HybridSearcher with BM25 + vector search + RRF fusion</li>
+                        <li>Add cross-encoder reranking (ms-marco-MiniLM-L-6-v2)</li>
+                        <li>Implement HyDE as an optional query transformation</li>
+                        <li>Create 20 test queries with ground-truth relevant documents</li>
+                        <li>Compare: naive RAG vs hybrid vs hybrid+rerank (measure Precision@5)</li>
+                        <li><strong>Bonus:</strong> Add parent-child chunking and measure context quality</li>
+                    </ol>
+                </div>
+
+                <div class="code-block">
+                    <pre><code class="language-python">"""Advanced RAG Pipeline - Integration"""
+
+class AdvancedRAG:
+    def __init__(self):
+        self.hybrid_searcher = HybridSearcher(documents)
+        self.reranker = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
+        self.client = OpenAI()
+    
+    def query(self, question: str, use_hyde: bool = True) -> dict:
+        # Optional: HyDE transformation
+        search_query = question
+        if use_hyde:
+            _, hypothetical = hyde_search(question, self.collection)
+            search_query = hypothetical
+        
+        # Stage 1: Hybrid retrieval (fast, broad)
+        candidates = self.hybrid_searcher.search(search_query, top_k=20)
+        
+        # Stage 2: Rerank (accurate, narrow)
+        pairs = [(question, c["content"]) for c in candidates]
+        scores = self.reranker.predict(pairs)
+        for c, s in zip(candidates, scores):
+            c["rerank_score"] = float(s)
+        
+        top_results = sorted(
+            candidates, key=lambda x: x["rerank_score"], reverse=True
+        )[:5]
+        
+        # Stage 3: Generate with top results
+        return self._generate(question, top_results)
+</code></pre>
+                </div>
+            </div>
+        </section>
+
+        <!-- Key Takeaways -->
+        <section>
+            <div class="key-points">
+                <h3>📋 Key Takeaways</h3>
+                <ul>
+                    <li>Hybrid search (BM25 + vectors) handles both semantic and keyword queries — always use it in production</li>
+                    <li>Cross-encoder reranking is the single biggest quality improvement you can add (+15-25% precision)</li>
+                    <li>HyDE bridges the question↔answer semantic gap by generating a hypothetical answer first</li>
+                    <li>Parent-child chunks give you precise retrieval + rich context for generation</li>
+                    <li>Stack techniques incrementally — measure improvement at each stage before adding complexity</li>
+                </ul>
+            </div>
+        </section>
+    </main>
+
+    <nav class="nav-links">
+        <a href="0012-building-rag-pipeline.html" class="prev">← Lesson 12: Building a RAG Pipeline</a>
+        <a href="0014-rag-evaluation-debugging.html" class="next">Lesson 14: RAG Evaluation & Debugging →</a>
+    </nav>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            if (window.Diagrams) {
+                Diagrams.createFlowDiagram(
+                    document.getElementById('rerank-flow'),
+                    [
+                        { label: 'User Query', sublabel: '"Fix memory leaks in Python"', color: '#6366f1' },
+                        { label: 'Hybrid Search', sublabel: 'BM25 + Vector → 20 candidates', color: '#22d3ee' },
+                        { label: 'Cross-Encoder', sublabel: 'Score each (query, doc) pair', color: '#f59e0b' },
+                        { label: 'Top-5 Reranked', sublabel: 'Most relevant chunks only', color: '#22c55e' },
+                        { label: 'Generate Answer', sublabel: 'High-quality context → LLM', color: '#6366f1' }
+                    ]
+                );
+
+                Diagrams.createFlowDiagram(
+                    document.getElementById('naive-vs-advanced'),
+                    [
+                        { label: 'Query Transform', sublabel: 'HyDE / Expansion / Multi-query', color: '#6366f1' },
+                        { label: 'Hybrid Retrieval', sublabel: 'Dense + Sparse + Metadata', color: '#22d3ee' },
+                        { label: 'Reranking', sublabel: 'Cross-encoder scoring', color: '#f59e0b' },
+                        { label: 'Compression', sublabel: 'Extract relevant portions', color: '#22c55e' },
+                        { label: 'Generation', sublabel: 'Focused, grounded answer', color: '#6366f1' }
+                    ]
+                );
+
+                Diagrams.createComparisonBar(
+                    document.getElementById('comparison-bars'),
+                    [
+                        { label: 'Naive RAG — Precision@5', value: 52, max: 100, color: '#ef4444' },
+                        { label: 'Naive RAG — Recall@5', value: 48, max: 100, color: '#ef4444' },
+                        { label: '+ Hybrid Search — Precision@5', value: 64, max: 100, color: '#f59e0b' },
+                        { label: '+ Hybrid Search — Recall@5', value: 71, max: 100, color: '#f59e0b' },
+                        { label: '+ Reranking — Precision@5', value: 79, max: 100, color: '#22d3ee' },
+                        { label: '+ Reranking — Recall@5', value: 74, max: 100, color: '#22d3ee' },
+                        { label: 'Full Advanced — Precision@5', value: 88, max: 100, color: '#22c55e' },
+                        { label: 'Full Advanced — Recall@5', value: 85, max: 100, color: '#22c55e' }
+                    ]
+                );
+            }
+        });
+    </script>
+</body>
+</html>

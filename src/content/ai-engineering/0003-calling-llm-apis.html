@@ -1,0 +1,535 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lesson 3: Calling LLM APIs</title>
+  <link rel="stylesheet" href="../assets/lesson.css">
+  <link rel="stylesheet" href="../assets/prism-theme.css">
+</head>
+<body>
+  <article class="lesson-content">
+
+    <header class="lesson-header">
+      <h1>Calling LLM APIs</h1>
+      <p>Master the OpenAI and Anthropic APIs — message roles, streaming, retries, rate limits, and building a production-ready CLI chatbot.</p>
+      <div class="lesson-meta">
+        <span>Module 1 · Lesson 3</span>
+        <span>30 min read</span>
+        <span><span class="pill accent">Hands-on</span></span>
+      </div>
+    </header>
+
+    <!-- ─── SECTION: The Request Lifecycle ─── -->
+    <h2>The Request Lifecycle</h2>
+
+    <p>Every LLM API call follows the same basic flow, whether you're using OpenAI, Anthropic, or any other provider:</p>
+
+    <div class="diagram-container" id="request-flow">
+      <div class="caption">Request lifecycle: from your code to streaming tokens back</div>
+    </div>
+
+    <p>Key things happening at each stage:</p>
+    <ul>
+      <li><strong>Build messages</strong> — Assemble system prompt + conversation history + user input</li>
+      <li><strong>API request</strong> — HTTP POST with auth headers, model selection, parameters</li>
+      <li><strong>Model inference</strong> — Provider runs your input through the model (100ms–30s)</li>
+      <li><strong>Stream response</strong> — Tokens arrive via Server-Sent Events as they're generated</li>
+      <li><strong>Process output</strong> — Parse, validate, store, display to user</li>
+    </ul>
+
+    <!-- ─── SECTION: Message Roles ─── -->
+    <h2>Message Roles</h2>
+
+    <p>Both OpenAI and Anthropic use a structured message format with <strong>roles</strong> that tell the model who's "speaking":</p>
+
+    <div class="concept-box">
+      <h3>The Three Roles</h3>
+      <ul>
+        <li><strong>system</strong> — Sets the AI's persona, rules, and constraints. Processed once at the start. The model treats this as authoritative instructions.</li>
+        <li><strong>user</strong> — Human messages. Questions, commands, data to process.</li>
+        <li><strong>assistant</strong> — The AI's previous responses. Include these to maintain conversation history.</li>
+      </ul>
+    </div>
+
+    <div class="code-block">
+      <div class="code-header">message structure</div>
+      <pre><code class="language-python">messages = [
+    {"role": "system", "content": "You are a helpful coding assistant. Be concise."},
+    {"role": "user", "content": "What's a list comprehension in Python?"},
+    {"role": "assistant", "content": "A list comprehension is a concise way to create lists..."},
+    {"role": "user", "content": "Show me an example with filtering"},
+]</code></pre>
+    </div>
+
+    <div class="callout note">
+      <strong>Anthropic's difference</strong>
+      <p>Anthropic separates the system prompt from messages. Instead of a system message in the array, you pass it as a top-level <code>system</code> parameter. Messages must strictly alternate between user and assistant roles.</p>
+    </div>
+
+    <!-- ─── SECTION: API Comparison ─── -->
+    <h2>OpenAI vs Anthropic: API Shapes</h2>
+
+    <table class="comparison-table">
+      <thead>
+        <tr>
+          <th>Feature</th>
+          <th>OpenAI</th>
+          <th>Anthropic</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Endpoint</td>
+          <td><code>/v1/chat/completions</code></td>
+          <td><code>/v1/messages</code></td>
+        </tr>
+        <tr>
+          <td>System prompt</td>
+          <td>Message with role "system"</td>
+          <td>Top-level <code>system</code> param</td>
+        </tr>
+        <tr>
+          <td>Max output param</td>
+          <td><code>max_tokens</code> (optional)</td>
+          <td><code>max_tokens</code> (required)</td>
+        </tr>
+        <tr>
+          <td>Streaming</td>
+          <td><code>stream: true</code>, SSE chunks</td>
+          <td><code>stream: true</code>, SSE events</td>
+        </tr>
+        <tr>
+          <td>Stop reason</td>
+          <td><code>finish_reason</code></td>
+          <td><code>stop_reason</code></td>
+        </tr>
+        <tr>
+          <td>Token counting</td>
+          <td>In response <code>usage</code> object</td>
+          <td>In response <code>usage</code> object</td>
+        </tr>
+        <tr>
+          <td>Python SDK</td>
+          <td><code>openai</code></td>
+          <td><code>anthropic</code></td>
+        </tr>
+        <tr>
+          <td>Auth header</td>
+          <td><code>Authorization: Bearer sk-...</code></td>
+          <td><code>x-api-key: sk-ant-...</code></td>
+        </tr>
+      </tbody>
+    </table>
+
+    <!-- ─── SECTION: Basic Calls ─── -->
+    <h2>Making Your First API Call</h2>
+
+    <h3>OpenAI</h3>
+
+    <div class="code-block">
+      <div class="code-header">openai_hello.py</div>
+      <pre><code class="language-python">"""Basic OpenAI API call."""
+import os
+from openai import OpenAI
+
+client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+
+response = client.chat.completions.create(
+    model="gpt-4o",
+    messages=[
+        {"role": "system", "content": "You are a helpful assistant."},
+        {"role": "user", "content": "Explain recursion in one sentence."},
+    ],
+    temperature=0.7,
+    max_tokens=150,
+)
+
+print(response.choices[0].message.content)
+print(f"Tokens used: {response.usage.total_tokens}")</code></pre>
+    </div>
+
+    <h3>Anthropic</h3>
+
+    <div class="code-block">
+      <div class="code-header">anthropic_hello.py</div>
+      <pre><code class="language-python">"""Basic Anthropic API call."""
+import os
+import anthropic
+
+client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+
+response = client.messages.create(
+    model="claude-sonnet-4-20250514",
+    max_tokens=150,
+    system="You are a helpful assistant.",
+    messages=[
+        {"role": "user", "content": "Explain recursion in one sentence."},
+    ],
+    temperature=0.7,
+)
+
+print(response.content[0].text)
+print(f"Tokens used: {response.usage.input_tokens + response.usage.output_tokens}")</code></pre>
+    </div>
+
+    <!-- ─── SECTION: Streaming ─── -->
+    <h2>Streaming Responses</h2>
+
+    <p>Streaming is <strong>essential</strong> for good UX. Without it, users stare at a blank screen for 2–10 seconds. With streaming, they see tokens appear in real-time.</p>
+
+    <div class="code-block">
+      <div class="code-header">streaming_openai.py</div>
+      <pre><code class="language-python">"""Streaming with OpenAI."""
+from openai import OpenAI
+import os
+
+client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+
+stream = client.chat.completions.create(
+    model="gpt-4o",
+    messages=[{"role": "user", "content": "Write a haiku about Python."}],
+    stream=True,
+)
+
+for chunk in stream:
+    delta = chunk.choices[0].delta
+    if delta.content:
+        print(delta.content, end="", flush=True)
+
+print()  # newline at end</code></pre>
+    </div>
+
+    <div class="code-block">
+      <div class="code-header">streaming_anthropic.py</div>
+      <pre><code class="language-python">"""Streaming with Anthropic."""
+import anthropic
+import os
+
+client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+
+with client.messages.stream(
+    model="claude-sonnet-4-20250514",
+    max_tokens=150,
+    messages=[{"role": "user", "content": "Write a haiku about Python."}],
+) as stream:
+    for text in stream.text_stream:
+        print(text, end="", flush=True)
+
+print()</code></pre>
+    </div>
+
+    <!-- ─── SECTION: API Key Security ─── -->
+    <div class="callout warning">
+      <strong>⚠️ Never hardcode API keys</strong>
+      <p>API keys should NEVER appear in source code, git history, or client-side code. Always use environment variables or a secrets manager:</p>
+      <ul>
+        <li>Local dev: <code>.env</code> file + <code>python-dotenv</code> (add <code>.env</code> to <code>.gitignore</code>)</li>
+        <li>Production: secrets manager (AWS Secrets Manager, GCP Secret Manager, Vault)</li>
+        <li>CI/CD: encrypted environment variables</li>
+      </ul>
+      <p>If a key leaks, rotate it immediately. OpenAI and Anthropic both allow instant key rotation in their dashboards.</p>
+    </div>
+
+    <!-- ─── SECTION: Retry Logic & Rate Limits ─── -->
+    <h2>Retry Logic & Rate Limits</h2>
+
+    <p>APIs fail. Networks drop. Rate limits hit. Production code <strong>must</strong> handle these gracefully.</p>
+
+    <div class="concept-box">
+      <h3>Common Error Codes</h3>
+      <ul>
+        <li><code>429</code> — Rate limited. Back off and retry.</li>
+        <li><code>500/502/503</code> — Server error. Retry with exponential backoff.</li>
+        <li><code>401</code> — Invalid API key. Don't retry; fix the key.</li>
+        <li><code>400</code> — Bad request (too many tokens, invalid params). Don't retry; fix the request.</li>
+      </ul>
+    </div>
+
+    <div class="code-block">
+      <div class="code-header">retry_logic.py</div>
+      <pre><code class="language-python">"""Robust API calls with retry logic."""
+import time
+import random
+from openai import OpenAI, RateLimitError, APIError, APITimeoutError
+import os
+
+client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+
+
+def call_with_retry(
+    messages: list,
+    model: str = "gpt-4o",
+    max_retries: int = 3,
+    base_delay: float = 1.0,
+) -> str:
+    """Call the API with exponential backoff retry."""
+    for attempt in range(max_retries + 1):
+        try:
+            response = client.chat.completions.create(
+                model=model,
+                messages=messages,
+                temperature=0.7,
+            )
+            return response.choices[0].message.content
+
+        except RateLimitError as e:
+            if attempt == max_retries:
+                raise
+            # Exponential backoff with jitter
+            delay = base_delay * (2 ** attempt) + random.uniform(0, 1)
+            print(f"Rate limited. Retrying in {delay:.1f}s... (attempt {attempt + 1})")
+            time.sleep(delay)
+
+        except APITimeoutError:
+            if attempt == max_retries:
+                raise
+            delay = base_delay * (2 ** attempt)
+            print(f"Timeout. Retrying in {delay:.1f}s...")
+            time.sleep(delay)
+
+        except APIError as e:
+            if e.status_code and e.status_code >= 500:
+                if attempt == max_retries:
+                    raise
+                time.sleep(base_delay * (2 ** attempt))
+            else:
+                raise  # Client errors (400, 401) — don't retry</code></pre>
+    </div>
+
+    <div class="callout tip">
+      <strong>SDK built-in retries</strong>
+      <p>Both the <code>openai</code> and <code>anthropic</code> Python SDKs have built-in retry logic. The OpenAI client retries 429/500+ errors twice by default. You can configure it: <code>OpenAI(max_retries=5)</code>. For most cases, the built-in retry is sufficient.</p>
+    </div>
+
+    <!-- ─── SECTION: Async Calls ─── -->
+    <h2>Async & Concurrent Calls</h2>
+
+    <p>When you need to make multiple independent API calls (e.g., evaluating 100 prompts), use async to parallelize:</p>
+
+    <div class="code-block">
+      <div class="code-header">async_calls.py</div>
+      <pre><code class="language-python">"""Async concurrent API calls."""
+import asyncio
+import os
+from openai import AsyncOpenAI
+
+client = AsyncOpenAI(api_key=os.environ["OPENAI_API_KEY"])
+
+
+async def classify(text: str) -> str:
+    """Classify a single piece of text."""
+    response = await client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {"role": "system", "content": "Classify as positive/negative/neutral. Reply with one word."},
+            {"role": "user", "content": text},
+        ],
+        temperature=0,
+        max_tokens=10,
+    )
+    return response.choices[0].message.content.strip()
+
+
+async def classify_batch(texts: list[str], max_concurrent: int = 10) -> list[str]:
+    """Classify multiple texts with bounded concurrency."""
+    semaphore = asyncio.Semaphore(max_concurrent)
+
+    async def limited_classify(text):
+        async with semaphore:
+            return await classify(text)
+
+    tasks = [limited_classify(t) for t in texts]
+    return await asyncio.gather(*tasks)
+
+
+# Usage
+texts = ["Great product!", "Terrible service.", "It was okay."]
+results = asyncio.run(classify_batch(texts))
+print(list(zip(texts, results)))</code></pre>
+    </div>
+
+    <div class="callout note">
+      <strong>Concurrency limits</strong>
+      <p>Don't fire 1,000 concurrent requests — you'll hit rate limits instantly. Use a semaphore (as shown) to cap at 10–50 concurrent requests depending on your tier. OpenAI's rate limits are per-minute, so spread requests over time for large batches.</p>
+    </div>
+
+    <!-- ─── SECTION: Full CLI Chatbot ─── -->
+    <h2>Project: CLI Chatbot with Streaming</h2>
+
+    <div class="project-box">
+      <h3>🛠️ Build a CLI Chatbot</h3>
+      <p>A full-featured terminal chatbot with streaming output, conversation history, system prompt configuration, and graceful error handling.</p>
+    </div>
+
+    <div class="code-block">
+      <div class="code-header">chatbot.py</div>
+      <pre><code class="language-python">"""
+CLI Chatbot with streaming and conversation history.
+Usage: python chatbot.py
+"""
+import os
+import sys
+from openai import OpenAI, APIError
+
+# ─── Configuration ───────────────────────────────────────────
+MODEL = "gpt-4o"
+SYSTEM_PROMPT = """You are a helpful AI assistant. You are concise but thorough.
+When showing code, always include brief comments explaining key parts."""
+
+MAX_HISTORY = 20  # Keep last N messages to manage context window
+
+
+def create_client() -> OpenAI:
+    """Create OpenAI client with API key from environment."""
+    api_key = os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        print("Error: OPENAI_API_KEY environment variable not set.")
+        print("Set it with: export OPENAI_API_KEY='sk-...'")
+        sys.exit(1)
+    return OpenAI(api_key=api_key)
+
+
+def stream_response(client: OpenAI, messages: list) -> str:
+    """Stream a response and return the full text."""
+    try:
+        stream = client.chat.completions.create(
+            model=MODEL,
+            messages=messages,
+            stream=True,
+            temperature=0.7,
+        )
+
+        full_response = []
+        print("\n\033[36mAssistant:\033[0m ", end="")
+
+        for chunk in stream:
+            delta = chunk.choices[0].delta
+            if delta.content:
+                print(delta.content, end="", flush=True)
+                full_response.append(delta.content)
+
+        print("\n")
+        return "".join(full_response)
+
+    except APIError as e:
+        print(f"\n\033[31mAPI Error: {e.message}\033[0m\n")
+        return ""
+
+
+def main():
+    client = create_client()
+    history = []
+
+    print("=" * 50)
+    print("  CLI Chatbot (type 'quit' to exit, 'clear' to reset)")
+    print("=" * 50)
+    print(f"  Model: {MODEL}")
+    print(f"  System: {SYSTEM_PROMPT[:60]}...")
+    print("=" * 50 + "\n")
+
+    while True:
+        try:
+            user_input = input("\033[33mYou:\033[0m ").strip()
+        except (KeyboardInterrupt, EOFError):
+            print("\n\nGoodbye!")
+            break
+
+        if not user_input:
+            continue
+        if user_input.lower() == "quit":
+            print("Goodbye!")
+            break
+        if user_input.lower() == "clear":
+            history.clear()
+            print("History cleared.\n")
+            continue
+        if user_input.lower() == "history":
+            print(f"Messages in history: {len(history)}")
+            for msg in history:
+                role = msg["role"]
+                content = msg["content"][:80]
+                print(f"  [{role}] {content}...")
+            print()
+            continue
+
+        # Add user message to history
+        history.append({"role": "user", "content": user_input})
+
+        # Trim history if too long
+        if len(history) > MAX_HISTORY:
+            history = history[-MAX_HISTORY:]
+
+        # Build full message list
+        messages = [{"role": "system", "content": SYSTEM_PROMPT}] + history
+
+        # Stream response
+        response_text = stream_response(client, messages)
+
+        if response_text:
+            history.append({"role": "assistant", "content": response_text})
+
+
+if __name__ == "__main__":
+    main()</code></pre>
+    </div>
+
+    <h3>Running It</h3>
+
+    <div class="code-block">
+      <div class="code-header">terminal</div>
+      <pre><code class="language-python"># Install dependency
+pip install openai
+
+# Set your API key
+export OPENAI_API_KEY="sk-..."
+
+# Run the chatbot
+python chatbot.py</code></pre>
+    </div>
+
+    <h3>Enhancements to Try</h3>
+
+    <ol class="step-list">
+      <li>Add a <code>/model</code> command to switch models mid-conversation</li>
+      <li>Add token counting to show cost per message (use <code>tiktoken</code> from Lesson 2)</li>
+      <li>Save/load conversation history to a JSON file</li>
+      <li>Add a <code>/system</code> command to change the system prompt on the fly</li>
+      <li>Implement the same chatbot using the Anthropic SDK for comparison</li>
+    </ol>
+
+    <!-- ─── Key Points ─── -->
+    <div class="key-points">
+      <h3>Key Takeaways</h3>
+      <ul>
+        <li>LLM APIs are stateless — you must send the full conversation history each time</li>
+        <li>Message roles (system/user/assistant) structure the conversation for the model</li>
+        <li>Always stream responses in user-facing applications for better UX</li>
+        <li>Implement retry logic with exponential backoff for production reliability</li>
+        <li>Never hardcode API keys — use environment variables or secrets managers</li>
+        <li>Use async + semaphores for batch processing with bounded concurrency</li>
+      </ul>
+    </div>
+
+    <!-- ─── Navigation ─── -->
+    <nav class="nav-links">
+      <a href="0002-how-llms-work.html" class="prev">How LLMs Actually Work</a>
+      <a href="0004-choosing-comparing-models.html" class="next">Choosing & Comparing Models</a>
+    </nav>
+
+  </article>
+
+  <script src="../assets/diagrams.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-python.min.js"></script>
+  <script>
+    Diagrams.createFlowDiagram('#request-flow', [
+      { label: 'Build Messages', sublabel: 'system + history' },
+      { label: 'API Request', sublabel: 'HTTP POST + auth' },
+      { label: 'Model Inference', sublabel: '100ms – 30s' },
+      { label: 'Stream Response', sublabel: 'SSE chunks' },
+      { label: 'Process Output', sublabel: 'parse & display' }
+    ]);
+  </script>
+</body>
+</html>

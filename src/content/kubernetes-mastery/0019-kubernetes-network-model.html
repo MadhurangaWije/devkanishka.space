@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lesson 19: The Kubernetes Network Model</title>
+    <style>
+        :root {
+            --bg: #fafafa; --text: #1a1a1a; --accent: #326ce5;
+            --accent-light: #e8f0fe; --border: #e0e0e0; --code-bg: #f5f5f5;
+            --success: #2e7d32; --warn: #f57c00;
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: 'Georgia', serif; line-height: 1.7; color: var(--text); background: var(--bg); max-width: 780px; margin: 0 auto; padding: 2rem 1.5rem; }
+        h1 { font-size: 2rem; margin-bottom: 0.5rem; color: var(--accent); }
+        h2 { font-size: 1.4rem; margin-top: 2.5rem; margin-bottom: 0.8rem; border-bottom: 2px solid var(--accent); padding-bottom: 0.3rem; }
+        h3 { font-size: 1.1rem; margin-top: 1.5rem; margin-bottom: 0.5rem; }
+        p { margin-bottom: 1rem; }
+        .meta { color: #666; font-size: 0.9rem; margin-bottom: 2rem; }
+        .key-insight { background: var(--accent-light); border-left: 4px solid var(--accent); padding: 1rem 1.2rem; margin: 1.5rem 0; border-radius: 0 4px 4px 0; }
+        .key-insight strong { color: var(--accent); }
+        .production-note { background: #fff3e0; border-left: 4px solid var(--warn); padding: 1rem 1.2rem; margin: 1.5rem 0; border-radius: 0 4px 4px 0; }
+        .production-note::before { content: "🏭 Production: "; font-weight: bold; }
+        .exam-tip { background: #e8f5e9; border-left: 4px solid var(--success); padding: 1rem 1.2rem; margin: 1.5rem 0; border-radius: 0 4px 4px 0; }
+        .exam-tip::before { content: "🎯 Exam Tip: "; font-weight: bold; color: var(--success); }
+        code { font-family: 'Menlo', 'Consolas', monospace; font-size: 0.85em; background: var(--code-bg); padding: 0.15em 0.4em; border-radius: 3px; }
+        pre { background: var(--code-bg); padding: 1rem; border-radius: 4px; overflow-x: auto; margin: 1rem 0; font-size: 0.85rem; line-height: 1.5; }
+        ul, ol { margin: 0.5rem 0 1rem 1.5rem; }
+        li { margin-bottom: 0.4rem; }
+        table { width: 100%; border-collapse: collapse; margin: 1rem 0; font-size: 0.9rem; }
+        th, td { border: 1px solid var(--border); padding: 0.6rem 0.8rem; text-align: left; }
+        th { background: var(--accent-light); font-weight: bold; }
+        .diagram { background: white; border: 1px solid var(--border); border-radius: 8px; padding: 1.5rem; margin: 1.5rem 0; text-align: center; }
+        .cert-badge { display: inline-block; background: var(--accent); color: white; font-size: 0.7rem; padding: 0.15rem 0.5rem; border-radius: 10px; margin-left: 0.5rem; }
+        .quiz { background: #f9f9f9; border: 1px solid var(--border); border-radius: 8px; padding: 1.5rem; margin-top: 2rem; }
+        .quiz h2 { border-bottom: none; margin-top: 0; }
+        .quiz-q { margin-bottom: 1.2rem; }
+        .quiz-q p { font-weight: bold; margin-bottom: 0.3rem; }
+        .quiz-answer { display: none; background: #e8f5e9; padding: 0.5rem 0.8rem; border-radius: 4px; margin-top: 0.5rem; }
+        .reveal-btn { background: var(--accent); color: white; border: none; padding: 0.3rem 0.8rem; border-radius: 4px; cursor: pointer; font-size: 0.8rem; }
+        .reveal-btn:hover { opacity: 0.85; }
+    </style>
+</head>
+<body>
+
+<h1>Lesson 19: The Kubernetes Network Model</h1>
+<p class="meta">Chapter 4: Networking · <span class="cert-badge">CKA</span> <span class="cert-badge">CKAD</span> · ~20 min</p>
+
+<p>Kubernetes imposes a <strong>flat network model</strong> with specific guarantees. Understanding these guarantees — and how they're implemented — is essential for debugging connectivity issues, designing NetworkPolicies, and choosing CNI plugins.</p>
+
+<h2>1. The Three Guarantees</h2>
+
+<p>Kubernetes requires that any networking implementation (CNI plugin) satisfies these rules:</p>
+
+<table>
+    <tr><th>#</th><th>Guarantee</th><th>Meaning</th></tr>
+    <tr><td>1</td><td><strong>Every Pod gets its own IP</strong></td><td>No sharing. Containers within a Pod share an IP (via pause container), but each Pod has a unique cluster-wide IP.</td></tr>
+    <tr><td>2</td><td><strong>Pods can communicate with all other Pods without NAT</strong></td><td>Pod A on Node 1 can reach Pod B on Node 2 using Pod B's IP directly. No port mapping. No translation.</td></tr>
+    <tr><td>3</td><td><strong>Agents on a node can communicate with all Pods on that node</strong></td><td>kubelet, kube-proxy, and node-local daemons can reach Pods directly.</td></tr>
+</table>
+
+<div class="key-insight">
+    <strong>The "no NAT" rule is the key insight.</strong> Unlike Docker's default bridge networking (where containers use private IPs behind port-mapped NAT), Kubernetes Pods have routable IPs visible across the entire cluster. When Pod A connects to Pod B, Pod B sees Pod A's real IP as the source. This simplifies service discovery, logging, and security policies.
+</div>
+
+<h3>What This Looks Like in Practice</h3>
+
+<pre># Pod on node-1:
+kubectl exec pod-a -- ip addr
+# eth0: 10.244.1.5/24   ← Pod IP (unique across cluster)
+
+# Pod on node-2:
+kubectl exec pod-b -- ip addr
+# eth0: 10.244.2.8/24   ← Different subnet, same flat network
+
+# Connectivity test (no NAT, no port mapping):
+kubectl exec pod-a -- curl 10.244.2.8:8080
+# Works directly — flat network</pre>
+
+<h3>Network Planes in a Cluster</h3>
+
+<div class="diagram">
+<svg viewBox="0 0 650 200" xmlns="http://www.w3.org/2000/svg" font-family="Menlo, monospace" font-size="9">
+    <!-- Node Network -->
+    <rect x="20" y="10" width="610" height="45" rx="5" fill="#f3e5f5" stroke="#7b1fa2" stroke-width="1.5"/>
+    <text x="325" y="28" text-anchor="middle" font-weight="bold" font-size="10">Node Network (e.g., 192.168.1.0/24)</text>
+    <text x="325" y="43" text-anchor="middle" font-size="8" fill="#666">Physical/VM IPs — nodes talk to each other here</text>
+    
+    <!-- Pod Network -->
+    <rect x="20" y="65" width="610" height="45" rx="5" fill="#e8f0fe" stroke="#326ce5" stroke-width="1.5"/>
+    <text x="325" y="83" text-anchor="middle" font-weight="bold" font-size="10">Pod Network (e.g., 10.244.0.0/16) — "Cluster CIDR"</text>
+    <text x="325" y="98" text-anchor="middle" font-size="8" fill="#666">Virtual overlay — each Pod gets an IP from this range</text>
+    
+    <!-- Service Network -->
+    <rect x="20" y="120" width="610" height="45" rx="5" fill="#c8e6c9" stroke="#2e7d32" stroke-width="1.5"/>
+    <text x="325" y="138" text-anchor="middle" font-weight="bold" font-size="10">Service Network (e.g., 10.96.0.0/12) — "Service CIDR"</text>
+    <text x="325" y="153" text-anchor="middle" font-size="8" fill="#666">Virtual IPs (ClusterIPs) — not routable, implemented by kube-proxy/eBPF</text>
+    
+    <!-- Notes -->
+    <text x="325" y="185" text-anchor="middle" font-size="9" fill="#666">Pod IPs are routable across nodes. Service IPs exist only in iptables/IPVS/eBPF rules.</text>
+</svg>
+</div>
+
+<table>
+    <tr><th>Network</th><th>CIDR Example</th><th>Configured By</th><th>Routable?</th></tr>
+    <tr><td>Node network</td><td><code>192.168.1.0/24</code></td><td>Infrastructure (cloud VPC, bare metal)</td><td>✅ Physical</td></tr>
+    <tr><td>Pod network (Cluster CIDR)</td><td><code>10.244.0.0/16</code></td><td>CNI plugin (<code>--cluster-cidr</code>)</td><td>✅ Virtual overlay or routed</td></tr>
+    <tr><td>Service network (Service CIDR)</td><td><code>10.96.0.0/12</code></td><td>API server (<code>--service-cluster-ip-range</code>)</td><td>❌ Virtual only (kernel rules)</td></tr>
+</table>
+
+<h2>2. Pod-to-Pod Communication</h2>
+
+<h3>Same Node</h3>
+
+<p>On the same node, Pods are connected via a <strong>virtual bridge</strong> (typically <code>cbr0</code> or <code>cni0</code>). Each Pod has a <code>veth</code> pair — one end in the Pod's network namespace, the other plugged into the bridge.</p>
+
+<div class="diagram">
+<svg viewBox="0 0 500 160" xmlns="http://www.w3.org/2000/svg" font-family="Menlo, monospace" font-size="9">
+    <!-- Node box -->
+    <rect x="20" y="10" width="460" height="140" rx="6" fill="#f1f8e9" stroke="#2e7d32" stroke-width="1.5"/>
+    <text x="250" y="28" text-anchor="middle" font-weight="bold" font-size="10">Node (worker-1)</text>
+    
+    <!-- Bridge -->
+    <rect x="130" y="65" width="240" height="25" rx="4" fill="#e8f0fe" stroke="#326ce5" stroke-width="1.5"/>
+    <text x="250" y="82" text-anchor="middle" font-size="9">cni0 bridge (10.244.1.0/24)</text>
+    
+    <!-- Pod A -->
+    <rect x="50" y="110" width="90" height="35" rx="4" fill="#c8e6c9" stroke="#2e7d32" stroke-width="1"/>
+    <text x="95" y="127" text-anchor="middle" font-size="8" font-weight="bold">Pod A</text>
+    <text x="95" y="139" text-anchor="middle" font-size="7">10.244.1.5</text>
+    <line x1="95" y1="110" x2="170" y2="90" stroke="#326ce5" stroke-width="1.5"/>
+    <text x="120" y="104" font-size="7" fill="#666">veth</text>
+    
+    <!-- Pod B -->
+    <rect x="200" y="110" width="90" height="35" rx="4" fill="#c8e6c9" stroke="#2e7d32" stroke-width="1"/>
+    <text x="245" y="127" text-anchor="middle" font-size="8" font-weight="bold">Pod B</text>
+    <text x="245" y="139" text-anchor="middle" font-size="7">10.244.1.6</text>
+    <line x1="245" y1="110" x2="250" y2="90" stroke="#326ce5" stroke-width="1.5"/>
+    
+    <!-- Pod C -->
+    <rect x="350" y="110" width="90" height="35" rx="4" fill="#c8e6c9" stroke="#2e7d32" stroke-width="1"/>
+    <text x="395" y="127" text-anchor="middle" font-size="8" font-weight="bold">Pod C</text>
+    <text x="395" y="139" text-anchor="middle" font-size="7">10.244.1.7</text>
+    <line x1="395" y1="110" x2="330" y2="90" stroke="#326ce5" stroke-width="1.5"/>
+    
+    <!-- eth0 -->
+    <rect x="380" y="40" width="80" height="20" rx="3" fill="#fff3e0" stroke="#f57c00" stroke-width="1"/>
+    <text x="420" y="53" text-anchor="middle" font-size="8">eth0 (node)</text>
+    <line x1="370" y1="75" x2="390" y2="55" stroke="#f57c00" stroke-width="1" stroke-dasharray="3"/>
+</svg>
+</div>
+
+<p>Traffic between Pod A and Pod B stays on the bridge — no routing needed, just L2 switching.</p>
+
+<h3>Cross-Node</h3>
+
+<p>When Pod A (node-1) talks to Pod D (node-2), the packet must leave node-1 and reach node-2. CNI plugins solve this differently:</p>
+
+<table>
+    <tr><th>Approach</th><th>How</th><th>Used By</th></tr>
+    <tr><td><strong>Overlay (VXLAN/Geneve)</strong></td><td>Encapsulate Pod packet inside a UDP packet between nodes</td><td>Flannel (VXLAN), Calico (optional), Cilium (optional)</td></tr>
+    <tr><td><strong>Direct routing</strong></td><td>Configure host routes so Pod CIDRs are routable via node IPs</td><td>Calico (BGP), Cilium (native routing)</td></tr>
+    <tr><td><strong>Cloud routes</strong></td><td>Cloud VPC route tables know which node owns which Pod CIDR</td><td>GKE, EKS VPC CNI, Azure CNI</td></tr>
+</table>
+
+<div class="diagram">
+<svg viewBox="0 0 600 130" xmlns="http://www.w3.org/2000/svg" font-family="Menlo, monospace" font-size="9">
+    <defs><marker id="arr19" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0 L10 5 L0 10z" fill="#326ce5"/></marker></defs>
+    
+    <!-- Node 1 -->
+    <rect x="20" y="20" width="200" height="90" rx="5" fill="#f1f8e9" stroke="#2e7d32" stroke-width="1.5"/>
+    <text x="120" y="38" text-anchor="middle" font-weight="bold">Node 1 (192.168.1.10)</text>
+    <rect x="40" y="50" width="70" height="30" rx="3" fill="#c8e6c9" stroke="#2e7d32" stroke-width="1"/>
+    <text x="75" y="69" text-anchor="middle" font-size="8">Pod A</text>
+    <text x="75" y="95" text-anchor="middle" font-size="7" fill="#666">10.244.1.0/24</text>
+    
+    <!-- Node 2 -->
+    <rect x="380" y="20" width="200" height="90" rx="5" fill="#f1f8e9" stroke="#2e7d32" stroke-width="1.5"/>
+    <text x="480" y="38" text-anchor="middle" font-weight="bold">Node 2 (192.168.1.11)</text>
+    <rect x="490" y="50" width="70" height="30" rx="3" fill="#c8e6c9" stroke="#2e7d32" stroke-width="1"/>
+    <text x="525" y="69" text-anchor="middle" font-size="8">Pod D</text>
+    <text x="480" y="95" text-anchor="middle" font-size="7" fill="#666">10.244.2.0/24</text>
+    
+    <!-- Tunnel -->
+    <line x1="220" y1="65" x2="380" y2="65" stroke="#326ce5" stroke-width="2" marker-end="url(#arr19)"/>
+    <text x="300" y="55" text-anchor="middle" font-size="9" fill="#326ce5" font-weight="bold">VXLAN tunnel / BGP route / VPC route</text>
+    <text x="300" y="85" text-anchor="middle" font-size="8" fill="#666">src: 10.244.1.5 → dst: 10.244.2.8 (no NAT!)</text>
+</svg>
+</div>
+
+<div class="key-insight">
+    <strong>Overlay vs routing trade-off:</strong> Overlays work everywhere (no infra changes needed) but add ~50 bytes of encapsulation overhead and slight latency. Direct routing is faster (no encap) but requires infrastructure support (BGP peering or cloud route tables). Cloud-native CNIs (EKS VPC CNI) assign Pod IPs from the VPC itself — no overlay, no routing config, native performance.
+</div>
+
+<h2>3. IP Allocation</h2>
+
+<h3>How Pods Get IPs</h3>
+
+<ol>
+    <li>The cluster has a <strong>Cluster CIDR</strong> (e.g., <code>10.244.0.0/16</code>)</li>
+    <li>Each node gets a <strong>Pod CIDR</strong> subset (e.g., node-1 gets <code>10.244.1.0/24</code> = 254 Pods max)</li>
+    <li>When a Pod is created, the CNI plugin assigns the next available IP from the node's Pod CIDR</li>
+    <li>The IP is released when the Pod is deleted</li>
+</ol>
+
+<pre># See node Pod CIDR:
+kubectl get nodes -o custom-columns=\
+NAME:.metadata.name,\
+POD-CIDR:.spec.podCIDR
+# NAME       POD-CIDR
+# worker-1   10.244.1.0/24
+# worker-2   10.244.2.0/24
+# worker-3   10.244.3.0/24</pre>
+
+<h3>IP Exhaustion</h3>
+
+<p>If a node's Pod CIDR is /24, it can host at most 254 Pods (minus a few reserved). Larger nodes (or many short-lived Pods) can exhaust this. Solutions:</p>
+
+<ul>
+    <li>Use a larger per-node CIDR (<code>--node-cidr-mask-size=23</code> = 510 IPs)</li>
+    <li>Use a CNI that doesn't subdivide (EKS VPC CNI allocates from the entire VPC subnet)</li>
+</ul>
+
+<div class="production-note">
+    AWS EKS with the VPC CNI allocates real VPC IPs to Pods. This means Pod IPs are routable from outside the cluster (VPN, other services) — powerful but can exhaust VPC address space quickly. Plan your VPC CIDR carefully: a /16 VPC with hundreds of Pods per node gets tight fast.
+</div>
+
+<h2>4. CNI — Container Network Interface</h2>
+
+<p>CNI is a specification for how network plugins are invoked. The kubelet calls CNI plugins at two points:</p>
+
+<ol>
+    <li><strong>ADD</strong> — when a Pod sandbox is created (assign IP, set up veth, configure routes)</li>
+    <li><strong>DEL</strong> — when a Pod sandbox is removed (release IP, remove interfaces)</li>
+</ol>
+
+<h3>Popular CNI Plugins</h3>
+
+<table>
+    <tr><th>Plugin</th><th>Approach</th><th>NetworkPolicy?</th><th>Best For</th></tr>
+    <tr><td><strong>Flannel</strong></td><td>VXLAN overlay</td><td>❌ No</td><td>Simple clusters, learning</td></tr>
+    <tr><td><strong>Calico</strong></td><td>BGP routing or VXLAN</td><td>✅ Yes</td><td>Bare metal, hybrid, enterprise</td></tr>
+    <tr><td><strong>Cilium</strong></td><td>eBPF (no iptables)</td><td>✅ Yes (L3-L7)</td><td>High performance, observability, service mesh</td></tr>
+    <tr><td><strong>AWS VPC CNI</strong></td><td>VPC-native IPs</td><td>✅ Yes (via Calico add-on)</td><td>EKS</td></tr>
+    <tr><td><strong>Azure CNI</strong></td><td>VNet-native IPs</td><td>✅ Yes</td><td>AKS</td></tr>
+    <tr><td><strong>Weave Net</strong></td><td>Mesh overlay</td><td>✅ Yes</td><td>Multi-cloud (less popular now)</td></tr>
+</table>
+
+<div class="key-insight">
+    <strong>CNI plugin choice determines:</strong> (1) Whether you get NetworkPolicy support. (2) Performance characteristics (overlay overhead vs native). (3) IP management strategy. (4) Advanced features (eBPF, L7 policies, encryption). Choose carefully — changing CNI on a running cluster is disruptive.
+</div>
+
+<h2>5. Communication Types</h2>
+
+<table>
+    <tr><th>Communication</th><th>Mechanism</th><th>Example</th></tr>
+    <tr><td>Container → Container (same Pod)</td><td><code>localhost</code></td><td>App talks to sidecar on localhost:9090</td></tr>
+    <tr><td>Pod → Pod (same node)</td><td>Bridge (L2 switch)</td><td>Direct by Pod IP</td></tr>
+    <tr><td>Pod → Pod (cross-node)</td><td>CNI (overlay/route)</td><td>Direct by Pod IP — no NAT</td></tr>
+    <tr><td>Pod → Service</td><td>kube-proxy (iptables/IPVS/eBPF)</td><td>ClusterIP → DNAT to Pod IP</td></tr>
+    <tr><td>External → Pod</td><td>NodePort / LoadBalancer / Ingress</td><td>Client → LB → Service → Pod</td></tr>
+    <tr><td>Pod → External</td><td>SNAT (node IP) by default</td><td>Pod makes API call to external service</td></tr>
+</table>
+
+<h3>Egress: SNAT Behavior</h3>
+
+<p>When a Pod connects to an external service (outside the cluster), the node <strong>SNATs</strong> the Pod IP to the node's IP. The external service sees the node IP as the source, not the Pod IP.</p>
+
+<pre># Pod 10.244.1.5 on node 192.168.1.10 connects to external API:
+# Source: 10.244.1.5 → SNAT → 192.168.1.10
+# External API sees source: 192.168.1.10
+
+# Exception: some CNIs (Calico, Cilium) can disable SNAT
+# for specific destinations or when using direct routing</pre>
+
+<div class="production-note">
+    SNAT matters for firewall rules: if an external service allowlists by IP, you need to allowlist all node IPs (or use a NAT gateway with a fixed IP). In AWS, use a NAT Gateway with Elastic IP so all egress traffic has a predictable source IP regardless of which node the Pod runs on.
+</div>
+
+<h2>6. Debugging Network Issues</h2>
+
+<pre># Check Pod IP:
+kubectl get pod -o wide
+
+# Test connectivity from inside a Pod:
+kubectl exec debug-pod -- curl -v http://10.244.2.8:8080
+kubectl exec debug-pod -- nslookup my-service.default.svc.cluster.local
+kubectl exec debug-pod -- wget -qO- --timeout=2 http://my-service:80
+
+# Deploy a network debug Pod:
+kubectl run netshoot --image=nicolaka/netshoot -it --rm -- bash
+# (has curl, dig, nslookup, tcpdump, iperf, ss, ip, traceroute)
+
+# Check node routing:
+kubectl debug node/worker-1 -it --image=ubuntu -- ip route
+
+# Check CNI logs:
+kubectl logs -n kube-system -l app=calico-node --tail=50
+
+# Check kube-proxy rules (iptables mode):
+kubectl debug node/worker-1 -it --image=ubuntu -- iptables-save | grep my-service</pre>
+
+<div class="exam-tip">
+    For CKA networking questions: (1) Always start with <code>kubectl get pod -o wide</code> to see IPs and nodes. (2) Use <code>kubectl exec</code> to test connectivity from inside a Pod. (3) Check DNS resolution with <code>nslookup</code>. (4) The <code>nicolaka/netshoot</code> image is your best friend for debugging — it has every network tool.
+</div>
+
+<h2>Summary</h2>
+
+<table>
+    <tr><th>Concept</th><th>Key Point</th></tr>
+    <tr><td>Flat network</td><td>Every Pod gets a unique IP; all Pods can reach all Pods without NAT</td></tr>
+    <tr><td>Three networks</td><td>Node (physical), Pod (Cluster CIDR), Service (Service CIDR)</td></tr>
+    <tr><td>Same-node</td><td>veth pairs connected to a bridge — L2 switching</td></tr>
+    <tr><td>Cross-node</td><td>Overlay (VXLAN) or direct routing (BGP/cloud routes)</td></tr>
+    <tr><td>IP allocation</td><td>Cluster CIDR → per-node Pod CIDR → individual Pod IP via CNI</td></tr>
+    <tr><td>CNI</td><td>Plugin spec (ADD/DEL); determines overlay vs routing, policy support</td></tr>
+    <tr><td>Egress SNAT</td><td>Pod → external: source NAT to node IP (external sees node IP)</td></tr>
+    <tr><td>Service IPs</td><td>Virtual — exist only in kernel rules, not routable</td></tr>
+</table>
+
+<!-- Quiz -->
+<div class="quiz">
+    <h2>📝 Quiz: The Kubernetes Network Model</h2>
+    
+    <div class="quiz-q">
+        <p>Q1: Pod A (10.244.1.5) on node-1 connects to Pod B (10.244.2.8) on node-2. What source IP does Pod B see?</p>
+        <button class="reveal-btn" onclick="this.nextElementSibling.style.display='block'">Show Answer</button>
+        <div class="quiz-answer"><strong>10.244.1.5</strong> (Pod A's real IP). The K8s network model guarantees no NAT for Pod-to-Pod communication. Pod B sees the actual source Pod IP regardless of which node it's on.</div>
+    </div>
+    
+    <div class="quiz-q">
+        <p>Q2: Pod A connects to an external API at 8.8.8.8. What source IP does the external API see?</p>
+        <button class="reveal-btn" onclick="this.nextElementSibling.style.display='block'">Show Answer</button>
+        <div class="quiz-answer">The <strong>node's IP</strong> (e.g., 192.168.1.10). For egress traffic leaving the cluster, SNAT translates the Pod IP to the node IP. The external service has no knowledge of Pod IPs. (Exception: some CNIs can preserve Pod IP for specific destinations.)</div>
+    </div>
+    
+    <div class="quiz-q">
+        <p>Q3: What's the difference between an overlay network and direct routing for cross-node Pod traffic?</p>
+        <button class="reveal-btn" onclick="this.nextElementSibling.style.display='block'">Show Answer</button>
+        <div class="quiz-answer"><strong>Overlay:</strong> Encapsulates the Pod packet inside a UDP packet (VXLAN/Geneve). Works on any infrastructure (no router changes needed). Adds ~50 bytes overhead and slight latency.<br><strong>Direct routing:</strong> Programs routes in the network (BGP or cloud VPC route tables) so Pod CIDRs are natively routable. No encapsulation overhead, better performance, but requires infrastructure support.</div>
+    </div>
+    
+    <div class="quiz-q">
+        <p>Q4: A node has Pod CIDR 10.244.1.0/24. How many Pods can it host (maximum)?</p>
+        <button class="reveal-btn" onclick="this.nextElementSibling.style.display='block'">Show Answer</button>
+        <div class="quiz-answer"><strong>~254 Pods</strong> (2^8 - 2 = 254 usable host addresses, minus gateway and broadcast). In practice, kubelet also has a <code>--max-pods</code> setting (default 110) which may limit it further. The IP space allows 254, but kubelet defaults may cap it lower.</div>
+    </div>
+    
+    <div class="quiz-q">
+        <p>Q5: You chose Flannel as your CNI plugin. Can you use NetworkPolicies?</p>
+        <button class="reveal-btn" onclick="this.nextElementSibling.style.display='block'">Show Answer</button>
+        <div class="quiz-answer"><strong>No.</strong> Flannel does not implement NetworkPolicy. You can create NetworkPolicy objects (the API server accepts them), but they won't be enforced — Flannel has no policy engine. You'd need to add Calico as a policy-only overlay alongside Flannel, or switch to a CNI that supports policies (Calico, Cilium, Weave).</div>
+    </div>
+    
+    <div class="quiz-q">
+        <p>Q6: Service IPs (ClusterIPs) like 10.96.0.1 — can you ping them?</p>
+        <button class="reveal-btn" onclick="this.nextElementSibling.style.display='block'">Show Answer</button>
+        <div class="quiz-answer"><strong>No</strong> (usually). ClusterIPs are virtual — they exist only as DNAT rules in iptables/IPVS. There's no actual interface listening on that IP. ICMP (ping) doesn't trigger DNAT rules (which match TCP/UDP port combinations). TCP connections work because they match the kube-proxy rules and get redirected to a real Pod IP.</div>
+    </div>
+</div>
+
+</body>
+</html>

@@ -1,0 +1,411 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lesson 018 – API Management &amp; Gateway | AZ-305 Study Guide</title>
+    <link rel="stylesheet" href="../assets/styles.css">
+    <script src="../assets/diagrams.js"></script>
+</head>
+<body>
+<div class="lesson-wrap">
+
+    <!-- Header -->
+    <header class="lesson-header fade-in">
+        <span class="lesson-number">Lesson 018 · 🟢 DEEP DIVE (~30 min)</span>
+        <h1>API Management &amp; Gateway</h1>
+        <p>Azure API Management (APIM) is the enterprise facade that decouples consumers from backends. Master tier selection, policy pipelines, OAuth flows, VNet integration, and multi-region deployment to architect a secure, scalable API platform.</p>
+    </header>
+
+    <!-- Table of Contents -->
+    <nav class="toc fade-in">
+        <h2>In This Lesson</h2>
+        <ol>
+            <li><a href="#role">APIM Role in Architecture</a></li>
+            <li><a href="#tiers">APIM Tiers — Decision Matrix</a></li>
+            <li><a href="#architecture">APIM Architecture: Gateway + Management + Portal</a></li>
+            <li><a href="#policies">Key Policies</a></li>
+            <li><a href="#versioning">Backend Abstraction: Versioning &amp; Revisions</a></li>
+            <li><a href="#security">Security Patterns</a></li>
+            <li><a href="#networking">Networking: VNet Modes &amp; Self-Hosted Gateway</a></li>
+            <li><a href="#multi-region">Multi-Region Deployment</a></li>
+            <li><a href="#real-world">Real-World: Banking API Platform</a></li>
+            <li><a href="#quiz">Knowledge Check</a></li>
+        </ol>
+    </nav>
+
+    <!-- Section 1: APIM Role -->
+    <section id="role" class="fade-in">
+        <h2>1. APIM Role in Architecture</h2>
+        <p>APIM implements the <strong>facade pattern</strong> — a single, consistent entry point that hides the complexity of multiple backend services. This decouples frontend consumers from backend implementation details and centralises cross-cutting concerns.</p>
+
+        <h3>Cross-Cutting Concerns Handled by APIM</h3>
+        <ul>
+            <li><strong>Authentication &amp; authorization</strong> — validate tokens before traffic reaches backends</li>
+            <li><strong>Rate limiting &amp; throttling</strong> — protect backends from burst traffic</li>
+            <li><strong>Caching</strong> — reduce backend load for read-heavy APIs</li>
+            <li><strong>Request/response transformation</strong> — reshape payloads without changing backends</li>
+            <li><strong>Logging &amp; analytics</strong> — unified telemetry across all APIs</li>
+            <li><strong>Versioning &amp; deprecation</strong> — expose stable contracts while evolving backends</li>
+        </ul>
+
+        <div class="box-diagram slide-in-left" id="diagram-facade" data-diagram='{
+            "nodes": [
+                {"id": "mobile", "label": "Mobile App", "x": 30, "y": 50, "w": 130, "h": 50, "shape": "box", "icon": "📱"},
+                {"id": "web", "label": "Web App", "x": 30, "y": 130, "w": 130, "h": 50, "shape": "box", "icon": "🌐"},
+                {"id": "partner", "label": "Partner System", "x": 30, "y": 210, "w": 130, "h": 50, "shape": "box", "icon": "🤝"},
+                {"id": "apim", "label": "APIM Gateway\n(Facade)", "x": 250, "y": 110, "w": 160, "h": 80, "shape": "box", "icon": "🚪", "tooltip": "Single entry point: auth, rate-limit, transform, route"},
+                {"id": "orders", "label": "Orders API", "x": 490, "y": 40, "w": 130, "h": 50, "shape": "box", "icon": "📦"},
+                {"id": "payments", "label": "Payments API", "x": 490, "y": 130, "w": 130, "h": 50, "shape": "box", "icon": "💳"},
+                {"id": "users", "label": "Users API", "x": 490, "y": 220, "w": 130, "h": 50, "shape": "box", "icon": "👤"}
+            ],
+            "edges": [
+                {"from": "mobile", "to": "apim", "label": "HTTPS"},
+                {"from": "web", "to": "apim", "label": "HTTPS"},
+                {"from": "partner", "to": "apim", "label": "HTTPS"},
+                {"from": "apim", "to": "orders", "label": ""},
+                {"from": "apim", "to": "payments", "label": ""},
+                {"from": "apim", "to": "users", "label": ""}
+            ]
+        }'></div>
+
+        <div class="callout tip">
+            <strong>Architecture principle:</strong> Never expose raw backend endpoints to external consumers. APIM provides the abstraction layer that lets you refactor, version, or replace backends without breaking client contracts.
+        </div>
+    </section>
+
+    <!-- Section 2: Tiers -->
+    <section id="tiers" class="fade-in">
+        <h2>2. APIM Tiers — Decision Matrix</h2>
+        <p>Choosing the right tier is a cost-vs-capability trade-off that appears frequently on AZ-305.</p>
+
+        <table class="compare-table">
+            <thead>
+                <tr>
+                    <th>Tier</th>
+                    <th>SLA</th>
+                    <th>VNet</th>
+                    <th>Multi-Region</th>
+                    <th>Dev Portal</th>
+                    <th>Scale Units</th>
+                    <th>Best For</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr><td><strong>Consumption</strong></td><td>99.95%</td><td>❌</td><td>❌</td><td>✅</td><td>Auto</td><td>Serverless, low-traffic, pay-per-call</td></tr>
+                <tr><td><strong>Developer</strong></td><td>No SLA</td><td>❌</td><td>❌</td><td>✅</td><td>1 (no scale)</td><td>Dev/test, prototyping</td></tr>
+                <tr><td><strong>Basic</strong></td><td>99.95%</td><td>❌</td><td>❌</td><td>❌</td><td>Up to 2</td><td>Small production, no portal needed</td></tr>
+                <tr><td><strong>Standard</strong></td><td>99.95%</td><td>❌</td><td>❌</td><td>✅</td><td>Up to 4</td><td>Medium production workloads</td></tr>
+                <tr><td><strong>Premium</strong></td><td>99.99%</td><td>✅</td><td>✅</td><td>✅</td><td>Up to 12+</td><td>Enterprise, VNet, multi-region, compliance</td></tr>
+            </tbody>
+        </table>
+
+        <div class="callout warning">
+            <strong>Exam tip:</strong> Only <em>Premium</em> supports VNet integration (internal or external mode) and multi-region gateway deployment. If the scenario mentions "private backend" or "multiple regions," the answer is Premium.
+        </div>
+    </section>
+
+    <!-- Section 3: Architecture -->
+    <section id="architecture" class="fade-in">
+        <h2>3. APIM Architecture</h2>
+        <p>Every APIM instance comprises three logical components:</p>
+
+        <ul>
+            <li><strong>Gateway (data plane)</strong> — proxies API calls, enforces policies, routes to backends. This is the performance-critical path.</li>
+            <li><strong>Management plane</strong> — Azure Resource Manager APIs + Azure portal experience for configuring APIs, products, policies, users.</li>
+            <li><strong>Developer portal</strong> — auto-generated, customisable documentation site where API consumers discover, test, and subscribe to APIs.</li>
+        </ul>
+
+        <h3>Policy Pipeline</h3>
+        <p>Policies execute at four stages of a request lifecycle:</p>
+        <ol>
+            <li><strong>Inbound</strong> — runs before the request reaches the backend (auth, rate-limit, transform)</li>
+            <li><strong>Backend</strong> — runs just before forwarding (set backend URL, client cert)</li>
+            <li><strong>Outbound</strong> — runs after backend response (transform, cache-store, headers)</li>
+            <li><strong>On-error</strong> — runs if any stage throws an exception</li>
+        </ol>
+
+        <pre><code>&lt;policies&gt;
+    &lt;inbound&gt;
+        &lt;rate-limit calls="100" renewal-period="60" /&gt;
+        &lt;validate-jwt header-name="Authorization" ...&gt;
+    &lt;/inbound&gt;
+    &lt;backend&gt;
+        &lt;forward-request /&gt;
+    &lt;/backend&gt;
+    &lt;outbound&gt;
+        &lt;cache-store duration="300" /&gt;
+    &lt;/outbound&gt;
+    &lt;on-error&gt;
+        &lt;set-body&gt;@("Error: " + context.LastError.Message)&lt;/set-body&gt;
+    &lt;/on-error&gt;
+&lt;/policies&gt;</code></pre>
+    </section>
+
+    <!-- Section 4: Key Policies -->
+    <section id="policies" class="fade-in">
+        <h2>4. Key Policies</h2>
+
+        <table class="compare-table">
+            <thead>
+                <tr>
+                    <th>Policy</th>
+                    <th>Stage</th>
+                    <th>Purpose</th>
+                    <th>Example</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr><td><code>rate-limit</code></td><td>Inbound</td><td>Throttle per subscription key</td><td>100 calls/min</td></tr>
+                <tr><td><code>rate-limit-by-key</code></td><td>Inbound</td><td>Throttle by custom expression (IP, user)</td><td>By caller IP</td></tr>
+                <tr><td><code>quota</code></td><td>Inbound</td><td>Hard cap over longer period</td><td>10,000 calls/month</td></tr>
+                <tr><td><code>cache-lookup</code> / <code>cache-store</code></td><td>Inbound / Outbound</td><td>Built-in response caching</td><td>Cache GET for 5 min</td></tr>
+                <tr><td><code>validate-jwt</code></td><td>Inbound</td><td>Validate OAuth 2.0 / OIDC tokens</td><td>Check issuer, audience, claims</td></tr>
+                <tr><td><code>set-header</code></td><td>Any</td><td>Add/remove/replace headers</td><td>Strip internal headers outbound</td></tr>
+                <tr><td><code>set-body</code></td><td>Any</td><td>Transform request/response body</td><td>XML → JSON conversion</td></tr>
+                <tr><td><code>rewrite-uri</code></td><td>Inbound</td><td>Change URL path before forwarding</td><td>/v2/orders → /api/orders</td></tr>
+                <tr><td><code>mock-response</code></td><td>Inbound</td><td>Return static response without calling backend</td><td>Prototyping, testing</td></tr>
+                <tr><td><code>retry</code></td><td>Backend</td><td>Retry failed backend calls</td><td>3 retries, exponential back-off</td></tr>
+                <tr><td><code>send-request</code></td><td>Any</td><td>Call an external service (e.g., lookup cache, enrich)</td><td>Fetch user profile, attach to request</td></tr>
+            </tbody>
+        </table>
+
+        <div class="callout tip">
+            <strong>Policy composition:</strong> Policies can be scoped at four levels — Global → Product → API → Operation. Lower scopes inherit and can override higher scopes using <code>&lt;base /&gt;</code> to control ordering.
+        </div>
+    </section>
+
+    <!-- Section 5: Versioning -->
+    <section id="versioning" class="fade-in">
+        <h2>5. Backend Abstraction: Versioning &amp; Revisions</h2>
+
+        <h3>Versioning Strategies</h3>
+        <table class="compare-table">
+            <thead>
+                <tr>
+                    <th>Scheme</th>
+                    <th>Example</th>
+                    <th>Pros</th>
+                    <th>Cons</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr><td><strong>URL path</strong></td><td><code>/v1/orders</code></td><td>Explicit, easy to cache/route</td><td>URL changes per version</td></tr>
+                <tr><td><strong>Query string</strong></td><td><code>/orders?api-version=2024-01-01</code></td><td>URL stays same; Azure's own pattern</td><td>Harder to discover</td></tr>
+                <tr><td><strong>Header</strong></td><td><code>Api-Version: 2</code></td><td>Clean URLs</td><td>Not visible in browser, harder to test</td></tr>
+            </tbody>
+        </table>
+
+        <h3>Revisions vs Versions</h3>
+        <ul>
+            <li><strong>Revision</strong> — non-breaking changes (bug fix, add optional field). Consumers don't notice. You can test a revision before making it current. Think: <em>git branch before merge</em>.</li>
+            <li><strong>Version</strong> — breaking changes (removed field, new auth model). Consumers choose which version to call. Think: <em>v1 vs v2 coexisting</em>.</li>
+        </ul>
+
+        <div class="callout tip">
+            <strong>Architecture pattern:</strong> Use revisions for iterative safe changes, versions only when you must break the contract. APIM lets you run both simultaneously, routing by version identifier.
+        </div>
+    </section>
+
+    <!-- Section 6: Security -->
+    <section id="security" class="fade-in">
+        <h2>6. Security Patterns</h2>
+
+        <h3>OAuth 2.0 Flow Through APIM</h3>
+        <div class="box-diagram slide-in-left" id="diagram-oauth" data-diagram='{
+            "nodes": [
+                {"id": "client", "label": "Client App", "x": 30, "y": 120, "w": 130, "h": 55, "shape": "box", "icon": "📱"},
+                {"id": "idp", "label": "Entra ID\n(Auth Server)", "x": 220, "y": 20, "w": 150, "h": 60, "shape": "box", "icon": "🔐"},
+                {"id": "apim", "label": "APIM Gateway\nvalidate-jwt", "x": 220, "y": 140, "w": 150, "h": 60, "shape": "box", "icon": "🚪"},
+                {"id": "backend", "label": "Backend API", "x": 440, "y": 140, "w": 130, "h": 55, "shape": "box", "icon": "⚙️"}
+            ],
+            "edges": [
+                {"from": "client", "to": "idp", "label": "1. Request token"},
+                {"from": "idp", "to": "client", "label": "2. Access token", "style": "dashed"},
+                {"from": "client", "to": "apim", "label": "3. Call API + Bearer token"},
+                {"from": "apim", "to": "apim", "label": "4. validate-jwt", "style": "dashed"},
+                {"from": "apim", "to": "backend", "label": "5. Forward (valid)"}
+            ]
+        }'></div>
+
+        <h3>Security Layers</h3>
+        <table class="compare-table">
+            <thead>
+                <tr>
+                    <th>Mechanism</th>
+                    <th>Where</th>
+                    <th>Use Case</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr><td><strong>Subscription keys</strong></td><td>APIM inbound</td><td>Identify callers, basic access control per product</td></tr>
+                <tr><td><strong>OAuth 2.0 / JWT validation</strong></td><td>APIM inbound (validate-jwt)</td><td>Delegated auth, fine-grained claims-based access</td></tr>
+                <tr><td><strong>Client certificates (mTLS)</strong></td><td>APIM inbound</td><td>Partner-to-APIM mutual authentication</td></tr>
+                <tr><td><strong>Managed Identity</strong></td><td>APIM → Backend</td><td>APIM authenticates to backend without secrets (e.g., to Azure Functions, App Service)</td></tr>
+                <tr><td><strong>IP filtering</strong></td><td>APIM inbound policy</td><td>Restrict to known CIDR ranges</td></tr>
+            </tbody>
+        </table>
+
+        <div class="callout warning">
+            <strong>Exam tip:</strong> Subscription keys alone are NOT sufficient security for production APIs. Always layer with OAuth 2.0 (validate-jwt) or client certificates. Subscription keys are an identification mechanism, not an authentication one.
+        </div>
+    </section>
+
+    <!-- Section 7: Networking -->
+    <section id="networking" class="fade-in">
+        <h2>7. Networking: VNet Modes &amp; Self-Hosted Gateway</h2>
+
+        <h3>VNet Integration Modes (Premium Only)</h3>
+        <table class="compare-table">
+            <thead>
+                <tr>
+                    <th>Mode</th>
+                    <th>Gateway Accessible From</th>
+                    <th>Backend Accessible From</th>
+                    <th>Use Case</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><strong>External</strong></td>
+                    <td>Internet (public IP)</td>
+                    <td>VNet + Internet</td>
+                    <td>Public-facing API with private backends</td>
+                </tr>
+                <tr>
+                    <td><strong>Internal</strong></td>
+                    <td>VNet only (private IP)</td>
+                    <td>VNet only</td>
+                    <td>Fully private API platform; expose via App Gateway / Front Door</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <h3>Self-Hosted Gateway</h3>
+        <p>A containerised gateway you deploy on-premises, in other clouds, or at the edge. It connects back to the APIM management plane for configuration sync.</p>
+        <ul>
+            <li>Runs as a Docker container or Kubernetes deployment</li>
+            <li>Enables hybrid/multi-cloud API governance with a single control plane</li>
+            <li>Policies and API definitions sync from the Azure-hosted management plane</li>
+            <li>Available on Developer and Premium tiers</li>
+        </ul>
+
+        <div class="callout tip">
+            <strong>Architecture pattern:</strong> For internal-only APIM, front it with Azure Application Gateway (WAF) or Front Door to add DDoS protection and global routing while keeping the gateway private.
+        </div>
+    </section>
+
+    <!-- Section 8: Multi-Region -->
+    <section id="multi-region" class="fade-in">
+        <h2>8. Multi-Region Deployment</h2>
+        <p>Premium tier supports deploying additional gateway units to multiple Azure regions, providing:</p>
+
+        <ul>
+            <li><strong>Lower latency</strong> — clients route to the nearest gateway via Traffic Manager / Front Door</li>
+            <li><strong>Higher availability</strong> — if one region fails, traffic shifts to healthy regions (99.99% SLA)</li>
+            <li><strong>Compliance</strong> — keep data processing in-region where required</li>
+        </ul>
+
+        <h3>How It Works</h3>
+        <ol>
+            <li>Primary region hosts the management plane (one region always "primary")</li>
+            <li>Additional regions host gateway units only</li>
+            <li>Configuration syncs automatically from primary to all regions</li>
+            <li>Each region can have its own backend pool (use <code>set-backend-service</code> policy with expressions to route by region)</li>
+        </ol>
+
+        <div class="callout warning">
+            <strong>Exam tip:</strong> Multi-region APIM requires Premium tier. Each additional region adds gateway capacity but the management plane stays in the primary region. You're billed per gateway unit per region.
+        </div>
+    </section>
+
+    <!-- Section 9: Real-World -->
+    <section id="real-world" class="fade-in">
+        <h2>9. Real-World: Banking API Platform</h2>
+
+        <div class="callout real-world">
+            <h3>🏦 Scenario: Open Banking Partner API</h3>
+            <p>A bank exposes internal services (accounts, payments, standing orders) to fintech partners via APIM.</p>
+
+            <h4>Architecture Decisions</h4>
+            <ul>
+                <li><strong>Tier:</strong> Premium — requires VNet integration (backends in private VNet) and multi-region for DR</li>
+                <li><strong>Networking:</strong> External VNet mode — partners call from internet, backends are VNet-private</li>
+                <li><strong>Security stack:</strong>
+                    <ul>
+                        <li>Partners authenticate via OAuth 2.0 (client credentials flow) → APIM validates JWT with <code>validate-jwt</code></li>
+                        <li>Client certificates required for high-value payment APIs (mTLS)</li>
+                        <li>Subscription keys per partner for identification &amp; analytics</li>
+                        <li>APIM uses managed identity to call backend Azure Functions</li>
+                    </ul>
+                </li>
+                <li><strong>Rate limiting:</strong> Per-partner quotas (10,000 calls/day basic tier, 100,000 premium tier) via Products</li>
+                <li><strong>Audit:</strong> All requests logged to Event Hub → Splunk for regulatory compliance</li>
+                <li><strong>Versioning:</strong> URL path scheme (<code>/v1/accounts</code>, <code>/v2/accounts</code>) — partners migrate at their own pace</li>
+            </ul>
+
+            <h4>Result</h4>
+            <p>50+ fintech partners onboarded via the developer portal. Zero backend exposure. Rate limiting prevented a partner's runaway script from impacting other consumers. Audit trail satisfies PSD2 regulatory requirements.</p>
+        </div>
+    </section>
+
+    <!-- Quiz -->
+    <section id="quiz" class="fade-in">
+        <h2>10. Knowledge Check</h2>
+
+        <div class="quiz" id="quiz-container">
+            <div class="quiz-question" data-correct="2">
+                <p><strong>Q1:</strong> Which APIM tier is required to deploy the gateway inside a Virtual Network?</p>
+                <label><input type="radio" name="q1" value="1"> Standard</label>
+                <label><input type="radio" name="q1" value="2"> Premium</label>
+                <label><input type="radio" name="q1" value="3"> Consumption</label>
+                <label><input type="radio" name="q1" value="4"> Basic</label>
+                <div class="quiz-explanation hidden">
+                    <p>✅ Only <strong>Premium</strong> supports VNet integration (both internal and external modes). This is a hard requirement — no other tier offers it.</p>
+                </div>
+            </div>
+
+            <div class="quiz-question" data-correct="3">
+                <p><strong>Q2:</strong> In the APIM policy pipeline, at which stage does <code>cache-store</code> execute?</p>
+                <label><input type="radio" name="q2" value="1"> Inbound</label>
+                <label><input type="radio" name="q2" value="2"> Backend</label>
+                <label><input type="radio" name="q2" value="3"> Outbound</label>
+                <label><input type="radio" name="q2" value="4"> On-error</label>
+                <div class="quiz-explanation hidden">
+                    <p>✅ <code>cache-store</code> runs in the <strong>outbound</strong> stage — it stores the backend response in cache after it arrives. The paired <code>cache-lookup</code> runs inbound to check for a cached response.</p>
+                </div>
+            </div>
+
+            <div class="quiz-question" data-correct="1">
+                <p><strong>Q3:</strong> What is the difference between a revision and a version in APIM?</p>
+                <label><input type="radio" name="q3" value="1"> Revisions are non-breaking changes; versions are breaking changes that coexist</label>
+                <label><input type="radio" name="q3" value="2"> Revisions replace the old API; versions keep the old one running</label>
+                <label><input type="radio" name="q3" value="3"> Revisions are for Premium tier only; versions work on all tiers</label>
+                <label><input type="radio" name="q3" value="4"> They are synonyms — both mean a new endpoint</label>
+                <div class="quiz-explanation hidden">
+                    <p>✅ <strong>Revisions</strong> let you make and test non-breaking changes safely (consumers don't see them until you make a revision current). <strong>Versions</strong> represent breaking changes that coexist — consumers explicitly choose which version to call.</p>
+                </div>
+            </div>
+
+            <div class="quiz-question" data-correct="4">
+                <p><strong>Q4:</strong> How should APIM authenticate to a backend Azure Function without storing secrets?</p>
+                <label><input type="radio" name="q4" value="1"> Store the Function key in APIM Named Values</label>
+                <label><input type="radio" name="q4" value="2"> Use a subscription key passed through to the backend</label>
+                <label><input type="radio" name="q4" value="3"> Configure client certificate authentication</label>
+                <label><input type="radio" name="q4" value="4"> Use APIM's managed identity with authentication-managed-identity policy</label>
+                <div class="quiz-explanation hidden">
+                    <p>✅ The <code>authentication-managed-identity</code> policy lets APIM obtain a token from Entra ID using its system-assigned managed identity — no secrets to rotate or store.</p>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- Navigation -->
+    <nav class="lesson-nav fade-in">
+        <a href="0017-front-door-cdn.html" class="prev">← Lesson 017</a>
+        <a href="0019-event-driven-architecture.html" class="next">Lesson 019 →</a>
+    </nav>
+
+</div>
+</body>
+</html>

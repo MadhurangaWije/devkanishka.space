@@ -1,0 +1,377 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lesson 002 – Identity Fundamentals with Entra ID | AZ-305 Curriculum</title>
+    <link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<div class="lesson-wrap">
+
+    <!-- Header -->
+    <header class="lesson-header fade-in">
+        <span class="lesson-number">Lesson 002 — 🟡 REVIEW</span>
+        <h1>Identity Fundamentals with Entra ID</h1>
+        <p>You know users and groups. Now think like an architect: managed identities vs service principals, workload identity federation, and cross-tenant patterns.</p>
+    </header>
+
+    <!-- Table of Contents -->
+    <nav class="toc fade-in">
+        <h2>In This Lesson</h2>
+        <ol>
+            <li><a href="#managed-identities">Managed Identities: System vs User-Assigned</a></li>
+            <li><a href="#service-principals">Service Principal Lifecycle at Scale</a></li>
+            <li><a href="#workload-federation">Workload Identity Federation for CI/CD</a></li>
+            <li><a href="#cross-tenant">Cross-Tenant Identity Patterns</a></li>
+            <li><a href="#multi-sub-identity">Identity Architecture for Multi-Subscription Environments</a></li>
+            <li><a href="#real-world">Real-World Scenario: SaaS Vendor Access</a></li>
+            <li><a href="#quiz">Knowledge Check</a></li>
+        </ol>
+    </nav>
+
+    <!-- Section 1: Managed Identities -->
+    <section id="managed-identities" class="fade-in">
+        <h2>Managed Identities: The Architect's Default Choice</h2>
+        <p>You've used managed identities in AZ-104 labs. As an architect, the question shifts from <em>"how do I enable one?"</em> to <em>"which type, for which topology, and what are the trade-offs at scale?"</em></p>
+
+        <div class="diagram slide-in-left" id="diagram-identity-flow"></div>
+
+        <div class="key-concept">
+            <h3>🔑 Key Concept: No Secrets to Manage</h3>
+            <p>Managed identities eliminate credential management entirely. Azure handles token issuance, rotation, and revocation through the Instance Metadata Service (IMDS). No secrets in Key Vault, no expiry alerts, no rotation runbooks.</p>
+        </div>
+
+        <div class="compare-grid">
+            <div>
+                <h4>System-Assigned Managed Identity</h4>
+                <ul>
+                    <li>✅ 1:1 tied to a single resource's lifecycle</li>
+                    <li>✅ Auto-created and auto-deleted with the resource</li>
+                    <li>✅ Easy to audit — identity maps directly to one resource</li>
+                    <li>✅ No orphaned identities possible</li>
+                    <li>❌ Cannot be shared across resources</li>
+                    <li>❌ Role assignments must be pre-created (chicken-and-egg with IaC)</li>
+                    <li>❌ Harder to pre-authorize before resource exists</li>
+                </ul>
+            </div>
+            <div>
+                <h4>User-Assigned Managed Identity</h4>
+                <ul>
+                    <li>✅ Independent lifecycle — create first, attach to many resources</li>
+                    <li>✅ Shared across multiple resources (e.g., a pool of VMs)</li>
+                    <li>✅ Pre-authorize in IaC before compute exists</li>
+                    <li>✅ Survives resource recreation (redeployments keep same identity)</li>
+                    <li>❌ Must be explicitly managed and cleaned up</li>
+                    <li>❌ Slightly harder to trace "which resource used this token?"</li>
+                    <li>❌ Possible orphaned identities if not governed</li>
+                </ul>
+            </div>
+        </div>
+
+        <div class="collapsible">
+            <div class="collapsible-header">When to choose which — decision framework</div>
+            <div class="collapsible-body">
+                <ul>
+                    <li><strong>Use system-assigned</strong> when: single-purpose resource, simple RBAC, you want automatic cleanup, audit trail clarity is paramount</li>
+                    <li><strong>Use user-assigned</strong> when: multiple resources need the same permissions (VMSS, container instances, blue-green deployments), you deploy with IaC and need to pre-stage role assignments, or the resource is frequently recreated</li>
+                    <li><strong>Use both together</strong> when: a resource needs a shared identity for common access (user-assigned) PLUS a unique identity for resource-specific access (system-assigned)</li>
+                </ul>
+            </div>
+        </div>
+    </section>
+
+    <!-- Section 2: Service Principals -->
+    <section id="service-principals" class="fade-in">
+        <h2>Service Principal Lifecycle at Scale</h2>
+        <p>Service principals are still necessary when managed identities aren't an option — external CI/CD systems, third-party integrations, or multi-tenant app registrations. The architect's job: minimize their use and govern the ones that remain.</p>
+
+        <div class="key-concept">
+            <h3>🔑 Key Concept: App Registration ≠ Service Principal</h3>
+            <p>An <strong>App Registration</strong> is the global identity definition (lives in the home tenant). A <strong>Service Principal</strong> is the local instance of that app in a specific tenant. One app registration can have service principals in many tenants — this is how multi-tenant apps work.</p>
+        </div>
+
+        <div class="callout-warning">
+            <h4>⚠️ Secret Sprawl is an Architecture Failure</h4>
+            <p>Every service principal with a client secret is a ticking clock. Secrets expire (max 2 years, recommended: much shorter). At scale, organizations accumulate hundreds of service principals with secrets that expire silently, breaking production. Architect for <strong>zero secrets</strong> wherever possible: managed identities first, workload identity federation second, certificates third, secrets as last resort.</p>
+        </div>
+
+        <div class="collapsible">
+            <div class="collapsible-header">Governing service principals at enterprise scale</div>
+            <div class="collapsible-body">
+                <ul>
+                    <li><strong>Ownership:</strong> Every app registration must have at least 2 owners from the responsible team — enforce via Entra ID Access Reviews</li>
+                    <li><strong>Credential expiry:</strong> Set org-wide policy for max credential lifetime (e.g., 90 days). Monitor with Microsoft Graph <code>applicationSignInDetailedSummary</code></li>
+                    <li><strong>Least privilege:</strong> Never grant tenant-wide admin consent to multi-tenant apps without security review</li>
+                    <li><strong>Naming convention:</strong> <code>sp-{team}-{purpose}-{env}</code> (e.g., <code>sp-platform-ghactions-prod</code>)</li>
+                    <li><strong>Regular review:</strong> Automate unused SP detection — if no sign-in activity in 90 days, flag for decommission</li>
+                </ul>
+            </div>
+        </div>
+    </section>
+
+    <!-- Section 3: Workload Identity Federation -->
+    <section id="workload-federation" class="fade-in">
+        <h2>Workload Identity Federation for CI/CD</h2>
+        <p>This is the modern replacement for storing Azure secrets in GitHub/GitLab/Jenkins. Instead of a client secret, your CI/CD platform presents its own token, and Azure trusts it directly via OIDC federation.</p>
+
+        <div class="key-concept">
+            <h3>🔑 Key Concept: Trust the Platform's Token</h3>
+            <p>Workload identity federation creates a trust relationship between Entra ID and an external identity provider (GitHub Actions, GitLab CI, Terraform Cloud, etc.). The external platform issues a short-lived OIDC token; Entra ID validates it and issues an Azure access token. <strong>No secrets cross system boundaries.</strong></p>
+        </div>
+
+        <h3>How It Works (GitHub Actions Example)</h3>
+        <ol>
+            <li>Create an App Registration in Entra ID</li>
+            <li>Add a <strong>federated credential</strong> specifying: GitHub org, repo, branch/environment</li>
+            <li>Assign RBAC roles to the app's service principal</li>
+            <li>In the GitHub workflow, use <code>azure/login@v1</code> with <code>client-id</code>, <code>tenant-id</code>, <code>subscription-id</code> — no secret needed</li>
+        </ol>
+
+        <div class="collapsible">
+            <div class="collapsible-header">Federation subject claims — scoping access precisely</div>
+            <div class="collapsible-body">
+                <p>The federated credential's <code>subject</code> field controls exactly which workflows can authenticate:</p>
+                <ul>
+                    <li><code>repo:org/repo:ref:refs/heads/main</code> — only the main branch</li>
+                    <li><code>repo:org/repo:environment:production</code> — only the "production" GitHub Environment</li>
+                    <li><code>repo:org/repo:pull_request</code> — any PR (use for plan-only, never for apply)</li>
+                </ul>
+                <p><strong>Architect tip:</strong> Create separate federated credentials per environment. The "dev" credential should have narrow RBAC on dev subscriptions; "prod" should require the GitHub <code>production</code> environment (which enforces approvals).</p>
+            </div>
+        </div>
+
+        <div class="exam-tip">
+            <h4>📝 AZ-305 Exam Tip</h4>
+            <p>When a scenario describes a CI/CD pipeline needing Azure access and mentions <strong>"minimize credential management"</strong> or <strong>"eliminate secrets"</strong> — the answer is <strong>workload identity federation</strong>. If the scenario says "on-premises Jenkins with no internet-facing IdP," federation isn't possible — fall back to certificate-based service principal with short expiry stored in Key Vault.</p>
+        </div>
+    </section>
+
+    <!-- Section 4: Cross-Tenant Identity -->
+    <section id="cross-tenant" class="fade-in">
+        <h2>Cross-Tenant Identity Patterns</h2>
+        <p>As an architect, you'll face scenarios where identities must work across organizational boundaries. Azure provides distinct mechanisms for distinct problems.</p>
+
+        <div class="diagram slide-in-right" id="diagram-cross-tenant"></div>
+
+        <div class="stagger-children">
+            <div class="key-concept">
+                <h3>B2B Collaboration (Entra External ID)</h3>
+                <p><strong>Use case:</strong> Invite external users (partners, vendors, contractors) into YOUR tenant as guest users. They authenticate with their home tenant but get a shadow identity in yours.</p>
+                <p><strong>Architect consideration:</strong> Guest users count toward directory limits. Use Access Packages (Entitlement Management) for lifecycle governance — auto-expire access after project ends.</p>
+            </div>
+            <div class="key-concept">
+                <h3>B2C (Azure AD B2C / External ID for customers)</h3>
+                <p><strong>Use case:</strong> Customer-facing apps where end users sign up with email/social/local accounts. Completely separate directory from your corporate tenant.</p>
+                <p><strong>Architect consideration:</strong> B2C is a separate tenant with its own policy engine (user flows / custom policies). It does NOT share the corporate Entra ID directory. Plan for separate governance.</p>
+            </div>
+            <div class="key-concept">
+                <h3>Multi-Tenant App Registrations</h3>
+                <p><strong>Use case:</strong> Your SaaS app needs to access resources in customer tenants. Register your app as multi-tenant; customers consent and a service principal is created in their tenant.</p>
+                <p><strong>Architect consideration:</strong> Customers control what permissions they grant via admin consent. Design for least-privilege scopes. Use application permissions (not delegated) for background/daemon access.</p>
+            </div>
+            <div class="key-concept">
+                <h3>Cross-Tenant Access Settings</h3>
+                <p><strong>Use case:</strong> Fine-grained control over which external tenants can collaborate with yours. Define inbound (who can access your resources) and outbound (what your users can access elsewhere) policies per partner tenant.</p>
+                <p><strong>Architect consideration:</strong> Default is "allow all B2B." For regulated industries, set default to "block all" and explicitly allow trusted partner tenant IDs.</p>
+            </div>
+        </div>
+    </section>
+
+    <!-- Section 5: Multi-Subscription Identity Architecture -->
+    <section id="multi-sub-identity" class="fade-in">
+        <h2>Identity Architecture for Multi-Subscription Environments</h2>
+
+        <div class="key-concept">
+            <h3>🔑 Key Concept: One Tenant, Many Subscriptions</h3>
+            <p>All subscriptions trust a single Entra ID tenant. Identity is the unifying layer across your entire Azure estate. RBAC role assignments can be scoped at management group level to span all subscriptions.</p>
+        </div>
+
+        <h3>Design Patterns</h3>
+        <ul>
+            <li><strong>Centralized identity team:</strong> Owns app registrations, manages Conditional Access, reviews service principal credentials. Platform team, not app teams.</li>
+            <li><strong>User-assigned managed identities per workload:</strong> Create in a shared identity resource group; attach across subscriptions. Enables consistent permissions across dev/staging/prod.</li>
+            <li><strong>Privileged Identity Management (PIM):</strong> No standing access to production subscriptions. JIT elevation with approval workflows and time-bounded activation.</li>
+            <li><strong>Emergency access accounts:</strong> Two cloud-only Global Admin accounts with long passwords, no MFA (phishing-resistant hardware token excepted), stored in a physical safe. Monitored by alerts.</li>
+        </ul>
+
+        <div class="callout-warning">
+            <h4>⚠️ Common Mistake: Over-Scoped Service Principals</h4>
+            <p>A service principal with Contributor on a management group can modify every resource in every subscription beneath it. Scope permissions to the narrowest resource group possible. If a pipeline deploys to one resource group, grant Contributor on that resource group only — never the subscription.</p>
+        </div>
+    </section>
+
+    <!-- Section 6: Real-World Scenario -->
+    <section id="real-world" class="fade-in">
+        <h2>Real-World Scenario</h2>
+
+        <div class="real-world-example">
+            <h3>🏢 Case Study: DataLens (SaaS Analytics Vendor)</h3>
+            <p><strong>Situation:</strong> DataLens sells an analytics platform that needs to read data from customers' Azure Storage accounts and Azure SQL databases. Each customer has their own Azure tenant. DataLens must access customer resources <em>without</em> customers sharing secrets or storage keys.</p>
+
+            <h4>Architecture Decision:</h4>
+            <ol>
+                <li><strong>Multi-tenant app registration:</strong> DataLens registers their app as multi-tenant in their home tenant with minimal permissions declared (e.g., <code>Storage Blob Data Reader</code>).</li>
+                <li><strong>Customer admin consent:</strong> Each customer's Azure admin reviews permissions and grants admin consent — this creates a service principal in the customer's tenant.</li>
+                <li><strong>Customer assigns RBAC:</strong> The customer grants the DataLens service principal <code>Storage Blob Data Reader</code> on specific storage accounts (not the whole subscription).</li>
+                <li><strong>Token acquisition:</strong> DataLens backend authenticates as the multi-tenant app, specifying the customer's tenant ID, and receives a token scoped to that customer's resources.</li>
+                <li><strong>No secrets in customer tenants:</strong> The credential (certificate or federated) lives only in DataLens's home tenant. Customers never see or manage it.</li>
+            </ol>
+
+            <h4>Why This Works:</h4>
+            <ul>
+                <li><strong>Customer controls access:</strong> They can revoke consent or remove role assignments at any time</li>
+                <li><strong>Least privilege:</strong> Read-only on specific storage accounts, not broad subscription access</li>
+                <li><strong>No shared secrets:</strong> No storage keys, no SAS tokens, no customer-managed credentials</li>
+                <li><strong>Audit trail:</strong> Every access appears in the customer's Entra ID sign-in logs under the DataLens service principal</li>
+            </ul>
+
+            <h4>Alternative Considered (and rejected):</h4>
+            <p><strong>Customer creates a service principal for DataLens with a client secret.</strong> Rejected because: the customer must manage secret rotation, there's no standard way to deliver secrets securely, and secret expiry breaks the integration silently.</p>
+        </div>
+    </section>
+
+    <!-- Summary -->
+    <section class="lesson-summary fade-in">
+        <h2>Lesson Summary</h2>
+        <ul>
+            <li><strong>Default to managed identities</strong> — system-assigned for single-resource simplicity, user-assigned for shared access and IaC-friendly pre-staging</li>
+            <li><strong>Service principals</strong> still needed for external systems and multi-tenant apps — govern with ownership, short credential lifetimes, and regular reviews</li>
+            <li><strong>Workload identity federation</strong> eliminates secrets for CI/CD — trust the platform's OIDC token instead</li>
+            <li><strong>Cross-tenant:</strong> B2B for partner collaboration, B2C for customers, multi-tenant apps for SaaS accessing customer resources</li>
+            <li><strong>Multi-subscription identity:</strong> centralize governance, scope narrowly, use PIM for production access</li>
+            <li><strong>Architect mindset:</strong> every secret is a liability; every standing permission is an attack surface</li>
+        </ul>
+    </section>
+
+    <!-- Quiz -->
+    <section id="quiz" class="quiz fade-in">
+        <h2>Knowledge Check</h2>
+        <div id="quiz-container"></div>
+    </section>
+
+    <!-- Navigation -->
+    <nav class="lesson-nav fade-in">
+        <a href="0001-azure-fundamentals-architect-mindset.html">&larr; Lesson 001: Azure Fundamentals &amp; Architect Mindset</a>
+        <a href="0003-identity-access-management.html">Lesson 003: Identity &amp; Access Management &rarr;</a>
+    </nav>
+
+</div>
+
+<script src="../assets/diagrams.js"></script>
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+
+    // Diagram 1: Identity Flow Comparison — Managed Identity vs Service Principal
+    AzureLessons.BoxDiagram(document.getElementById('diagram-identity-flow'), {
+        groups: [
+            { label: "Managed Identity Flow (Recommended)", x: 20, y: 10, w: 760, h: 160 },
+            { label: "Service Principal + Secret Flow (Legacy)", x: 20, y: 190, w: 760, h: 160 }
+        ],
+        nodes: [
+            // Managed Identity flow
+            { id: "app1", label: "App Service\n(your app)", x: 60, y: 60, w: 140, h: 60, shape: "rect", icon: "app-service", tooltip: "Your application running on Azure compute" },
+            { id: "mi1", label: "Managed\nIdentity", x: 270, y: 60, w: 120, h: 60, shape: "rect", icon: "identity", tooltip: "System or user-assigned managed identity — no credentials stored" },
+            { id: "token1", label: "Access Token\n(auto-issued)", x: 460, y: 60, w: 140, h: 60, shape: "rect", icon: "token", tooltip: "Short-lived token from IMDS endpoint — auto-rotated" },
+            { id: "resource1", label: "Azure Storage\n(target)", x: 660, y: 60, w: 120, h: 60, shape: "rect", icon: "storage", tooltip: "Target resource trusts the token via RBAC" },
+            // Service Principal flow
+            { id: "app2", label: "External App\n(CI/CD, etc.)", x: 60, y: 240, w: 140, h: 60, shape: "rect", icon: "app-service", tooltip: "Application outside Azure or without managed identity support" },
+            { id: "sp2", label: "Service Principal\n+ Secret/Cert", x: 270, y: 240, w: 140, h: 60, shape: "rect", icon: "identity", tooltip: "App registration with client secret or certificate — YOU manage rotation" },
+            { id: "token2", label: "Access Token\n(you request)", x: 460, y: 240, w: 140, h: 60, shape: "rect", icon: "token", tooltip: "Token obtained via client credential flow — requires valid secret" },
+            { id: "resource2", label: "Azure Storage\n(target)", x: 660, y: 240, w: 120, h: 60, shape: "rect", icon: "storage", tooltip: "Same RBAC authorization, but credential management burden is on you" }
+        ],
+        edges: [
+            // Managed Identity flow
+            { from: "app1", to: "mi1", label: "IMDS call", style: "solid" },
+            { from: "mi1", to: "token1", label: "auto-issued", style: "solid" },
+            { from: "token1", to: "resource1", label: "Bearer auth", style: "solid" },
+            // Service Principal flow
+            { from: "app2", to: "sp2", label: "secret/cert", style: "dashed" },
+            { from: "sp2", to: "token2", label: "OAuth2 client\ncredential flow", style: "dashed" },
+            { from: "token2", to: "resource2", label: "Bearer auth", style: "solid" }
+        ]
+    });
+
+    // Diagram 2: Cross-Tenant Identity Patterns
+    AzureLessons.BoxDiagram(document.getElementById('diagram-cross-tenant'), {
+        groups: [
+            { label: "Your Tenant (Contoso)", x: 20, y: 10, w: 360, h: 400 },
+            { label: "Customer/Partner Tenant (Fabrikam)", x: 420, y: 10, w: 360, h: 400 }
+        ],
+        nodes: [
+            // Contoso tenant
+            { id: "app-reg", label: "App Registration\n(multi-tenant)", x: 60, y: 60, w: 160, h: 60, shape: "rect", icon: "app-service", tooltip: "Your SaaS app registered as multi-tenant in your home tenant" },
+            { id: "contoso-sp", label: "Service Principal\n(home)", x: 60, y: 170, w: 160, h: 60, shape: "rect", icon: "identity", tooltip: "Service principal in your own tenant" },
+            { id: "contoso-users", label: "Your Users\n(Members)", x: 60, y: 280, w: 160, h: 60, shape: "rect", icon: "identity", tooltip: "Your corporate users — members of your tenant" },
+            { id: "b2b-guest", label: "Guest User\n(from Fabrikam)", x: 220, y: 280, w: 140, h: 60, shape: "rect", icon: "identity", tooltip: "B2B guest — authenticates in their home tenant, shadow identity here" },
+            // Fabrikam tenant
+            { id: "fab-sp", label: "Service Principal\n(consent-created)", x: 480, y: 60, w: 160, h: 60, shape: "rect", icon: "identity", tooltip: "Created when Fabrikam admin consents to your multi-tenant app" },
+            { id: "fab-resources", label: "Fabrikam's\nAzure Resources", x: 480, y: 170, w: 160, h: 60, shape: "rect", icon: "storage", tooltip: "Customer's resources — they control RBAC" },
+            { id: "fab-users", label: "Fabrikam Users\n(Members)", x: 480, y: 280, w: 160, h: 60, shape: "rect", icon: "identity", tooltip: "Fabrikam's own users" },
+            { id: "cross-tenant-settings", label: "Cross-Tenant\nAccess Settings", x: 650, y: 170, w: 120, h: 60, shape: "rect", icon: "policy", tooltip: "Inbound/outbound access policies controlling B2B trust" }
+        ],
+        edges: [
+            { from: "app-reg", to: "contoso-sp", label: "instantiates", style: "solid" },
+            { from: "app-reg", to: "fab-sp", label: "admin consent", style: "dashed" },
+            { from: "fab-sp", to: "fab-resources", label: "RBAC assigned\nby customer", style: "solid" },
+            { from: "fab-users", to: "b2b-guest", label: "B2B invite", style: "dashed" },
+            { from: "cross-tenant-settings", to: "fab-sp", label: "controls", style: "solid" },
+            { from: "cross-tenant-settings", to: "b2b-guest", label: "controls", style: "solid" }
+        ]
+    });
+
+    // Quiz — 4 design-decision questions
+    AzureLessons.Quiz(document.getElementById('quiz-container'), [
+        {
+            question: "Your team deploys an App Service that reads from a single Azure SQL Database in the same subscription. No other service needs this access. Which identity approach is best?",
+            options: [
+                "User-assigned managed identity shared with other App Services",
+                "System-assigned managed identity on the App Service",
+                "Service principal with a client secret stored in Key Vault",
+                "Workload identity federation with GitHub Actions"
+            ],
+            correct: 1,
+            explanation: "System-assigned is ideal here: 1:1 relationship, same lifecycle as the App Service, no other resource needs this identity. It's the simplest and most auditable option."
+        },
+        {
+            question: "You're designing a GitHub Actions pipeline that deploys infrastructure to Azure. The security team mandates zero stored secrets. What should you recommend?",
+            options: [
+                "Store a service principal secret in GitHub encrypted secrets",
+                "Use a managed identity attached to a self-hosted runner VM",
+                "Configure workload identity federation with a federated credential on an app registration",
+                "Use an Azure DevOps service connection instead"
+            ],
+            correct: 2,
+            explanation: "Workload identity federation lets GitHub Actions authenticate to Azure using its OIDC token — no secret is stored anywhere. The federated credential trusts GitHub's token issuer for the specific repo/branch."
+        },
+        {
+            question: "A SaaS vendor needs read access to your Azure Storage account for their analytics product. They propose you create a service principal in your tenant and share the secret with them. What's the better architecture?",
+            options: [
+                "Accept their proposal but use a certificate instead of a secret",
+                "Have them register a multi-tenant app; you consent and assign narrow RBAC in your tenant",
+                "Create a shared SAS token with a long expiry for simplicity",
+                "Give them a guest user account with Storage Blob Data Reader"
+            ],
+            correct: 1,
+            explanation: "The vendor should own the app registration in their tenant (multi-tenant). You consent and assign RBAC. This way: they manage their own credentials, you control what they can access, and you can revoke consent at any time."
+        },
+        {
+            question: "You have 5 microservices running as Container Apps that all need to read from the same Azure Key Vault. Services are frequently redeployed. What identity design minimizes operational overhead?",
+            options: [
+                "System-assigned managed identity on each Container App with 5 separate role assignments",
+                "One user-assigned managed identity shared across all 5 Container Apps",
+                "A single service principal with a certificate rotated monthly",
+                "Workload identity federation for each Container App"
+            ],
+            correct: 1,
+            explanation: "User-assigned managed identity: one identity, one role assignment on Key Vault, survives Container App redeployments. System-assigned would mean 5 role assignments and re-creation of identities on every redeployment."
+        }
+    ]);
+
+    // Initialize interactions
+    AzureLessons.ScrollReveal();
+    AzureLessons.Collapsible();
+});
+</script>
+</body>
+</html>

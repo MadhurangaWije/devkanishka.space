@@ -1,0 +1,1157 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>L45 · The Descriptor Protocol &amp; Attribute Lookup — Python A→Z</title>
+<link rel="stylesheet" href="../assets/style.css" />
+</head>
+<body>
+<div id="sidebar-placeholder"></div>
+<div id="main">
+  <div id="lesson-header">
+    <div class="lesson-track track-internals">🟠 Python Internals</div>
+    <h1>The Descriptor Protocol &amp; Attribute Lookup</h1>
+    <div class="lesson-meta">
+      <span>📖 Lesson 45</span>
+      <span>⏱ 60 min</span>
+      <span>🧪 5 questions</span>
+      <span>💻 3 exercises</span>
+    </div>
+  </div>
+  <div id="content">
+    <div class="objectives">
+      <h4>🎯 Learning Objectives</h4>
+      <ul>
+        <li>Explain the full attribute lookup chain: instance <code>__dict__</code>, class <code>__dict__</code>, and the MRO</li>
+        <li>Distinguish data descriptors from non-data descriptors and explain the priority order</li>
+        <li>Implement <code>__get__</code>, <code>__set__</code>, and <code>__delete__</code> to build custom descriptors</li>
+        <li>Understand how <code>property</code>, <code>staticmethod</code>, <code>classmethod</code>, and <code>function</code> objects use the descriptor protocol</li>
+        <li>Build reusable validated field descriptors for class-level validation</li>
+        <li>Understand <code>__slots__</code> as member descriptors and their effect on <code>__dict__</code></li>
+        <li>Use <code>__set_name__</code> to make descriptors self-configuring at class creation time</li>
+      </ul>
+    </div>
+
+    <!-- ═══════════════════════════════════════════════════════════════ -->
+    <h2 id="attribute-lookup">1 · Attribute Lookup: The Full Chain</h2>
+
+    <p>
+      When you write <code>obj.attr</code>, Python follows a precise lookup order defined by
+      <code>object.__getattribute__</code>. Understanding this order is the key to understanding every
+      "magic" attribute behaviour in Python — from <code>property</code> to ORM field validation to
+      mock objects. The algorithm runs synchronously, in full, every time any attribute is accessed.
+    </p>
+
+    <p>Here is the complete algorithm, expressed as pseudocode:</p>
+
+    <pre style="background:#1a1a2e;padding:16px;border-radius:8px;overflow-x:auto;font-size:0.82rem;color:#e0e0f0;">object.__getattribute__(obj, 'attr'):
+
+  1. type_mro = type(obj).__mro__          # [type(obj), ..., object]
+
+  2. For each cls in type_mro:
+       if 'attr' in cls.__dict__:
+           descriptor = cls.__dict__['attr']
+           if hasattr(descriptor, '__set__') or hasattr(descriptor, '__delete__'):
+               # DATA DESCRIPTOR — highest priority
+               return descriptor.__get__(obj, type(obj))
+
+  3. if 'attr' in obj.__dict__:
+       # Instance variable — second priority
+       return obj.__dict__['attr']
+
+  4. For each cls in type_mro:
+       if 'attr' in cls.__dict__:
+           descriptor = cls.__dict__['attr']
+           if hasattr(descriptor, '__get__'):
+               # NON-DATA DESCRIPTOR — third priority
+               return descriptor.__get__(obj, type(obj))
+           else:
+               # Plain class attribute — fourth priority
+               return descriptor
+
+  5. raise AttributeError(f"'{type(obj).__name__}' object has no attribute 'attr'")</pre>
+
+    <p>
+      The following example demonstrates this priority order concretely. Notice how the
+      <em>data</em> descriptor wins even when an instance <code>__dict__</code> key with the same
+      name exists, while the <em>non-data</em> descriptor is silently shadowed by the instance key:
+    </p>
+
+    <div style="position:relative"><pre><code class="language-python">class DataDesc:
+    def __get__(self, obj, objtype=None):
+        return "data_desc __get__"
+    def __set__(self, obj, value):
+        pass   # makes this a DATA descriptor
+
+class NonDataDesc:
+    def __get__(self, obj, objtype=None):
+        return "non_data_desc __get__"
+    # no __set__ → NON-DATA descriptor
+
+class MyClass:
+    data     = DataDesc()
+    non_data = NonDataDesc()
+
+obj = MyClass()
+obj.__dict__["data"]     = "instance value (data)"
+obj.__dict__["non_data"] = "instance value (non_data)"
+
+print(obj.data)      # "data_desc __get__"         — DATA desc wins over instance __dict__
+print(obj.non_data)  # "instance value (non_data)" — instance __dict__ wins over non-data desc</code></pre><span class="code-label">lookup_priority.py</span></div>
+
+    <div class="callout callout-concept">
+      <strong>Why the asymmetry?</strong> Data descriptors (like <code>property</code>) must be able
+      to intercept writes and prevent instance <code>__dict__</code> entries from shadowing them —
+      otherwise a single assignment (<code>obj.radius = 5</code>) would bypass the property setter
+      forever. Non-data descriptors (like regular functions) allow instance attributes to shadow them,
+      which is exactly how <code>self.method = lambda: ...</code> can override a class method on a
+      per-instance basis.
+    </div>
+
+    <h3>Priority table</h3>
+    <table>
+      <thead>
+        <tr>
+          <th>Priority</th>
+          <th>Source</th>
+          <th>Condition</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td>1 (highest)</td><td>Class / MRO <code>__dict__</code></td><td>Object has both <code>__get__</code> and (<code>__set__</code> or <code>__delete__</code>) — <em>data descriptor</em></td></tr>
+        <tr><td>2</td><td>Instance <code>__dict__</code></td><td>Key present in <code>obj.__dict__</code></td></tr>
+        <tr><td>3</td><td>Class / MRO <code>__dict__</code></td><td>Object has <code>__get__</code> only — <em>non-data descriptor</em></td></tr>
+        <tr><td>4 (lowest)</td><td>Class / MRO <code>__dict__</code></td><td>Plain class attribute (no <code>__get__</code>)</td></tr>
+        <tr><td>—</td><td>nowhere</td><td><code>AttributeError</code></td></tr>
+      </tbody>
+    </table>
+
+    <!-- ═══════════════════════════════════════════════════════════════ -->
+    <h2 id="descriptor-protocol">2 · The Descriptor Protocol: <code>__get__</code>, <code>__set__</code>, <code>__delete__</code></h2>
+
+    <p>
+      A <strong>descriptor</strong> is any object that defines one or more of:
+      <code>__get__</code>, <code>__set__</code>, <code>__delete__</code>.
+      That is the complete definition. There is no base class to inherit, no registration step.
+      Python discovers descriptors purely by duck-typing: if an object sitting in a class
+      <code>__dict__</code> has the right dunder(s), the descriptor protocol is invoked automatically.
+    </p>
+
+    <p>
+      The three dunder methods have carefully-specified signatures. <code>__get__</code> receives
+      <code>None</code> for <code>obj</code> when the descriptor is accessed via the class
+      (<code>MyClass.attr</code>) rather than an instance. This lets descriptors return themselves
+      (or useful metadata) in the class-access case:
+    </p>
+
+    <div style="position:relative"><pre><code class="language-python">class Descriptor:
+    """
+    __get__(self, obj, objtype=None)
+        - obj is None when accessed via the class: MyClass.attr
+        - obj is the instance when accessed via instance: my_obj.attr
+
+    __set__(self, obj, value)
+        - called on instance attribute assignment: my_obj.attr = value
+
+    __delete__(self, obj)
+        - called on del my_obj.attr
+    """
+    def __set_name__(self, owner, name):
+        # Called at class creation time (Python 3.6+)
+        self.name = name
+        self.private_name = f"_{owner.__name__}__{name}"
+
+    def __get__(self, obj, objtype=None):
+        if obj is None:
+            return self          # class-level access: return the descriptor itself
+        return getattr(obj, self.private_name, None)
+
+    def __set__(self, obj, value):
+        setattr(obj, self.private_name, value)
+
+    def __delete__(self, obj):
+        delattr(obj, self.private_name)
+
+class Point:
+    x = Descriptor()
+    y = Descriptor()
+
+p = Point()
+p.x = 10          # calls Descriptor.__set__(p, 10)
+p.y = 20
+print(p.x)        # calls Descriptor.__get__(p, Point) → 10
+del p.x           # calls Descriptor.__delete__(p)
+print(Point.x)    # Descriptor.__get__(None, Point) → the descriptor object itself</code></pre><span class="code-label">descriptor_basics.py</span></div>
+
+    <p>
+      The <code>__set_name__</code> hook (Python 3.6+) is called automatically when the class body
+      finishes execution. Python passes the owning class and the attribute name to the descriptor,
+      letting it store its own name without any boilerplate in the class definition. Before
+      <code>__set_name__</code> existed, library authors had to require users to repeat the name:
+      <code>x = TypedField("x", int)</code> — redundant and error-prone. Now descriptors are
+      self-configuring.
+    </p>
+
+    <div class="callout callout-tip">
+      <strong>Two-phase initialisation.</strong> <code>__init__</code> runs first (when Python
+      evaluates the right-hand side of <code>x = Descriptor()</code> inside the class body), then
+      <code>__set_name__</code> runs after the whole class body has been executed. At
+      <code>__set_name__</code> time the class object exists and is passed as <code>owner</code>.
+    </div>
+    <!-- ═══════════════════════════════════════════════════════════════ -->
+    <h2 id="validated-fields">3 · Validated Field Descriptors</h2>
+
+    <p>
+      One of the most practically useful applications of the descriptor protocol is building
+      <strong>reusable field validators</strong> that enforce type constraints and value ranges at
+      assignment time. This is the same pattern used internally by Django model fields, SQLAlchemy
+      mapped columns, attrs, and Pydantic v1 under the hood. The descriptor lives once in the class
+      but guards every instance independently by storing per-instance data in the instance's own
+      <code>__dict__</code> (via a mangled private name to avoid collisions).
+    </p>
+
+    <div style="position:relative"><pre><code class="language-python">from typing import Any, Type, Callable
+
+class TypedField:
+    """A descriptor that enforces a type constraint on assignment."""
+
+    def __set_name__(self, owner: type, name: str) -&gt; None:
+        self.public_name  = name
+        self.private_name = f"_{name}"
+
+    def __init__(self, expected_type: type, *, nullable: bool = False) -&gt; None:
+        self.expected_type = expected_type
+        self.nullable      = nullable
+
+    def __get__(self, obj, objtype=None):
+        if obj is None:
+            return self
+        return getattr(obj, self.private_name, None)
+
+    def __set__(self, obj, value) -&gt; None:
+        if value is None and self.nullable:
+            setattr(obj, self.private_name, value)
+            return
+        if not isinstance(value, self.expected_type):
+            raise TypeError(
+                f"{self.public_name!r} expects {self.expected_type.__name__}, "
+                f"got {type(value).__name__}"
+            )
+        setattr(obj, self.private_name, value)
+
+    def __delete__(self, obj) -&gt; None:
+        setattr(obj, self.private_name, None)
+
+
+class RangedField(TypedField):
+    """Adds min/max bounds on top of type checking."""
+
+    def __init__(self, expected_type: type, *, lo=None, hi=None, **kw) -&gt; None:
+        super().__init__(expected_type, **kw)
+        self.lo, self.hi = lo, hi
+
+    def __set__(self, obj, value) -&gt; None:
+        super().__set__(obj, value)   # type check first
+        v = getattr(obj, self.private_name)
+        if v is not None:
+            if self.lo is not None and v &lt; self.lo:
+                raise ValueError(f"{self.public_name!r} must be &gt;= {self.lo}, got {v}")
+            if self.hi is not None and v &gt; self.hi:
+                raise ValueError(f"{self.public_name!r} must be &lt;= {self.hi}, got {v}")
+
+
+class Employee:
+    name   = TypedField(str)
+    age    = RangedField(int, lo=18, hi=120)
+    salary = RangedField(float, lo=0.0)
+
+    def __init__(self, name, age, salary):
+        self.name   = name
+        self.age    = age
+        self.salary = salary
+
+    def __repr__(self):
+        return f"Employee({self.name!r}, age={self.age}, salary={self.salary})"
+
+e = Employee("Alice", 30, 95000.0)
+print(e)   # Employee('Alice', age=30, salary=95000.0)
+
+try:
+    e.age = 15
+except ValueError as err:
+    print(err)   # 'age' must be >= 18, got 15
+
+try:
+    e.name = 123
+except TypeError as err:
+    print(err)   # 'name' expects str, got int</code></pre><span class="code-label">validated_fields.py</span></div>
+
+    <p>
+      Notice the inheritance chain: <code>RangedField.__set__</code> delegates to
+      <code>TypedField.__set__</code> via <code>super()</code>, then adds its own range check on top.
+      The type check and range check compose cleanly because descriptors are plain Python objects —
+      you get the full power of inheritance and composition.
+    </p>
+
+    <div class="callout callout-warn">
+      <strong>Shared descriptor, per-instance storage.</strong> The same <code>TypedField</code>
+      instance (e.g., <code>Employee.name</code>) is shared across <em>all</em>
+      <code>Employee</code> instances. Never store per-instance state on <code>self</code> inside a
+      descriptor — store it on <code>obj</code> instead (via <code>setattr(obj, self.private_name,
+      value)</code>). If you store on <code>self</code>, every instance will read and overwrite the
+      same slot.
+    </div>
+
+    <!-- ═══════════════════════════════════════════════════════════════ -->
+    <h2 id="property-internals">4 · How <code>property</code> Is Implemented</h2>
+
+    <p>
+      <code>property</code> is itself a descriptor — one of the most elegant examples in the
+      standard library. It is implemented in C for performance, but its behaviour can be reproduced
+      exactly in pure Python. Understanding this implementation dissolves the mystery of decorators
+      like <code>@radius.setter</code> (they just call a method that returns a <em>new</em>
+      <code>property</code> object with the setter wired in):
+    </p>
+
+    <div style="position:relative"><pre><code class="language-python"># Rough Python equivalent of the built-in property descriptor
+class property_:
+    def __init__(self, fget=None, fset=None, fdel=None, doc=None):
+        self.fget = fget
+        self.fset = fset
+        self.fdel = fdel
+        self.__doc__ = doc or (fget.__doc__ if fget else None)
+
+    def __set_name__(self, owner, name):
+        self.__name__ = name
+
+    def __get__(self, obj, objtype=None):
+        if obj is None:
+            return self          # accessed on the class
+        if self.fget is None:
+            raise AttributeError(f"unreadable attribute '{self.__name__}'")
+        return self.fget(obj)
+
+    def __set__(self, obj, value):
+        if self.fset is None:
+            raise AttributeError(f"can't set attribute '{self.__name__}'")
+        self.fset(obj, value)
+
+    def __delete__(self, obj):
+        if self.fdel is None:
+            raise AttributeError(f"can't delete attribute '{self.__name__}'")
+        self.fdel(obj)
+
+    # These methods return a NEW property with the extra function wired in
+    def getter(self, fget):   return type(self)(fget, self.fset, self.fdel, self.__doc__)
+    def setter(self, fset):   return type(self)(self.fget, fset, self.fdel, self.__doc__)
+    def deleter(self, fdel):  return type(self)(self.fget, self.fset, fdel, self.__doc__)
+
+
+class Circle:
+    def __init__(self, radius: float):
+        self._radius = radius
+
+    @property
+    def radius(self) -&gt; float:
+        return self._radius
+
+    @radius.setter
+    def radius(self, value: float) -&gt; None:
+        if value &lt; 0:
+            raise ValueError("Radius must be non-negative")
+        self._radius = value
+
+    @property
+    def area(self) -&gt; float:
+        import math
+        return math.pi * self._radius ** 2
+
+c = Circle(5.0)
+print(c.radius)        # 5.0
+print(c.area)          # 78.539...
+c.radius = 10.0
+print(Circle.radius)   # &lt;property object at 0x...&gt; — descriptor itself</code></pre><span class="code-label">property_internals.py</span></div>
+
+    <p>
+      The <code>@radius.setter</code> decorator is <em>not</em> magic syntax. It is exactly
+      equivalent to:
+    </p>
+    <pre style="background:#1a1a2e;padding:16px;border-radius:8px;overflow-x:auto;font-size:0.82rem;color:#e0e0f0;"># @radius.setter is sugar for:
+radius = radius.setter(lambda self, v: ...)
+# i.e. it calls property.setter(), which returns a brand-new property
+# object that has both fget and fset populated.</pre>
+
+    <p>
+      Because <code>property</code> defines both <code>__get__</code> and <code>__set__</code>
+      (even if <code>fset</code> is <code>None</code>, the method still exists), it is a
+      <strong>data descriptor</strong>. This means it takes priority over the instance
+      <code>__dict__</code>. Doing <code>obj.__dict__['radius'] = 999</code> will not bypass the
+      property — the next access to <code>obj.radius</code> will still invoke <code>fget</code>.
+      This is crucial for computed and validated attributes.
+    </p>
+
+    <div class="callout callout-concept">
+      <strong>Why <code>obj is None</code> in <code>__get__</code>?</strong>
+      When you access a descriptor on the <em>class</em> (e.g., <code>Circle.radius</code>),
+      <code>__get__</code> is called with <code>obj=None</code>. Returning <code>self</code>
+      (the property object) lets you inspect it: <code>Circle.radius.fget</code>,
+      <code>Circle.radius.__doc__</code>, etc. If you returned <code>fget(None)</code> you would
+      crash or produce wrong results.
+    </div>
+
+    <!-- ═══════════════════════════════════════════════════════════════ -->
+    <h2 id="staticmethod-classmethod">5 · <code>staticmethod</code> and <code>classmethod</code> as Descriptors</h2>
+
+    <p>
+      Every callable you put in a class body uses the descriptor protocol to handle binding.
+      <code>staticmethod</code> and <code>classmethod</code> are both <strong>non-data
+      descriptors</strong> (they only define <code>__get__</code>, not <code>__set__</code>).
+      Their <code>__get__</code> implementations differ in what they return:
+    </p>
+
+    <ul>
+      <li><strong><code>staticmethod.__get__</code></strong> returns the raw, unbound function — no
+        binding occurs at all.</li>
+      <li><strong><code>classmethod.__get__</code></strong> returns a bound method with the
+        <em>class</em> (<code>cls</code>) pre-filled as the first argument.</li>
+      <li><strong>Plain <code>function.__get__</code></strong> returns a bound method with the
+        <em>instance</em> (<code>self</code>) pre-filled — this is how every regular method works.</li>
+    </ul>
+
+    <div style="position:relative"><pre><code class="language-python">class MyClass:
+    @staticmethod
+    def static_fn(x):
+        return x * 2
+
+    @classmethod
+    def class_fn(cls, x):
+        return f"{cls.__name__}: {x * 2}"
+
+# staticmethod.__get__ returns the raw function (no binding)
+print(MyClass.__dict__["static_fn"])                          # &lt;staticmethod object&gt;
+print(MyClass.__dict__["static_fn"].__get__(None, MyClass))  # &lt;function static_fn ...&gt;
+print(MyClass.static_fn(5))                                   # 10
+
+# classmethod.__get__ returns a bound method with cls already bound
+print(MyClass.__dict__["class_fn"])          # &lt;classmethod object&gt;
+print(MyClass.class_fn(5))                   # "MyClass: 10"
+
+# Plain function is a non-data descriptor — __get__ returns a bound method
+def greet(self):
+    return f"Hello from {type(self).__name__}"
+
+class Greeter:
+    hello = greet      # assign a function as a class attribute
+
+g = Greeter()
+print(g.hello())                                              # "Hello from Greeter"
+print(Greeter.__dict__["hello"])                              # &lt;function greet ...&gt;
+print(Greeter.__dict__["hello"].__get__(g, Greeter))         # &lt;bound method greet of ...&gt;
+
+# This is exactly how def creates methods in a class body
+class MyClass2:
+    def method(self):   # stored as a plain function in __dict__
+        return "called"
+
+print(type(MyClass2.__dict__["method"]))     # &lt;class 'function'&gt;
+print(type(MyClass2().method))               # &lt;class 'method'&gt;  — bound on access</code></pre><span class="code-label">staticmethod_classmethod_descriptors.py</span></div>
+
+    <div class="callout callout-concept">
+      <strong>Methods receive <code>self</code> through the descriptor protocol — not through
+      special syntax or bytecode.</strong> When you access <code>obj.method</code>, Python calls
+      <code>function.__get__(obj, type(obj))</code>, which returns a <strong>bound method</strong> —
+      a thin wrapper that prepends <code>obj</code> as the first argument whenever the wrapper is
+      called. The <code>def</code> keyword inside a class body stores a plain function;
+      the binding happens lazily at access time via <code>__get__</code>. This is why you can pass
+      <code>obj.method</code> around as a callable and it still "knows" its instance.
+    </div>
+
+    <p>
+      This also explains the subtle performance difference: accessing a method on an instance
+      creates a new bound-method wrapper object each time. For hot loops you can cache
+      <code>fn = obj.method</code> and call <code>fn()</code> repeatedly to avoid repeated
+      descriptor invocations.
+    </p>
+
+    <!-- ═══════════════════════════════════════════════════════════════ -->
+    <h2 id="slots">6 · <code>__slots__</code> as Member Descriptors</h2>
+
+    <p>
+      When you declare <code>__slots__</code> on a class, Python creates a
+      <code>member_descriptor</code> for each slot name and stores it in the class
+      <code>__dict__</code>. These member descriptors are <strong>data descriptors</strong> — they
+      define both <code>__get__</code> and <code>__set__</code>. The actual slot storage is
+      allocated inline in the object's C struct, bypassing the per-instance <code>__dict__</code>
+      entirely. The result: smaller objects and faster attribute access.
+    </p>
+
+    <div style="position:relative"><pre><code class="language-python">import sys
+
+class WithDict:
+    def __init__(self, x, y):
+        self.x = x
+        self.y = y
+
+class WithSlots:
+    __slots__ = ("x", "y")
+
+    def __init__(self, x, y):
+        self.x = x
+        self.y = y
+
+d_obj = WithDict(1, 2)
+s_obj = WithSlots(1, 2)
+
+print(sys.getsizeof(d_obj))    # ~48 bytes (slots) + ~232 bytes (__dict__ overhead)
+print(sys.getsizeof(s_obj))    # ~56 bytes — no __dict__ overhead
+
+# __slots__ creates member_descriptor objects in the class dict
+print(type(WithSlots.__dict__["x"]))   # &lt;class 'member_descriptor'&gt;
+print(WithSlots.__dict__["x"])         # &lt;member 'x' of 'WithSlots' objects&gt;
+
+# member_descriptor IS a data descriptor (has __get__ and __set__)
+desc = WithSlots.__dict__["x"]
+print(desc.__get__(s_obj, WithSlots))   # 1
+desc.__set__(s_obj, 99)
+print(s_obj.x)                           # 99
+
+# No __dict__ on slotted objects
+try:
+    print(s_obj.__dict__)
+except AttributeError as e:
+    print(e)   # 'WithSlots' object has no attribute '__dict__'
+
+# ── Inheritance: must redeclare __slots__ or __dict__ is added back ──
+class Child(WithSlots):
+    __slots__ = ("z",)   # inherits x, y slots from parent + adds z
+    def __init__(self, x, y, z):
+        super().__init__(x, y)
+        self.z = z
+
+c = Child(1, 2, 3)
+print(c.x, c.y, c.z)   # 1 2 3
+
+# ── weakref support: add __weakref__ to __slots__ ──
+class Cached:
+    __slots__ = ("data", "__weakref__")
+    def __init__(self, data):
+        self.data = data
+
+import weakref
+obj = Cached([1, 2, 3])
+ref = weakref.ref(obj)
+print(ref())   # &lt;Cached object at 0x...&gt;</code></pre><span class="code-label">slots_descriptors.py</span></div>
+
+    <div class="callout callout-warn">
+      <strong>Slots and multiple inheritance.</strong> If <em>any</em> base class in the MRO has a
+      <code>__dict__</code> (i.e., does not define <code>__slots__</code>), the subclass will also
+      gain a <code>__dict__</code> even if the subclass declares <code>__slots__</code>. The memory
+      savings are only guaranteed when <em>every</em> class in the chain defines
+      <code>__slots__</code>. When in doubt, check: <code>hasattr(obj, '__dict__')</code>.
+    </div>
+
+    <p>
+      Memory savings compound at scale. A list of one million <code>WithDict</code> objects can
+      easily consume several hundred megabytes just for the <code>__dict__</code> overhead; the same
+      list of <code>WithSlots</code> objects can be 4–8× smaller in practice. This is why
+      data-intensive libraries like NumPy, pandas, and dataclasses (with
+      <code>slots=True</code> in Python 3.10+) use slots heavily.
+    </p>
+
+    <!-- ═══════════════════════════════════════════════════════════════ -->
+    <h2 id="getattr-hooks">7 · <code>__getattr__</code>, <code>__getattribute__</code>, <code>__setattr__</code>, <code>__delattr__</code></h2>
+
+    <p>
+      The descriptor protocol operates at the <em>slot level</em> (inside
+      <code>object.__getattribute__</code>). But you can intercept attribute access at the
+      <em>class level</em> too — by overriding the dunder methods on the class itself. These four
+      hooks form the outermost layer of Python's attribute machinery:
+    </p>
+
+    <table>
+      <thead>
+        <tr>
+          <th>Hook</th>
+          <th>When called</th>
+          <th>Typical use</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td><code>__getattribute__</code></td><td>Every single attribute access, always</td><td>Logging, access control, transparent proxies</td></tr>
+        <tr><td><code>__getattr__</code></td><td>Only when <code>__getattribute__</code> raises <code>AttributeError</code></td><td>Lazy attributes, dynamic attribute generation, proxy fallback</td></tr>
+        <tr><td><code>__setattr__</code></td><td>Every attribute assignment</td><td>Validation, change tracking, immutable objects</td></tr>
+        <tr><td><code>__delattr__</code></td><td>Every <code>del obj.attr</code></td><td>Cleanup, audit trails</td></tr>
+      </tbody>
+    </table>
+
+    <div style="position:relative"><pre><code class="language-python">class LoggedAccess:
+    """Every attribute access is logged."""
+
+    def __getattribute__(self, name: str):
+        """Called for EVERY attribute access (including __dict__, methods, etc.)"""
+        print(f"  __getattribute__({name!r})")
+        return super().__getattribute__(name)
+
+    def __setattr__(self, name: str, value):
+        """Called for EVERY attribute assignment."""
+        print(f"  __setattr__({name!r}, {value!r})")
+        super().__setattr__(name, value)
+
+    def __delattr__(self, name: str):
+        print(f"  __delattr__({name!r})")
+        super().__delattr__(name)
+
+    def __getattr__(self, name: str):
+        """ONLY called when normal lookup fails — the last resort."""
+        print(f"  __getattr__({name!r}) — not found via normal lookup")
+        raise AttributeError(name)
+
+
+class MyObj(LoggedAccess):
+    def __init__(self):
+        self.x = 10    # triggers __setattr__
+
+obj = MyObj()
+print(obj.x)           # triggers __getattribute__
+del obj.x              # triggers __delattr__
+print(obj.missing)     # triggers __getattribute__ first, then __getattr__</code></pre><span class="code-label">attribute_hooks.py</span></div>
+
+    <div class="callout callout-warn">
+      <strong>Infinite recursion trap.</strong> Inside <code>__getattribute__</code>, accessing
+      <em>any</em> attribute on <code>self</code> will call <code>__getattribute__</code> again,
+      causing infinite recursion. Always use <code>super().__getattribute__(name)</code> or
+      <code>object.__getattribute__(self, name)</code> to break the cycle. The same applies to
+      <code>__setattr__</code>: use <code>object.__setattr__(self, name, value)</code> when you
+      need to bypass your own override.
+    </div>
+
+    <p>
+      The critical distinction between <code>__getattribute__</code> and
+      <code>__getattr__</code> bears repeating:
+    </p>
+    <ul>
+      <li><strong><code>__getattribute__</code></strong> is called <em>always</em>, for every access.
+        Override it only when you truly need to intercept everything (e.g., a security wrapper that
+        blocks access to private names). Getting it wrong causes hard-to-debug infinite recursion.</li>
+      <li><strong><code>__getattr__</code></strong> is called only when normal lookup (including the
+        descriptor protocol and instance <code>__dict__</code>) has already failed. This is the safe
+        fallback hook. Use it for dynamic attribute generation, lazy loading, and proxy objects.</li>
+    </ul>
+
+    <p>
+      A practical <strong>transparent proxy</strong> pattern — wraps any target object so all
+      attribute access flows through transparently:
+    </p>
+
+    <div style="position:relative"><pre><code class="language-python">class Proxy:
+    """Transparently wrap any object, intercepting all attribute access."""
+
+    def __init__(self, target):
+        object.__setattr__(self, "_target", target)   # bypass our own __setattr__
+
+    def __getattr__(self, name):
+        # Called only when the proxy itself doesn't have 'name'
+        return getattr(object.__getattribute__(self, "_target"), name)
+
+    def __setattr__(self, name, value):
+        if name == "_target":
+            object.__setattr__(self, name, value)
+        else:
+            setattr(object.__getattribute__(self, "_target"), name, value)
+
+
+class Config:
+    debug   = False
+    version = "1.0"
+
+proxy = Proxy(Config)
+print(proxy.debug)     # False  — forwarded to Config.debug
+proxy.debug = True     # forwarded to Config.debug = True
+print(Config.debug)    # True   — the real object was mutated</code></pre><span class="code-label">proxy_pattern.py</span></div>
+
+    <div class="callout callout-tip">
+      <strong>The <code>object.__setattr__</code> trick.</strong> When you override
+      <code>__setattr__</code> on a class, any assignment inside <code>__init__</code> (including
+      <code>self.x = ...</code>) routes through your override. To store bootstrap attributes
+      (like <code>_target</code> in the proxy above) without triggering infinite recursion or
+      forwarding logic, call <code>object.__setattr__(self, name, value)</code> directly to bypass
+      the overridden version.
+    </div>
+
+    <!-- ── 8. Lazy & Cached Descriptors ── -->
+    <h2 id="lazy-cached">Lazy &amp; Cached Descriptors</h2>
+    <p>
+      A common pattern is computing an expensive attribute once and caching it —
+      the descriptor handles the first computation and then shadows itself with
+      an instance value.
+    </p>
+    <div style="position:relative">
+      <pre><code class="language-python">import time, functools
+
+class lazy_property:
+    """
+    Non-data descriptor: computes value on first access,
+    then stores it in instance __dict__ so subsequent accesses
+    bypass the descriptor entirely (instance __dict__ wins over non-data desc).
+    """
+    def __init__(self, func):
+        self.func = func
+        self.attrname = None
+        self.__doc__ = func.__doc__
+
+    def __set_name__(self, owner, name):
+        self.attrname = name
+
+    def __get__(self, obj, objtype=None):
+        if obj is None:
+            return self
+        if self.attrname is None:
+            raise TypeError("lazy_property must be used as a class attribute")
+        val = obj.__dict__.get(self.attrname, _MISSING := object())
+        if val is _MISSING:
+            val = self.func(obj)
+            obj.__dict__[self.attrname] = val   # cache in instance dict
+        return val
+
+
+class DataProcessor:
+    def __init__(self, data: list[int]):
+        self._data = data
+
+    @lazy_property
+    def stats(self) -> dict:
+        print("  Computing stats (expensive)…")
+        time.sleep(0.01)   # simulate work
+        return {
+            "mean": sum(self._data) / len(self._data),
+            "min":  min(self._data),
+            "max":  max(self._data),
+        }
+
+dp = DataProcessor(list(range(1000)))
+print(dp.stats)   # computes and caches
+print(dp.stats)   # returns cached value — descriptor not called again
+print("stats" in dp.__dict__)   # True — stored in instance dict</code></pre>
+      <span class="code-label">lazy_property.py</span>
+    </div>
+    <div class="callout callout-tip">
+      Python 3.8+ ships <code>functools.cached_property</code> in the standard library —
+      it works exactly like the pattern above. Prefer it over rolling your own.
+      Note: <code>cached_property</code> is a <em>non-data</em> descriptor, so it can
+      be cleared by deleting the instance attribute:
+      <code>del obj.stats</code> removes the cached value, forcing recomputation on next access.
+    </div>
+
+    <!-- ── 9. Descriptor-Based ORM Columns ── -->
+    <h2 id="orm-columns">Descriptor-Based ORM Columns</h2>
+    <p>
+      Django model fields, SQLAlchemy's <code>mapped_column</code>, and attrs/dataclasses
+      all use the descriptor protocol to attach metadata and behaviour to class attributes.
+      Here is a simplified version showing the technique:
+    </p>
+    <div style="position:relative">
+      <pre><code class="language-python">from typing import Any
+import sqlite3
+
+class Column:
+    """Descriptor that represents a database column on a Model class."""
+
+    def __set_name__(self, owner, name: str) -> None:
+        self.name = name
+        # Register on the owner class so the metaclass can find all columns
+        if not hasattr(owner, "_columns"):
+            owner._columns = {}
+        owner._columns[name] = self
+
+    def __init__(self, col_type: str, *, primary_key: bool = False,
+                 nullable: bool = True, default=None):
+        self.col_type    = col_type
+        self.primary_key = primary_key
+        self.nullable    = nullable
+        self.default     = default
+        self.name        = None   # filled by __set_name__
+
+    def __get__(self, obj, objtype=None):
+        if obj is None:
+            return self
+        return obj.__dict__.get(self.name, self.default)
+
+    def __set__(self, obj, value) -> None:
+        if value is None and not self.nullable:
+            raise ValueError(f"Column '{self.name}' is NOT NULL")
+        obj.__dict__[self.name] = value
+
+    def sql_definition(self) -> str:
+        parts = [self.name, self.col_type]
+        if self.primary_key: parts.append("PRIMARY KEY AUTOINCREMENT")
+        if not self.nullable: parts.append("NOT NULL")
+        return " ".join(parts)
+
+
+class Model:
+    """Base class for ORM models — introspects Column descriptors."""
+
+    @classmethod
+    def create_table_sql(cls) -> str:
+        cols = ", ".join(
+            desc.sql_definition()
+            for desc in cls._columns.values()
+        )
+        return f"CREATE TABLE IF NOT EXISTS {cls.__name__} ({cols});"
+
+    def to_dict(self) -> dict:
+        return {name: getattr(self, name) for name in self._columns}
+
+
+class User(Model):
+    id       = Column("INTEGER", primary_key=True, nullable=False)
+    username = Column("TEXT",    nullable=False)
+    email    = Column("TEXT",    nullable=False)
+    age      = Column("INTEGER", nullable=True, default=None)
+
+print(User.create_table_sql())
+# CREATE TABLE IF NOT EXISTS User (id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+#   username TEXT NOT NULL, email TEXT NOT NULL, age INTEGER);
+
+u = User()
+u.username = "alice"
+u.email    = "alice@example.com"
+u.age      = 30
+print(u.to_dict())
+# {'id': None, 'username': 'alice', 'email': 'alice@example.com', 'age': 30}
+
+try:
+    u.username = None   # NOT NULL violation
+except ValueError as e:
+    print(e)   # Column 'username' is NOT NULL</code></pre>
+      <span class="code-label">orm_columns.py</span>
+    </div>
+
+    <!-- ── 10. Full Attribute Lookup Table ── -->
+    <h2 id="lookup-table">Complete Attribute Lookup Reference</h2>
+    <p>
+      Combining everything: the full priority order for <code>obj.attr</code> lookup,
+      the special cases, and how to hook into each layer.
+    </p>
+
+    <table>
+      <thead>
+        <tr>
+          <th>Priority</th>
+          <th>Source</th>
+          <th>Condition</th>
+          <th>How to hook / override</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>1 (highest)</td>
+          <td>Data descriptor in <code>type(obj).__mro__</code></td>
+          <td>Class attribute has both <code>__get__</code> and <code>__set__</code>/<code>__delete__</code></td>
+          <td>Define a data descriptor class; use <code>property</code>, <code>__slots__</code></td>
+        </tr>
+        <tr>
+          <td>2</td>
+          <td><code>obj.__dict__['attr']</code></td>
+          <td>Key exists in the instance dictionary</td>
+          <td>Direct <code>obj.__dict__</code> access; <code>__setattr__</code></td>
+        </tr>
+        <tr>
+          <td>3</td>
+          <td>Non-data descriptor in <code>type(obj).__mro__</code></td>
+          <td>Class attribute has <code>__get__</code> but not <code>__set__</code>/<code>__delete__</code></td>
+          <td>Regular functions, <code>classmethod</code>, <code>staticmethod</code>, <code>cached_property</code></td>
+        </tr>
+        <tr>
+          <td>4</td>
+          <td>Plain class attribute in <code>type(obj).__mro__</code></td>
+          <td>Any object in the class dict without <code>__get__</code></td>
+          <td>Simple class-level assignment</td>
+        </tr>
+        <tr>
+          <td>5 (fallback)</td>
+          <td><code>__getattr__</code></td>
+          <td>Only called when all above raise <code>AttributeError</code></td>
+          <td>Define <code>__getattr__</code> for dynamic attributes, proxies</td>
+        </tr>
+        <tr>
+          <td>Override all</td>
+          <td><code>__getattribute__</code></td>
+          <td>Always called first; implements the above algorithm</td>
+          <td>Override with <code>super().__getattribute__(name)</code> to extend</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <div style="position:relative">
+      <pre><code class="language-python"># Demonstration of all six levels in one class
+class AllLevels:
+    # Level 1: data descriptor
+    data_desc = property(lambda self: "data_desc")
+
+    # Level 3: non-data descriptor (regular function)
+    def method(self): return "method"
+
+    # Level 4: plain class attribute
+    class_attr = "class_attr"
+
+    def __getattr__(self, name):
+        # Level 5: only called when levels 1-4 all fail
+        return f"__getattr__({name!r})"
+
+obj = AllLevels()
+obj.__dict__["data_desc"] = "instance (shadow attempt)"  # level 2
+obj.__dict__["method"]    = "instance method shadow"      # level 2
+
+print(obj.data_desc)    # "data_desc"      — data desc wins over instance dict
+print(obj.method)       # "instance method shadow" — instance dict wins over non-data desc
+print(obj.class_attr)   # "class_attr"     — falls through to class
+print(obj.missing)      # "__getattr__('missing')" — final fallback</code></pre>
+      <span class="code-label">all_levels.py</span>
+    </div>
+
+    <!-- ── Best Practices ── -->
+    <h2 id="best-practices">Best Practices</h2>
+    <ul>
+      <li><strong>Always implement <code>__set_name__</code></strong> in custom descriptors — it gives the descriptor its own name for free, enabling clear error messages and correct instance storage keys without extra boilerplate.</li>
+      <li><strong>Store instance data in <code>obj.__dict__</code> using a mangled key</strong> (e.g. <code>f"_{owner.__name__}__{name}"</code>) — never store it on the descriptor itself, or all instances will share the same value.</li>
+      <li><strong>Use <code>functools.cached_property</code> for expensive computed attributes</strong> — it is a standard-library non-data descriptor that caches in instance <code>__dict__</code>, avoiding repeated computation.</li>
+      <li><strong>Prefer <code>__getattr__</code> over <code>__getattribute__</code></strong> for most use cases — <code>__getattr__</code> is only called when normal lookup fails, so it is easier to reason about and avoids infinite recursion traps.</li>
+      <li><strong>When overriding <code>__getattribute__</code>, always delegate to <code>super()</code></strong> — <code>object.__getattribute__</code> implements the full descriptor/MRO lookup chain; replacing it entirely breaks everything.</li>
+      <li><strong>Add <code>__weakref__</code> to <code>__slots__</code></strong> if instances may be stored in <code>WeakValueDictionary</code> or <code>WeakSet</code> — otherwise weak-referencing them raises <code>TypeError</code>.</li>
+      <li><strong>Return <code>self</code> from <code>__get__</code> when <code>obj is None</code></strong> — this is the class-level access pattern. Returning the descriptor object allows <code>MyClass.attr</code> to return the descriptor for inspection.</li>
+      <li><strong>Understand that <code>property</code> is a data descriptor</strong> — it always wins over instance <code>__dict__</code>, which is why <code>obj.__dict__['x'] = 99</code> cannot bypass a <code>@property</code>.</li>
+    </ul>
+
+    <!-- ── Exercises ── -->
+    <h2 id="exercises">Exercises</h2>
+    <div class="exercise-section">
+
+      <div class="exercise">
+        <h3>Exercise 1 — Observable Descriptor</h3>
+        <p>
+          Build an <code>Observable</code> descriptor that calls registered callbacks
+          whenever the value changes:
+        </p>
+        <ul>
+          <li>Implement <code>__get__</code>, <code>__set__</code>, <code>__set_name__</code>.</li>
+          <li>On <code>__set__</code>, call all registered callbacks with <code>(instance, old_value, new_value)</code>.</li>
+          <li>Add a class-level <code>observe(instance, callback)</code> method that registers a callback for a specific instance.</li>
+          <li>Test: create a <code>Sensor</code> class with <code>temperature = Observable(float)</code>; register a callback that logs changes; verify it fires on assignment.</li>
+          <li>Ensure multiple instances have independent callback lists.</li>
+        </ul>
+        <details>
+          <summary>💡 Hint</summary>
+          <pre><code class="language-python">from collections import defaultdict
+import weakref
+
+class Observable:
+    def __set_name__(self, owner, name):
+        self.name = name
+        self.private = f"_{name}"
+
+    def __get__(self, obj, objtype=None):
+        if obj is None: return self
+        return getattr(obj, self.private, None)
+
+    def __set__(self, obj, value):
+        old = getattr(obj, self.private, None)
+        setattr(obj, self.private, value)
+        key = id(obj)
+        for cb in self._callbacks.get(key, []):
+            cb(obj, old, value)
+
+    def __init__(self, typ=None):
+        self.typ = typ
+        self._callbacks: dict[int, list] = defaultdict(list)
+
+    def observe(self, instance, callback):
+        self._callbacks[id(instance)].append(callback)
+
+class Sensor:
+    temperature = Observable(float)
+
+s = Sensor()
+Sensor.temperature.observe(s, lambda inst, old, new: print(f"Changed: {old} → {new}"))
+s.temperature = 22.5   # prints: Changed: None → 22.5
+s.temperature = 25.0   # prints: Changed: 22.5 → 25.0</code></pre>
+        </details>
+      </div>
+
+      <div class="exercise">
+        <h3>Exercise 2 — <code>__slots__</code> Benchmark</h3>
+        <p>
+          Quantify the memory and speed benefit of <code>__slots__</code> over <code>__dict__</code>:
+        </p>
+        <ul>
+          <li>Create two identical classes — <code>PointDict</code> (no slots) and <code>PointSlots</code> (with <code>__slots__ = ("x", "y")</code>).</li>
+          <li>Instantiate 1 000 000 of each; measure peak memory with <code>tracemalloc</code>.</li>
+          <li>Benchmark attribute read speed with <code>timeit</code> (read <code>obj.x</code> 10 million times on each).</li>
+          <li>Print a summary table showing: object size, total memory for 1M objects, attribute read time.</li>
+          <li>Inspect <code>PointSlots.__dict__["x"]</code> to confirm it is a <code>member_descriptor</code>.</li>
+        </ul>
+        <details>
+          <summary>💡 Hint</summary>
+          <pre><code class="language-python">import sys, tracemalloc, timeit
+
+class PointDict:
+    def __init__(self, x, y): self.x, self.y = x, y
+
+class PointSlots:
+    __slots__ = ("x", "y")
+    def __init__(self, x, y): self.x, self.y = x, y
+
+for cls in (PointDict, PointSlots):
+    tracemalloc.start()
+    objs = [cls(i, i) for i in range(1_000_000)]
+    _, peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+    read_time = timeit.timeit(lambda: objs[0].x, number=10_000_000)
+    print(f"{cls.__name__:12s}  size={sys.getsizeof(objs[0])}B  "
+          f"peak={peak/1e6:.1f}MB  read={read_time:.3f}s")</code></pre>
+        </details>
+      </div>
+
+      <div class="exercise">
+        <h3>Exercise 3 — Proxy with Audit Trail</h3>
+        <p>
+          Build an <code>AuditProxy</code> that wraps any object and records every
+          attribute read, write, and delete as a timestamped log entry:
+        </p>
+        <ul>
+          <li>Override <code>__getattr__</code>, <code>__setattr__</code>, and <code>__delattr__</code>.</li>
+          <li>For writes: record <code>(timestamp, "set", attr, old_value, new_value)</code>.</li>
+          <li>For reads: record <code>(timestamp, "get", attr, value)</code>.</li>
+          <li>Expose a <code>get_audit_log()</code> method that returns the full history.</li>
+          <li>Test with a <code>Config</code> dataclass; verify the log captures all operations in order.</li>
+          <li>Ensure accesses to the proxy's own internals (<code>_target</code>, <code>_log</code>) do NOT appear in the audit log.</li>
+        </ul>
+        <details>
+          <summary>💡 Hint</summary>
+          <pre><code class="language-python">from datetime import datetime, timezone
+
+class AuditProxy:
+    _INTERNAL = frozenset({"_target", "_log"})
+
+    def __init__(self, target):
+        object.__setattr__(self, "_target", target)
+        object.__setattr__(self, "_log", [])
+
+    def _record(self, entry):
+        object.__getattribute__(self, "_log").append(entry)
+
+    def get_audit_log(self):
+        return list(object.__getattribute__(self, "_log"))
+
+    def __getattr__(self, name):
+        target = object.__getattribute__(self, "_target")
+        value  = getattr(target, name)
+        self._record((datetime.now(timezone.utc), "get", name, value))
+        return value
+
+    def __setattr__(self, name, value):
+        if name in AuditProxy._INTERNAL:
+            object.__setattr__(self, name, value)
+            return
+        target  = object.__getattribute__(self, "_target")
+        old_val = getattr(target, name, "<unset>")
+        setattr(target, name, value)
+        self._record((datetime.now(timezone.utc), "set", name, old_val, value))
+
+    def __delattr__(self, name):
+        target = object.__getattribute__(self, "_target")
+        delattr(target, name)
+        self._record((datetime.now(timezone.utc), "del", name))
+
+from dataclasses import dataclass
+
+@dataclass
+class Config:
+    debug: bool = False
+    version: str = "1.0"
+
+proxy = AuditProxy(Config())
+proxy.debug   = True
+proxy.version = "2.0"
+_ = proxy.debug
+for entry in proxy.get_audit_log():
+    print(entry)</code></pre>
+        </details>
+      </div>
+
+    </div><!-- /exercise-section -->
+
+    <div id="quiz-section"></div>
+    <div id="lesson-nav-footer"></div>
+  </div><!-- /content -->
+</div><!-- /main -->
+
+<script src="../assets/nav-data.js"></script>
+<script src="../assets/nav.js"></script>
+<script src="../assets/quiz.js"></script>
+<script src="../assets/highlight.js"></script>
+
+<script>
+buildLessonFooter();
+
+QuizWidget.render("quiz-section", [
+  {
+    question: "In Python's attribute lookup chain, why does a data descriptor take priority over an instance's `__dict__` entry?",
+    options: [
+      "Because data descriptors are stored in the class __dict__ which is always searched before instance __dict__",
+      "Because `object.__getattribute__` explicitly checks for data descriptors (those with __set__ or __delete__) before looking in instance __dict__ — ensuring that property setters and validators cannot be bypassed by direct __dict__ writes",
+      "Because instance __dict__ is only used for plain data storage and is never searched during attribute lookup",
+      "Because Python caches data descriptor results separately from instance __dict__ for performance"
+    ],
+    correct: 1,
+    explanation: "object.__getattribute__ implements a specific algorithm: it first scans the MRO for a data descriptor (any class attribute with __set__ or __delete__). If found, it calls descriptor.__get__ immediately, before even looking at instance __dict__. This is intentional — it prevents instance __dict__ from shadowing a property or validated field. If only __get__ is defined (non-data descriptor), instance __dict__ is checked first, which is why cached_property and bound methods can be overridden per-instance."
+  },
+  {
+    question: "What is the difference between `__getattr__` and `__getattribute__`?",
+    options: [
+      "__getattribute__ is for class attributes; __getattr__ is for instance attributes",
+      "__getattribute__ is called on every attribute access and implements the full lookup chain; __getattr__ is only called as a last resort when __getattribute__ raises AttributeError",
+      "__getattr__ is faster because it skips the MRO lookup; __getattribute__ always does a full MRO scan",
+      "They are aliases — Python calls whichever one is defined on the class"
+    ],
+    correct: 1,
+    explanation: "__getattribute__ is the entry point for ALL attribute access — it is called first, every time, and it implements the full descriptor/MRO/instance-dict lookup algorithm. __getattr__ is a fallback hook that is invoked only when __getattribute__ raises AttributeError (i.e. the attribute was not found anywhere). For most use cases (proxy objects, dynamic attributes, missing-key defaults), __getattr__ is the right hook — it is simpler and less likely to cause infinite recursion. Override __getattribute__ only when you need to intercept every access, and always call super().__getattribute__(name) to avoid breaking normal lookup."
+  },
+  {
+    question: "Why is storing descriptor state on `self` (the descriptor object) a bug when multiple instances use the same descriptor?",
+    options: [
+      "Python prevents writing to descriptor objects — they are immutable",
+      "The descriptor is a single class-level object shared by all instances; writing to self.value inside __set__ means all instances share the same storage — the last write wins for all of them",
+      "Descriptor state stored on self is garbage-collected before it can be read back",
+      "It works correctly for the first instance but raises AttributeError for subsequent ones"
+    ],
+    correct: 1,
+    explanation: "A descriptor is placed once in the class __dict__ and that single instance is used for all instances of the class. If __set__ does self.value = v, it stores the value on the descriptor object itself. Every instance that writes to the attribute overwrites the same slot — so all instances end up seeing the last-written value. The correct pattern is to store instance data in the instance's own __dict__ (or in a separate per-instance mapping keyed by id(obj)), using a private key like f'_{name}'. __set_name__ provides the attribute name to construct that key."
+  },
+  {
+    question: "How does a regular Python method receive `self` automatically when called on an instance?",
+    options: [
+      "Python's parser inserts the instance as the first argument at the call site automatically during compilation",
+      "Functions are non-data descriptors — when accessed via an instance, function.__get__(instance, type) is called, returning a bound method object that wraps the function with the instance pre-filled as the first argument",
+      "The CALL bytecode always passes the object on the left of the dot as the first argument",
+      "The class stores a parallel __bound_methods__ dict that maps method names to pre-bound callables"
+    ],
+    correct: 1,
+    explanation: "Plain functions defined in a class body are non-data descriptors — they implement __get__ but not __set__. When you access obj.method, Python calls function.__get__(obj, type(obj)), which returns a bound method object. This bound method wraps the function and stores a reference to obj. When the bound method is called, it prepends obj as the first positional argument before forwarding the call to the underlying function. This is the entire mechanism behind self — there is no compiler magic, just the descriptor protocol."
+  },
+  {
+    question: "What makes `functools.cached_property` work as a cache that can be invalidated by `del obj.attr`?",
+    options: [
+      "cached_property uses a WeakValueDictionary keyed by instance id to store cached values",
+      "cached_property is a non-data descriptor (no __set__) so instance __dict__ wins over it; on first access it computes the value and stores it directly in instance __dict__; del obj.attr removes the __dict__ entry, letting the descriptor recompute on the next access",
+      "cached_property registers a __del__ hook on the instance that clears the cache when the instance is garbage-collected",
+      "cached_property uses a class-level LRU cache keyed by (id(instance), attr_name) with a configurable maxsize"
+    ],
+    correct: 1,
+    explanation: "cached_property is a non-data descriptor — it has __get__ but no __set__ or __delete__. Python's lookup rule for non-data descriptors is: check instance __dict__ first; only call __get__ if the key is absent. On first access, cached_property.__get__ computes the value and writes it directly into obj.__dict__[attr_name]. On subsequent accesses, the instance __dict__ entry is found first (higher priority than the non-data descriptor) and returned immediately — the descriptor is never called again. del obj.attr removes the __dict__ entry, so the next access falls through to the descriptor again and recomputes. This is an elegant use of the priority rules."
+  }
+]);
+</script>
+</body>
+</html>

@@ -1,0 +1,341 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lesson 12: Pod Disruption Budgets</title>
+    <style>
+        :root {
+            --bg: #fafafa; --text: #1a1a1a; --accent: #326ce5;
+            --accent-light: #e8f0fe; --border: #e0e0e0; --code-bg: #f5f5f5;
+            --success: #2e7d32; --warn: #f57c00;
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: 'Georgia', serif; line-height: 1.7; color: var(--text); background: var(--bg); max-width: 780px; margin: 0 auto; padding: 2rem 1.5rem; }
+        h1 { font-size: 2rem; margin-bottom: 0.5rem; color: var(--accent); }
+        h2 { font-size: 1.4rem; margin-top: 2.5rem; margin-bottom: 0.8rem; border-bottom: 2px solid var(--accent); padding-bottom: 0.3rem; }
+        h3 { font-size: 1.1rem; margin-top: 1.5rem; margin-bottom: 0.5rem; }
+        p { margin-bottom: 1rem; }
+        .meta { color: #666; font-size: 0.9rem; margin-bottom: 2rem; }
+        .key-insight { background: var(--accent-light); border-left: 4px solid var(--accent); padding: 1rem 1.2rem; margin: 1.5rem 0; border-radius: 0 4px 4px 0; }
+        .key-insight strong { color: var(--accent); }
+        .production-note { background: #fff3e0; border-left: 4px solid var(--warn); padding: 1rem 1.2rem; margin: 1.5rem 0; border-radius: 0 4px 4px 0; }
+        .production-note::before { content: "🏭 Production: "; font-weight: bold; }
+        .exam-tip { background: #e8f5e9; border-left: 4px solid var(--success); padding: 1rem 1.2rem; margin: 1.5rem 0; border-radius: 0 4px 4px 0; }
+        .exam-tip::before { content: "🎯 Exam Tip: "; font-weight: bold; color: var(--success); }
+        code { font-family: 'Menlo', 'Consolas', monospace; font-size: 0.85em; background: var(--code-bg); padding: 0.15em 0.4em; border-radius: 3px; }
+        pre { background: var(--code-bg); padding: 1rem; border-radius: 4px; overflow-x: auto; margin: 1rem 0; font-size: 0.85rem; line-height: 1.5; }
+        ul, ol { margin: 0.5rem 0 1rem 1.5rem; }
+        li { margin-bottom: 0.4rem; }
+        table { width: 100%; border-collapse: collapse; margin: 1rem 0; font-size: 0.9rem; }
+        th, td { border: 1px solid var(--border); padding: 0.6rem 0.8rem; text-align: left; }
+        th { background: var(--accent-light); font-weight: bold; }
+        .diagram { background: white; border: 1px solid var(--border); border-radius: 8px; padding: 1.5rem; margin: 1.5rem 0; text-align: center; }
+        .cert-badge { display: inline-block; background: var(--accent); color: white; font-size: 0.7rem; padding: 0.15rem 0.5rem; border-radius: 10px; margin-left: 0.5rem; }
+        .quiz { background: #f9f9f9; border: 1px solid var(--border); border-radius: 8px; padding: 1.5rem; margin-top: 2rem; }
+        .quiz h2 { border-bottom: none; margin-top: 0; }
+        .quiz-q { margin-bottom: 1.2rem; }
+        .quiz-q p { font-weight: bold; margin-bottom: 0.3rem; }
+        .quiz-answer { display: none; background: #e8f5e9; padding: 0.5rem 0.8rem; border-radius: 4px; margin-top: 0.5rem; }
+        .reveal-btn { background: var(--accent); color: white; border: none; padding: 0.3rem 0.8rem; border-radius: 4px; cursor: pointer; font-size: 0.8rem; }
+        .reveal-btn:hover { opacity: 0.85; }
+    </style>
+</head>
+<body>
+
+<h1>Lesson 12: Pod Disruption Budgets</h1>
+<p class="meta">Chapter 2: Core Workloads · <span class="cert-badge">CKA</span> <span class="cert-badge">CKAD</span> · ~15 min</p>
+
+<p>Kubernetes will sometimes need to evict your Pods — during node drains, cluster upgrades, or autoscaler scale-downs. A <strong>Pod Disruption Budget (PDB)</strong> tells Kubernetes how much disruption your application can tolerate, preventing it from taking down too many Pods at once.</p>
+
+<h2>1. Voluntary vs Involuntary Disruptions</h2>
+
+<table>
+    <tr><th>Type</th><th>Cause</th><th>PDB Respected?</th></tr>
+    <tr><td><strong>Voluntary</strong></td><td><code>kubectl drain</code>, cluster autoscaler scale-down, rolling updates, Pod eviction API</td><td>✅ Yes — PDB blocks the operation until safe</td></tr>
+    <tr><td><strong>Involuntary</strong></td><td>Node crash, OOMKill, kernel panic, hardware failure</td><td>❌ No — these happen without asking</td></tr>
+</table>
+
+<div class="key-insight">
+    <strong>PDBs only protect against voluntary disruptions.</strong> If a node's power goes out, Kubernetes can't ask permission first — your Pods die regardless of PDB. PDBs protect you from <em>controlled</em> operations: drains, upgrades, and autoscaler decisions.
+</div>
+
+<h3>The Eviction API</h3>
+
+<p>Voluntary disruptions go through the <strong>Eviction API</strong> (<code>POST /api/v1/namespaces/{ns}/pods/{name}/eviction</code>). This API checks PDBs before allowing the eviction. Tools that use it:</p>
+
+<ul>
+    <li><code>kubectl drain</code> — evicts all Pods from a node</li>
+    <li>Cluster Autoscaler — evicts Pods before removing a node</li>
+    <li>Descheduler — moves Pods for better balance</li>
+    <li>Node upgrades (kubeadm) — cordons and drains nodes</li>
+</ul>
+
+<p><code>kubectl delete pod</code> does <strong>NOT</strong> go through the Eviction API — it directly deletes the Pod and ignores PDBs.</p>
+
+<div class="production-note">
+    This distinction matters: if ops team uses <code>kubectl delete pod</code> to "drain" a node manually, PDBs won't protect you. Always use <code>kubectl drain</code> or the Eviction API for controlled operations.
+</div>
+
+<h2>2. PDB Configuration</h2>
+
+<p>A PDB targets Pods via a label selector (just like a Service) and specifies one of two constraints:</p>
+
+<h3>Option A: minAvailable</h3>
+
+<pre>apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: web-pdb
+spec:
+  minAvailable: 2              # At least 2 Pods must stay running
+  selector:
+    matchLabels:
+      app: web
+# If you have 3 Pods, only 1 can be disrupted at a time (3 - 2 = 1)</pre>
+
+<h3>Option B: maxUnavailable</h3>
+
+<pre>apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: web-pdb
+spec:
+  maxUnavailable: 1            # At most 1 Pod can be down at a time
+  selector:
+    matchLabels:
+      app: web
+# If you have 3 Pods, 1 can be disrupted (same result as minAvailable: 2)</pre>
+
+<h3>Percentage Values</h3>
+
+<pre>spec:
+  minAvailable: "80%"    # At least 80% of matched Pods must stay up
+  # 10 Pods × 80% = 8 must stay → 2 can be disrupted
+
+spec:
+  maxUnavailable: "25%"  # At most 25% can be down
+  # 10 Pods × 25% = 2 can be disrupted at once (rounds up)</pre>
+
+<h3>minAvailable vs maxUnavailable</h3>
+
+<table>
+    <tr><th></th><th>minAvailable</th><th>maxUnavailable</th></tr>
+    <tr><td>Semantics</td><td>"Keep at least N up"</td><td>"Allow at most N down"</td></tr>
+    <tr><td>As replicas scale</td><td>Fixed floor — more Pods can be disrupted as you scale up</td><td>Fixed disruption rate — scales proportionally</td></tr>
+    <tr><td>Best for</td><td>Quorum systems (need minimum N for correctness)</td><td>General services (tolerate proportional loss)</td></tr>
+</table>
+
+<div class="key-insight">
+    <strong>You can only set one:</strong> <code>minAvailable</code> OR <code>maxUnavailable</code>, never both. They're two ways to express the same constraint. Choose based on which is more natural for your application's availability requirement.
+</div>
+
+<h2>3. How PDBs Work in Practice</h2>
+
+<h3>kubectl drain Interaction</h3>
+
+<div class="diagram">
+<svg viewBox="0 0 650 180" xmlns="http://www.w3.org/2000/svg" font-family="Menlo, monospace" font-size="9">
+    <defs><marker id="arr12" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0 L10 5 L0 10z" fill="#326ce5"/></marker></defs>
+    
+    <text x="325" y="15" text-anchor="middle" font-weight="bold" font-size="10">kubectl drain node-2 (3 Pods, PDB minAvailable=2)</text>
+    
+    <!-- Step 1 -->
+    <rect x="20" y="30" width="180" height="45" rx="4" fill="#e8f0fe" stroke="#326ce5" stroke-width="1.5"/>
+    <text x="110" y="48" text-anchor="middle" font-size="9">1. Cordon node-2</text>
+    <text x="110" y="62" text-anchor="middle" font-size="8" fill="#666">(mark unschedulable)</text>
+    
+    <line x1="200" y1="52" x2="225" y2="52" stroke="#326ce5" stroke-width="1.5" marker-end="url(#arr12)"/>
+    
+    <!-- Step 2 -->
+    <rect x="225" y="30" width="180" height="45" rx="4" fill="#e8f0fe" stroke="#326ce5" stroke-width="1.5"/>
+    <text x="315" y="48" text-anchor="middle" font-size="9">2. Evict Pod on node-2</text>
+    <text x="315" y="62" text-anchor="middle" font-size="8" fill="#666">(checks PDB: 3-1=2 ≥ min 2 ✓)</text>
+    
+    <line x1="405" y1="52" x2="430" y2="52" stroke="#326ce5" stroke-width="1.5" marker-end="url(#arr12)"/>
+    
+    <!-- Step 3 -->
+    <rect x="430" y="30" width="200" height="45" rx="4" fill="#c8e6c9" stroke="#2e7d32" stroke-width="1.5"/>
+    <text x="530" y="48" text-anchor="middle" font-size="9">3. Eviction allowed ✓</text>
+    <text x="530" y="62" text-anchor="middle" font-size="8" fill="#666">Pod terminated, rescheduled elsewhere</text>
+    
+    <!-- Blocked scenario -->
+    <rect x="20" y="100" width="610" height="60" rx="4" fill="#ffcdd2" stroke="#c62828" stroke-width="1.5"/>
+    <text x="325" y="120" text-anchor="middle" font-weight="bold" font-size="10">If only 2 Pods are healthy (one already down):</text>
+    <text x="325" y="138" text-anchor="middle" font-size="9">Eviction API returns 429 Too Many Requests</text>
+    <text x="325" y="152" text-anchor="middle" font-size="9">kubectl drain retries with backoff until Pod becomes available or --timeout is reached</text>
+</svg>
+</div>
+
+<h3>Drain Behavior with PDB</h3>
+
+<pre># Normal drain (respects PDBs):
+kubectl drain node-2 --ignore-daemonsets --delete-emptydir-data
+# Waits if PDB would be violated, retries until budget allows
+
+# Drain with timeout:
+kubectl drain node-2 --timeout=300s
+# Gives up after 5 minutes if PDB blocks
+
+# Force drain (IGNORES PDBs — dangerous!):
+kubectl drain node-2 --disable-eviction
+# Directly deletes Pods, bypasses Eviction API entirely</pre>
+
+<div class="production-note">
+    During cluster upgrades, if a drain hangs because of a PDB, investigate: is the workload degraded (can't reach minAvailable even without the drain)? Common cause: another Pod already crashed, so the budget is already exhausted. Fix the unhealthy Pod first, then the drain will proceed.
+</div>
+
+<h3>PDB Status</h3>
+
+<pre>kubectl get pdb
+# NAME      MIN AVAILABLE   MAX UNAVAILABLE   ALLOWED DISRUPTIONS   AGE
+# web-pdb   2               N/A               1                     5d
+
+kubectl describe pdb web-pdb
+# Status:
+#   Current Healthy:    3
+#   Desired Healthy:    2
+#   Disruptions Allowed: 1    ← how many can be evicted right now
+#   Expected Pods:      3
+#   Observed Generation: 1</pre>
+
+<div class="key-insight">
+    <strong><code>Disruptions Allowed</code> is the key field.</strong> It shows how many Pods can be evicted RIGHT NOW without violating the budget. If it's 0, no voluntary evictions will succeed until a Pod recovers or a new one becomes Ready.
+</div>
+
+<h2>4. Common Patterns & Gotchas</h2>
+
+<h3>Pattern: Quorum-Based Systems</h3>
+
+<pre># etcd (3 nodes, needs quorum of 2):
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: etcd
+# Only 1 etcd Pod can be disrupted at a time
+# Guarantees quorum is always maintained</pre>
+
+<h3>Pattern: Stateless Web Service</h3>
+
+<pre># Web app with 10 replicas — can lose 20%:
+spec:
+  maxUnavailable: "20%"
+  selector:
+    matchLabels:
+      app: web
+# 2 Pods can be evicted simultaneously
+# Speeds up node drains while maintaining capacity</pre>
+
+<h3>Anti-Pattern: minAvailable = replicas</h3>
+
+<pre># ⚠️ DANGEROUS:
+spec:
+  minAvailable: 3    # with exactly 3 replicas
+# Disruptions Allowed = 0 → drain NEVER succeeds
+# This blocks cluster upgrades and autoscaler!</pre>
+
+<div class="production-note">
+    Never set <code>minAvailable</code> equal to your replica count (or <code>maxUnavailable: 0</code>). This creates an undrainable workload — cluster operations will hang forever waiting for permission that never comes. Always allow at least 1 disruption.
+</div>
+
+<h3>Gotcha: PDB and Single-Replica Deployments</h3>
+
+<pre># Single replica + PDB with minAvailable: 1
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: singleton
+# Disruptions Allowed = 0 (can't go below 1 if you only have 1)
+# Node drains will block!
+# Solution: either accept downtime or run ≥2 replicas</pre>
+
+<h3>Gotcha: PDB Doesn't Protect During Rolling Updates</h3>
+
+<p>Deployment rolling updates use their own <code>maxUnavailable</code> parameter, NOT the PDB. The PDB only applies to <em>external</em> disruptions (drain, autoscaler). The Deployment controller manages its own rollout budget independently.</p>
+
+<div class="exam-tip">
+    CKA exam: you may be asked to create a PDB. Remember: (1) it's in the <code>policy/v1</code> apiVersion, (2) selector must match the Pods you want to protect, (3) specify exactly one of minAvailable or maxUnavailable.
+</div>
+
+<h2>5. Unhealthy Pod Eviction Policy (K8s 1.27+)</h2>
+
+<p>By default, unhealthy Pods (not Ready) still count against the PDB — they can't be evicted either. The new <code>unhealthyPodEvictionPolicy</code> field changes this:</p>
+
+<table>
+    <tr><th>Policy</th><th>Behavior</th></tr>
+    <tr><td><code>IfHealthy</code> (default)</td><td>Only evict Pods if the budget allows (unhealthy Pods block drains too)</td></tr>
+    <tr><td><code>AlwaysAllow</code></td><td>Unhealthy Pods can always be evicted regardless of budget</td></tr>
+</table>
+
+<pre>spec:
+  maxUnavailable: 1
+  unhealthyPodEvictionPolicy: AlwaysAllow
+  selector:
+    matchLabels:
+      app: web
+# If a Pod is stuck in CrashLoopBackOff, it can be evicted
+# without counting against the budget</pre>
+
+<div class="key-insight">
+    <strong><code>AlwaysAllow</code> solves the "stuck drain" problem:</strong> If a Pod is already unhealthy (CrashLoopBackOff, not Ready), it's not contributing to availability anyway. Letting it be evicted unblocks node operations without sacrificing actual availability.
+</div>
+
+<h2>Summary</h2>
+
+<table>
+    <tr><th>Concept</th><th>Key Point</th></tr>
+    <tr><td>PDB</td><td>Limits how many Pods can be voluntarily disrupted at once</td></tr>
+    <tr><td>Voluntary disruption</td><td>drain, autoscaler, eviction API — respects PDB</td></tr>
+    <tr><td>Involuntary disruption</td><td>Node crash, OOMKill — ignores PDB (can't be prevented)</td></tr>
+    <tr><td>minAvailable</td><td>"Keep at least N up" — good for quorum systems</td></tr>
+    <tr><td>maxUnavailable</td><td>"Allow at most N down" — good for proportional tolerance</td></tr>
+    <tr><td>DisruptionsAllowed</td><td>Shows how many Pods can be evicted right now</td></tr>
+    <tr><td><code>kubectl delete pod</code></td><td>Does NOT respect PDBs (bypasses Eviction API)</td></tr>
+    <tr><td>Anti-pattern</td><td>minAvailable = replicas → blocks all drains forever</td></tr>
+</table>
+
+<!-- Quiz -->
+<div class="quiz">
+    <h2>📝 Quiz: Pod Disruption Budgets</h2>
+    
+    <div class="quiz-q">
+        <p>Q1: A Deployment has 5 replicas. PDB is <code>maxUnavailable: 2</code>. How many Pods can be evicted simultaneously?</p>
+        <button class="reveal-btn" onclick="this.nextElementSibling.style.display='block'">Show Answer</button>
+        <div class="quiz-answer"><strong>2 Pods.</strong> maxUnavailable: 2 means at most 2 Pods can be down at any time. With 5 replicas and all healthy, disruptionsAllowed = 2.</div>
+    </div>
+    
+    <div class="quiz-q">
+        <p>Q2: A node crashes, killing 2 Pods. The PDB says <code>minAvailable: 3</code> and there were 5 Pods. Does the PDB prevent this?</p>
+        <button class="reveal-btn" onclick="this.nextElementSibling.style.display='block'">Show Answer</button>
+        <div class="quiz-answer"><strong>No.</strong> Node crashes are <em>involuntary</em> disruptions. PDBs only protect against voluntary disruptions (eviction API, drain). The Pods are killed regardless. The PDB will prevent further voluntary evictions until Pods recover to at least 3 healthy.</div>
+    </div>
+    
+    <div class="quiz-q">
+        <p>Q3: You run <code>kubectl drain node-1</code> but it hangs. <code>kubectl get pdb</code> shows <code>ALLOWED DISRUPTIONS: 0</code>. Why and how do you fix it?</p>
+        <button class="reveal-btn" onclick="this.nextElementSibling.style.display='block'">Show Answer</button>
+        <div class="quiz-answer">The PDB budget is exhausted — not enough healthy Pods to allow any more evictions (e.g., a Pod on another node is already unhealthy). Fix: <strong>(1)</strong> Check Pod health: <code>kubectl get pods -l app=web</code>. <strong>(2)</strong> Fix the unhealthy Pod (or delete it if stuck). <strong>(3)</strong> Once a replacement becomes Ready, disruptionsAllowed goes back up and the drain proceeds.</div>
+    </div>
+    
+    <div class="quiz-q">
+        <p>Q4: What's the difference between <code>kubectl drain</code> and <code>kubectl delete pod</code> regarding PDBs?</p>
+        <button class="reveal-btn" onclick="this.nextElementSibling.style.display='block'">Show Answer</button>
+        <div class="quiz-answer"><code>kubectl drain</code> uses the <strong>Eviction API</strong> which checks PDBs — it will wait/retry if the budget doesn't allow eviction.<br><code>kubectl delete pod</code> <strong>bypasses the Eviction API</strong> entirely — it directly deletes the Pod regardless of any PDB. Never use <code>delete pod</code> for operational drains.</div>
+    </div>
+    
+    <div class="quiz-q">
+        <p>Q5: You have a 3-replica etcd cluster. What PDB configuration ensures quorum is always maintained during drains?</p>
+        <button class="reveal-btn" onclick="this.nextElementSibling.style.display='block'">Show Answer</button>
+        <div class="quiz-answer"><code>minAvailable: 2</code> (quorum for 3-node Raft). This ensures at least 2 etcd Pods are always up, allowing only 1 to be evicted at a time. Drains proceed one node at a time, maintaining consensus throughout.</div>
+    </div>
+    
+    <div class="quiz-q">
+        <p>Q6: A PDB has <code>minAvailable: "80%"</code> and the Deployment has 4 replicas. How many disruptions are allowed?</p>
+        <button class="reveal-btn" onclick="this.nextElementSibling.style.display='block'">Show Answer</button>
+        <div class="quiz-answer"><strong>0 disruptions.</strong> 80% of 4 = 3.2, rounded up to 4. So minAvailable=4 with 4 replicas → no Pod can be evicted. This is the percentage gotcha — at small replica counts, 80% can effectively mean "allow zero." Better to use absolute numbers for small replica counts.</div>
+    </div>
+</div>
+
+</body>
+</html>

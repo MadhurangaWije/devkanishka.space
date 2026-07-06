@@ -1,0 +1,397 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lesson 29: Advanced Networking — Overlay, Mesh, eBPF</title>
+<link rel="stylesheet" href="../assets/lesson-style.css">
+</head>
+<body>
+<nav class="lesson-nav">
+  <a href="0028-building-your-own-container-runtime.html">&larr; Previous: Building Your Own Container Runtime</a>
+  <a href="0030-the-future.html">Next: The Future &rarr;</a>
+</nav>
+
+<article>
+<h1>Lesson 29: Advanced Networking — Overlay, Mesh, eBPF</h1>
+<p class="subtitle">Deep networking internals for designing distributed system architectures</p>
+
+<!-- ════════════════════════════════════════════ -->
+<section>
+<h2>1. Recap: Single-Host Networking</h2>
+<p>On a single Docker host, container networking is straightforward:</p>
+<ul>
+  <li><strong>veth pairs</strong> — virtual Ethernet cables connecting each container to a bridge</li>
+  <li><strong>docker0 bridge</strong> — a software switch that forwards frames between containers</li>
+  <li><strong>iptables NAT</strong> — masquerades outbound traffic and routes published ports</li>
+</ul>
+<p>This works perfectly on one machine. But real production systems span dozens or hundreds of hosts. How do containers on <em>different</em> hosts communicate as if they're on the same LAN?</p>
+</section>
+
+<!-- ════════════════════════════════════════════ -->
+<section>
+<h2>2. Overlay Networks</h2>
+<p><strong>The problem:</strong> Container A on Host 1 (IP 10.0.1.5) needs to reach Container B on Host 2 (IP 10.0.1.9). The underlying physical network only knows about host IPs — it has no route to 10.0.1.x.</p>
+<p><strong>The solution:</strong> Encapsulate the container-to-container packet inside a host-to-host packet. The physical network delivers the outer packet; the destination host unwraps it and delivers the inner packet to the target container.</p>
+<p><strong>VXLAN</strong> (Virtual eXtensible LAN) is the dominant overlay protocol. It wraps full Layer 2 Ethernet frames inside UDP packets (port 4789).</p>
+
+<!-- VXLAN Encapsulation Diagram -->
+<svg viewBox="0 0 800 340" xmlns="http://www.w3.org/2000/svg" style="max-width:800px;margin:1.5em auto;display:block;">
+  <!-- Host 1 -->
+  <rect x="30" y="20" width="320" height="130" rx="8" fill="#e3f2fd" stroke="#1565c0" stroke-width="2"/>
+  <text x="190" y="45" text-anchor="middle" font-weight="bold" font-size="14" fill="#1565c0">Host 1 (192.168.1.10)</text>
+  <rect x="60" y="60" width="120" height="50" rx="5" fill="#bbdefb" stroke="#1565c0"/>
+  <text x="120" y="90" text-anchor="middle" font-size="12">Container A</text>
+  <text x="120" y="105" text-anchor="middle" font-size="10" fill="#555">10.0.1.5</text>
+  <rect x="210" y="60" width="120" height="50" rx="5" fill="#c8e6c9" stroke="#2e7d32"/>
+  <text x="270" y="90" text-anchor="middle" font-size="12">VTEP</text>
+  <text x="270" y="105" text-anchor="middle" font-size="10" fill="#555">encap/decap</text>
+
+  <!-- Host 2 -->
+  <rect x="450" y="20" width="320" height="130" rx="8" fill="#fce4ec" stroke="#c62828" stroke-width="2"/>
+  <text x="610" y="45" text-anchor="middle" font-weight="bold" font-size="14" fill="#c62828">Host 2 (192.168.1.20)</text>
+  <rect x="480" y="60" width="120" height="50" rx="5" fill="#c8e6c9" stroke="#2e7d32"/>
+  <text x="540" y="90" text-anchor="middle" font-size="12">VTEP</text>
+  <text x="540" y="105" text-anchor="middle" font-size="10" fill="#555">encap/decap</text>
+  <rect x="630" y="60" width="120" height="50" rx="5" fill="#ffcdd2" stroke="#c62828"/>
+  <text x="690" y="90" text-anchor="middle" font-size="12">Container B</text>
+  <text x="690" y="105" text-anchor="middle" font-size="10" fill="#555">10.0.1.9</text>
+
+  <!-- Wire between hosts -->
+  <line x1="330" y1="85" x2="480" y2="85" stroke="#333" stroke-width="2" stroke-dasharray="6,3"/>
+  <text x="405" y="78" text-anchor="middle" font-size="11" fill="#333">Physical Network</text>
+
+  <!-- Encapsulated packet diagram -->
+  <rect x="100" y="180" width="600" height="60" rx="6" fill="#fff3e0" stroke="#e65100" stroke-width="2"/>
+  <text x="400" y="198" text-anchor="middle" font-size="11" font-weight="bold" fill="#e65100">Outer Packet (Host-to-Host)</text>
+  <rect x="115" y="205" width="130" height="28" rx="4" fill="#ffe0b2" stroke="#e65100"/>
+  <text x="180" y="224" text-anchor="middle" font-size="10">Outer Eth + IP + UDP</text>
+  <rect x="255" y="205" width="80" height="28" rx="4" fill="#ffcc80" stroke="#e65100"/>
+  <text x="295" y="224" text-anchor="middle" font-size="10">VXLAN Hdr</text>
+  <rect x="345" y="205" width="340" height="28" rx="4" fill="#a5d6a7" stroke="#2e7d32" stroke-width="2"/>
+  <text x="515" y="224" text-anchor="middle" font-size="10" font-weight="bold" fill="#1b5e20">Inner Packet: Eth | IP (10.0.1.5→10.0.1.9) | Payload</text>
+
+  <!-- Labels -->
+  <text x="400" y="270" text-anchor="middle" font-size="12" fill="#555">Physical network sees: 192.168.1.10 → 192.168.1.20 (UDP:4789)</text>
+  <text x="400" y="290" text-anchor="middle" font-size="12" fill="#555">Containers see: 10.0.1.5 → 10.0.1.9 (direct L2)</text>
+
+  <!-- Arrows -->
+  <path d="M120 110 L120 135 L270 135 L270 110" fill="none" stroke="#1565c0" stroke-width="1.5" marker-end="url(#arrowBlue)"/>
+  <path d="M540 110 L540 135 L690 135 L690 110" fill="none" stroke="#c62828" stroke-width="1.5" marker-start="url(#arrowRed)"/>
+  <defs>
+    <marker id="arrowBlue" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#1565c0"/></marker>
+    <marker id="arrowRed" markerWidth="8" markerHeight="6" refX="0" refY="3" orient="auto"><path d="M8,0 L0,3 L8,6" fill="#c62828"/></marker>
+  </defs>
+</svg>
+</section>
+
+<!-- ════════════════════════════════════════════ -->
+<section>
+<h2>3. How VXLAN Works</h2>
+<ul>
+  <li><strong>VTEP</strong> (Virtual Tunnel Endpoint) — a kernel-level component on each host that handles encapsulation and decapsulation.</li>
+  <li><strong>ARP resolution</strong> — when Container A needs Container B's MAC, the VTEP resolves it across hosts (via multicast, unicast flooding, or a control plane lookup).</li>
+  <li><strong>Transparent to containers</strong> — containers see a flat L2 network; they don't know packets are being wrapped.</li>
+</ul>
+<h3>Performance Costs</h3>
+<table>
+  <tr><th>Cost</th><th>Impact</th></tr>
+  <tr><td>MTU reduction</td><td>~50 bytes overhead → effective MTU drops from 1500 to ~1450</td></tr>
+  <tr><td>CPU overhead</td><td>Encap/decap processing per packet</td></tr>
+  <tr><td>Latency</td><td>Slight increase due to extra headers and processing</td></tr>
+</table>
+</section>
+
+<!-- ════════════════════════════════════════════ -->
+<section>
+<h2>4. CNI Plugins (Kubernetes)</h2>
+<p><strong>CNI</strong> (Container Network Interface) is the Kubernetes standard for pluggable networking. Each plugin implements pod-to-pod connectivity differently:</p>
+
+<table>
+  <thead>
+    <tr>
+      <th>Plugin</th>
+      <th>Approach</th>
+      <th>Overlay?</th>
+      <th>Network Policy</th>
+      <th>Key Feature</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>Flannel</strong></td>
+      <td>VXLAN overlay</td>
+      <td>Yes</td>
+      <td>No (needs Calico add-on)</td>
+      <td>Simple, easy setup</td>
+    </tr>
+    <tr>
+      <td><strong>Calico</strong></td>
+      <td>BGP routing</td>
+      <td>No (native routing)</td>
+      <td>Yes (rich policies)</td>
+      <td>High performance, no encap overhead</td>
+    </tr>
+    <tr>
+      <td><strong>Cilium</strong></td>
+      <td>eBPF datapath</td>
+      <td>Optional</td>
+      <td>Yes (L3–L7)</td>
+      <td>No iptables, observability built-in</td>
+    </tr>
+    <tr>
+      <td><strong>Weave</strong></td>
+      <td>Mesh overlay</td>
+      <td>Yes</td>
+      <td>Yes</td>
+      <td>Automatic encryption, peer discovery</td>
+    </tr>
+  </tbody>
+</table>
+</section>
+
+<!-- ════════════════════════════════════════════ -->
+<section>
+<h2>5. The eBPF Revolution</h2>
+<p><strong>eBPF</strong> (extended Berkeley Packet Filter) lets you run sandboxed programs <em>inside the Linux kernel</em> without modifying kernel source or loading kernel modules.</p>
+
+<h3>For Networking, eBPF Replaces iptables</h3>
+<ul>
+  <li><strong>iptables problem:</strong> rules are evaluated sequentially — O(n). At thousands of services, rule traversal becomes a bottleneck.</li>
+  <li><strong>eBPF solution:</strong> hash-map lookups — O(1). Programmable packet processing with zero-copy.</li>
+</ul>
+
+<h3>What Cilium Uses eBPF For</h3>
+<ul>
+  <li>Pod-to-pod routing</li>
+  <li>Service load balancing (replaces kube-proxy)</li>
+  <li>Network policy enforcement</li>
+  <li>Observability (Hubble)</li>
+</ul>
+
+<!-- eBPF vs iptables Diagram -->
+<svg viewBox="0 0 800 280" xmlns="http://www.w3.org/2000/svg" style="max-width:800px;margin:1.5em auto;display:block;">
+  <!-- iptables side -->
+  <text x="190" y="25" text-anchor="middle" font-weight="bold" font-size="14" fill="#c62828">iptables (Sequential Chain)</text>
+  <rect x="30" y="40" width="320" height="220" rx="8" fill="#ffebee" stroke="#c62828" stroke-width="1.5"/>
+
+  <rect x="60" y="55" width="100" height="30" rx="4" fill="#ffcdd2" stroke="#c62828"/>
+  <text x="110" y="75" text-anchor="middle" font-size="10">PREROUTING</text>
+  <rect x="60" y="95" width="100" height="30" rx="4" fill="#ffcdd2" stroke="#c62828"/>
+  <text x="110" y="115" text-anchor="middle" font-size="10">FORWARD</text>
+  <rect x="60" y="135" width="100" height="30" rx="4" fill="#ffcdd2" stroke="#c62828"/>
+  <text x="110" y="155" text-anchor="middle" font-size="10">Rule 1...N</text>
+  <rect x="60" y="175" width="100" height="30" rx="4" fill="#ffcdd2" stroke="#c62828"/>
+  <text x="110" y="195" text-anchor="middle" font-size="10">POSTROUTING</text>
+  <rect x="60" y="215" width="100" height="30" rx="4" fill="#ef9a9a" stroke="#c62828"/>
+  <text x="110" y="235" text-anchor="middle" font-size="10">DELIVER</text>
+
+  <!-- Arrows down iptables -->
+  <line x1="110" y1="85" x2="110" y2="95" stroke="#c62828" stroke-width="1.5" marker-end="url(#iptArr)"/>
+  <line x1="110" y1="125" x2="110" y2="135" stroke="#c62828" stroke-width="1.5" marker-end="url(#iptArr)"/>
+  <line x1="110" y1="165" x2="110" y2="175" stroke="#c62828" stroke-width="1.5" marker-end="url(#iptArr)"/>
+  <line x1="110" y1="205" x2="110" y2="215" stroke="#c62828" stroke-width="1.5" marker-end="url(#iptArr)"/>
+
+  <text x="230" y="80" font-size="11" fill="#c62828">Every packet traverses</text>
+  <text x="230" y="95" font-size="11" fill="#c62828">ALL chains sequentially</text>
+  <text x="230" y="130" font-size="13" font-weight="bold" fill="#c62828">O(n) per packet</text>
+  <text x="230" y="155" font-size="11" fill="#888">n = number of rules</text>
+  <text x="230" y="200" font-size="11" fill="#c62828">1000 services =</text>
+  <text x="230" y="215" font-size="11" fill="#c62828">~20,000 iptables rules</text>
+
+  <!-- eBPF side -->
+  <text x="600" y="25" text-anchor="middle" font-weight="bold" font-size="14" fill="#2e7d32">eBPF (Direct Hash Lookup)</text>
+  <rect x="450" y="40" width="320" height="220" rx="8" fill="#e8f5e9" stroke="#2e7d32" stroke-width="1.5"/>
+
+  <rect x="480" y="70" width="120" height="35" rx="4" fill="#c8e6c9" stroke="#2e7d32"/>
+  <text x="540" y="92" text-anchor="middle" font-size="11">Packet arrives</text>
+
+  <rect x="480" y="130" width="120" height="35" rx="4" fill="#a5d6a7" stroke="#2e7d32"/>
+  <text x="540" y="148" text-anchor="middle" font-size="10">eBPF map lookup</text>
+  <text x="540" y="160" text-anchor="middle" font-size="10">(hash table)</text>
+
+  <rect x="480" y="190" width="120" height="35" rx="4" fill="#81c784" stroke="#2e7d32"/>
+  <text x="540" y="212" text-anchor="middle" font-size="11">Action / Forward</text>
+
+  <line x1="540" y1="105" x2="540" y2="130" stroke="#2e7d32" stroke-width="2" marker-end="url(#ebpfArr)"/>
+  <line x1="540" y1="165" x2="540" y2="190" stroke="#2e7d32" stroke-width="2" marker-end="url(#ebpfArr)"/>
+
+  <text x="660" y="100" font-size="13" font-weight="bold" fill="#2e7d32">O(1) per packet</text>
+  <text x="660" y="120" font-size="11" fill="#555">Regardless of # services</text>
+  <text x="660" y="160" font-size="11" fill="#2e7d32">Programmable:</text>
+  <text x="660" y="175" font-size="11" fill="#2e7d32">route, LB, policy,</text>
+  <text x="660" y="190" font-size="11" fill="#2e7d32">observe — in one pass</text>
+
+  <defs>
+    <marker id="iptArr" markerWidth="6" markerHeight="5" refX="6" refY="2.5" orient="auto"><path d="M0,0 L6,2.5 L0,5" fill="#c62828"/></marker>
+    <marker id="ebpfArr" markerWidth="6" markerHeight="5" refX="6" refY="2.5" orient="auto"><path d="M0,0 L6,2.5 L0,5" fill="#2e7d32"/></marker>
+  </defs>
+</svg>
+</section>
+
+<!-- ════════════════════════════════════════════ -->
+<section>
+<h2>6. Network Policies</h2>
+<p>Network policies are firewall rules for containers — specifying which pods can talk to which.</p>
+
+<pre><code># Kubernetes NetworkPolicy: only allow "api" pods to reach "db" on port 5432
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: db-allow-api-only
+spec:
+  podSelector:
+    matchLabels:
+      app: db
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: api
+      ports:
+        - protocol: TCP
+          port: 5432</code></pre>
+
+<p><strong>Key points:</strong></p>
+<ul>
+  <li>Default: all traffic allowed (no policies = open network)</li>
+  <li>Once a policy selects a pod, only explicitly allowed traffic is permitted (default-deny for that pod)</li>
+  <li>Calico and Cilium enforce policies at the kernel level (eBPF or iptables) — not in userspace proxies</li>
+</ul>
+</section>
+
+<!-- ════════════════════════════════════════════ -->
+<section>
+<h2>7. Service Mesh Networking</h2>
+<p>A service mesh adds a <strong>sidecar proxy</strong> (typically Envoy) next to every pod, intercepting all inbound and outbound traffic.</p>
+
+<h3>Capabilities</h3>
+<ul>
+  <li><strong>mTLS</strong> — mutual TLS between every service (zero-trust networking)</li>
+  <li><strong>Observability</strong> — every request is traced, metered, logged</li>
+  <li><strong>Traffic splitting</strong> — canary deployments by percentage (e.g., 5% to v2)</li>
+  <li><strong>Retries &amp; circuit breaking</strong> — resilience without code changes</li>
+</ul>
+
+<h3>Architecture</h3>
+<table>
+  <tr><th>Layer</th><th>Role</th><th>Example</th></tr>
+  <tr><td><strong>Data Plane</strong></td><td>Sidecar proxies that handle traffic</td><td>Envoy, Linkerd-proxy</td></tr>
+  <tr><td><strong>Control Plane</strong></td><td>Configures proxies, issues certs</td><td>Istio (istiod), Linkerd</td></tr>
+</table>
+</section>
+
+<!-- ════════════════════════════════════════════ -->
+<section>
+<h2>Hands-On: Docker Overlay Network Across Swarm Nodes</h2>
+<div class="hands-on">
+<p>Create a multi-host overlay network and verify cross-host communication:</p>
+<pre><code># On manager node: initialize swarm
+docker swarm init --advertise-addr &lt;MANAGER_IP&gt;
+
+# On worker node: join swarm (use token from init output)
+docker swarm join --token &lt;TOKEN&gt; &lt;MANAGER_IP&gt;:2377
+
+# Create overlay network
+docker network create --driver overlay --attachable my-overlay
+
+# On manager: run a container on the overlay
+docker run -dit --name web --network my-overlay alpine sleep 3600
+
+# On worker: run another container on the same overlay
+docker run -dit --name client --network my-overlay alpine sleep 3600
+
+# From client, ping web by container name (DNS resolves across hosts!)
+docker exec client ping -c 3 web
+
+# Inspect the network — see both containers
+docker network inspect my-overlay
+
+# Observe VXLAN in action (on either host):
+sudo tcpdump -i eth0 udp port 4789 -c 5</code></pre>
+<p><strong>What you should see:</strong> The <code>ping</code> succeeds across hosts. <code>tcpdump</code> shows UDP packets on port 4789 — that's the VXLAN encapsulation carrying your container traffic.</p>
+</div>
+</section>
+
+<!-- ════════════════════════════════════════════ -->
+<section>
+<h2>Industry Callout</h2>
+<div class="callout">
+<h3>🏭 eBPF in Production</h3>
+<ul>
+  <li><strong>Cloudflare</strong> uses eBPF (XDP) for DDoS mitigation — dropping malicious packets at the NIC driver level before they reach the kernel networking stack, handling 10+ Tbps of attack traffic.</li>
+  <li><strong>Google GKE</strong> adopted Cilium as the default CNI, using eBPF for pod networking, service load balancing, and network policy — eliminating kube-proxy and iptables entirely.</li>
+  <li><strong>Meta (Facebook)</strong> uses eBPF-based Katran for L4 load balancing across their global infrastructure.</li>
+</ul>
+</div>
+</section>
+
+<!-- ════════════════════════════════════════════ -->
+<section>
+<h2>Knowledge Check</h2>
+
+<div class="quiz" data-quiz="overlay-purpose">
+  <h3>Quiz 1: Overlay Networks</h3>
+  <p>What is the primary purpose of an overlay network like VXLAN?</p>
+  <div class="options">
+    <label><input type="radio" name="overlay-purpose" value="a"> To encrypt all container traffic</label>
+    <label><input type="radio" name="overlay-purpose" value="b"> To allow containers on different hosts to communicate as if on the same L2 network</label>
+    <label><input type="radio" name="overlay-purpose" value="c"> To improve network throughput between containers</label>
+    <label><input type="radio" name="overlay-purpose" value="d"> To replace DNS resolution for containers</label>
+  </div>
+  <button class="check-answer" data-correct="b">Check Answer</button>
+  <div class="feedback"></div>
+</div>
+
+<div class="quiz" data-quiz="ebpf-advantage">
+  <h3>Quiz 2: eBPF vs iptables</h3>
+  <p>What is the key scaling advantage of eBPF over iptables for network policy enforcement?</p>
+  <div class="options">
+    <label><input type="radio" name="ebpf-advantage" value="a"> eBPF uses less memory</label>
+    <label><input type="radio" name="ebpf-advantage" value="b"> eBPF runs in userspace which is faster</label>
+    <label><input type="radio" name="ebpf-advantage" value="c"> eBPF uses hash-map lookups (O(1)) instead of sequential rule traversal (O(n))</label>
+    <label><input type="radio" name="ebpf-advantage" value="d"> eBPF doesn't require root privileges</label>
+  </div>
+  <button class="check-answer" data-correct="c">Check Answer</button>
+  <div class="feedback"></div>
+</div>
+
+<div class="quiz" data-quiz="network-policy">
+  <h3>Quiz 3: Network Policies</h3>
+  <p>In Kubernetes, what happens when you apply a NetworkPolicy that selects a pod?</p>
+  <div class="options">
+    <label><input type="radio" name="network-policy" value="a"> All traffic to/from that pod is encrypted</label>
+    <label><input type="radio" name="network-policy" value="b"> The pod is isolated — only explicitly allowed traffic is permitted</label>
+    <label><input type="radio" name="network-policy" value="c"> The pod is moved to a dedicated network namespace</label>
+    <label><input type="radio" name="network-policy" value="d"> All traffic is logged but still allowed</label>
+  </div>
+  <button class="check-answer" data-correct="b">Check Answer</button>
+  <div class="feedback"></div>
+</div>
+</section>
+
+<!-- ════════════════════════════════════════════ -->
+<section>
+<h2>Key Takeaways</h2>
+<ul>
+  <li><strong>Overlay networks</strong> (VXLAN) solve multi-host container connectivity by encapsulating traffic in host-to-host packets.</li>
+  <li><strong>CNI plugins</strong> offer different trade-offs: simplicity (Flannel), performance (Calico/BGP), programmability (Cilium/eBPF).</li>
+  <li><strong>eBPF</strong> is revolutionizing Linux networking — O(1) lookups replace O(n) iptables chains, enabling scalable routing, load balancing, and policy.</li>
+  <li><strong>Network policies</strong> provide container-level firewalling — essential for zero-trust architectures.</li>
+  <li><strong>Service meshes</strong> add mTLS, observability, and traffic control via sidecar proxies — powerful but add complexity.</li>
+  <li>Modern production clusters combine these layers: Cilium for CNI + eBPF networking, with optional service mesh for L7 features.</li>
+</ul>
+</section>
+
+</article>
+
+<nav class="lesson-nav">
+  <a href="0028-building-your-own-container-runtime.html">&larr; Previous: Building Your Own Container Runtime</a>
+  <a href="0030-the-future.html">Next: The Future &rarr;</a>
+</nav>
+
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

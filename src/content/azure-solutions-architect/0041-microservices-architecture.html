@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lesson 041 – Microservices Architecture | AZ-305 Study Guide</title>
+    <link rel="stylesheet" href="../assets/styles.css">
+    <script src="../assets/diagrams.js"></script>
+</head>
+<body>
+<div class="lesson-wrap">
+
+    <header class="lesson-header fade-in">
+        <span class="lesson-number">Lesson 041 · 🟢 DEEP DIVE (~35 min)</span>
+        <h1>Microservices Architecture</h1>
+        <p>Design decomposed, independently deployable services using CQRS, Saga patterns, sidecars, and event-driven data strategies on Azure Kubernetes Service with Cosmos DB and Service Bus.</p>
+    </header>
+
+    <nav class="toc fade-in">
+        <h2>In This Lesson</h2>
+        <ol>
+            <li><a href="#principles">Microservices Principles</a></li>
+            <li><a href="#decomposition">Service Decomposition</a></li>
+            <li><a href="#communication">Communication Patterns</a></li>
+            <li><a href="#cqrs">CQRS</a></li>
+            <li><a href="#saga">Saga Pattern</a></li>
+            <li><a href="#sidecar">Sidecar &amp; Ambassador Patterns</a></li>
+            <li><a href="#data">Data Patterns</a></li>
+            <li><a href="#real-world">Real-World: E-Commerce on AKS</a></li>
+            <li><a href="#exam-tip">Exam Tip</a></li>
+            <li><a href="#quiz">Knowledge Check</a></li>
+        </ol>
+    </nav>
+
+    <!-- 1. Principles -->
+    <section id="principles" class="fade-in">
+        <h2>1. Microservices Principles</h2>
+        <ul>
+            <li><strong>Single Responsibility</strong> — each service owns one business capability and its data.</li>
+            <li><strong>Independent Deployability</strong> — deploy, scale, and roll back services without coordinating the whole system.</li>
+            <li><strong>Decentralized Data</strong> — no shared database; each service chooses its own store (polyglot persistence).</li>
+            <li><strong>Smart Endpoints / Dumb Pipes</strong> — business logic lives in services, not in middleware; messaging infra just routes bytes.</li>
+            <li><strong>Design for Failure</strong> — retries, circuit breakers, bulkheads, and graceful degradation.</li>
+        </ul>
+    </section>
+
+    <!-- 2. Service Decomposition -->
+    <section id="decomposition" class="fade-in">
+        <h2>2. Service Decomposition</h2>
+        <p><strong>Bounded Contexts (DDD)</strong> — identify language boundaries. "Order" means different things in sales vs. shipping. Each bounded context becomes a candidate service.</p>
+        <ul>
+            <li><strong>Strangler Fig Pattern</strong> — migrate incrementally: route traffic to new microservices while the monolith still handles remaining features. Remove monolith modules one by one.</li>
+            <li><strong>Anti-corruption Layer</strong> — translate between old monolith models and new service contracts to prevent legacy pollution.</li>
+            <li><strong>Tip:</strong> Start decomposition with the domain that changes most frequently or needs independent scaling.</li>
+        </ul>
+    </section>
+
+    <!-- 3. Communication Patterns -->
+    <section id="communication" class="fade-in">
+        <h2>3. Communication Patterns</h2>
+        <h3>Synchronous vs Asynchronous</h3>
+        <ul>
+            <li><strong>HTTP / gRPC</strong> — request-reply; simple but creates temporal coupling. Use for queries needing immediate response.</li>
+            <li><strong>Queues / Events (Service Bus, Event Hubs)</strong> — decouples sender from receiver; enables retry, replay, and load leveling.</li>
+        </ul>
+        <h3>Choreography vs Orchestration</h3>
+        <div class="compare-grid" data-compare='{
+            "headers": ["Aspect", "Choreography", "Orchestration"],
+            "rows": [
+                ["Control", "Decentralized — services react to events", "Central coordinator directs each step"],
+                ["Coupling", "Low (publish-subscribe)", "Higher (orchestrator knows all services)"],
+                ["Visibility", "Harder to trace end-to-end", "Clear workflow definition"],
+                ["Failure Handling", "Each service handles its own", "Orchestrator manages compensation"],
+                ["Azure Tooling", "Event Grid + Service Bus topics", "Durable Functions / Logic Apps"]
+            ]
+        }'></div>
+    </section>
+
+    <!-- 4. CQRS -->
+    <section id="cqrs" class="fade-in">
+        <h2>4. CQRS — Command Query Responsibility Segregation</h2>
+        <p>Separate the write model (commands) from the read model (queries). Each can use different stores, schemas, and scaling strategies.</p>
+        <div class="box-diagram" data-diagram='{
+            "title": "CQRS Architecture",
+            "boxes": [
+                {"id": "client", "label": "Client App", "row": 0, "col": 1},
+                {"id": "cmd", "label": "Command\nService", "row": 1, "col": 0},
+                {"id": "qry", "label": "Query\nService", "row": 1, "col": 2},
+                {"id": "writedb", "label": "Write Store\n(Cosmos DB)", "row": 2, "col": 0},
+                {"id": "events", "label": "Domain Events\n(Service Bus)", "row": 2, "col": 1},
+                {"id": "readdb", "label": "Read Store\n(SQL / Redis)", "row": 2, "col": 2}
+            ],
+            "arrows": [
+                {"from": "client", "to": "cmd", "label": "Commands"},
+                {"from": "client", "to": "qry", "label": "Queries"},
+                {"from": "cmd", "to": "writedb"},
+                {"from": "cmd", "to": "events", "label": "Publish"},
+                {"from": "events", "to": "readdb", "label": "Project"},
+                {"from": "qry", "to": "readdb"}
+            ]
+        }'></div>
+        <p><strong>When CQRS helps:</strong> read-heavy workloads, different scaling needs for reads vs. writes, complex domain models, or when read projections need denormalized views.</p>
+    </section>
+
+    <!-- 5. Saga Pattern -->
+    <section id="saga" class="fade-in">
+        <h2>5. Saga Pattern — Distributed Transactions</h2>
+        <p>In microservices there is no global 2PC (two-phase commit). A saga coordinates a sequence of local transactions, each followed by a <em>compensating transaction</em> if a subsequent step fails.</p>
+        <div class="box-diagram" data-diagram='{
+            "title": "Saga Pattern — Order Flow",
+            "boxes": [
+                {"id": "order", "label": "1. Create\nOrder", "row": 0, "col": 0},
+                {"id": "payment", "label": "2. Reserve\nPayment", "row": 0, "col": 1},
+                {"id": "inventory", "label": "3. Reserve\nInventory", "row": 0, "col": 2},
+                {"id": "ship", "label": "4. Schedule\nShipment", "row": 0, "col": 3},
+                {"id": "comp3", "label": "Compensate:\nRelease Stock", "row": 1, "col": 2},
+                {"id": "comp2", "label": "Compensate:\nRefund", "row": 1, "col": 1},
+                {"id": "comp1", "label": "Compensate:\nCancel Order", "row": 1, "col": 0}
+            ],
+            "arrows": [
+                {"from": "order", "to": "payment"},
+                {"from": "payment", "to": "inventory"},
+                {"from": "inventory", "to": "ship"},
+                {"from": "ship", "to": "comp3", "label": "Fail"},
+                {"from": "comp3", "to": "comp2"},
+                {"from": "comp2", "to": "comp1"}
+            ]
+        }'></div>
+        <div class="info-box">💡 Implement sagas with <strong>Azure Durable Functions</strong> (orchestration) or <strong>Service Bus</strong> topics (choreography). Always make compensations idempotent.</div>
+    </section>
+
+    <!-- 6. Sidecar & Ambassador -->
+    <section id="sidecar" class="fade-in">
+        <h2>6. Sidecar &amp; Ambassador Patterns on AKS</h2>
+        <ul>
+            <li><strong>Sidecar</strong> — a helper container in the same pod. Handles cross-cutting concerns (logging, mTLS, config) without changing application code.</li>
+            <li><strong>Ambassador</strong> — a sidecar that proxies outbound calls, handling retries, circuit-breaking, and protocol translation.</li>
+            <li><strong>Dapr (Distributed Application Runtime)</strong> — provides building blocks (pub/sub, state, service invocation) as a sidecar on AKS. Swaps infra without code changes.</li>
+            <li><strong>Service Mesh (Istio / Linkerd)</strong> — injects Envoy proxies as sidecars; delivers mTLS, traffic splitting, observability.</li>
+        </ul>
+    </section>
+
+    <!-- 7. Data Patterns -->
+    <section id="data" class="fade-in">
+        <h2>7. Data Patterns</h2>
+        <ul>
+            <li><strong>Database-per-Service</strong> — enforces loose coupling; services expose data only via APIs or events.</li>
+            <li><strong>Event Sourcing</strong> — persist state as an append-only stream of events. Rebuild current state by replaying. Pairs naturally with CQRS.</li>
+            <li><strong>Outbox Pattern</strong> — write domain event to a local outbox table in the same DB transaction, then a relay publishes it to Service Bus. Guarantees at-least-once delivery without distributed transactions.</li>
+            <li><strong>Change Data Capture (CDC)</strong> — stream changes from Cosmos DB change feed or SQL CDC to downstream services.</li>
+        </ul>
+    </section>
+
+    <!-- 8. Real-World -->
+    <section id="real-world" class="fade-in">
+        <h2>8. Real-World: E-Commerce Microservices on AKS</h2>
+        <div class="real-world-box">
+            <h3>Scenario</h3>
+            <p>A retailer migrates a .NET monolith (orders, catalog, payments, shipping) to microservices on AKS.</p>
+            <h3>Design Decisions</h3>
+            <ul>
+                <li><strong>Decomposition:</strong> Bounded contexts → four services. Strangler fig routes via Azure Front Door; legacy endpoints forwarded to monolith during transition.</li>
+                <li><strong>Data:</strong> Catalog → Cosmos DB (global reads). Orders → Azure SQL. Payments → event-sourced in Cosmos DB change feed.</li>
+                <li><strong>Communication:</strong> Synchronous gRPC between Catalog ↔ Orders (low-latency lookups). Async Service Bus topics for order-created, payment-confirmed events.</li>
+                <li><strong>Saga:</strong> Durable Functions orchestrate Create Order → Reserve Payment → Reserve Inventory → Schedule Shipment with compensations on failure.</li>
+                <li><strong>Sidecar:</strong> Dapr sidecar handles pub/sub bindings and secret retrieval from Key Vault — no SDK lock-in.</li>
+                <li><strong>Observability:</strong> Distributed tracing via Application Insights; correlation IDs propagated through Service Bus message properties.</li>
+            </ul>
+            <h3>Result</h3>
+            <p>Independent weekly deploys per team, 99.95% availability, and catalog reads scaled to 50K RPS via CQRS read replicas in Redis.</p>
+        </div>
+    </section>
+
+    <!-- 9. Exam Tip -->
+    <section id="exam-tip" class="fade-in">
+        <h2>9. Exam Tip</h2>
+        <div class="info-box exam-tip">🎯 AZ-305 frequently tests: (1) Why database-per-service — answer: loose coupling and independent scaling. (2) When to use Saga vs. 2PC — answer: Saga in microservices because 2PC doesn't span autonomous services. (3) CQRS justification — answer: separate scaling of reads and writes with different data models.</div>
+    </section>
+
+    <!-- 10. Quiz -->
+    <section id="quiz" class="fade-in">
+        <h2>10. Knowledge Check</h2>
+        <div class="quiz" data-questions='[
+            {"question":"What pattern allows incremental migration from a monolith to microservices by routing requests to new services while legacy code still runs?","options":["CQRS","Strangler Fig","Saga","Outbox"],"answer":1,"explanation":"The Strangler Fig pattern incrementally routes traffic to new microservices, allowing the monolith to shrink over time without a big-bang rewrite."},
+            {"question":"In a Saga, what ensures consistency when a downstream step fails?","options":["Two-phase commit","Compensating transactions","Distributed locks","Global transaction coordinator"],"answer":1,"explanation":"Each saga step has a compensating transaction that undoes its work if a later step fails, maintaining eventual consistency without 2PC."},
+            {"question":"Which Azure service is best suited as the event bus between CQRS command and query sides?","options":["Azure Blob Storage","Azure Service Bus","Azure Traffic Manager","Azure Front Door"],"answer":1,"explanation":"Service Bus topics reliably deliver domain events from the write side to projectors that update the read store."},
+            {"question":"What does the Outbox pattern guarantee?","options":["Exactly-once processing","At-least-once event publishing without distributed transactions","Zero message latency","Automatic schema migration"],"answer":1,"explanation":"The outbox pattern writes events to a local table in the same DB transaction, then a relay publishes them — ensuring at-least-once delivery without distributed transactions."},
+            {"question":"A team wants cross-cutting mTLS and traffic splitting on AKS without changing application code. Which approach fits?","options":["Embed TLS in each service","Use Azure Application Gateway only","Deploy a service mesh (Istio/Linkerd) with Envoy sidecars","Add a CDN"],"answer":2,"explanation":"A service mesh injects Envoy sidecar proxies that handle mTLS, traffic splitting, and observability transparently — no app code changes needed."}
+        ]'></div>
+    </section>
+
+    <nav class="lesson-nav">
+        <a href="0040-infrastructure-automation-devops.html" class="prev">← Lesson 040</a>
+        <a href="0042-zero-trust-network-design.html" class="next">Lesson 042 →</a>
+    </nav>
+</div>
+<script>
+    document.addEventListener('DOMContentLoaded', function() {
+        AzureLessons.Diagrams.renderAll();
+        AzureLessons.Quiz.init();
+        AzureLessons.ScrollReveal.init();
+        AzureLessons.Collapsible.init();
+    });
+</script>
+</body>
+</html>

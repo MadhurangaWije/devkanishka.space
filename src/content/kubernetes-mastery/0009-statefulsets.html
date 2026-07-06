@@ -1,0 +1,408 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lesson 9: StatefulSets</title>
+    <style>
+        :root {
+            --bg: #fafafa; --text: #1a1a1a; --accent: #326ce5;
+            --accent-light: #e8f0fe; --border: #e0e0e0; --code-bg: #f5f5f5;
+            --success: #2e7d32; --warn: #f57c00;
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: 'Georgia', serif; line-height: 1.7; color: var(--text); background: var(--bg); max-width: 780px; margin: 0 auto; padding: 2rem 1.5rem; }
+        h1 { font-size: 2rem; margin-bottom: 0.5rem; color: var(--accent); }
+        h2 { font-size: 1.4rem; margin-top: 2.5rem; margin-bottom: 0.8rem; border-bottom: 2px solid var(--accent); padding-bottom: 0.3rem; }
+        h3 { font-size: 1.1rem; margin-top: 1.5rem; margin-bottom: 0.5rem; }
+        p { margin-bottom: 1rem; }
+        .meta { color: #666; font-size: 0.9rem; margin-bottom: 2rem; }
+        .key-insight { background: var(--accent-light); border-left: 4px solid var(--accent); padding: 1rem 1.2rem; margin: 1.5rem 0; border-radius: 0 4px 4px 0; }
+        .key-insight strong { color: var(--accent); }
+        .production-note { background: #fff3e0; border-left: 4px solid var(--warn); padding: 1rem 1.2rem; margin: 1.5rem 0; border-radius: 0 4px 4px 0; }
+        .production-note::before { content: "🏭 Production: "; font-weight: bold; }
+        .exam-tip { background: #e8f5e9; border-left: 4px solid var(--success); padding: 1rem 1.2rem; margin: 1.5rem 0; border-radius: 0 4px 4px 0; }
+        .exam-tip::before { content: "🎯 Exam Tip: "; font-weight: bold; color: var(--success); }
+        code { font-family: 'Menlo', 'Consolas', monospace; font-size: 0.85em; background: var(--code-bg); padding: 0.15em 0.4em; border-radius: 3px; }
+        pre { background: var(--code-bg); padding: 1rem; border-radius: 4px; overflow-x: auto; margin: 1rem 0; font-size: 0.85rem; line-height: 1.5; }
+        ul, ol { margin: 0.5rem 0 1rem 1.5rem; }
+        li { margin-bottom: 0.4rem; }
+        table { width: 100%; border-collapse: collapse; margin: 1rem 0; font-size: 0.9rem; }
+        th, td { border: 1px solid var(--border); padding: 0.6rem 0.8rem; text-align: left; }
+        th { background: var(--accent-light); font-weight: bold; }
+        .diagram { background: white; border: 1px solid var(--border); border-radius: 8px; padding: 1.5rem; margin: 1.5rem 0; text-align: center; }
+        .cert-badge { display: inline-block; background: var(--accent); color: white; font-size: 0.7rem; padding: 0.15rem 0.5rem; border-radius: 10px; margin-left: 0.5rem; }
+        .quiz { background: #f9f9f9; border: 1px solid var(--border); border-radius: 8px; padding: 1.5rem; margin-top: 2rem; }
+        .quiz h2 { border-bottom: none; margin-top: 0; }
+        .quiz-q { margin-bottom: 1.2rem; }
+        .quiz-q p { font-weight: bold; margin-bottom: 0.3rem; }
+        .quiz-answer { display: none; background: #e8f5e9; padding: 0.5rem 0.8rem; border-radius: 4px; margin-top: 0.5rem; }
+        .reveal-btn { background: var(--accent); color: white; border: none; padding: 0.3rem 0.8rem; border-radius: 4px; cursor: pointer; font-size: 0.8rem; }
+        .reveal-btn:hover { opacity: 0.85; }
+    </style>
+</head>
+<body>
+
+<h1>Lesson 9: StatefulSets</h1>
+<p class="meta">Chapter 2: Core Workloads · <span class="cert-badge">CKA</span> <span class="cert-badge">CKAD</span> · ~22 min</p>
+
+<p>Deployments treat Pods as <em>interchangeable cattle</em>. But some workloads — databases, message queues, distributed consensus systems — need <strong>stable identity</strong>: a fixed name, persistent storage that follows the Pod, and ordered startup. That's what StatefulSets provide.</p>
+
+<h2>1. The Problem StatefulSets Solve</h2>
+
+<p>Consider a 3-node PostgreSQL cluster with streaming replication:</p>
+
+<ul>
+    <li>Node 0 is the <strong>primary</strong> (accepts writes)</li>
+    <li>Nodes 1 and 2 are <strong>replicas</strong> (read-only, stream WAL from primary)</li>
+    <li>Each node has its own data directory (can't share storage)</li>
+    <li>Replicas need to find the primary by a <em>stable DNS name</em></li>
+    <li>If a Pod restarts, it must get the <em>same storage</em> back</li>
+</ul>
+
+<p>A Deployment can't do this. It gives Pods random names (<code>web-8b2c-xk4j9</code>), shares no identity across restarts, and provides no ordering guarantees.</p>
+
+<h3>StatefulSet Guarantees</h3>
+
+<table>
+    <tr><th>Guarantee</th><th>Deployment</th><th>StatefulSet</th></tr>
+    <tr><td>Pod names</td><td>Random suffix (<code>web-8b2c-xk4j9</code>)</td><td>Ordinal index (<code>db-0</code>, <code>db-1</code>, <code>db-2</code>)</td></tr>
+    <tr><td>Stable network identity</td><td>❌ (IP changes on reschedule)</td><td>✅ (fixed DNS name per Pod)</td></tr>
+    <tr><td>Persistent storage</td><td>Shared or ephemeral</td><td>Dedicated PVC per Pod, reattached on reschedule</td></tr>
+    <tr><td>Startup order</td><td>All at once</td><td>Sequential: 0 → 1 → 2 (configurable)</td></tr>
+    <tr><td>Shutdown order</td><td>Any order</td><td>Reverse: 2 → 1 → 0</td></tr>
+</table>
+
+<div class="key-insight">
+    <strong>StatefulSet = stable identity + stable storage + ordered operations.</strong> Use them when your application is not fungible — when each instance has a role, needs its own disk, or must discover peers by name.
+</div>
+
+<h2>2. StatefulSet Anatomy</h2>
+
+<pre>apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+spec:
+  serviceName: postgres-headless    # ← REQUIRED: headless Service name
+  replicas: 3
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16
+          ports:
+            - containerPort: 5432
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+          env:
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+  volumeClaimTemplates:             # ← PVC per Pod
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: fast-ssd
+        resources:
+          requests:
+            storage: 50Gi
+  podManagementPolicy: OrderedReady # ← sequential (default)
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      partition: 0                  # ← for canary updates</pre>
+
+<h3>Key Differences from Deployment</h3>
+
+<table>
+    <tr><th>Field</th><th>Purpose</th><th>Notes</th></tr>
+    <tr><td><code>serviceName</code></td><td>Names the headless Service for DNS</td><td>Required — must exist</td></tr>
+    <tr><td><code>volumeClaimTemplates</code></td><td>Creates a unique PVC per Pod</td><td>PVCs persist even if Pod/STS is deleted</td></tr>
+    <tr><td><code>podManagementPolicy</code></td><td><code>OrderedReady</code> (sequential) or <code>Parallel</code></td><td>Parallel skips ordering for faster startup</td></tr>
+    <tr><td><code>updateStrategy.partition</code></td><td>Only update Pods with ordinal ≥ partition</td><td>Enables canary updates</td></tr>
+</table>
+
+<h2>3. Stable Network Identity</h2>
+
+<h3>Pod Naming</h3>
+
+<p>Pods are named <code>{statefulset-name}-{ordinal}</code>:</p>
+
+<pre># StatefulSet "postgres" with replicas=3 creates:
+postgres-0
+postgres-1
+postgres-2
+
+# If postgres-1 dies, it's rescheduled as postgres-1 (same name, same PVC)</pre>
+
+<h3>Headless Service & DNS</h3>
+
+<p>A <strong>headless Service</strong> (ClusterIP: None) is required. It doesn't load-balance — instead, it creates DNS records for each Pod individually:</p>
+
+<pre># Headless Service definition:
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-headless
+spec:
+  clusterIP: None           # ← This makes it headless
+  selector:
+    app: postgres
+  ports:
+    - port: 5432</pre>
+
+<h3>DNS Records Created</h3>
+
+<div class="diagram">
+<svg viewBox="0 0 650 180" xmlns="http://www.w3.org/2000/svg" font-family="Menlo, monospace" font-size="9">
+    <!-- Service DNS -->
+    <rect x="20" y="10" width="610" height="35" rx="5" fill="#e8f0fe" stroke="#326ce5" stroke-width="1.5"/>
+    <text x="325" y="31" text-anchor="middle" font-size="10">postgres-headless.default.svc.cluster.local → returns ALL Pod IPs (A records)</text>
+    
+    <!-- Individual Pod DNS -->
+    <rect x="20" y="60" width="195" height="50" rx="5" fill="#c8e6c9" stroke="#2e7d32" stroke-width="1.5"/>
+    <text x="117" y="80" text-anchor="middle" font-weight="bold">postgres-0</text>
+    <text x="117" y="97" text-anchor="middle" font-size="8">postgres-0.postgres-headless</text>
+    <text x="117" y="107" text-anchor="middle" font-size="8">.default.svc.cluster.local</text>
+    
+    <rect x="228" y="60" width="195" height="50" rx="5" fill="#c8e6c9" stroke="#2e7d32" stroke-width="1.5"/>
+    <text x="325" y="80" text-anchor="middle" font-weight="bold">postgres-1</text>
+    <text x="325" y="97" text-anchor="middle" font-size="8">postgres-1.postgres-headless</text>
+    <text x="325" y="107" text-anchor="middle" font-size="8">.default.svc.cluster.local</text>
+    
+    <rect x="435" y="60" width="195" height="50" rx="5" fill="#c8e6c9" stroke="#2e7d32" stroke-width="1.5"/>
+    <text x="532" y="80" text-anchor="middle" font-weight="bold">postgres-2</text>
+    <text x="532" y="97" text-anchor="middle" font-size="8">postgres-2.postgres-headless</text>
+    <text x="532" y="107" text-anchor="middle" font-size="8">.default.svc.cluster.local</text>
+    
+    <!-- Explanation -->
+    <text x="325" y="140" text-anchor="middle" font-size="10" fill="#666">Each Pod gets a stable DNS name: {pod-name}.{service-name}.{namespace}.svc.cluster.local</text>
+    <text x="325" y="158" text-anchor="middle" font-size="10" fill="#666">This DNS name stays the same even if the Pod is rescheduled to a different node</text>
+</svg>
+</div>
+
+<pre># From any Pod in the cluster:
+nslookup postgres-0.postgres-headless.default.svc.cluster.local
+# → 10.244.1.5 (Pod IP — may change on reschedule, but DNS name stays)
+
+# Replicas can find the primary by name:
+# postgresql.conf: primary_conninfo = 'host=postgres-0.postgres-headless ...'</pre>
+
+<div class="key-insight">
+    <strong>Stable DNS ≠ stable IP.</strong> The DNS name is stable (always resolves to the correct Pod), but the underlying IP may change when a Pod is rescheduled. Applications should connect by DNS name, not IP. This is why headless Services exist — they give each Pod its own discoverable identity.
+</div>
+
+<div class="production-note">
+    You often need TWO Services for a StatefulSet: (1) a headless Service for internal peer discovery (clusterIP: None), and (2) a regular ClusterIP/LoadBalancer Service for client traffic (load-balanced across all Pods). The headless Service is for the StatefulSet's <code>serviceName</code> field.
+</div>
+
+<h2>4. Persistent Storage — volumeClaimTemplates</h2>
+
+<p>The <code>volumeClaimTemplates</code> field creates a unique PVC for each Pod, named <code>{template-name}-{statefulset-name}-{ordinal}</code>:</p>
+
+<pre># For StatefulSet "postgres" with volumeClaimTemplate named "data":
+kubectl get pvc
+# NAME              STATUS   VOLUME         CAPACITY   STORAGECLASS
+# data-postgres-0   Bound    pv-abc123      50Gi       fast-ssd
+# data-postgres-1   Bound    pv-def456      50Gi       fast-ssd
+# data-postgres-2   Bound    pv-ghi789      50Gi       fast-ssd</pre>
+
+<h3>Storage Lifecycle</h3>
+
+<div class="diagram">
+<svg viewBox="0 0 600 130" xmlns="http://www.w3.org/2000/svg" font-family="Menlo, monospace" font-size="9">
+    <defs><marker id="arr9" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0 L10 5 L0 10z" fill="#326ce5"/></marker></defs>
+    
+    <rect x="10" y="20" width="130" height="40" rx="4" fill="#e8f0fe" stroke="#326ce5" stroke-width="1.5"/>
+    <text x="75" y="44" text-anchor="middle" font-size="9">STS created</text>
+    
+    <line x1="140" y1="40" x2="170" y2="40" stroke="#326ce5" stroke-width="1.5" marker-end="url(#arr9)"/>
+    
+    <rect x="170" y="20" width="130" height="40" rx="4" fill="#c8e6c9" stroke="#2e7d32" stroke-width="1.5"/>
+    <text x="235" y="37" text-anchor="middle" font-size="9">PVCs created</text>
+    <text x="235" y="50" text-anchor="middle" font-size="8" fill="#666">(one per Pod)</text>
+    
+    <line x1="300" y1="40" x2="330" y2="40" stroke="#326ce5" stroke-width="1.5" marker-end="url(#arr9)"/>
+    
+    <rect x="330" y="20" width="130" height="40" rx="4" fill="#fff3e0" stroke="#f57c00" stroke-width="1.5"/>
+    <text x="395" y="37" text-anchor="middle" font-size="9">Pod deleted/</text>
+    <text x="395" y="50" text-anchor="middle" font-size="9">rescheduled</text>
+    
+    <line x1="460" y1="40" x2="490" y2="40" stroke="#326ce5" stroke-width="1.5" marker-end="url(#arr9)"/>
+    
+    <rect x="490" y="20" width="105" height="40" rx="4" fill="#c8e6c9" stroke="#2e7d32" stroke-width="1.5"/>
+    <text x="542" y="37" text-anchor="middle" font-size="9">Same PVC</text>
+    <text x="542" y="50" text-anchor="middle" font-size="9">reattached ✓</text>
+    
+    <!-- Bottom row: deletion -->
+    <rect x="10" y="80" width="130" height="40" rx="4" fill="#ffcdd2" stroke="#c62828" stroke-width="1.5"/>
+    <text x="75" y="104" text-anchor="middle" font-size="9">STS deleted</text>
+    
+    <line x1="140" y1="100" x2="170" y2="100" stroke="#c62828" stroke-width="1.5" marker-end="url(#arr9)"/>
+    
+    <rect x="170" y="80" width="200" height="40" rx="4" fill="#fff3e0" stroke="#f57c00" stroke-width="1.5"/>
+    <text x="270" y="97" text-anchor="middle" font-size="9">PVCs SURVIVE ⚠️</text>
+    <text x="270" y="110" text-anchor="middle" font-size="8" fill="#666">Must delete manually</text>
+</svg>
+</div>
+
+<div class="key-insight">
+    <strong>PVCs are never automatically deleted.</strong> Deleting a StatefulSet or scaling down does NOT delete the PVCs. This is a safety feature — your data survives even if you accidentally delete the StatefulSet. You must manually delete PVCs to reclaim storage.
+</div>
+
+<h3>PVC Retention Policy (K8s 1.27+)</h3>
+
+<pre># New: control PVC lifecycle explicitly
+spec:
+  persistentVolumeClaimRetentionPolicy:
+    whenDeleted: Delete    # Delete PVCs when STS is deleted
+    whenScaled: Retain     # Keep PVCs when scaling down (default)</pre>
+
+<table>
+    <tr><th>Policy</th><th>whenDeleted</th><th>whenScaled</th></tr>
+    <tr><td>Default (safe)</td><td>Retain</td><td>Retain</td></tr>
+    <tr><td>Clean up on delete</td><td>Delete</td><td>Retain</td></tr>
+    <tr><td>Aggressive cleanup</td><td>Delete</td><td>Delete</td></tr>
+</table>
+
+<div class="production-note">
+    After scaling down a StatefulSet from 5 to 3, PVCs <code>data-postgres-3</code> and <code>data-postgres-4</code> still exist. If you scale back up to 5, those Pods will reattach to their original PVCs — data is preserved. This is intentional for databases: scale down during low traffic, scale up later without data loss.
+</div>
+
+<h2>5. Ordered Operations</h2>
+
+<h3>podManagementPolicy: OrderedReady (default)</h3>
+
+<table>
+    <tr><th>Operation</th><th>Order</th><th>Condition</th></tr>
+    <tr><td>Scale up</td><td>0 → 1 → 2 → ...</td><td>Each Pod must be Running+Ready before next starts</td></tr>
+    <tr><td>Scale down</td><td>... → 2 → 1 → 0</td><td>Each Pod must be fully terminated before next stops</td></tr>
+    <tr><td>Update</td><td>... → 2 → 1 → 0 (reverse)</td><td>Each updated Pod must be Ready before next is updated</td></tr>
+</table>
+
+<p><strong>Why?</strong> Many distributed systems require this:</p>
+<ul>
+    <li>A primary (index 0) must start first before replicas can connect</li>
+    <li>Shutting down the primary last ensures failover happens cleanly</li>
+    <li>Rolling updates from highest ordinal first = update replicas before primary</li>
+</ul>
+
+<h3>podManagementPolicy: Parallel</h3>
+
+<p>All Pods start/stop simultaneously — no ordering. Use when Pods are independent (e.g., each is a standalone cache shard that doesn't need to discover peers at startup).</p>
+
+<pre>spec:
+  podManagementPolicy: Parallel
+  # All Pods created at once during scale-up
+  # Faster, but no startup ordering guarantee</pre>
+
+<h2>6. Update Strategies</h2>
+
+<h3>RollingUpdate (default)</h3>
+
+<p>Updates Pods in <strong>reverse ordinal order</strong> (highest first): 2 → 1 → 0. Each Pod must become Ready before the next is updated.</p>
+
+<h3>Partition — Canary Updates</h3>
+
+<p>The <code>partition</code> parameter is powerful: only Pods with ordinal <strong>≥ partition</strong> are updated. Pods below the partition keep the old version.</p>
+
+<pre>spec:
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      partition: 2    # Only postgres-2 gets the new version
+
+# After verifying postgres-2 is healthy:
+# Set partition: 1 → updates postgres-2, postgres-1
+# Set partition: 0 → updates all (full rollout)</pre>
+
+<div class="key-insight">
+    <strong>Partition enables staged rollouts for databases.</strong> Update one replica first (canary), verify replication works with the new version, then proceed. If it fails, only one replica is affected — set partition back to 3 and the old version stays on 0, 1.
+</div>
+
+<h3>OnDelete Strategy</h3>
+
+<pre>spec:
+  updateStrategy:
+    type: OnDelete
+  # Pods are NOT automatically updated
+  # You must manually delete each Pod to trigger an update
+  # Gives maximum control for critical stateful workloads</pre>
+
+<h2>7. When to Use StatefulSets vs Deployments</h2>
+
+<table>
+    <tr><th>Use StatefulSet When</th><th>Use Deployment When</th></tr>
+    <tr><td>Each Pod needs its own persistent disk</td><td>Pods share no state or use shared storage</td></tr>
+    <tr><td>Pods need stable DNS names for peer discovery</td><td>Pods are behind a load-balanced Service</td></tr>
+    <tr><td>Startup/shutdown order matters</td><td>Pods are interchangeable</td></tr>
+    <tr><td>Database, Kafka, ZooKeeper, Elasticsearch, etcd</td><td>Web servers, API servers, workers, caches</td></tr>
+</table>
+
+<div class="production-note">
+    Many teams avoid StatefulSets for managed databases (use RDS, Cloud SQL, etc.). StatefulSets shine for: self-managed databases that must run on K8s, distributed systems (Kafka, Elasticsearch, CockroachDB), and any workload where each instance has a distinct role or persistent state.
+</div>
+
+<h2>Summary</h2>
+
+<table>
+    <tr><th>Concept</th><th>Key Point</th></tr>
+    <tr><td>Stable identity</td><td>Pods named <code>{sts}-{ordinal}</code>, preserved across rescheduling</td></tr>
+    <tr><td>Headless Service</td><td>Required — gives each Pod its own DNS name</td></tr>
+    <tr><td>volumeClaimTemplates</td><td>Unique PVC per Pod, survives Pod deletion and STS deletion</td></tr>
+    <tr><td>Ordered operations</td><td>Scale up 0→N, scale down N→0, update N→0</td></tr>
+    <tr><td>Partition</td><td>Only update Pods ≥ partition ordinal (canary for stateful apps)</td></tr>
+    <tr><td>PVC retention</td><td>PVCs never auto-deleted (safety). Must delete manually or configure policy.</td></tr>
+</table>
+
+<!-- Quiz -->
+<div class="quiz">
+    <h2>📝 Quiz: StatefulSets</h2>
+    
+    <div class="quiz-q">
+        <p>Q1: A StatefulSet "redis" has 3 replicas. What are the Pod names and in what order do they start?</p>
+        <button class="reveal-btn" onclick="this.nextElementSibling.style.display='block'">Show Answer</button>
+        <div class="quiz-answer">Pod names: <code>redis-0</code>, <code>redis-1</code>, <code>redis-2</code>.<br>Start order (with OrderedReady): <code>redis-0</code> starts first and must be Running+Ready before <code>redis-1</code> starts, then <code>redis-2</code>.</div>
+    </div>
+    
+    <div class="quiz-q">
+        <p>Q2: You delete the StatefulSet "postgres" with <code>kubectl delete sts postgres</code>. What happens to the PVCs?</p>
+        <button class="reveal-btn" onclick="this.nextElementSibling.style.display='block'">Show Answer</button>
+        <div class="quiz-answer"><strong>PVCs survive.</strong> Deleting a StatefulSet does NOT delete its PVCs (unlike Pods which are deleted). This is a safety feature to protect data. You must manually delete PVCs: <code>kubectl delete pvc data-postgres-0 data-postgres-1 data-postgres-2</code>.</div>
+    </div>
+    
+    <div class="quiz-q">
+        <p>Q3: What DNS name would Pod "kafka-2" in namespace "messaging" with headless Service "kafka-svc" get?</p>
+        <button class="reveal-btn" onclick="this.nextElementSibling.style.display='block'">Show Answer</button>
+        <div class="quiz-answer"><code>kafka-2.kafka-svc.messaging.svc.cluster.local</code><br>Format: <code>{pod-name}.{service-name}.{namespace}.svc.cluster.local</code></div>
+    </div>
+    
+    <div class="quiz-q">
+        <p>Q4: You have a 5-replica StatefulSet and set <code>partition: 3</code> with a new image. Which Pods get updated?</p>
+        <button class="reveal-btn" onclick="this.nextElementSibling.style.display='block'">Show Answer</button>
+        <div class="quiz-answer">Only Pods with ordinal <strong>≥ 3</strong>: <code>pod-3</code> and <code>pod-4</code> get the new image. Pods <code>pod-0</code>, <code>pod-1</code>, <code>pod-2</code> keep the old image. This is used for canary testing of stateful workloads.</div>
+    </div>
+    
+    <div class="quiz-q">
+        <p>Q5: Why does a StatefulSet require a headless Service (clusterIP: None) rather than a normal Service?</p>
+        <button class="reveal-btn" onclick="this.nextElementSibling.style.display='block'">Show Answer</button>
+        <div class="quiz-answer">A normal Service provides a single virtual IP and load-balances across Pods — you can't address individual Pods. A <strong>headless Service</strong> creates individual DNS A records for each Pod, enabling direct peer-to-peer communication. StatefulSet Pods need to find each other by name (e.g., replica connects to <code>postgres-0</code> specifically).</div>
+    </div>
+    
+    <div class="quiz-q">
+        <p>Q6: You scale a StatefulSet from 5 down to 3, then later scale back up to 5. What storage do Pods 3 and 4 get?</p>
+        <button class="reveal-btn" onclick="this.nextElementSibling.style.display='block'">Show Answer</button>
+        <div class="quiz-answer">They reattach to their <strong>original PVCs</strong> (<code>data-sts-3</code> and <code>data-sts-4</code>) which were retained during scale-down. All data from before the scale-down is still there. This is the key value of StatefulSet storage — data persists through scale operations.</div>
+    </div>
+</div>
+
+</body>
+</html>

@@ -1,0 +1,576 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lesson 11: Chunking Strategies | AI Engineering</title>
+    <link rel="stylesheet" href="../assets/lesson.css">
+    <link rel="stylesheet" href="../assets/prism-theme.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-python.min.js"></script>
+    <script src="../assets/diagrams.js"></script>
+</head>
+<body>
+    <div class="lesson-header">
+        <div class="module-badge">Module 3: RAG Pipeline</div>
+        <h1>Chunking Strategies</h1>
+        <p class="lesson-subtitle">How you split documents determines retrieval quality. Master fixed, recursive, semantic, and document-aware chunking to optimize your RAG pipeline.</p>
+    </div>
+
+    <div class="lesson-meta">
+        <span class="pill">Lesson 11</span>
+        <span class="pill">~20 min</span>
+        <span class="pill">Intermediate</span>
+    </div>
+
+    <main class="lesson-content">
+        <!-- Section 1: Why Chunking Matters -->
+        <section>
+            <h2>Why Chunking Matters</h2>
+            <div class="concept-box">
+                <h3>The Chunking Dilemma</h3>
+                <p>Embedding models have token limits (256–8192 tokens). Even if they didn't, embedding an entire 50-page document into one vector loses granularity — searching returns the whole document or nothing. Chunking splits documents into retrievable units that balance <strong>specificity</strong> (finding exact relevant info) with <strong>context</strong> (having enough surrounding info to be useful).</p>
+            </div>
+
+            <p>The wrong chunk size is the #1 silent killer of RAG quality:</p>
+            <ul>
+                <li><strong>Too small</strong> (50 tokens): Loses context, retrieves fragments without meaning</li>
+                <li><strong>Too large</strong> (2000 tokens): Dilutes relevance, wastes context window, reduces precision</li>
+                <li><strong>Sweet spot</strong> (200–500 tokens): Usually optimal for most use cases</li>
+            </ul>
+
+            <div class="diagram-container" id="chunk-tradeoff"></div>
+        </section>
+
+        <!-- Section 2: Visual - Same Doc, 3 Strategies -->
+        <section>
+            <h2>Same Document, Three Strategies</h2>
+            <p>Consider this markdown document and how different strategies split it:</p>
+
+            <div class="code-block">
+                <pre><code class="language-python">sample_doc = """
+# Introduction to Machine Learning
+
+Machine learning is a subset of artificial intelligence that enables
+systems to learn from data. It has transformed industries from healthcare
+to finance.
+
+## Supervised Learning
+
+In supervised learning, models learn from labeled examples. Common
+algorithms include linear regression, decision trees, and neural networks.
+The key challenge is overfitting — when a model memorizes training data
+rather than learning general patterns.
+
+## Unsupervised Learning
+
+Unsupervised learning finds hidden patterns in unlabeled data. Clustering
+algorithms like K-means group similar data points. Dimensionality reduction
+techniques like PCA compress high-dimensional data.
+
+## Deep Learning
+
+Deep learning uses neural networks with many layers. Transformers
+revolutionized NLP with attention mechanisms. GPT and BERT are
+transformer-based architectures that achieve state-of-the-art results.
+"""</code></pre>
+            </div>
+
+            <div class="comparison-table">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Strategy</th>
+                            <th>Chunk 1</th>
+                            <th>Chunk 2</th>
+                            <th>Chunk 3</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><strong>Fixed (200 chars)</strong></td>
+                            <td>"# Introduction to Machine Learning\n\nMachine learning is a subset of artificial intelligence that enables systems to learn from data. It has transformed industries from health..."</td>
+                            <td>"...care to finance.\n\n## Supervised Learning\n\nIn supervised learning, models learn from labeled examples. Common algorithms include linear regression, deci..."</td>
+                            <td>"...sion trees, and neural networks. The key challenge is overfitting — when a model memorizes training data rather than learning general patterns.\n\n##..."</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Recursive (by section)</strong></td>
+                            <td>"Introduction to Machine Learning\n\nMachine learning is a subset of artificial intelligence..."</td>
+                            <td>"Supervised Learning\n\nIn supervised learning, models learn from labeled examples..."</td>
+                            <td>"Unsupervised Learning\n\nUnsupervised learning finds hidden patterns..."</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Semantic</strong></td>
+                            <td>"Machine learning is a subset of AI that enables systems to learn from data. It has transformed industries."</td>
+                            <td>"In supervised learning, models learn from labeled examples. Common algorithms include linear regression, decision trees, and neural networks. The key challenge is overfitting."</td>
+                            <td>"Deep learning uses neural networks with many layers. Transformers revolutionized NLP. GPT and BERT are transformer-based architectures."</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <div class="callout">
+                <strong>👁️ Notice:</strong> Fixed chunking cuts mid-sentence (losing meaning). Recursive respects document structure. Semantic groups by topic similarity regardless of position.
+            </div>
+        </section>
+
+        <!-- Section 3: Strategy 1 - Fixed Size -->
+        <section>
+            <h2>Strategy 1: Fixed-Size Chunking</h2>
+            <p>The simplest approach — split every N characters/tokens with optional overlap.</p>
+
+            <div class="code-block">
+                <pre><code class="language-python">from langchain.text_splitter import CharacterTextSplitter
+
+# Fixed-size by character count
+splitter = CharacterTextSplitter(
+    separator="",          # Split anywhere
+    chunk_size=300,        # Characters per chunk
+    chunk_overlap=50,      # Overlap between chunks
+    length_function=len
+)
+
+chunks = splitter.split_text(sample_doc)
+print(f"Fixed chunks: {len(chunks)}")
+for i, chunk in enumerate(chunks):
+    print(f"  Chunk {i}: {len(chunk)} chars — '{chunk[:60]}...'")
+</code></pre>
+            </div>
+
+            <div class="concept-box">
+                <h3>When to Use Fixed-Size</h3>
+                <ul>
+                    <li>✅ Uniform-length documents (tweets, product descriptions)</li>
+                    <li>✅ When you need predictable chunk counts for cost estimation</li>
+                    <li>❌ Structured documents (breaks headers, code blocks, tables)</li>
+                    <li>❌ When semantic coherence matters</li>
+                </ul>
+            </div>
+        </section>
+
+        <!-- Section 4: Strategy 2 - Recursive Character Splitting -->
+        <section>
+            <h2>Strategy 2: Recursive Character Splitting</h2>
+            <p>LangChain's most popular splitter. Tries to split at natural boundaries in priority order: paragraphs → sentences → words → characters.</p>
+
+            <div class="code-block">
+                <pre><code class="language-python">from langchain.text_splitter import RecursiveCharacterTextSplitter
+
+# Recursive splitting with hierarchy of separators
+splitter = RecursiveCharacterTextSplitter(
+    chunk_size=500,
+    chunk_overlap=50,
+    separators=[
+        "\n\n",   # First try: split on double newlines (paragraphs)
+        "\n",     # Then: single newlines
+        ". ",     # Then: sentences
+        ", ",     # Then: clauses
+        " ",      # Then: words
+        ""        # Last resort: characters
+    ],
+    length_function=len
+)
+
+chunks = splitter.split_text(sample_doc)
+print(f"Recursive chunks: {len(chunks)}")
+for i, chunk in enumerate(chunks):
+    print(f"  Chunk {i} ({len(chunk)} chars): '{chunk[:80]}...'")
+
+# --- Token-based splitting (more accurate for LLMs) ---
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+
+# Use tiktoken for accurate token counting
+splitter_tokens = RecursiveCharacterTextSplitter.from_tiktoken_encoder(
+    encoding_name="cl100k_base",  # GPT-4 tokenizer
+    chunk_size=256,               # Tokens, not characters
+    chunk_overlap=30
+)
+
+chunks_tok = splitter_tokens.split_text(sample_doc)
+print(f"\nToken-based chunks: {len(chunks_tok)}")
+</code></pre>
+            </div>
+
+            <div class="callout">
+                <strong>💡 Pro Tip:</strong> Always use token-based chunking when your embedding model has a token limit. Character counts don't map linearly to tokens (1 token ≈ 4 characters on average for English).
+            </div>
+        </section>
+
+        <!-- Section 5: Strategy 3 - Semantic Chunking -->
+        <section>
+            <h2>Strategy 3: Semantic Chunking</h2>
+            <p>Groups sentences by embedding similarity. When consecutive sentences are semantically similar, they stay together. When similarity drops (topic shift), a new chunk starts.</p>
+
+            <div class="code-block">
+                <pre><code class="language-python">import numpy as np
+from openai import OpenAI
+import re
+
+client = OpenAI()
+
+def semantic_chunk(text: str, threshold: float = 0.75, min_chunk: int = 2):
+    """Split text into semantically coherent chunks.
+    
+    Algorithm:
+    1. Split into sentences
+    2. Embed each sentence
+    3. Compute cosine similarity between consecutive sentences
+    4. Split where similarity drops below threshold
+    """
+    # Split into sentences
+    sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', text) if s.strip()]
+    
+    if len(sentences) <= min_chunk:
+        return [text]
+    
+    # Embed all sentences
+    response = client.embeddings.create(
+        input=sentences, model="text-embedding-3-small"
+    )
+    embeddings = [d.embedding for d in response.data]
+    
+    # Calculate consecutive similarities
+    similarities = []
+    for i in range(len(embeddings) - 1):
+        a, b = np.array(embeddings[i]), np.array(embeddings[i + 1])
+        sim = np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
+        similarities.append(sim)
+    
+    # Find split points (where similarity drops)
+    chunks = []
+    current_chunk = [sentences[0]]
+    
+    for i, sim in enumerate(similarities):
+        if sim < threshold and len(current_chunk) >= min_chunk:
+            chunks.append(" ".join(current_chunk))
+            current_chunk = [sentences[i + 1]]
+        else:
+            current_chunk.append(sentences[i + 1])
+    
+    if current_chunk:
+        chunks.append(" ".join(current_chunk))
+    
+    return chunks
+
+# Usage
+chunks = semantic_chunk(sample_doc, threshold=0.72)
+print(f"Semantic chunks: {len(chunks)}")
+for i, chunk in enumerate(chunks):
+    print(f"\n--- Chunk {i} ({len(chunk)} chars) ---")
+    print(chunk[:150] + "...")
+</code></pre>
+            </div>
+
+            <div class="concept-box">
+                <h3>Semantic Chunking Tradeoffs</h3>
+                <ul>
+                    <li>✅ Best coherence — each chunk is about ONE topic</li>
+                    <li>✅ Adapts to document structure automatically</li>
+                    <li>❌ Expensive — requires embedding every sentence</li>
+                    <li>❌ Threshold tuning — 0.7 might be too aggressive or too conservative</li>
+                    <li>❌ Variable chunk sizes — harder to predict costs</li>
+                </ul>
+            </div>
+        </section>
+
+        <!-- Section 6: Strategy 4 - Document-Aware Chunking -->
+        <section>
+            <h2>Strategy 4: Document-Aware Chunking</h2>
+            <p>Uses document structure (headers, code blocks, tables) as natural boundaries.</p>
+
+            <div class="code-block">
+                <pre><code class="language-python">from langchain.text_splitter import (
+    MarkdownHeaderTextSplitter,
+    RecursiveCharacterTextSplitter,
+    Language
+)
+
+# --- Markdown-aware splitting ---
+headers_to_split_on = [
+    ("#", "h1"),
+    ("##", "h2"),
+    ("###", "h3"),
+]
+
+md_splitter = MarkdownHeaderTextSplitter(
+    headers_to_split_on=headers_to_split_on
+)
+
+md_chunks = md_splitter.split_text(sample_doc)
+for chunk in md_chunks:
+    print(f"Headers: {chunk.metadata}")
+    print(f"Content: {chunk.page_content[:80]}...\n")
+
+# Each chunk knows its heading hierarchy!
+# Headers: {'h1': 'Introduction to Machine Learning', 'h2': 'Supervised Learning'}
+# Content: In supervised learning, models learn from labeled examples...
+
+# --- Two-stage: structural split then size limit ---
+# First: split by headers
+md_chunks = md_splitter.split_text(sample_doc)
+
+# Second: if any chunk is too long, split it further
+char_splitter = RecursiveCharacterTextSplitter(
+    chunk_size=500, chunk_overlap=50
+)
+
+final_chunks = []
+for chunk in md_chunks:
+    if len(chunk.page_content) > 500:
+        sub_chunks = char_splitter.split_text(chunk.page_content)
+        for sc in sub_chunks:
+            final_chunks.append({"content": sc, "metadata": chunk.metadata})
+    else:
+        final_chunks.append({
+            "content": chunk.page_content, 
+            "metadata": chunk.metadata
+        })
+
+# --- Code-aware splitting ---
+python_splitter = RecursiveCharacterTextSplitter.from_language(
+    language=Language.PYTHON,
+    chunk_size=500,
+    chunk_overlap=50
+)
+
+code = '''
+class DataProcessor:
+    def __init__(self, config):
+        self.config = config
+    
+    def process(self, data):
+        """Process raw data into features."""
+        cleaned = self.clean(data)
+        features = self.extract_features(cleaned)
+        return features
+    
+    def clean(self, data):
+        """Remove nulls and normalize."""
+        return [d for d in data if d is not None]
+'''
+
+code_chunks = python_splitter.split_text(code)
+# Splits at class/function boundaries, not mid-function!
+</code></pre>
+            </div>
+        </section>
+
+        <!-- Section 7: Chunk Size Tradeoffs -->
+        <section>
+            <h2>Chunk Size vs Retrieval Quality</h2>
+            <p>Empirical results show a sweet spot that varies by use case:</p>
+
+            <div class="diagram-container" id="chunk-quality-chart"></div>
+
+            <div class="comparison-table">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Chunk Size</th>
+                            <th>Precision</th>
+                            <th>Recall</th>
+                            <th>Best For</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><strong>128 tokens</strong></td>
+                            <td>High ⬆️</td>
+                            <td>Low ⬇️</td>
+                            <td>FAQ, factoid QA, definitions</td>
+                        </tr>
+                        <tr>
+                            <td><strong>256 tokens</strong></td>
+                            <td>High ⬆️</td>
+                            <td>Medium ➡️</td>
+                            <td>General-purpose RAG (recommended start)</td>
+                        </tr>
+                        <tr>
+                            <td><strong>512 tokens</strong></td>
+                            <td>Medium ➡️</td>
+                            <td>High ⬆️</td>
+                            <td>Technical docs, tutorials, reasoning-heavy</td>
+                        </tr>
+                        <tr>
+                            <td><strong>1024 tokens</strong></td>
+                            <td>Low ⬇️</td>
+                            <td>High ⬆️</td>
+                            <td>Long-form analysis, legal documents</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <div class="callout">
+                <strong>🧪 The Overlap Question:</strong> 10–20% overlap is standard. Overlap ensures that information at chunk boundaries isn't lost. For a 500-token chunk, 50–100 token overlap is typical. Too much overlap wastes storage and creates duplicate retrieval results.
+            </div>
+        </section>
+
+        <!-- Section 8: Practical Decision Framework -->
+        <section>
+            <h2>Choosing a Strategy: Decision Framework</h2>
+            <div class="diagram-container" id="decision-flow"></div>
+
+            <div class="key-points">
+                <h3>🔑 Quick Decision Guide</h3>
+                <ul>
+                    <li><strong>Structured docs (Markdown, HTML, code)?</strong> → Document-aware chunking</li>
+                    <li><strong>Homogeneous text (articles, emails)?</strong> → Recursive character splitting</li>
+                    <li><strong>Mixed topics in single docs?</strong> → Semantic chunking</li>
+                    <li><strong>Tight budget, simple data?</strong> → Fixed-size with overlap</li>
+                    <li><strong>Maximum quality, any cost?</strong> → Semantic + parent-child chunks (see Lesson 13)</li>
+                </ul>
+            </div>
+        </section>
+
+        <!-- Mini Project -->
+        <section>
+            <div class="project-box">
+                <h2>🛠️ Mini-Project: Chunking Benchmark</h2>
+                <p>Compare chunking strategies on real documents and measure retrieval quality.</p>
+
+                <div class="step-list">
+                    <h4>Steps:</h4>
+                    <ol>
+                        <li>Select 5 markdown/text documents with known questions and answers</li>
+                        <li>Implement all 4 strategies (fixed, recursive, semantic, markdown-aware)</li>
+                        <li>Chunk each document with each strategy and embed all chunks</li>
+                        <li>For 10 test queries, retrieve top-3 chunks from each strategy</li>
+                        <li>Score: Does the correct answer appear in the top-3? (Precision@3)</li>
+                        <li>Compare chunk counts, average chunk size, and retrieval accuracy</li>
+                        <li><strong>Bonus:</strong> Plot chunk size distribution for each strategy</li>
+                    </ol>
+                </div>
+
+                <div class="code-block">
+                    <pre><code class="language-python">"""Chunking Benchmark - Starter Code"""
+from langchain.text_splitter import (
+    CharacterTextSplitter,
+    RecursiveCharacterTextSplitter,
+    MarkdownHeaderTextSplitter
+)
+import chromadb
+import json
+
+# Test documents and ground-truth QA pairs
+test_cases = [
+    {
+        "doc": open("docs/ml_intro.md").read(),
+        "questions": [
+            {"q": "What is overfitting?", "answer_in": "memorizes training data"},
+            {"q": "What did transformers revolutionize?", "answer_in": "NLP"},
+        ]
+    },
+    # ... add more
+]
+
+strategies = {
+    "fixed_300": CharacterTextSplitter(chunk_size=300, chunk_overlap=50),
+    "recursive_500": RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50),
+    "recursive_256_tokens": RecursiveCharacterTextSplitter.from_tiktoken_encoder(
+        chunk_size=256, chunk_overlap=30
+    ),
+}
+
+def evaluate_strategy(name, splitter, test_cases):
+    """Score a chunking strategy on retrieval accuracy."""
+    client = chromadb.Client()
+    collection = client.create_collection(f"bench_{name}")
+    
+    all_chunks = []
+    for doc_case in test_cases:
+        chunks = splitter.split_text(doc_case["doc"])
+        all_chunks.extend(chunks)
+    
+    collection.add(
+        documents=all_chunks,
+        ids=[f"chunk_{i}" for i in range(len(all_chunks))]
+    )
+    
+    # Score retrieval
+    hits = 0
+    total = 0
+    for doc_case in test_cases:
+        for qa in doc_case["questions"]:
+            results = collection.query(query_texts=[qa["q"]], n_results=3)
+            top_3_text = " ".join(results["documents"][0])
+            if qa["answer_in"].lower() in top_3_text.lower():
+                hits += 1
+            total += 1
+    
+    accuracy = hits / total
+    print(f"{name}: {accuracy:.0%} ({hits}/{total}) | {len(all_chunks)} chunks")
+    return accuracy
+
+# Run benchmark
+for name, splitter in strategies.items():
+    evaluate_strategy(name, splitter, test_cases)
+</code></pre>
+                </div>
+            </div>
+        </section>
+
+        <!-- Key Takeaways -->
+        <section>
+            <div class="key-points">
+                <h3>📋 Key Takeaways</h3>
+                <ul>
+                    <li>Chunking is the #1 lever for RAG quality — more impactful than model choice or prompt tuning</li>
+                    <li>Recursive character splitting is the best default for most text documents</li>
+                    <li>Use document-aware splitting for structured content (Markdown, HTML, code)</li>
+                    <li>Semantic chunking produces best coherence but costs more (requires embedding every sentence)</li>
+                    <li>256–512 tokens with 10-20% overlap is the sweet spot for most RAG applications</li>
+                    <li>Always benchmark on YOUR data with YOUR queries — there is no universal best strategy</li>
+                </ul>
+            </div>
+        </section>
+    </main>
+
+    <nav class="nav-links">
+        <a href="0010-vector-databases.html" class="prev">← Lesson 10: Vector Databases</a>
+        <a href="0012-building-rag-pipeline.html" class="next">Lesson 12: Building a RAG Pipeline →</a>
+    </nav>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            if (window.Diagrams) {
+                Diagrams.createComparisonBar(
+                    document.getElementById('chunk-tradeoff'),
+                    [
+                        { label: '128 tokens — Precision', value: 92, max: 100, color: '#22c55e' },
+                        { label: '128 tokens — Recall', value: 45, max: 100, color: '#ef4444' },
+                        { label: '256 tokens — Precision', value: 85, max: 100, color: '#22c55e' },
+                        { label: '256 tokens — Recall', value: 72, max: 100, color: '#22d3ee' },
+                        { label: '512 tokens — Precision', value: 68, max: 100, color: '#f59e0b' },
+                        { label: '512 tokens — Recall', value: 88, max: 100, color: '#22c55e' },
+                        { label: '1024 tokens — Precision', value: 42, max: 100, color: '#ef4444' },
+                        { label: '1024 tokens — Recall', value: 94, max: 100, color: '#22c55e' }
+                    ]
+                );
+
+                Diagrams.createComparisonBar(
+                    document.getElementById('chunk-quality-chart'),
+                    [
+                        { label: 'Fixed 300 chars', value: 62, max: 100, color: '#ef4444' },
+                        { label: 'Recursive 500 chars', value: 78, max: 100, color: '#f59e0b' },
+                        { label: 'Recursive 256 tokens', value: 84, max: 100, color: '#22d3ee' },
+                        { label: 'Markdown-aware', value: 88, max: 100, color: '#22c55e' },
+                        { label: 'Semantic chunking', value: 91, max: 100, color: '#6366f1' }
+                    ]
+                );
+
+                Diagrams.createFlowDiagram(
+                    document.getElementById('decision-flow'),
+                    [
+                        { label: 'Analyze Document Type', sublabel: 'Structured? Code? Plain text?', color: '#6366f1' },
+                        { label: 'Choose Strategy', sublabel: 'Match structure to splitter', color: '#22d3ee' },
+                        { label: 'Set Chunk Size', sublabel: '256-512 tokens for most cases', color: '#f59e0b' },
+                        { label: 'Add Overlap', sublabel: '10-20% of chunk size', color: '#22c55e' },
+                        { label: 'Benchmark & Iterate', sublabel: 'Test with real queries', color: '#6366f1' }
+                    ]
+                );
+            }
+        });
+    </script>
+</body>
+</html>

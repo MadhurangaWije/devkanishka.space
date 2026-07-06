@@ -1,0 +1,348 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lesson 37: Authentication Methods</title>
+    <style>
+        :root {
+            --bg: #fafafa; --text: #1a1a1a; --accent: #326ce5;
+            --accent-light: #e8f0fe; --border: #e0e0e0; --code-bg: #f5f5f5;
+            --success: #2e7d32; --warn: #f57c00;
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: 'Georgia', serif; line-height: 1.7; color: var(--text); background: var(--bg); max-width: 780px; margin: 0 auto; padding: 2rem 1.5rem; }
+        h1 { font-size: 2rem; margin-bottom: 0.5rem; color: var(--accent); }
+        h2 { font-size: 1.4rem; margin-top: 2.5rem; margin-bottom: 0.8rem; border-bottom: 2px solid var(--accent); padding-bottom: 0.3rem; }
+        h3 { font-size: 1.1rem; margin-top: 1.5rem; margin-bottom: 0.5rem; }
+        p { margin-bottom: 1rem; }
+        .meta { color: #666; font-size: 0.9rem; margin-bottom: 2rem; }
+        .key-insight { background: var(--accent-light); border-left: 4px solid var(--accent); padding: 1rem 1.2rem; margin: 1.5rem 0; border-radius: 0 4px 4px 0; }
+        .key-insight strong { color: var(--accent); }
+        .production-note { background: #fff3e0; border-left: 4px solid var(--warn); padding: 1rem 1.2rem; margin: 1.5rem 0; border-radius: 0 4px 4px 0; }
+        .production-note::before { content: "🏭 Production: "; font-weight: bold; }
+        .exam-tip { background: #e8f5e9; border-left: 4px solid var(--success); padding: 1rem 1.2rem; margin: 1.5rem 0; border-radius: 0 4px 4px 0; }
+        .exam-tip::before { content: "🎯 Exam Tip: "; font-weight: bold; color: var(--success); }
+        .security-warn { background: #fce4ec; border-left: 4px solid #c62828; padding: 1rem 1.2rem; margin: 1.5rem 0; border-radius: 0 4px 4px 0; }
+        .security-warn::before { content: "🔒 Security: "; font-weight: bold; color: #c62828; }
+        code { font-family: 'Menlo', 'Consolas', monospace; font-size: 0.85em; background: var(--code-bg); padding: 0.15em 0.4em; border-radius: 3px; }
+        pre { background: var(--code-bg); padding: 1rem; border-radius: 4px; overflow-x: auto; margin: 1rem 0; font-size: 0.85rem; line-height: 1.5; }
+        ul, ol { margin: 0.5rem 0 1rem 1.5rem; }
+        li { margin-bottom: 0.4rem; }
+        table { width: 100%; border-collapse: collapse; margin: 1rem 0; font-size: 0.9rem; }
+        th, td { border: 1px solid var(--border); padding: 0.6rem 0.8rem; text-align: left; }
+        th { background: var(--accent-light); font-weight: bold; }
+        .diagram { background: white; border: 1px solid var(--border); border-radius: 8px; padding: 1.5rem; margin: 1.5rem 0; text-align: center; }
+        .cert-badge { display: inline-block; background: var(--accent); color: white; font-size: 0.7rem; padding: 0.15rem 0.5rem; border-radius: 10px; margin-left: 0.5rem; }
+        .quiz { background: #f9f9f9; border: 1px solid var(--border); border-radius: 8px; padding: 1.5rem; margin-top: 2rem; }
+        .quiz h2 { border-bottom: none; margin-top: 0; }
+        .quiz-q { margin-bottom: 1.2rem; }
+        .quiz-q p { font-weight: bold; margin-bottom: 0.3rem; }
+        .quiz-answer { display: none; background: #e8f5e9; padding: 0.5rem 0.8rem; border-radius: 4px; margin-top: 0.5rem; }
+        .reveal-btn { background: var(--accent); color: white; border: none; padding: 0.3rem 0.8rem; border-radius: 4px; cursor: pointer; font-size: 0.8rem; }
+        .reveal-btn:hover { opacity: 0.85; }
+    </style>
+</head>
+<body>
+
+<h1>Lesson 37: Authentication Methods</h1>
+<p class="meta">Chapter 7: Security — RBAC & Identity · <span class="cert-badge">CKA</span> <span class="cert-badge">CKS</span> · ~20 min</p>
+
+<p>Authentication is the first gate in the API server pipeline: <strong>"Who are you?"</strong> Kubernetes doesn't manage user accounts itself — it delegates authentication to external systems (certificates, tokens, OIDC providers). Understanding the authentication methods is critical for CKS and for securing production clusters.</p>
+
+<h2>1. Two Types of Identity</h2>
+
+<p>Kubernetes distinguishes between two kinds of identities:</p>
+
+<table>
+    <tr><th></th><th>Human Users</th><th>Service Accounts</th></tr>
+    <tr><td><strong>Managed by</strong></td><td>External system (OIDC, certs, LDAP)</td><td>Kubernetes API (objects in etcd)</td></tr>
+    <tr><td><strong>Exists as K8s object?</strong></td><td>❌ No (K8s has no "User" resource)</td><td>✅ Yes (<code>kind: ServiceAccount</code>)</td></tr>
+    <tr><td><strong>Namespaced?</strong></td><td>No (cluster-wide identity)</td><td>Yes (per-namespace)</td></tr>
+    <tr><td><strong>Used by</strong></td><td>kubectl users, CI/CD pipelines, admins</td><td>Pods, controllers, operators</td></tr>
+    <tr><td><strong>Authentication</strong></td><td>Client certs, OIDC tokens, static tokens</td><td>Projected SA tokens (JWT)</td></tr>
+</table>
+
+<div class="key-insight">
+    <strong>Kubernetes does NOT store user accounts.</strong> There's no <code>kubectl create user</code> command. Users are established by external authenticators (X.509 cert CN, OIDC sub claim, etc.). The API server verifies the credential and extracts the username/groups — but never stores them. This is fundamentally different from ServiceAccounts which ARE K8s objects.
+</div>
+
+<h3>The Authentication Flow</h3>
+
+<div class="diagram">
+<svg viewBox="0 0 600 100" xmlns="http://www.w3.org/2000/svg" font-family="Menlo, monospace" font-size="9">
+    <defs><marker id="arr37" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0 L10 5 L0 10z" fill="#326ce5"/></marker></defs>
+    
+    <rect x="20" y="30" width="100" height="40" rx="4" fill="#f3e5f5" stroke="#7b1fa2" stroke-width="1.5"/>
+    <text x="70" y="50" text-anchor="middle" font-size="9" font-weight="bold">Request</text>
+    <text x="70" y="63" text-anchor="middle" font-size="7" fill="#666">+ credential</text>
+    
+    <line x1="120" y1="50" x2="160" y2="50" stroke="#326ce5" stroke-width="1.5" marker-end="url(#arr37)"/>
+    
+    <rect x="160" y="25" width="180" height="50" rx="4" fill="#e8f0fe" stroke="#326ce5" stroke-width="2"/>
+    <text x="250" y="45" text-anchor="middle" font-weight="bold">Authentication Plugins</text>
+    <text x="250" y="60" text-anchor="middle" font-size="7" fill="#666">Certs | Tokens | OIDC | Webhook</text>
+    <text x="250" y="70" text-anchor="middle" font-size="7" fill="#666">(tried in order, first match wins)</text>
+    
+    <line x1="340" y1="50" x2="380" y2="50" stroke="#326ce5" stroke-width="1.5" marker-end="url(#arr37)"/>
+    
+    <rect x="380" y="30" width="120" height="40" rx="4" fill="#c8e6c9" stroke="#2e7d32" stroke-width="1.5"/>
+    <text x="440" y="48" text-anchor="middle" font-size="9" font-weight="bold">Authenticated!</text>
+    <text x="440" y="62" text-anchor="middle" font-size="7" fill="#666">user: jane, groups: [dev]</text>
+    
+    <text x="530" y="50" text-anchor="middle" font-size="9">→ AuthZ</text>
+</svg>
+</div>
+
+<p>The API server runs multiple authenticators. Each request is tried against all configured plugins. The <strong>first one that succeeds</strong> establishes the identity. If all fail → 401 Unauthorized.</p>
+
+<h2>2. X.509 Client Certificates</h2>
+
+<p>The most common authentication for cluster components (kubelet, scheduler, controller-manager) and kubeadm-created admin users. The API server trusts any certificate signed by its configured CA.</p>
+
+<h3>How It Works</h3>
+
+<ol>
+    <li>Client presents a TLS client certificate during the HTTPS handshake</li>
+    <li>API server validates the cert against its <code>--client-ca-file</code> (the cluster CA)</li>
+    <li>Username is extracted from the certificate's <strong>Common Name (CN)</strong></li>
+    <li>Groups are extracted from the certificate's <strong>Organization (O)</strong> fields</li>
+</ol>
+
+<pre># Certificate with CN=jane, O=developers, O=admins
+# → Authenticated as user "jane" with groups ["developers", "admins"]</pre>
+
+<h3>Creating a User Certificate (CKA Exam Pattern)</h3>
+
+<pre># 1. Generate private key:
+openssl genrsa -out jane.key 2048
+
+# 2. Create Certificate Signing Request (CSR):
+openssl req -new -key jane.key -out jane.csr \
+  -subj "/CN=jane/O=developers"
+#         ↑ username    ↑ group
+
+# 3. Submit CSR to Kubernetes for signing:
+cat &lt;&lt;EOF | kubectl apply -f -
+apiVersion: certificates.k8s.io/v1
+kind: CertificateSigningRequest
+metadata:
+  name: jane-csr
+spec:
+  request: $(cat jane.csr | base64 | tr -d '\n')
+  signerName: kubernetes.io/kube-apiserver-client
+  usages: ["client auth"]
+EOF
+
+# 4. Approve the CSR:
+kubectl certificate approve jane-csr
+
+# 5. Get the signed certificate:
+kubectl get csr jane-csr -o jsonpath='{.status.certificate}' | base64 -d > jane.crt
+
+# 6. Add to kubeconfig:
+kubectl config set-credentials jane \
+  --client-certificate=jane.crt \
+  --client-key=jane.key
+kubectl config set-context jane-ctx \
+  --cluster=kubernetes --user=jane</pre>
+
+<div class="exam-tip">
+    CKA/CKS exam: creating user certificates via CertificateSigningRequest is a common question. Know the steps: generate key → create CSR → submit to K8s → approve → extract cert. The critical detail: <code>signerName: kubernetes.io/kube-apiserver-client</code> and <code>usages: ["client auth"]</code>.
+</div>
+
+<div class="security-warn">
+    Client certificates <strong>cannot be revoked</strong> without rotating the entire cluster CA. Once issued, a cert is valid until it expires. This is a major limitation — if a user's key is compromised, you can't invalidate just their cert. This is why OIDC is preferred for human users in production.
+</div>
+
+<h2>3. OIDC (OpenID Connect)</h2>
+
+<p>The <strong>recommended method for human users</strong> in production. Integrates with identity providers (Google, Azure AD, Okta, Keycloak, Dex) for SSO with centralized user management.</p>
+
+<h3>How It Works</h3>
+
+<ol>
+    <li>User authenticates with the OIDC provider (login page, MFA)</li>
+    <li>Provider returns an <strong>ID token</strong> (JWT) containing user claims</li>
+    <li>kubectl sends the JWT as a bearer token to the API server</li>
+    <li>API server validates the JWT signature against the provider's public keys</li>
+    <li>Username/groups extracted from configured JWT claims</li>
+</ol>
+
+<pre># API server configuration for OIDC:
+kube-apiserver \
+  --oidc-issuer-url=https://accounts.google.com \
+  --oidc-client-id=my-k8s-cluster \
+  --oidc-username-claim=email \
+  --oidc-groups-claim=groups \
+  --oidc-username-prefix="oidc:" \
+  --oidc-groups-prefix="oidc:"</pre>
+
+<h3>OIDC vs Certificates</h3>
+
+<table>
+    <tr><th>Aspect</th><th>X.509 Certificates</th><th>OIDC</th></tr>
+    <tr><td>Revocation</td><td>❌ Can't revoke (must rotate CA)</td><td>✅ Disable user in provider → immediate</td></tr>
+    <tr><td>Short-lived</td><td>Typically long-lived (1 year)</td><td>✅ Tokens expire (hours, configurable)</td></tr>
+    <tr><td>MFA</td><td>❌ No (just key possession)</td><td>✅ Provider enforces MFA</td></tr>
+    <tr><td>Centralized</td><td>❌ Per-cluster CA</td><td>✅ One provider for all clusters</td></tr>
+    <tr><td>Setup complexity</td><td>Low (built-in)</td><td>Medium (need OIDC provider)</td></tr>
+    <tr><td>Best for</td><td>Component auth, bootstrap, kubeadm admin</td><td>Human users in production</td></tr>
+</table>
+
+<div class="production-note">
+    In production multi-cluster environments, OIDC + a shared identity provider (Okta, Azure AD) is the standard. One login gets you access to all clusters. Disable a user in the IdP → they lose access to ALL clusters immediately. Tools like <code>kubelogin</code> and <code>oidc-login</code> handle the token refresh flow transparently in kubectl.
+</div>
+
+<h2>4. ServiceAccount Tokens</h2>
+
+<p>ServiceAccounts are for <strong>Pods and automated systems</strong> — not humans. Every namespace has a <code>default</code> ServiceAccount. Pods use SA tokens to authenticate with the API server.</p>
+
+<h3>Modern Bound Tokens (K8s 1.22+)</h3>
+
+<pre># Automatically projected into every Pod:
+/var/run/secrets/kubernetes.io/serviceaccount/token
+
+# This is a short-lived JWT (bound token):
+# - Expires after 1 hour (auto-rotated by kubelet)
+# - Bound to the specific Pod (invalidated on Pod deletion)
+# - Audience-bound (valid only for the API server)
+
+# Decoded token payload:
+{
+  "iss": "https://kubernetes.default.svc",
+  "sub": "system:serviceaccount:default:my-app-sa",
+  "aud": ["https://kubernetes.default.svc"],
+  "exp": 1705334400,
+  "iat": 1705330800,
+  "kubernetes.io": {
+    "namespace": "default",
+    "pod": {"name": "web-abc", "uid": "..."},
+    "serviceaccount": {"name": "my-app-sa", "uid": "..."}
+  }
+}</pre>
+
+<h3>Creating Long-Lived Tokens (When Needed)</h3>
+
+<pre># For external systems that need a static token (CI/CD, monitoring):
+apiVersion: v1
+kind: Secret
+metadata:
+  name: ci-token
+  annotations:
+    kubernetes.io/service-account.name: ci-sa
+type: kubernetes.io/service-account-token
+# Controller generates a non-expiring token in this Secret
+
+# Or create a token with specific expiry:
+kubectl create token ci-sa --duration=8760h   # 1 year</pre>
+
+<div class="security-warn">
+    Long-lived tokens are a security risk — they don't expire until manually deleted. K8s 1.24+ stopped auto-creating them. Only create long-lived tokens when absolutely necessary (legacy integrations that can't handle token rotation). Always prefer bound tokens (automatic, short-lived, Pod-specific).
+</div>
+
+<h2>5. Other Authentication Methods</h2>
+
+<h3>Bootstrap Tokens</h3>
+
+<pre># Used during kubeadm join — short-lived tokens for node registration:
+kubeadm token create --print-join-command
+# Token format: abcdef.0123456789abcdef (6 chars.16 chars)
+# Stored as Secrets in kube-system namespace
+# Default TTL: 24 hours — expire after cluster bootstrap</pre>
+
+<h3>Webhook Token Authentication</h3>
+
+<pre># Delegates authentication to an external service:
+kube-apiserver --authentication-token-webhook-config-file=/etc/k8s/webhook-config.yaml
+# API server sends the bearer token to your webhook
+# Webhook responds with: authenticated=true, user=..., groups=[...]
+# Use case: custom auth systems, legacy token validation</pre>
+
+<h3>Static Token File (Avoid in Production)</h3>
+
+<pre># API server reads tokens from a CSV file:
+# kube-apiserver --token-auth-file=/etc/k8s/tokens.csv
+# Format: token,user,uid,"group1,group2"
+# ⚠️ Not recommended: no expiry, no revocation, requires API server restart to change</pre>
+
+<h3>Anonymous Authentication</h3>
+
+<pre># If no authenticator matches → request is anonymous:
+# user: system:anonymous
+# groups: [system:unauthenticated]
+# Some paths allow anonymous (healthz, readyz)
+# Disable for non-public endpoints: --anonymous-auth=false</pre>
+
+<h2>6. What Each Component Uses</h2>
+
+<table>
+    <tr><th>Component</th><th>Auth Method</th><th>Identity</th></tr>
+    <tr><td>kubelet</td><td>X.509 client cert</td><td><code>system:node:&lt;nodename&gt;</code></td></tr>
+    <tr><td>kube-scheduler</td><td>X.509 client cert</td><td><code>system:kube-scheduler</code></td></tr>
+    <tr><td>kube-controller-manager</td><td>X.509 client cert</td><td><code>system:kube-controller-manager</code></td></tr>
+    <tr><td>kube-proxy</td><td>X.509 client cert</td><td><code>system:kube-proxy</code></td></tr>
+    <tr><td>kubectl (admin)</td><td>X.509 client cert (kubeadm) or OIDC</td><td>CN from cert or OIDC claim</td></tr>
+    <tr><td>Pods</td><td>ServiceAccount token (bound JWT)</td><td><code>system:serviceaccount:&lt;ns&gt;:&lt;name&gt;</code></td></tr>
+    <tr><td>CI/CD pipelines</td><td>SA token or OIDC</td><td>Depends on setup</td></tr>
+</table>
+
+<div class="key-insight">
+    <strong>Pattern: system components use X.509 certs, humans use OIDC, Pods use SA tokens.</strong> This three-tier model gives you: immutable component identities (certs), centrally-managed human access (OIDC), and auto-rotating workload identities (bound tokens).
+</div>
+
+<h2>Summary</h2>
+
+<table>
+    <tr><th>Method</th><th>Identity Source</th><th>Best For</th><th>Revocable?</th></tr>
+    <tr><td>X.509 Certs</td><td>CN=user, O=groups</td><td>Components, bootstrap admin</td><td>❌ (only CA rotation)</td></tr>
+    <tr><td>OIDC</td><td>JWT claims (email, groups)</td><td>Human users (production)</td><td>✅ (disable in IdP)</td></tr>
+    <tr><td>SA Tokens (bound)</td><td>Projected JWT (1h, Pod-bound)</td><td>Pods, workload identity</td><td>✅ (delete Pod/SA)</td></tr>
+    <tr><td>SA Tokens (static)</td><td>Secret-stored JWT (no expiry)</td><td>Legacy integrations</td><td>✅ (delete Secret)</td></tr>
+    <tr><td>Bootstrap Tokens</td><td>kube-system Secret (24h TTL)</td><td>kubeadm node join</td><td>✅ (delete/expire)</td></tr>
+    <tr><td>Webhook</td><td>External auth service</td><td>Custom auth systems</td><td>✅ (external control)</td></tr>
+</table>
+
+<!-- Quiz -->
+<div class="quiz">
+    <h2>📝 Quiz: Authentication Methods</h2>
+    
+    <div class="quiz-q">
+        <p>Q1: A user presents a client certificate with CN=alice and O=engineering. What username and groups does the API server extract?</p>
+        <button class="reveal-btn" onclick="this.nextElementSibling.style.display='block'">Show Answer</button>
+        <div class="quiz-answer">Username: <strong>alice</strong> (from Common Name). Groups: <strong>["engineering"]</strong> (from Organization). If the cert had multiple O fields (O=engineering, O=ops), both would be groups.</div>
+    </div>
+    
+    <div class="quiz-q">
+        <p>Q2: A user's private key is compromised. They were authenticated via X.509 cert. How do you revoke their access?</p>
+        <button class="reveal-btn" onclick="this.nextElementSibling.style.display='block'">Show Answer</button>
+        <div class="quiz-answer"><strong>You can't directly revoke a single cert.</strong> Options: (1) Remove their RBAC bindings (they authenticate but can't do anything). (2) Rotate the entire cluster CA (invalidates ALL certs — very disruptive). (3) If the cert has a short TTL, wait for expiry. This is why OIDC is preferred — you just disable the user in the identity provider for immediate revocation.</div>
+    </div>
+    
+    <div class="quiz-q">
+        <p>Q3: Does Kubernetes have a "User" resource you can create with <code>kubectl create user</code>?</p>
+        <button class="reveal-btn" onclick="this.nextElementSibling.style.display='block'">Show Answer</button>
+        <div class="quiz-answer"><strong>No.</strong> Kubernetes has no User resource and no user management API. Users are external — established by authenticators (cert CN, OIDC claims). Only ServiceAccounts are K8s-native identity objects. To "create a user," you issue them a certificate or add them to your OIDC provider.</div>
+    </div>
+    
+    <div class="quiz-q">
+        <p>Q4: What's the difference between a legacy SA token (Secret-stored) and a modern bound SA token (projected)?</p>
+        <button class="reveal-btn" onclick="this.nextElementSibling.style.display='block'">Show Answer</button>
+        <div class="quiz-answer"><strong>Legacy:</strong> Stored in a Secret, never expires, not bound to any Pod, valid until manually deleted. Dangerous if leaked.<br><strong>Bound (modern):</strong> Projected into the Pod, expires in ~1h (auto-rotated by kubelet), bound to specific Pod UID (invalidated when Pod is deleted), audience-restricted. Much safer — compromised token is short-lived and useless after Pod deletion.</div>
+    </div>
+    
+    <div class="quiz-q">
+        <p>Q5: The kubelet on worker-1 authenticates to the API server. What identity does it present?</p>
+        <button class="reveal-btn" onclick="this.nextElementSibling.style.display='block'">Show Answer</button>
+        <div class="quiz-answer">Username: <strong><code>system:node:worker-1</code></strong>. Group: <strong><code>system:nodes</code></strong>. It uses an X.509 client certificate with CN=<code>system:node:worker-1</code> and O=<code>system:nodes</code>. This identity is used by the Node authorizer to limit kubelet access to only its own node's Pods and Secrets.</div>
+    </div>
+    
+    <div class="quiz-q">
+        <p>Q6: Why is OIDC preferred over X.509 certs for human users in production?</p>
+        <button class="reveal-btn" onclick="this.nextElementSibling.style.display='block'">Show Answer</button>
+        <div class="quiz-answer">Four reasons: <strong>(1) Revocation</strong> — disable user in IdP, immediate effect. Certs can't be revoked. <strong>(2) Short-lived</strong> — OIDC tokens expire in hours; certs are valid for months/years. <strong>(3) MFA</strong> — IdP can enforce multi-factor auth. <strong>(4) Centralized</strong> — one IdP manages access to all clusters. Certs are per-cluster and per-user.</div>
+    </div>
+</div>
+
+</body>
+</html>

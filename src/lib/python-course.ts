@@ -92,12 +92,50 @@ export const PHASES: PhaseMeta[] = [
       { slug: 'packaging',   title: 'Packaging & pyproject.toml', subtitle: "Turning a project into an installable, distributable package.",     number: 36, file: '0036-packaging.html' },
     ],
   },
+  {
+    number: 4,
+    name: 'Phase 4 — FastAPI & Web APIs',
+    urlSegment: 'phase-4',
+    contentDir: 'python-a-to-z',
+    lessons: [
+      { slug: 'fastapi-intro',               title: 'FastAPI Intro & Routing',       subtitle: "Path operations, path/query parameters, and organising routes into APIRouter modules.", number: 37, file: '0037-fastapi-intro.html' },
+      { slug: 'pydantic',                    title: 'Pydantic & Validation',         subtitle: "Validating request bodies and shaping responses with typed models.",                     number: 38, file: '0038-pydantic.html' },
+      { slug: 'dependency-injection',        title: 'Dependency Injection',          subtitle: "FastAPI's Depends() system for shared logic, auth, and database sessions.",              number: 39, file: '0039-dependency-injection.html' },
+      { slug: 'auth-oauth2-jwt',             title: 'Auth: OAuth2 & JWT',            subtitle: "Authenticating API users with OAuth2 password flow and JWT access tokens.",              number: 40, file: '0040-auth.html' },
+      { slug: 'databases-sqlalchemy',        title: 'Databases with SQLAlchemy',     subtitle: "Models, sessions, and async queries — connecting FastAPI to a real database.",           number: 41, file: '0041-databases.html' },
+      { slug: 'background-tasks-websockets', title: 'Background Tasks & WebSockets', subtitle: "Running work after a response is sent, and real-time communication over WebSockets.",    number: 42, file: '0042-background-tasks.html' },
+    ],
+  },
+  {
+    number: 5,
+    name: 'Phase 5 — Python for ML & AI',
+    urlSegment: 'phase-5',
+    contentDir: 'python-a-to-z',
+    lessons: [
+      { slug: 'python-numpy',         title: 'Python + NumPy: Arrays & Vectorisation',       subtitle: "The array library every ML/AI tool is built on — shapes, broadcasting, and vectorised operations.", number: 43, file: '0043-numpy.html' },
+      { slug: 'python-pandas',        title: 'Python + Pandas: Data Wrangling',              subtitle: "DataFrames, Series, and the cleaning/reshaping work that precedes every model.",                    number: 44, file: '0044-pandas.html' },
+      { slug: 'python-visualization', title: 'Python + Matplotlib/Seaborn: Visualisation',   subtitle: "Seeing your data before you model it — the plots every analysis starts with.",                     number: 45, file: '0045-visualization.html' },
+      { slug: 'python-sklearn',       title: 'Python + Scikit-learn: ML Pipelines',          subtitle: "Fitting, transforming, and chaining models with scikit-learn's Pipeline API.",                     number: 46, file: '0046-sklearn.html' },
+    ],
+  },
+  {
+    number: 6,
+    name: 'Phase 6 — CPython Internals (Bonus)',
+    urlSegment: 'phase-6',
+    contentDir: 'python-a-to-z',
+    lessons: [
+      { slug: 'cpython-internals',      title: 'CPython Internals: Bytecode, Frames & the Eval Loop',       subtitle: "What actually happens when Python runs your code — bytecode, frame objects, and the eval loop.", number: 47, file: '0043-cpython-internals.html' },
+      { slug: 'python-object-model',    title: 'The Python Object Model: Memory, gc & Weak References',     subtitle: "Reference counting, the cyclic garbage collector, and how weak references avoid keeping objects alive.", number: 48, file: '0044-object-model.html' },
+      { slug: 'descriptors',            title: 'The Descriptor Protocol & Attribute Lookup',                subtitle: "The mechanism behind properties, methods, and attribute access — descriptors, demystified.", number: 49, file: '0045-descriptors.html' },
+      { slug: 'metaclasses',            title: 'Metaclasses & the Class Creation Protocol',                 subtitle: "What actually runs when Python builds a class — and how to hook into it.", number: 50, file: '0046-metaclasses-deep.html' },
+      { slug: 'import-system',          title: 'The Import System: importlib, Finders & Loaders',           subtitle: "What `import` actually does — sys.path, finders, loaders, and the module cache.", number: 51, file: '0047-import-system.html' },
+      { slug: 'abstract-syntax-trees',  title: 'Abstract Syntax Trees: Parsing, Walking & Code Generation', subtitle: "Parsing Python into an AST, walking it, and generating code — the machinery behind linters and formatters.", number: 52, file: '0048-ast.html' },
+      { slug: 'performance-engineering', title: 'Performance Engineering: Profiling, __slots__, C Extensions & Free-Threaded Python', subtitle: "Finding and fixing real bottlenecks — profiling, __slots__, C extensions, and the free-threaded build.", number: 53, file: '0049-performance-engineering.html' },
+    ],
+  },
 ];
 
-export const COMING_SOON_PHASES = [
-  'Phase 4 — FastAPI & Web APIs',
-  'Phase 5 — Python for ML & AI',
-];
+export const COMING_SOON_PHASES: string[] = [];
 
 // Flat lesson list for quick lookups
 export const ALL_LESSONS: (LessonMeta & { phaseNumber: number; urlSegment: string })[] =

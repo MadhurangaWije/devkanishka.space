@@ -1,0 +1,423 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lesson 28: Building Your Own Container Runtime</title>
+    <link rel="stylesheet" href="../assets/lesson-style.css">
+</head>
+<body>
+    <nav class="lesson-nav">
+        <a href="0027-scaling-patterns.html">← Previous: Scaling Patterns</a>
+        <a href="0029-advanced-networking.html">Next: Advanced Networking →</a>
+    </nav>
+
+    <article class="lesson-content">
+        <h1>Lesson 28: Building Your Own Container Runtime</h1>
+        <p class="lesson-subtitle">Demystifying containers by building one from scratch with Linux primitives</p>
+
+        <!-- Section 1: What a Runtime Actually Does -->
+        <section>
+            <h2>1. What a Runtime Actually Does</h2>
+            <p>A container runtime does exactly one thing: it takes a <strong>root filesystem</strong> and a <strong>configuration</strong>, then creates an <strong>isolated process</strong>. That's it. No magic.</p>
+            <p>It uses three Linux primitives:</p>
+            <ul>
+                <li><strong>Namespaces</strong> — isolation (the process can't see other processes, networks, or users)</li>
+                <li><strong>Cgroups</strong> — resource limits (the process can't consume more than X MB of RAM)</li>
+                <li><strong>chroot / pivot_root</strong> — filesystem isolation (the process sees only its own root)</li>
+            </ul>
+            <p>Docker is not magical. It's a UX layer on top of these primitives. By the end of this lesson, you'll create a container with a 30-line shell script.</p>
+        </section>
+
+        <!-- Section 2: The OCI Runtime Spec -->
+        <section>
+            <h2>2. The OCI Runtime Spec</h2>
+            <p>The <strong>Open Container Initiative (OCI)</strong> defines a standard for container runtimes. Two key pieces:</p>
+            <dl>
+                <dt><code>config.json</code></dt>
+                <dd>Declares what to run, which namespaces to create, which filesystems to mount, and which cgroup limits to apply.</dd>
+                <dt>Lifecycle commands</dt>
+                <dd><code>create</code> → <code>start</code> → <code>kill</code> → <code>delete</code></dd>
+            </dl>
+            <p><strong>runc</strong> is the reference implementation. Any OCI-compliant runtime is a drop-in replacement — you can swap runc for crun, youki, or kata-runtime without changing your container images.</p>
+        </section>
+
+        <!-- SVG Diagram: 5 Steps to Create a Container -->
+        <section>
+            <h2>The 5 Steps to Create a Container</h2>
+            <svg viewBox="0 0 800 200" class="diagram" aria-label="Five steps to create a container shown as a linear flow">
+                <!-- Step boxes -->
+                <rect x="10" y="60" width="130" height="80" rx="8" fill="#e3f2fd" stroke="#1565c0" stroke-width="2"/>
+                <text x="75" y="95" text-anchor="middle" font-size="13" font-weight="bold" fill="#1565c0">1. Root FS</text>
+                <text x="75" y="115" text-anchor="middle" font-size="11" fill="#333">Extract image</text>
+                <text x="75" y="130" text-anchor="middle" font-size="11" fill="#333">into directory</text>
+
+                <rect x="170" y="60" width="130" height="80" rx="8" fill="#e8f5e9" stroke="#2e7d32" stroke-width="2"/>
+                <text x="235" y="95" text-anchor="middle" font-size="13" font-weight="bold" fill="#2e7d32">2. Namespaces</text>
+                <text x="235" y="115" text-anchor="middle" font-size="11" fill="#333">unshare PID,</text>
+                <text x="235" y="130" text-anchor="middle" font-size="11" fill="#333">mount, UTS, net</text>
+
+                <rect x="330" y="60" width="130" height="80" rx="8" fill="#fff3e0" stroke="#e65100" stroke-width="2"/>
+                <text x="395" y="95" text-anchor="middle" font-size="13" font-weight="bold" fill="#e65100">3. pivot_root</text>
+                <text x="395" y="115" text-anchor="middle" font-size="11" fill="#333">Change root to</text>
+                <text x="395" y="130" text-anchor="middle" font-size="11" fill="#333">container FS</text>
+
+                <rect x="490" y="60" width="130" height="80" rx="8" fill="#fce4ec" stroke="#c62828" stroke-width="2"/>
+                <text x="555" y="95" text-anchor="middle" font-size="13" font-weight="bold" fill="#c62828">4. Cgroups</text>
+                <text x="555" y="115" text-anchor="middle" font-size="11" fill="#333">Set memory,</text>
+                <text x="555" y="130" text-anchor="middle" font-size="11" fill="#333">CPU limits</text>
+
+                <rect x="650" y="60" width="130" height="80" rx="8" fill="#ede7f6" stroke="#4527a0" stroke-width="2"/>
+                <text x="715" y="95" text-anchor="middle" font-size="13" font-weight="bold" fill="#4527a0">5. exec</text>
+                <text x="715" y="115" text-anchor="middle" font-size="11" fill="#333">Replace shell</text>
+                <text x="715" y="130" text-anchor="middle" font-size="11" fill="#333">with process</text>
+
+                <!-- Arrows -->
+                <path d="M140,100 L170,100" fill="none" stroke="#666" stroke-width="2" marker-end="url(#arrowhead)"/>
+                <path d="M300,100 L330,100" fill="none" stroke="#666" stroke-width="2" marker-end="url(#arrowhead)"/>
+                <path d="M460,100 L490,100" fill="none" stroke="#666" stroke-width="2" marker-end="url(#arrowhead)"/>
+                <path d="M620,100 L650,100" fill="none" stroke="#666" stroke-width="2" marker-end="url(#arrowhead)"/>
+
+                <defs>
+                    <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+                        <polygon points="0 0, 10 3.5, 0 7" fill="#666"/>
+                    </marker>
+                </defs>
+
+                <!-- Result label -->
+                <text x="400" y="175" text-anchor="middle" font-size="14" fill="#333" font-style="italic">Result: an isolated process = a container</text>
+            </svg>
+        </section>
+
+        <!-- Section 3: Creating a Root Filesystem -->
+        <section>
+            <h2>3. Step 1: Creating a Root Filesystem</h2>
+            <p>A container needs a filesystem to see. The simplest way: export a Docker image.</p>
+            <pre><code># Create a minimal Alpine rootfs
+mkdir rootfs
+docker export $(docker create alpine) | tar -C rootfs -xf -
+
+# Verify — you should see standard Linux directories
+ls rootfs/
+# bin  dev  etc  home  lib  media  mnt  opt  proc  root  run  sbin  srv  sys  tmp  usr  var</code></pre>
+            <p>Alternative: use <code>debootstrap</code> for a minimal Debian rootfs:</p>
+            <pre><code>sudo debootstrap --variant=minbase bullseye rootfs/ http://deb.debian.org/debian</code></pre>
+            <p>Either way, you now have a directory that looks like a Linux root. That's all a container image is — a tarball of files.</p>
+        </section>
+
+        <!-- Section 4: Isolating with Namespaces -->
+        <section>
+            <h2>4. Step 2: Isolating with Namespaces</h2>
+            <p>The <code>unshare</code> command (or the <code>unshare(2)</code> / <code>clone(2)</code> syscall) creates new namespaces for a process:</p>
+            <pre><code># Create new PID, mount, UTS, and network namespaces
+sudo unshare --pid --mount --uts --net --fork /bin/sh
+
+# Inside the new namespace:
+hostname container-test    # Only affects this UTS namespace
+echo $$                    # PID 1 — this process thinks it's init!</code></pre>
+            <p>Key namespace types:</p>
+            <table>
+                <thead>
+                    <tr><th>Namespace</th><th>Isolates</th><th>Flag</th></tr>
+                </thead>
+                <tbody>
+                    <tr><td>PID</td><td>Process IDs</td><td><code>CLONE_NEWPID</code></td></tr>
+                    <tr><td>Mount</td><td>Filesystem mounts</td><td><code>CLONE_NEWNS</code></td></tr>
+                    <tr><td>UTS</td><td>Hostname</td><td><code>CLONE_NEWUTS</code></td></tr>
+                    <tr><td>Network</td><td>Network stack</td><td><code>CLONE_NEWNET</code></td></tr>
+                    <tr><td>User</td><td>UID/GID mappings</td><td><code>CLONE_NEWUSER</code></td></tr>
+                    <tr><td>IPC</td><td>Inter-process comms</td><td><code>CLONE_NEWIPC</code></td></tr>
+                </tbody>
+            </table>
+        </section>
+
+        <!-- Section 5: Changing the Root -->
+        <section>
+            <h2>5. Step 3: Changing the Root</h2>
+            <p><code>pivot_root</code> is preferred over <code>chroot</code> because it truly swaps the mount point — the old root becomes inaccessible (not just hidden).</p>
+            <pre><code># Inside the unshared namespace:
+mount --bind rootfs rootfs        # Make it a mount point
+cd rootfs
+mkdir -p .old_root
+
+# Pivot: new root = current dir, old root moved to .old_root
+pivot_root . .old_root
+
+# Mount essential filesystems
+mount -t proc proc /proc
+mount -t sysfs sys /sys
+mount -t tmpfs tmp /dev
+
+# Unmount old root completely
+umount -l /.old_root
+rmdir /.old_root
+
+# Now the process can ONLY see rootfs contents
+ls /    # Shows Alpine/Debian files, not the host</code></pre>
+        </section>
+
+        <!-- Section 6: Applying Cgroup Limits -->
+        <section>
+            <h2>6. Step 4: Applying Cgroup Limits</h2>
+            <p>Cgroup v2 uses a unified hierarchy via pseudo-files:</p>
+            <pre><code># Create a cgroup for our container
+mkdir -p /sys/fs/cgroup/mycontainer
+
+# Set memory limit to 512MB
+echo 536870912 > /sys/fs/cgroup/mycontainer/memory.max
+
+# Set CPU limit to 50% of one core (100ms period, 50ms quota)
+echo "50000 100000" > /sys/fs/cgroup/mycontainer/cpu.max
+
+# Set max PIDs to 64
+echo 64 > /sys/fs/cgroup/mycontainer/pids.max
+
+# Assign our process ($$) to this cgroup
+echo $$ > /sys/fs/cgroup/mycontainer/cgroup.procs</code></pre>
+            <p>That's it. The kernel now enforces these limits. If the process exceeds 512MB, the OOM killer terminates it.</p>
+        </section>
+
+        <!-- Section 7: Exec the Process -->
+        <section>
+            <h2>7. Step 5: Exec the Process</h2>
+            <p>The setup is complete. The final step replaces our shell with the target process:</p>
+            <pre><code># exec replaces the current process — no new PID, no shell overhead
+exec /bin/sh</code></pre>
+            <p>After <code>exec</code>, the shell is gone. The target process IS PID 1 inside the container. When it exits, the container is done.</p>
+        </section>
+
+        <!-- Section 8: Putting It Together -->
+        <section>
+            <h2>8. Putting It Together: A Minimal Container Runtime</h2>
+            <p>Here's a ~30-line shell script that creates a real container:</p>
+            <pre><code>#!/bin/bash
+# mini-container.sh — A minimal container runtime
+# Usage: sudo ./mini-container.sh &lt;rootfs-path&gt; &lt;command&gt;
+
+set -e
+
+ROOTFS="$1"
+CMD="${2:-/bin/sh}"
+CGROUP_NAME="mini-container-$$"
+
+# Step 1: Create cgroup with limits
+mkdir -p /sys/fs/cgroup/$CGROUP_NAME
+echo 536870912 > /sys/fs/cgroup/$CGROUP_NAME/memory.max
+echo 64 > /sys/fs/cgroup/$CGROUP_NAME/pids.max
+echo $$ > /sys/fs/cgroup/$CGROUP_NAME/cgroup.procs
+
+# Step 2: Enter new namespaces (unshare + fork)
+exec unshare --pid --mount --uts --net --fork /bin/bash -c "
+    # Step 3: Set hostname
+    hostname mini-container
+
+    # Step 4: Pivot root
+    mount --bind \"$ROOTFS\" \"$ROOTFS\"
+    cd \"$ROOTFS\"
+    mkdir -p .old_root
+    pivot_root . .old_root
+
+    # Step 5: Mount essential filesystems
+    mount -t proc proc /proc
+    mount -t sysfs sys /sys
+    mount -t tmpfs tmp /dev
+
+    # Step 6: Remove old root
+    umount -l /.old_root
+    rmdir /.old_root
+
+    # Step 7: Exec the target process
+    exec $CMD
+"</code></pre>
+            <p>Run it:</p>
+            <pre><code>sudo ./mini-container.sh ./rootfs /bin/sh
+# You're now inside a container you built yourself!</code></pre>
+            <p>This IS what runc does — just with more error handling, security hardening, and OCI spec compliance.</p>
+        </section>
+
+        <!-- Section 9: runc Directly -->
+        <section>
+            <h2>9. Using runc Directly</h2>
+            <p>You can use runc without Docker to run OCI containers:</p>
+            <pre><code># Generate a default OCI config
+mkdir mycontainer && cd mycontainer
+mkdir rootfs
+docker export $(docker create alpine) | tar -C rootfs -xf -
+runc spec    # Generates config.json
+
+# Run the container
+sudo runc create mycontainer
+sudo runc start mycontainer
+sudo runc list
+sudo runc delete mycontainer</code></pre>
+
+            <h3>Example config.json (abbreviated)</h3>
+            <pre><code>{
+    "ociVersion": "1.0.2",
+    "process": {
+        "terminal": true,
+        "user": { "uid": 0, "gid": 0 },
+        "args": ["/bin/sh"],
+        "env": ["PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"],
+        "cwd": "/"
+    },
+    "root": {
+        "path": "rootfs",
+        "readonly": true
+    },
+    "hostname": "my-container",
+    "linux": {
+        "namespaces": [
+            { "type": "pid" },
+            { "type": "mount" },
+            { "type": "uts" },
+            { "type": "network" },
+            { "type": "ipc" }
+        ],
+        "resources": {
+            "memory": { "limit": 536870912 },
+            "pids": { "limit": 64 }
+        }
+    }
+}</code></pre>
+        </section>
+
+        <!-- Callout: Not Just Docker -->
+        <aside class="callout callout-info">
+            <h3>🔧 Not Just Docker: OCI Runtime Alternatives</h3>
+            <ul>
+                <li><strong>runc</strong> — Reference implementation (Go), used by Docker & containerd</li>
+                <li><strong>crun</strong> — Faster, written in C, smaller memory footprint, used by Podman</li>
+                <li><strong>youki</strong> — Written in Rust, memory-safe, growing community</li>
+                <li><strong>kata-runtime</strong> — Runs each container in a lightweight VM for stronger isolation</li>
+            </ul>
+            <p>All are OCI-compliant — they all take the same <code>config.json</code> and rootfs. You can swap them by changing one line of containerd config.</p>
+        </aside>
+
+        <!-- Callout: Industry -->
+        <aside class="callout callout-warning">
+            <h3>🏭 Why Runtime Internals Matter in Production</h3>
+            <p>Understanding these primitives helps you debug real issues:</p>
+            <ul>
+                <li><strong>Container won't start?</strong> Check namespace creation permissions (seccomp, AppArmor)</li>
+                <li><strong>OOM kills?</strong> Inspect <code>memory.max</code> vs <code>memory.current</code> in the cgroup</li>
+                <li><strong>Network unreachable?</strong> The network namespace needs a veth pair configured</li>
+                <li><strong>Filesystem corruption?</strong> Overlay mount issues after pivot_root</li>
+                <li><strong>PID 1 zombie reaping?</strong> Your process must handle SIGCHLD or use tini/dumb-init</li>
+            </ul>
+        </aside>
+
+        <!-- Quiz 1 -->
+        <div class="quiz" data-quiz="pivot-root-vs-chroot">
+            <h3>Quiz 1: pivot_root vs chroot</h3>
+            <p>Why is <code>pivot_root</code> preferred over <code>chroot</code> for containers?</p>
+            <div class="quiz-options">
+                <label><input type="radio" name="q1" value="a"> chroot doesn't work on modern kernels</label>
+                <label><input type="radio" name="q1" value="b"> pivot_root actually changes the mount namespace's root, making the old root unmountable and inaccessible</label>
+                <label><input type="radio" name="q1" value="c"> pivot_root is faster</label>
+                <label><input type="radio" name="q1" value="d"> chroot requires root permissions but pivot_root doesn't</label>
+            </div>
+            <button class="quiz-submit" onclick="checkQuiz('pivot-root-vs-chroot', 'b')">Check Answer</button>
+            <div class="quiz-feedback"></div>
+        </div>
+
+        <!-- Quiz 2 -->
+        <div class="quiz" data-quiz="namespace-syscall">
+            <h3>Quiz 2: Namespace Creation</h3>
+            <p>Which syscall creates new namespaces for a process?</p>
+            <div class="quiz-options">
+                <label><input type="radio" name="q2" value="a"> fork()</label>
+                <label><input type="radio" name="q2" value="b"> exec()</label>
+                <label><input type="radio" name="q2" value="c"> unshare() or clone() with CLONE_NEW* flags</label>
+                <label><input type="radio" name="q2" value="d"> namespace()</label>
+            </div>
+            <button class="quiz-submit" onclick="checkQuiz('namespace-syscall', 'c')">Check Answer</button>
+            <div class="quiz-feedback"></div>
+        </div>
+
+        <!-- Quiz 3 -->
+        <div class="quiz" data-quiz="cgroup-memory">
+            <h3>Quiz 3: Cgroup v2 Memory Limit</h3>
+            <p>Which file do you write to in cgroup v2 to set a container's memory limit?</p>
+            <div class="quiz-options">
+                <label><input type="radio" name="q3" value="a"> memory.limit_in_bytes</label>
+                <label><input type="radio" name="q3" value="b"> memory.max</label>
+                <label><input type="radio" name="q3" value="c"> memory.limit</label>
+                <label><input type="radio" name="q3" value="d"> cgroup.memory.max</label>
+            </div>
+            <button class="quiz-submit" onclick="checkQuiz('cgroup-memory', 'b')">Check Answer</button>
+            <div class="quiz-feedback"></div>
+        </div>
+
+        <!-- Hands-on Tasks -->
+        <section class="hands-on">
+            <h2>🛠️ Hands-On Tasks</h2>
+
+            <div class="task">
+                <h3>Task 1: Explore Namespace Isolation</h3>
+                <p>Use <code>unshare</code> to create isolated namespaces and explore the environment from inside:</p>
+                <pre><code># Terminal 1: Create a new PID + UTS namespace
+sudo unshare --pid --uts --mount --fork /bin/bash
+
+# Inside the namespace:
+hostname isolated-host
+echo "My PID: $$"           # Should be 1
+mount -t proc proc /proc
+ps aux                       # Only sees processes in THIS namespace
+hostname                     # Shows "isolated-host"
+
+# Terminal 2 (on host): Verify host is unaffected
+hostname                     # Still your original hostname
+ps aux | grep unshare        # You can see the unshare process from outside</code></pre>
+                <p><strong>Observe:</strong> The namespace is one-way isolation. The host sees everything; the container sees only itself.</p>
+            </div>
+
+            <div class="task">
+                <h3>Task 2: Run a Container with runc (No Docker Daemon)</h3>
+                <pre><code># Install runc (if not present)
+# Ubuntu/Debian: sudo apt install runc
+# Or download from: https://github.com/opencontainers/runc/releases
+
+# Set up the bundle
+mkdir -p ~/runc-test/rootfs
+cd ~/runc-test
+docker export $(docker create alpine) | tar -C rootfs -xf -
+
+# Generate OCI spec
+runc spec
+
+# Edit config.json: change "terminal": true to false if running non-interactively
+# Change "args": ["sh"] to ["echo", "Hello from runc!"]
+
+# Run it
+sudo runc run my-first-container
+# Output: Hello from runc!
+
+# Clean up
+sudo runc delete my-first-container 2>/dev/null</code></pre>
+                <p><strong>Key insight:</strong> No Docker daemon involved. runc directly uses the kernel primitives to create the container.</p>
+            </div>
+        </section>
+
+        <!-- Key Takeaways -->
+        <section class="key-takeaways">
+            <h2>📌 Key Takeaways</h2>
+            <ul>
+                <li>A container is just a Linux process with namespace isolation, cgroup limits, and a pivoted root filesystem.</li>
+                <li>Three primitives: <code>unshare</code>/<code>clone</code> (namespaces), cgroup pseudo-files (limits), <code>pivot_root</code> (filesystem).</li>
+                <li>The OCI Runtime Spec standardizes how runtimes work — <code>config.json</code> + lifecycle commands.</li>
+                <li>You can build a working container runtime in ~30 lines of shell script.</li>
+                <li>runc, crun, youki, and kata-runtime are all interchangeable OCI runtimes with different tradeoffs.</li>
+                <li>Understanding these internals is essential for debugging container issues in production (OOM kills, network problems, namespace permission errors).</li>
+            </ul>
+        </section>
+    </article>
+
+    <nav class="lesson-nav bottom-nav">
+        <a href="0027-scaling-patterns.html">← Previous: Scaling Patterns</a>
+        <a href="0029-advanced-networking.html">Next: Advanced Networking →</a>
+    </nav>
+
+    <script src="../assets/quiz.js"></script>
+</body>
+</html>

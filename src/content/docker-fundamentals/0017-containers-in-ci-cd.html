@@ -1,0 +1,497 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lesson 17: Containers in CI/CD Pipelines</title>
+  <link rel="stylesheet" href="../assets/lesson-style.css">
+</head>
+<body>
+
+  <div class="lesson-meta">
+    <span>📦 Lesson 17 of 20</span>
+    <span>⏱️ 16–20 minutes</span>
+    <span>🚀 CI/CD &amp; Automation</span>
+  </div>
+
+  <h1>Containers in CI/CD Pipelines</h1>
+  <p class="subtitle">Containers don't just run in production—they power the entire delivery pipeline. From reproducible build environments to daemonless image builds in Kubernetes, containers are the backbone of modern CI/CD.</p>
+
+  <!-- ============================================================ -->
+  <h2>1. Why Containers in CI/CD?</h2>
+
+  <p>Before containers, CI environments were fragile snowflakes—shared Jenkins agents with conflicting tool versions, "works on CI but not locally" bugs, and hours spent debugging environment drift. Containers eliminate this entire category of problems:</p>
+
+  <ul>
+    <li><strong>Reproducible build environments</strong> — Every job runs in a defined image with pinned tool versions</li>
+    <li><strong>No "works on CI but not locally"</strong> — Same image locally and in CI; identical results</li>
+    <li><strong>Fast spin-up</strong> — Containers start in seconds vs. minutes for VMs</li>
+    <li><strong>Isolation between jobs</strong> — Parallel jobs can't pollute each other's filesystem or processes</li>
+    <li><strong>Ephemeral and clean-slate</strong> — Every run starts fresh; no accumulated state or leftover artifacts</li>
+  </ul>
+
+  <div class="callout">
+    <div class="callout-title">Architecture Insight</div>
+    <p>As an architect, think of CI containers as <em>disposable compute units</em>. They enforce the constraint that your build process must be fully declarative—if it can't run in a fresh container, it has hidden dependencies.</p>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>2. Containers AS the CI Environment</h2>
+
+  <p>Each CI job runs <em>inside</em> a container. The container image defines the complete toolchain available to that job:</p>
+
+  <h3>GitHub Actions</h3>
+  <pre><code>jobs:
+  build:
+    runs-on: ubuntu-latest
+    container:
+      image: node:20-alpine
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm ci
+      - run: npm test</code></pre>
+
+  <p>The <code>container: image: node:20-alpine</code> line means "run every step of this job inside a <code>node:20-alpine</code> container." The runner pulls the image, starts the container, and executes your steps inside it.</p>
+
+  <h3>GitLab CI</h3>
+  <pre><code>test:
+  image: node:20
+  stage: test
+  script:
+    - npm ci
+    - npm test</code></pre>
+
+  <h3>Jenkins (Declarative Pipeline)</h3>
+  <pre><code>pipeline {
+  agent {
+    docker { image 'node:20' }
+  }
+  stages {
+    stage('Test') {
+      steps {
+        sh 'npm ci && npm test'
+      }
+    }
+  }
+}</code></pre>
+
+  <p>In all three systems, the pattern is the same: declare an image, get a pristine environment with exactly the tools you need.</p>
+
+  <!-- ============================================================ -->
+  <h2>3. Building Images in CI</h2>
+
+  <p>Beyond using containers as the CI environment, CI pipelines also <em>build</em> container images as artifacts. The common pattern:</p>
+
+  <ol>
+    <li><strong>Build</strong> — <code>docker build</code> creates the image</li>
+    <li><strong>Test</strong> — Run the test suite inside the freshly built image</li>
+    <li><strong>Scan</strong> — Security vulnerability scan (Trivy, Snyk, Grype)</li>
+    <li><strong>Push</strong> — Push to registry on success</li>
+    <li><strong>Deploy</strong> — Update the running service with the new image</li>
+  </ol>
+
+  <h3>GitHub Actions Workflow: Build, Test, Push</h3>
+  <pre><code>name: Build and Push
+
+on:
+  push:
+    branches: [main]
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=sha
+            type=ref,event=branch
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Run tests against built image
+        run: |
+          docker run --rm ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${GITHUB_SHA::7} npm test</code></pre>
+
+  <!-- ============================================================ -->
+  <h2>4. Docker-in-Docker (DinD) vs Socket Mounting</h2>
+
+  <p>When your CI job itself runs in a container, how do you run <code>docker build</code> inside it? Two approaches:</p>
+
+  <h3>Docker-in-Docker (DinD)</h3>
+  <p>A privileged container runs its own Docker daemon (<code>dockerd</code>) inside:</p>
+  <pre><code># GitLab CI example with DinD
+build:
+  image: docker:24
+  services:
+    - docker:24-dind
+  variables:
+    DOCKER_TLS_CERTDIR: "/certs"
+  script:
+    - docker build -t myapp .</code></pre>
+
+  <ul>
+    <li>✅ Full isolation — inner Docker has its own storage</li>
+    <li>✅ Clean layer cache per job (or shared via volumes)</li>
+    <li>❌ Requires <code>--privileged</code> mode (security concern)</li>
+    <li>❌ No layer cache sharing between jobs (unless configured)</li>
+  </ul>
+
+  <h3>Socket Mounting</h3>
+  <p>Bind-mount the host's Docker socket into the CI container:</p>
+  <pre><code># Mount the host Docker socket
+docker run -v /var/run/docker.sock:/var/run/docker.sock \
+  docker:24 docker build -t myapp .</code></pre>
+
+  <ul>
+    <li>✅ Shares layer cache with host (fast builds)</li>
+    <li>✅ No privileged mode needed on the inner container</li>
+    <li>❌ Jobs can see/kill each other's containers (no isolation)</li>
+    <li>❌ Container breakout risk — socket access = root on host</li>
+  </ul>
+
+  <table>
+    <thead><tr><th>Concern</th><th>DinD</th><th>Socket Mount</th></tr></thead>
+    <tbody>
+      <tr><td>Isolation</td><td>Strong</td><td>None</td></tr>
+      <tr><td>Cache sharing</td><td>Hard</td><td>Automatic</td></tr>
+      <tr><td>Security</td><td>Needs --privileged</td><td>Host root access</td></tr>
+      <tr><td>Best for</td><td>Multi-tenant CI</td><td>Trusted single-tenant</td></tr>
+    </tbody>
+  </table>
+
+  <!-- ============================================================ -->
+  <h2>5. Kaniko &amp; Daemonless Builds</h2>
+
+  <p>In Kubernetes-based CI (Tekton, GitHub Actions on ARC, GitLab K8s runners), you often <em>cannot</em> run a Docker daemon. The solution: daemonless image builders.</p>
+
+  <h3>Kaniko</h3>
+  <p>Kaniko builds container images from a Dockerfile <em>entirely in userspace</em>—no daemon, no root, no privileged mode:</p>
+
+  <pre><code># Kubernetes pod spec for Kaniko
+apiVersion: v1
+kind: Pod
+spec:
+  containers:
+    - name: kaniko
+      image: gcr.io/kaniko-project/executor:latest
+      args:
+        - "--dockerfile=Dockerfile"
+        - "--context=git://github.com/org/repo.git"
+        - "--destination=ghcr.io/org/repo:latest"
+      volumeMounts:
+        - name: docker-config
+          mountPath: /kaniko/.docker
+  volumes:
+    - name: docker-config
+      secret:
+        secretName: registry-credentials</code></pre>
+
+  <p>How it works: Kaniko reads the Dockerfile, executes each instruction in a snapshot filesystem, computes layer diffs, and pushes the resulting image directly to a registry—no <code>dockerd</code> involved.</p>
+
+  <div class="callout">
+    <div class="callout-title">Not Just Docker</div>
+    <p><strong>Buildah</strong> — OCI image builder from Red Hat, daemonless, integrates with Podman. <strong>Podman</strong> — Drop-in Docker replacement, rootless by default. <strong>Tekton</strong> — Kubernetes-native CI/CD framework where each pipeline step is a container in a pod. These tools are increasingly common in enterprise CI where Docker daemon access is restricted.</p>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>6. Caching in CI</h2>
+
+  <p>Without caching, every CI run rebuilds every layer from scratch. With proper caching, only changed layers rebuild—cutting build times from 10+ minutes to under 60 seconds.</p>
+
+  <h3>Caching Strategies</h3>
+
+  <table>
+    <thead><tr><th>Strategy</th><th>How It Works</th><th>Best For</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><code>--cache-from</code></td>
+        <td>Pull a previous image from registry, use its layers as cache</td>
+        <td>Any CI system</td>
+      </tr>
+      <tr>
+        <td>BuildKit inline cache</td>
+        <td>Embed cache metadata in pushed image (<code>--build-arg BUILDKIT_INLINE_CACHE=1</code>)</td>
+        <td>Simple setups</td>
+      </tr>
+      <tr>
+        <td>GitHub Actions cache</td>
+        <td><code>cache-from: type=gha</code> in build-push-action</td>
+        <td>GitHub-hosted runners</td>
+      </tr>
+      <tr>
+        <td>Local cache mount</td>
+        <td><code>--mount=type=cache,target=/root/.cache</code> in Dockerfile RUN</td>
+        <td>Package manager caches (npm, pip, go)</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>Example: Registry Cache</h3>
+  <pre><code># Pull previous image for cache, build with cache-from
+docker pull ghcr.io/org/myapp:latest || true
+docker build \
+  --cache-from ghcr.io/org/myapp:latest \
+  --tag ghcr.io/org/myapp:$SHA \
+  --tag ghcr.io/org/myapp:latest \
+  .
+docker push ghcr.io/org/myapp:$SHA
+docker push ghcr.io/org/myapp:latest</code></pre>
+
+  <h3>Example: Dockerfile with Cache Mounts</h3>
+  <pre><code># syntax=docker/dockerfile:1
+FROM node:20-alpine
+WORKDIR /app
+COPY package*.json ./
+RUN --mount=type=cache,target=/root/.npm \
+    npm ci --prefer-offline
+COPY . .
+RUN npm run build</code></pre>
+
+  <!-- ============================================================ -->
+  <h2>7. The Full Pipeline</h2>
+
+  <p>Here's the complete flow from code push to production deployment:</p>
+
+  <!-- SVG: CI/CD Pipeline Flow Diagram -->
+  <svg viewBox="0 0 900 320" xmlns="http://www.w3.org/2000/svg" style="width:100%;max-width:900px;margin:1.5rem auto;display:block;" role="img" aria-label="CI/CD pipeline flow diagram showing stages from code push to production">
+    <defs>
+      <marker id="arrowCI" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+        <polygon points="0 0, 8 3, 0 6" fill="#6366f1"/>
+      </marker>
+      <linearGradient id="stageBg" x1="0%" y1="0%" x2="0%" y2="100%">
+        <stop offset="0%" style="stop-color:#eef2ff"/>
+        <stop offset="100%" style="stop-color:#e0e7ff"/>
+      </linearGradient>
+    </defs>
+
+    <!-- Title -->
+    <text x="450" y="25" text-anchor="middle" font-size="14" font-weight="bold" fill="#1e1b4b">CI/CD Pipeline with Containers</text>
+
+    <!-- Stage 1: Push -->
+    <rect x="20" y="50" width="100" height="70" rx="8" fill="url(#stageBg)" stroke="#6366f1" stroke-width="1.5"/>
+    <text x="70" y="75" text-anchor="middle" font-size="20">📝</text>
+    <text x="70" y="98" text-anchor="middle" font-size="10" font-weight="bold" fill="#312e81">Push</text>
+    <text x="70" y="112" text-anchor="middle" font-size="8" fill="#4338ca">Code</text>
+
+    <!-- Arrow 1-2 -->
+    <line x1="120" y1="85" x2="145" y2="85" stroke="#6366f1" stroke-width="2" marker-end="url(#arrowCI)"/>
+
+    <!-- Stage 2: CI Trigger -->
+    <rect x="148" y="50" width="100" height="70" rx="8" fill="url(#stageBg)" stroke="#6366f1" stroke-width="1.5"/>
+    <text x="198" y="75" text-anchor="middle" font-size="20">⚡</text>
+    <text x="198" y="98" text-anchor="middle" font-size="10" font-weight="bold" fill="#312e81">CI Trigger</text>
+    <text x="198" y="112" text-anchor="middle" font-size="8" fill="#4338ca">Webhook</text>
+
+    <!-- Arrow 2-3 -->
+    <line x1="248" y1="85" x2="273" y2="85" stroke="#6366f1" stroke-width="2" marker-end="url(#arrowCI)"/>
+
+    <!-- Stage 3: Build Image -->
+    <rect x="276" y="50" width="100" height="70" rx="8" fill="url(#stageBg)" stroke="#6366f1" stroke-width="1.5"/>
+    <text x="326" y="75" text-anchor="middle" font-size="20">🐳</text>
+    <text x="326" y="98" text-anchor="middle" font-size="10" font-weight="bold" fill="#312e81">Build</text>
+    <text x="326" y="112" text-anchor="middle" font-size="8" fill="#4338ca">Image</text>
+
+    <!-- Arrow 3-4 -->
+    <line x1="376" y1="85" x2="401" y2="85" stroke="#6366f1" stroke-width="2" marker-end="url(#arrowCI)"/>
+
+    <!-- Stage 4: Test -->
+    <rect x="404" y="50" width="100" height="70" rx="8" fill="url(#stageBg)" stroke="#6366f1" stroke-width="1.5"/>
+    <text x="454" y="75" text-anchor="middle" font-size="20">🧪</text>
+    <text x="454" y="98" text-anchor="middle" font-size="10" font-weight="bold" fill="#312e81">Test</text>
+    <text x="454" y="112" text-anchor="middle" font-size="8" fill="#4338ca">In Container</text>
+
+    <!-- Arrow 4-5 -->
+    <line x1="504" y1="85" x2="529" y2="85" stroke="#6366f1" stroke-width="2" marker-end="url(#arrowCI)"/>
+
+    <!-- Stage 5: Scan -->
+    <rect x="532" y="50" width="100" height="70" rx="8" fill="url(#stageBg)" stroke="#6366f1" stroke-width="1.5"/>
+    <text x="582" y="75" text-anchor="middle" font-size="20">🔒</text>
+    <text x="582" y="98" text-anchor="middle" font-size="10" font-weight="bold" fill="#312e81">Scan</text>
+    <text x="582" y="112" text-anchor="middle" font-size="8" fill="#4338ca">Security</text>
+
+    <!-- Arrow 5-6 -->
+    <line x1="632" y1="85" x2="657" y2="85" stroke="#6366f1" stroke-width="2" marker-end="url(#arrowCI)"/>
+
+    <!-- Stage 6: Push -->
+    <rect x="660" y="50" width="100" height="70" rx="8" fill="url(#stageBg)" stroke="#6366f1" stroke-width="1.5"/>
+    <text x="710" y="75" text-anchor="middle" font-size="20">📦</text>
+    <text x="710" y="98" text-anchor="middle" font-size="10" font-weight="bold" fill="#312e81">Push</text>
+    <text x="710" y="112" text-anchor="middle" font-size="8" fill="#4338ca">Registry</text>
+
+    <!-- Arrow 6-7 -->
+    <line x1="760" y1="85" x2="785" y2="85" stroke="#6366f1" stroke-width="2" marker-end="url(#arrowCI)"/>
+
+    <!-- Stage 7: Deploy -->
+    <rect x="788" y="50" width="100" height="70" rx="8" fill="url(#stageBg)" stroke="#6366f1" stroke-width="1.5"/>
+    <text x="838" y="75" text-anchor="middle" font-size="20">🚀</text>
+    <text x="838" y="98" text-anchor="middle" font-size="10" font-weight="bold" fill="#312e81">Deploy</text>
+    <text x="838" y="112" text-anchor="middle" font-size="8" fill="#4338ca">Staging</text>
+
+    <!-- Second row: Promote -->
+    <line x1="838" y1="120" x2="838" y2="155" stroke="#6366f1" stroke-width="2" marker-end="url(#arrowCI)"/>
+
+    <rect x="788" y="160" width="100" height="70" rx="8" fill="#dcfce7" stroke="#16a34a" stroke-width="1.5"/>
+    <text x="838" y="185" text-anchor="middle" font-size="20">✅</text>
+    <text x="838" y="208" text-anchor="middle" font-size="10" font-weight="bold" fill="#14532d">Promote</text>
+    <text x="838" y="222" text-anchor="middle" font-size="8" fill="#166534">Production</text>
+
+    <!-- Container icons annotation -->
+    <rect x="20" y="160" width="350" height="90" rx="8" fill="#fefce8" stroke="#ca8a04" stroke-width="1" stroke-dasharray="4"/>
+    <text x="35" y="182" font-size="10" font-weight="bold" fill="#854d0e">🐳 Every stage runs in a container:</text>
+    <text x="35" y="200" font-size="9" fill="#713f12">• Build: docker:24 or kaniko image</text>
+    <text x="35" y="215" font-size="9" fill="#713f12">• Test: application image with test deps</text>
+    <text x="35" y="230" font-size="9" fill="#713f12">• Scan: trivy/grype scanner image</text>
+    <text x="35" y="245" font-size="9" fill="#713f12">• Deploy: kubectl/helm image</text>
+
+    <!-- Gate annotation -->
+    <rect x="420" y="160" width="240" height="70" rx="8" fill="#fef2f2" stroke="#dc2626" stroke-width="1" stroke-dasharray="4"/>
+    <text x="435" y="182" font-size="10" font-weight="bold" fill="#991b1b">🚦 Quality Gates (auto-fail pipeline):</text>
+    <text x="435" y="200" font-size="9" fill="#7f1d1d">• Tests fail → no push to registry</text>
+    <text x="435" y="215" font-size="9" fill="#7f1d1d">• Critical CVE found → block deploy</text>
+    <text x="435" y="230" font-size="9" fill="#7f1d1d">• Image too large → warning/fail</text>
+  </svg>
+
+  <!-- ============================================================ -->
+  <h2>Industry Callout</h2>
+
+  <div class="callout">
+    <div class="callout-title">🏢 How Netflix &amp; Spotify Ship Thousands of Containers/Day</div>
+    <p><strong>Netflix</strong> uses Titus (their container platform) to run CI/CD at massive scale. Every microservice team pushes independently; the platform handles image builds, security scanning, canary deployments, and automatic rollbacks. They deploy thousands of container changes per day across hundreds of microservices.</p>
+    <p><strong>Spotify</strong> built their CI/CD on top of Kubernetes with custom controllers. Each squad owns their pipeline definition. Builds run in ephemeral pods, images are scanned with inline policies, and promotion to production is gated by automated integration tests running in containers.</p>
+    <p>The key pattern: <em>standardized container-based pipelines</em> let thousands of engineers ship independently without stepping on each other.</p>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>Interactive Quizzes</h2>
+
+  <!-- Quiz 1 -->
+  <div class="quiz" data-quiz="dind-vs-socket">
+    <h3>Quiz 1: DinD vs Socket Mount</h3>
+    <p>Your CI runs on a shared Kubernetes cluster with multiple teams. You need to build Docker images but are concerned about one team's CI job interfering with another's containers. Which approach is more appropriate?</p>
+    <div class="quiz-options">
+      <button data-answer="wrong" data-explanation="Socket mounting shares the host's Docker daemon—all jobs can see and affect each other's containers. This provides no isolation between teams.">Socket mounting (/var/run/docker.sock)</button>
+      <button data-answer="correct" data-explanation="Correct! DinD provides each job with its own Docker daemon, isolating containers between teams. Though it requires privileged mode, in a multi-tenant environment isolation is critical. Even better: use Kaniko for daemonless builds.">Docker-in-Docker (DinD)</button>
+      <button data-answer="wrong" data-explanation="Running Docker directly on the host isn't possible when your CI jobs themselves run in containers on Kubernetes.">Run Docker directly on the Kubernetes node</button>
+    </div>
+  </div>
+
+  <!-- Quiz 2 -->
+  <div class="quiz" data-quiz="why-containers-ci">
+    <h3>Quiz 2: Why Containers in CI?</h3>
+    <p>A team reports that tests pass on a developer's machine and in CI, but fail in staging. Which CI improvement would BEST prevent environment-related discrepancies?</p>
+    <div class="quiz-options">
+      <button data-answer="wrong" data-explanation="More test coverage helps find bugs but doesn't address the root cause: environment differences between CI and staging.">Adding more unit tests to the CI pipeline</button>
+      <button data-answer="correct" data-explanation="Correct! Using the same container image for CI tests AND staging deployment guarantees identical environments. If tests pass in the image, the same image will behave identically in staging.">Running CI tests inside the same container image that deploys to staging</button>
+      <button data-answer="wrong" data-explanation="Pinning OS packages helps, but the VM-based CI still has many other differences from the staging container environment (init system, filesystem layout, kernel modules).">Pinning the CI VM's OS package versions</button>
+    </div>
+  </div>
+
+  <!-- Quiz 3 -->
+  <div class="quiz" data-quiz="caching-strategy">
+    <h3>Quiz 3: Caching Strategy</h3>
+    <p>Your Docker build in CI takes 8 minutes, mostly spent on <code>npm install</code> (which rarely changes). Your CI uses GitHub Actions. What's the most effective caching approach?</p>
+    <div class="quiz-options">
+      <button data-answer="wrong" data-explanation="Committing node_modules bloats the repo and defeats the purpose of a lockfile. It also doesn't help with Docker layer caching.">Commit node_modules to the repository</button>
+      <button data-answer="wrong" data-explanation="Rebuilding without cache every time is exactly the problem we're trying to solve!">Use --no-cache to ensure clean builds</button>
+      <button data-answer="correct" data-explanation="Correct! Combining GitHub Actions cache (type=gha) with a Dockerfile cache mount for npm lets BuildKit reuse the npm download cache AND Docker layer cache across runs. The npm install layer only rebuilds when package-lock.json changes.">Use BuildKit with GitHub Actions cache (type=gha) and RUN --mount=type=cache for npm</button>
+    </div>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>Hands-On Task</h2>
+
+  <div class="callout warning">
+    <div class="callout-title">🛠️ Build It: GitHub Actions Workflow for GHCR</div>
+    <p>Create a GitHub Actions workflow that builds a Docker image and pushes it to GitHub Container Registry (GHCR).</p>
+
+    <p><strong>Requirements:</strong></p>
+    <ol>
+      <li>Trigger on push to <code>main</code> branch</li>
+      <li>Log in to GHCR using <code>GITHUB_TOKEN</code></li>
+      <li>Build the image with a tag based on the Git SHA</li>
+      <li>Run tests inside the built image before pushing</li>
+      <li>Push to <code>ghcr.io/&lt;your-username&gt;/&lt;repo&gt;:&lt;sha&gt;</code></li>
+      <li>Enable BuildKit layer caching</li>
+    </ol>
+
+    <p><strong>Starter template:</strong></p>
+    <pre><code># .github/workflows/build.yml
+name: Build and Push to GHCR
+
+on:
+  push:
+    branches: [main]
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      # TODO: Checkout code
+      # TODO: Login to GHCR
+      # TODO: Build image with SHA tag
+      # TODO: Run tests in the built image
+      # TODO: Push image (only if tests pass)
+      </code></pre>
+
+    <p><strong>Validation:</strong> Push to a real repo with a Dockerfile and confirm the image appears in the repo's Packages tab on GitHub.</p>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>Key Takeaways</h2>
+
+  <ul class="takeaways">
+    <li><strong>Containers as CI environments</strong> give you reproducible, isolated, ephemeral build agents with zero drift</li>
+    <li><strong>The image IS the artifact</strong> — build once, test that image, deploy that same image everywhere</li>
+    <li><strong>DinD vs socket mounting</strong> is a security/isolation trade-off; prefer DinD for multi-tenant, socket mount for single-tenant trusted environments</li>
+    <li><strong>Kaniko and Buildah</strong> enable image builds without a Docker daemon—essential for Kubernetes-native CI</li>
+    <li><strong>Layer caching</strong> (registry cache, GHA cache, cache mounts) can reduce build times by 80%+</li>
+    <li><strong>Quality gates</strong> (test, scan, size check) in the pipeline prevent bad images from reaching production</li>
+    <li><strong>The full pipeline</strong>: push → build → test → scan → push → deploy staging → promote production</li>
+  </ul>
+
+  <!-- ============================================================ -->
+  <nav class="lesson-nav">
+    <a href="0016-health-checks-and-restart-policies.html">← Prev: Health Checks &amp; Restart Policies</a>
+    <a href="0018-local-development-with-containers.html">Next: Local Development with Containers →</a>
+  </nav>
+
+  <script src="../assets/quiz.js"></script>
+</body>
+</html>

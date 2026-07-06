@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lesson 23 — Argo Rollouts: Progressive Delivery</title>
+  <link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+
+  <div class="lesson-meta">
+    <span class="number">LESSON 23</span> &middot; Advanced Pattern + Hands-On &middot; ~25 minutes
+  </div>
+
+  <h1>Argo Rollouts: Progressive Delivery</h1>
+  <p>Rolling updates are good. But what if the new version has a subtle bug that only appears under load? Progressive delivery shifts traffic gradually and monitors metrics — auto-rolling back if things degrade. This is how Netflix, Intuit, and Shopify deploy.</p>
+
+  <div class="progress">
+    <span>Lesson 23 of 33</span>
+    <div class="progress-bar"><div class="progress-fill" style="width: 69%"></div></div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>Rolling Update vs Canary</h2>
+
+  <div class="diagram">
+    <svg viewBox="0 0 720 180" xmlns="http://www.w3.org/2000/svg">
+      <!-- Rolling -->
+      <rect x="20" y="10" width="330" height="75" rx="6" fill="#e3f2fd" stroke="#1976d2"/>
+      <text x="185" y="30" text-anchor="middle" font-size="9" font-weight="bold" fill="#1976d2">Rolling Update (K8s default)</text>
+      <text x="185" y="48" text-anchor="middle" font-size="8" fill="#555">Replace pods one by one</text>
+      <text x="185" y="63" text-anchor="middle" font-size="8" fill="#555">If new pod is healthy → continue replacing</text>
+      <text x="185" y="78" text-anchor="middle" font-size="8" fill="#c62828">⚠️ No traffic analysis. Pod "healthy" ≠ "behaving correctly"</text>
+      
+      <!-- Canary -->
+      <rect x="370" y="10" width="330" height="75" rx="6" fill="#e8f5e9" stroke="#388e3c"/>
+      <text x="535" y="30" text-anchor="middle" font-size="9" font-weight="bold" fill="#388e3c">Canary (Argo Rollouts)</text>
+      <text x="535" y="48" text-anchor="middle" font-size="8" fill="#555">Shift 5% traffic → monitor metrics → 25% → 50% → 100%</text>
+      <text x="535" y="63" text-anchor="middle" font-size="8" fill="#555">At EACH step: query Prometheus for error rate</text>
+      <text x="535" y="78" text-anchor="middle" font-size="8" fill="#388e3c">✅ If error rate > threshold → automatic rollback</text>
+      
+      <!-- Comparison timeline -->
+      <text x="360" y="110" text-anchor="middle" font-size="9" font-weight="bold">Impact of a Bug</text>
+      
+      <rect x="50" y="120" width="250" height="22" rx="3" fill="#ffcdd2" stroke="#c62828"/>
+      <text x="175" y="135" text-anchor="middle" font-size="8" fill="#c62828">Rolling: 100% users hit bug (once rollout completes)</text>
+      
+      <rect x="50" y="148" width="25" height="22" rx="3" fill="#c8e6c9" stroke="#388e3c"/>
+      <text x="175" y="163" font-size="8" fill="#388e3c">Canary: only 5% hit bug → auto-rollback → 95% never affected</text>
+    </svg>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>How Argo Rollouts Works</h2>
+
+  <div class="diagram">
+    <svg viewBox="0 0 720 200" xmlns="http://www.w3.org/2000/svg">
+      <!-- Steps visualization -->
+      <text x="360" y="18" text-anchor="middle" font-size="10" font-weight="bold">Canary Rollout Steps</text>
+      
+      <!-- Step boxes -->
+      <rect x="30" y="35" width="100" height="55" rx="4" fill="#e3f2fd" stroke="#1976d2"/>
+      <text x="80" y="52" text-anchor="middle" font-size="8" font-weight="bold">Step 1</text>
+      <text x="80" y="65" text-anchor="middle" font-size="7">setWeight: 5%</text>
+      <text x="80" y="78" text-anchor="middle" font-size="7">pause: 2m</text>
+      
+      <line x1="130" y1="62" x2="155" y2="62" stroke="#333" stroke-width="1" marker-end="url(#g23)"/>
+      
+      <rect x="155" y="35" width="110" height="55" rx="4" fill="#fff3e0" stroke="#f57c00"/>
+      <text x="210" y="52" text-anchor="middle" font-size="8" font-weight="bold">Step 2</text>
+      <text x="210" y="65" text-anchor="middle" font-size="7">analysis: check</text>
+      <text x="210" y="78" text-anchor="middle" font-size="7">error rate < 5%?</text>
+      
+      <line x1="265" y1="62" x2="290" y2="62" stroke="#333" stroke-width="1" marker-end="url(#g23)"/>
+      
+      <rect x="290" y="35" width="100" height="55" rx="4" fill="#e3f2fd" stroke="#1976d2"/>
+      <text x="340" y="52" text-anchor="middle" font-size="8" font-weight="bold">Step 3</text>
+      <text x="340" y="65" text-anchor="middle" font-size="7">setWeight: 25%</text>
+      <text x="340" y="78" text-anchor="middle" font-size="7">pause: 5m</text>
+      
+      <line x1="390" y1="62" x2="415" y2="62" stroke="#333" stroke-width="1" marker-end="url(#g23)"/>
+      
+      <rect x="415" y="35" width="100" height="55" rx="4" fill="#e3f2fd" stroke="#1976d2"/>
+      <text x="465" y="52" text-anchor="middle" font-size="8" font-weight="bold">Step 4</text>
+      <text x="465" y="65" text-anchor="middle" font-size="7">setWeight: 50%</text>
+      <text x="465" y="78" text-anchor="middle" font-size="7">pause: 5m</text>
+      
+      <line x1="515" y1="62" x2="540" y2="62" stroke="#333" stroke-width="1" marker-end="url(#g23)"/>
+      
+      <rect x="540" y="35" width="130" height="55" rx="4" fill="#c8e6c9" stroke="#388e3c" stroke-width="2"/>
+      <text x="605" y="52" text-anchor="middle" font-size="8" font-weight="bold" fill="#2e7d32">Step 5</text>
+      <text x="605" y="65" text-anchor="middle" font-size="7" fill="#2e7d32">setWeight: 100%</text>
+      <text x="605" y="78" text-anchor="middle" font-size="7" fill="#2e7d32">🎉 Full promotion</text>
+      
+      <!-- Failure path -->
+      <line x1="210" y1="90" x2="210" y2="120" stroke="#c62828" stroke-width="1.5"/>
+      <rect x="140" y="120" width="140" height="30" rx="4" fill="#ffcdd2" stroke="#c62828"/>
+      <text x="210" y="140" text-anchor="middle" font-size="8" fill="#c62828" font-weight="bold">❌ Analysis fails → ROLLBACK</text>
+      
+      <!-- Traffic visualization -->
+      <rect x="30" y="165" width="640" height="25" rx="4" fill="#f5f5f5" stroke="#bdbdbd"/>
+      <rect x="30" y="165" width="32" height="25" rx="4" fill="#bbdefb" stroke="#1976d2"/>
+      <text x="360" y="182" text-anchor="middle" font-size="8" fill="#555">█ = canary traffic (5%) | rest = stable version</text>
+      
+      <defs>
+        <marker id="g23" markerWidth="6" markerHeight="4" refX="6" refY="2" orient="auto"><polygon points="0 0, 6 2, 0 4" fill="#333"/></marker>
+      </defs>
+    </svg>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>🏋️ Install Argo Rollouts</h2>
+
+  <div class="exercise">
+<pre><code>kubectl create namespace argo-rollouts
+kubectl apply -n argo-rollouts -f \
+  https://github.com/argoproj/argo-rollouts/releases/latest/download/install.yaml
+
+# Install kubectl plugin (optional but useful)
+# macOS: brew install argoproj/tap/kubectl-argo-rollouts
+# Linux: curl -LO https://github.com/argoproj/argo-rollouts/releases/latest/download/kubectl-argo-rollouts-linux-amd64 && chmod +x kubectl-argo-rollouts-linux-amd64 && sudo mv kubectl-argo-rollouts-linux-amd64 /usr/local/bin/kubectl-argo-rollouts
+
+# Verify
+kubectl argo rollouts version
+</code></pre>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>🏋️ Canary Rollout Manifest</h2>
+
+  <div class="exercise">
+    <p>Replace your Deployment with a Rollout:</p>
+<pre><code>apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: cicd-mastery-api
+  namespace: production
+spec:
+  replicas: 5
+  selector:
+    matchLabels: { app: cicd-mastery-api }
+  template:
+    metadata:
+      labels: { app: cicd-mastery-api }
+    spec:
+      containers:
+        - name: api
+          image: acrcicdmastery.azurecr.io/cicd-mastery-api:sha-abc1234
+          ports: [{ containerPort: 3000 }]
+          readinessProbe:
+            httpGet: { path: /health, port: 3000 }
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+
+  strategy:
+    canary:
+      canaryService: cicd-mastery-canary   <span style="color:#6c7086"># traffic to canary pods</span>
+      stableService: cicd-mastery-stable   <span style="color:#6c7086"># traffic to stable pods</span>
+
+      steps:
+        - setWeight: 5
+        - pause: { duration: 2m }
+        - setWeight: 25
+        - pause: { duration: 5m }
+        - setWeight: 50
+        - pause: { duration: 5m }
+        - setWeight: 100       <span style="color:#6c7086"># full promotion</span>
+</code></pre>
+
+    <p>Create two Services (stable + canary):</p>
+<pre><code>apiVersion: v1
+kind: Service
+metadata:
+  name: cicd-mastery-stable
+spec:
+  selector: { app: cicd-mastery-api }
+  ports: [{ port: 80, targetPort: 3000 }]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: cicd-mastery-canary
+spec:
+  selector: { app: cicd-mastery-api }
+  ports: [{ port: 80, targetPort: 3000 }]
+</code></pre>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>Adding Automated Analysis</h2>
+
+  <p>The real power: automated validation at each step using Prometheus metrics.</p>
+
+<pre><code>apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: success-rate
+spec:
+  metrics:
+    - name: http-success-rate
+      provider:
+        prometheus:
+          address: http://prometheus-server.monitoring:80
+          query: |
+            sum(rate(http_requests_total{service="cicd-mastery-canary",status!~"5.."}[5m]))
+            /
+            sum(rate(http_requests_total{service="cicd-mastery-canary"}[5m]))
+      successCondition: result[0] >= 0.95   <span style="color:#6c7086"># 95% success rate</span>
+      failureCondition: result[0] < 0.90    <span style="color:#6c7086"># Abort below 90%</span>
+      interval: 60s
+      count: 3
+</code></pre>
+
+  <p>Then add analysis to your Rollout steps:</p>
+<pre><code>      steps:
+        - setWeight: 5
+        - pause: { duration: 2m }
+        - analysis:
+            templates:
+              - templateName: success-rate
+        - setWeight: 50
+        - pause: { duration: 5m }
+        - setWeight: 100
+</code></pre>
+
+  <div class="key-insight">
+    <strong>This is the production gold standard:</strong> Deploy to 5% of traffic → run automated analysis against real metrics → if success rate drops below 95%, automatically rollback. No human needed. No 3 AM pages.
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>Watching a Rollout</h2>
+
+<pre><code># Watch live progress
+kubectl argo rollouts get rollout cicd-mastery-api -n production --watch
+
+# Output:
+# Name:            cicd-mastery-api
+# Status:          ◌ Progressing
+# Strategy:        Canary
+#   Step:          2/6
+#   SetWeight:     5
+#   ActualWeight:  5
+# Images:
+#   acrXXX/api:sha-old (stable)
+#   acrXXX/api:sha-new (canary)
+# Replicas:
+#   Desired: 5, Current: 5, Updated: 1, Ready: 5, Available: 5
+</code></pre>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>🧠 Recall Check</h2>
+
+  <div class="recall">
+    <ol>
+      <li>What's the key difference between a K8s Deployment and an Argo Rollout?</li>
+      <li>What does <code>setWeight: 5</code> mean in a canary strategy?</li>
+      <li>What happens when an AnalysisTemplate's <code>failureCondition</code> is met?</li>
+      <li>Why do you need two Services (stable + canary)?</li>
+    </ol>
+    <details>
+      <summary>Reveal answers</summary>
+      <ol>
+        <li>A Rollout supports <strong>progressive traffic shifting</strong> (canary/blue-green) with automated analysis. A Deployment only does rolling updates (replace pods sequentially, no traffic control).</li>
+        <li>Route <strong>5% of traffic</strong> to the new (canary) pods, 95% to the old (stable) pods. Argo Rollouts configures the Service mesh or ingress controller to split traffic.</li>
+        <li>The rollout is <strong>immediately aborted</strong> and all traffic returns to the stable version. Automatic rollback — no human intervention needed.</li>
+        <li>Traffic splitting works at the Service level. The <code>stableService</code> always points to stable pods; <code>canaryService</code> points to canary pods. The Rollout controller adjusts traffic weights between them.</li>
+      </ol>
+    </details>
+  </div>
+
+  <div class="key-insight">
+    Progressive delivery is the most sophisticated deployment strategy. Combined with GitOps (ArgoCD manages the Rollout resource), you get: Git commit → canary deploys → automated validation → full promotion or auto-rollback. Fully hands-off production deployments.
+  </div>
+
+  <p><strong>Next lesson:</strong> Secrets in GitOps — handling sensitive data when everything is in Git.</p>
+
+</body>
+</html>

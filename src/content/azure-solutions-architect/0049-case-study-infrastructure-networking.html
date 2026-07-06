@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lesson 049 – Case Study: Infrastructure &amp; Networking | AZ-305 Study Guide</title>
+    <link rel="stylesheet" href="../assets/styles.css">
+    <script src="../assets/diagrams.js"></script>
+</head>
+<body>
+<div class="lesson-wrap">
+
+    <header class="lesson-header fade-in">
+        <span class="lesson-number">Lesson 049 · 🟢 DEEP DIVE (~35 min)</span>
+        <h1>Case Study: Infrastructure &amp; Networking</h1>
+        <p>Design a hub-spoke/vWAN network with zero-trust, hybrid ExpressRoute, and multi-region HA for SecureBank — a financial services company migrating to Azure.</p>
+    </header>
+
+    <nav class="toc fade-in">
+        <h2>In This Lesson</h2>
+        <ol>
+            <li><a href="#scenario">The Scenario</a></li>
+            <li><a href="#topology">Decision 1 — Network Topology</a></li>
+            <li><a href="#hybrid">Decision 2 — Hybrid Connectivity</a></li>
+            <li><a href="#zero-trust">Decision 3 — Zero-Trust Security</a></li>
+            <li><a href="#load-balancing">Decision 4 — Load Balancing</a></li>
+            <li><a href="#compute">Decision 5 — Compute &amp; DR</a></li>
+            <li><a href="#diagram-topology">Architecture: Network Topology</a></li>
+            <li><a href="#diagram-security">Architecture: Layered Security</a></li>
+            <li><a href="#quiz">Exam-Style Questions</a></li>
+        </ol>
+    </nav>
+
+    <!-- 1. Scenario -->
+    <section id="scenario" class="fade-in">
+        <h2>1. The Scenario — SecureBank</h2>
+        <table class="comparison-table">
+            <tr><th>Attribute</th><th>Detail</th></tr>
+            <tr><td>Industry</td><td>Financial Services (retail &amp; commercial banking)</td></tr>
+            <tr><td>On-premises DCs</td><td>3 — New York, London, Singapore</td></tr>
+            <tr><td>Migration scope</td><td>60% of workloads to Azure over 18 months</td></tr>
+            <tr><td>Existing estate</td><td>200+ VMs, 15 SQL Servers, custom LOB apps</td></tr>
+            <tr><td>Latency requirement</td><td>&lt;5 ms between app tier and DB tier</td></tr>
+            <tr><td>Availability SLA</td><td>99.99% for customer-facing services</td></tr>
+            <tr><td>Compliance</td><td>SOX, PCI-DSS — data must <em>not</em> leave region</td></tr>
+            <tr><td>Hybrid connectivity</td><td>ExpressRoute from all 3 DCs</td></tr>
+            <tr><td>Security posture</td><td>Zero-trust network model, TLS inspection</td></tr>
+        </table>
+    </section>
+
+    <!-- 2. Network Topology -->
+    <section id="topology" class="fade-in">
+        <h2>2. Decision 1 — Network Topology</h2>
+        <p><strong>Choice:</strong> Azure Virtual WAN with Secured Virtual Hubs (Azure Firewall Manager) in East US, UK South, and Southeast Asia.</p>
+        <h3>Rationale</h3>
+        <ul>
+            <li><strong>Virtual WAN</strong> — Microsoft-managed routing; simplifies any-to-any transit across 3 regions without maintaining custom route tables.</li>
+            <li><strong>Secured Hubs</strong> — centralises firewall policy per region via Firewall Manager; consistent rule sets across geographies.</li>
+            <li><strong>Hub-Spoke per region</strong> — connectivity hub + dedicated app spokes isolate blast radius; CIDR planning uses /16 per region, /22 per spoke.</li>
+        </ul>
+        <div class="key-concept">
+            <h4>💡 CIDR Plan</h4>
+            <p>East US: 10.1.0.0/16 · UK South: 10.2.0.0/16 · SE Asia: 10.3.0.0/16<br>
+            Each spoke: /22 (1,024 IPs) — subnets for app (/24), data (/24), mgmt (/26), AzureFirewallSubnet (/26).</p>
+        </div>
+    </section>
+
+    <!-- 3. Hybrid Connectivity -->
+    <section id="hybrid" class="fade-in">
+        <h2>3. Decision 2 — Hybrid Connectivity</h2>
+        <p><strong>Choice:</strong> ExpressRoute with Global Reach + FastPath for latency-sensitive traffic.</p>
+        <ul>
+            <li><strong>ExpressRoute Premium</strong> — each DC gets a dedicated circuit (redundant pairs); connects to the regional vWAN hub.</li>
+            <li><strong>Global Reach</strong> — enables DC-to-DC communication (e.g., NY ↔ London) over Microsoft backbone without hairpinning through Azure.</li>
+            <li><strong>FastPath</strong> — bypasses the gateway for traffic between on-prem and directly-peered VNets; critical for &lt;5 ms app-to-DB latency.</li>
+            <li><strong>VPN as failover</strong> — site-to-site VPN tunnels provide last-resort connectivity if an ER circuit degrades.</li>
+        </ul>
+    </section>
+
+    <!-- 4. Zero-Trust -->
+    <section id="zero-trust" class="fade-in">
+        <h2>4. Decision 3 — Zero-Trust Security</h2>
+        <p><strong>Choice:</strong> Azure Firewall Premium + Private Endpoints + NSG/ASG micro-segmentation.</p>
+        <ul>
+            <li><strong>Azure Firewall Premium</strong> — TLS inspection, IDPS signatures, URL filtering; deployed in each secured hub.</li>
+            <li><strong>Private Endpoints</strong> — all PaaS services (SQL, Storage, Key Vault) accessed only via Private Link; no public endpoints.</li>
+            <li><strong>NSG + ASG</strong> — application security groups tag workloads (e.g., "WebTier", "AppTier"); NSG rules reference ASGs for intent-based micro-segmentation.</li>
+            <li><strong>DDoS Protection Standard</strong> — enabled on all VNets hosting public-facing IPs.</li>
+        </ul>
+        <div class="key-concept">
+            <h4>💡 PCI-DSS Alignment</h4>
+            <p>Cardholder data environment (CDE) spokes have deny-all NSG defaults; only explicitly whitelisted ASG flows are permitted. Diagnostic logs ship to a dedicated Log Analytics workspace with 1-year retention.</p>
+        </div>
+    </section>
+
+    <!-- 5. Load Balancing -->
+    <section id="load-balancing" class="fade-in">
+        <h2>5. Decision 4 — Load Balancing</h2>
+        <p><strong>Choice:</strong> Three-tier: Azure Front Door → Application Gateway → Internal Load Balancer.</p>
+        <ul>
+            <li><strong>Azure Front Door</strong> — global anycast entry; WAF policy (OWASP 3.2 + bot protection); routes to nearest healthy region.</li>
+            <li><strong>Application Gateway v2</strong> — regional L7 with WAF; handles path-based routing, SSL offload, and autoscaling.</li>
+            <li><strong>Internal Load Balancer (Standard)</strong> — distributes traffic across backend VMs/AKS nodes within a spoke; zone-redundant.</li>
+        </ul>
+    </section>
+
+    <!-- 6. Compute & DR -->
+    <section id="compute" class="fade-in">
+        <h2>6. Decision 5 — Compute &amp; DR</h2>
+        <ul>
+            <li><strong>AKS</strong> — modernised LOB apps containerised; CNI networking for VNet-native pods; node pools across 3 AZs.</li>
+            <li><strong>VMs in Availability Zones</strong> — legacy apps not yet refactored; deployed across zones for 99.99% VM SLA.</li>
+            <li><strong>VMSS</strong> — batch processing workloads; scale-in during off-hours to optimise cost.</li>
+            <li><strong>SQL Failover Groups</strong> — auto-failover across paired regions (East US ↔ West US 2, UK South ↔ UK West); RPO &lt;5 s.</li>
+            <li><strong>Azure Site Recovery (ASR)</strong> — replicates VMs to paired region; RTO &lt;15 min.</li>
+            <li><strong>Traffic Manager</strong> — DNS-based failover (priority routing) for active-passive multi-region DR.</li>
+        </ul>
+    </section>
+
+    <!-- Diagram 1: Network Topology -->
+    <section id="diagram-topology" class="fade-in">
+        <h2>7. Architecture — Network Topology</h2>
+        <div class="diagram-container">
+            <div class="box-diagram" data-diagram='{
+                "title": "Virtual WAN — Multi-Region Topology",
+                "boxes": [
+                    {"id": "vwan", "label": "Azure Virtual WAN", "x": 300, "y": 20, "color": "#0078d4"},
+                    {"id": "hub-us", "label": "Secured Hub\nEast US", "x": 100, "y": 120, "color": "#e97132"},
+                    {"id": "hub-uk", "label": "Secured Hub\nUK South", "x": 300, "y": 120, "color": "#e97132"},
+                    {"id": "hub-sg", "label": "Secured Hub\nSE Asia", "x": 500, "y": 120, "color": "#e97132"},
+                    {"id": "spoke-us1", "label": "App Spoke US\n10.1.4.0/22", "x": 30, "y": 240, "color": "#50e6ff"},
+                    {"id": "spoke-us2", "label": "Data Spoke US\n10.1.8.0/22", "x": 170, "y": 240, "color": "#50e6ff"},
+                    {"id": "spoke-uk1", "label": "App Spoke UK\n10.2.4.0/22", "x": 300, "y": 240, "color": "#50e6ff"},
+                    {"id": "spoke-sg1", "label": "App Spoke SG\n10.3.4.0/22", "x": 500, "y": 240, "color": "#50e6ff"},
+                    {"id": "er-ny", "label": "ER Circuit\nNew York DC", "x": 30, "y": 360, "color": "#8661c5"},
+                    {"id": "er-ldn", "label": "ER Circuit\nLondon DC", "x": 300, "y": 360, "color": "#8661c5"},
+                    {"id": "er-sg", "label": "ER Circuit\nSingapore DC", "x": 500, "y": 360, "color": "#8661c5"}
+                ],
+                "connections": [
+                    {"from": "vwan", "to": "hub-us"},
+                    {"from": "vwan", "to": "hub-uk"},
+                    {"from": "vwan", "to": "hub-sg"},
+                    {"from": "hub-us", "to": "spoke-us1"},
+                    {"from": "hub-us", "to": "spoke-us2"},
+                    {"from": "hub-uk", "to": "spoke-uk1"},
+                    {"from": "hub-sg", "to": "spoke-sg1"},
+                    {"from": "hub-us", "to": "er-ny"},
+                    {"from": "hub-uk", "to": "er-ldn"},
+                    {"from": "hub-sg", "to": "er-sg"}
+                ]
+            }'></div>
+        </div>
+    </section>
+
+    <!-- Diagram 2: Layered Security -->
+    <section id="diagram-security" class="fade-in">
+        <h2>8. Architecture — Layered Security Stack</h2>
+        <div class="diagram-container">
+            <div class="box-diagram" data-diagram='{
+                "title": "Zero-Trust Layered Security",
+                "boxes": [
+                    {"id": "internet", "label": "Internet", "x": 280, "y": 10, "color": "#999999"},
+                    {"id": "ddos", "label": "DDoS Protection\nStandard", "x": 280, "y": 70, "color": "#e97132"},
+                    {"id": "fd", "label": "Azure Front Door\n+ WAF", "x": 280, "y": 130, "color": "#0078d4"},
+                    {"id": "fw", "label": "Azure Firewall Premium\nTLS Inspect · IDPS", "x": 280, "y": 200, "color": "#dd2c00"},
+                    {"id": "nsg", "label": "NSG + ASG\nMicro-segmentation", "x": 280, "y": 270, "color": "#ffb900"},
+                    {"id": "pe", "label": "Private Endpoints\nNo Public Access", "x": 280, "y": 340, "color": "#0e7a0d"},
+                    {"id": "workload", "label": "Workloads\nAKS · VMs · SQL", "x": 280, "y": 410, "color": "#50e6ff"}
+                ],
+                "connections": [
+                    {"from": "internet", "to": "ddos"},
+                    {"from": "ddos", "to": "fd"},
+                    {"from": "fd", "to": "fw"},
+                    {"from": "fw", "to": "nsg"},
+                    {"from": "nsg", "to": "pe"},
+                    {"from": "pe", "to": "workload"}
+                ]
+            }'></div>
+        </div>
+    </section>
+
+    <!-- Quiz -->
+    <section id="quiz" class="fade-in">
+        <h2>9. Exam-Style Questions</h2>
+        <div class="quiz" data-questions='[
+            {"question":"SecureBank needs <5 ms latency from app VMs to SQL Managed Instance. Which ExpressRoute feature should they enable?","options":["ExpressRoute Global Reach","ExpressRoute FastPath","VPN Gateway transit","Route Server"],"answer":1,"explanation":"FastPath bypasses the ExpressRoute gateway for data-plane traffic, eliminating gateway latency and achieving near-direct connectivity between on-prem/VNet resources."},
+            {"question":"Which service provides centralised firewall policy management across all three secured virtual hubs?","options":["Azure Policy","Network Watcher","Azure Firewall Manager","Microsoft Defender for Cloud"],"answer":2,"explanation":"Azure Firewall Manager lets you define and apply firewall policies (rules, threat intel, TLS inspection) consistently across multiple secured virtual hubs in a Virtual WAN."},
+            {"question":"SecureBank must ensure PaaS services (SQL, Storage) are never exposed to the public internet. Which feature satisfies this?","options":["Service Endpoints","Private Endpoints (Private Link)","VNet injection","NAT Gateway"],"answer":1,"explanation":"Private Endpoints assign a private IP inside the VNet for the PaaS service and allow disabling public access entirely — the strongest network isolation option."},
+            {"question":"For 99.99% SLA on customer-facing web apps, which load-balancing chain is MOST appropriate?","options":["Traffic Manager → Internal LB","Azure Front Door → Application Gateway → Internal LB","Application Gateway only","Azure Load Balancer (public)"],"answer":1,"explanation":"Front Door provides global anycast + WAF + instant failover; App Gateway adds regional L7 intelligence; Internal LB distributes to backends across availability zones — together they achieve 99.99%+ composite SLA."},
+            {"question":"SecureBank's compliance requires data to remain in-region. Which Azure SQL HA feature replicates within the same region pair while supporting automatic failover to a secondary region?","options":["Geo-restore","Active geo-replication with manual failover","Auto-failover groups with paired regions","Locally-redundant backups"],"answer":2,"explanation":"Auto-failover groups replicate to a specific paired region (which shares compliance boundaries) and support automatic failover with a grace period, meeting both HA and data-residency requirements."}
+        ]'></div>
+    </section>
+
+    <nav class="lesson-nav">
+        <a href="0048-azure-well-architected-labs.html" class="prev">← Lesson 048</a>
+        <a href="0050-case-study-data-platform.html" class="next">Lesson 050 →</a>
+    </nav>
+</div>
+</body>
+</html>

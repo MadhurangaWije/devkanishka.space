@@ -1,0 +1,341 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lesson 5: Anatomy of a Running Container</title>
+  <link rel="stylesheet" href="../assets/lesson-style.css">
+</head>
+<body>
+
+  <div class="lesson-meta">
+    <span>📦 Lesson 5 of 12</span>
+    <span>⏱️ 10–12 minutes</span>
+    <span>🔬 Deep Internals</span>
+  </div>
+
+  <h1>Anatomy of a Running Container</h1>
+  <p class="subtitle">A container is not a tiny VM. It is a regular Linux process with three kernel features applied: <strong>namespaces</strong>, <strong>cgroups</strong>, and a <strong>union filesystem</strong>. This lesson shows you exactly what that means, provably.</p>
+
+  <!-- ============================================================ -->
+  <h2>1. A Container Is Just a Process</h2>
+
+  <p>Run <code>docker run -d nginx</code>, then immediately run <code>docker top &lt;id&gt;</code> on the host. You will see a plain <code>nginx</code> process with a regular PID. There is no hypervisor, no separate kernel, no hardware virtualisation — just a Linux process the kernel launched with some extra flags.</p>
+
+  <pre><code># On the host:
+$ docker run -d --name web nginx
+$ docker top web
+UID    PID    PPID   CMD
+root   18432  18410  nginx: master process nginx -g daemon off;
+www    18487  18432  nginx: worker process
+
+# Same PID visible in the host process table:
+$ ps aux | grep 18432</code></pre>
+
+  <div class="callout warning">
+    <div class="callout-title">Not a VM — No Separate Kernel</div>
+    <p>A VM boots its own kernel. A container shares the host kernel — the exact same running kernel instance. There is no boot sequence, no kernel image inside the container image, and no hypervisor layer. That is why containers start in milliseconds and a 5 MB image is realistic.</p>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>2. Namespaces — The Isolation</h2>
+
+  <p>The kernel feature that makes a process <em>feel</em> isolated is the <strong>namespace</strong>. Each namespace wraps one aspect of the global system and gives the process its own private view of it. Docker applies six namespaces at container start.</p>
+
+  <div class="diagram">
+    <!-- SVG 1: nested boxes — Host Kernel > Cgroups > Namespaces > Process -->
+    <svg viewBox="0 0 420 260" width="420" height="260" xmlns="http://www.w3.org/2000/svg" font-family="system-ui, sans-serif" font-size="13">
+      <!-- Host kernel box -->
+      <rect x="10" y="10" width="400" height="240" rx="8" fill="#f1f5f9" stroke="#94a3b8" stroke-width="2"/>
+      <text x="200" y="30" text-anchor="middle" font-weight="bold" fill="#475569">Host Kernel</text>
+      <!-- Cgroups box -->
+      <rect x="30" y="42" width="360" height="198" rx="6" fill="#fef3c7" stroke="#f59e0b" stroke-width="1.5"/>
+      <text x="200" y="59" text-anchor="middle" font-weight="bold" fill="#b45309">Cgroups boundary (CPU · Memory · I/O)</text>
+      <!-- Namespaces box -->
+      <rect x="55" y="70" width="310" height="158" rx="6" fill="#e0f2fe" stroke="#0369a1" stroke-width="1.5"/>
+      <text x="210" y="88" text-anchor="middle" font-weight="bold" fill="#0369a1">Namespaces</text>
+      <!-- Namespace labels -->
+      <text x="80" y="108" fill="#0c4a6e" font-size="11">PID  ·  Net  ·  Mount</text>
+      <text x="80" y="126" fill="#0c4a6e" font-size="11">UTS  ·  IPC  ·  User</text>
+      <!-- Process box -->
+      <rect x="110" y="138" width="200" height="72" rx="5" fill="#dcfce7" stroke="#16a34a" stroke-width="1.5"/>
+      <text x="210" y="160" text-anchor="middle" font-weight="bold" fill="#166534">Container Process</text>
+      <text x="210" y="178" text-anchor="middle" fill="#166534" font-size="11">thinks it is PID 1</text>
+      <text x="210" y="196" text-anchor="middle" fill="#166534" font-size="11">on its own machine</text>
+    </svg>
+    <div class="diagram-caption">Fig 1. A container process lives inside namespace isolation, bounded by cgroups, sharing the host kernel.</div>
+  </div>
+
+  <table style="width:100%; font-size:0.9rem; border-collapse:collapse; margin-bottom:1.5rem;">
+    <thead>
+      <tr style="border-bottom:2px solid var(--color-border);">
+        <th style="text-align:left; padding:0.5rem;">Namespace</th>
+        <th style="text-align:left; padding:0.5rem;">Isolates</th>
+        <th style="text-align:left; padding:0.5rem;">Effect inside container</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr style="border-bottom:1px solid var(--color-border);">
+        <td style="padding:0.5rem;"><code>pid</code></td>
+        <td style="padding:0.5rem;">Process IDs</td>
+        <td style="padding:0.5rem;">First process is PID 1; can't see host PIDs</td>
+      </tr>
+      <tr style="border-bottom:1px solid var(--color-border);">
+        <td style="padding:0.5rem;"><code>net</code></td>
+        <td style="padding:0.5rem;">Network stack</td>
+        <td style="padding:0.5rem;">Own <code>eth0</code>, IP address, routing table</td>
+      </tr>
+      <tr style="border-bottom:1px solid var(--color-border);">
+        <td style="padding:0.5rem;"><code>mnt</code></td>
+        <td style="padding:0.5rem;">Filesystem mounts</td>
+        <td style="padding:0.5rem;">Sees only its own filesystem tree</td>
+      </tr>
+      <tr style="border-bottom:1px solid var(--color-border);">
+        <td style="padding:0.5rem;"><code>uts</code></td>
+        <td style="padding:0.5rem;">Hostname / domain</td>
+        <td style="padding:0.5rem;">Own hostname (default: container ID)</td>
+      </tr>
+      <tr style="border-bottom:1px solid var(--color-border);">
+        <td style="padding:0.5rem;"><code>ipc</code></td>
+        <td style="padding:0.5rem;">IPC objects</td>
+        <td style="padding:0.5rem;">Isolated shared memory, semaphores</td>
+      </tr>
+      <tr>
+        <td style="padding:0.5rem;"><code>user</code></td>
+        <td style="padding:0.5rem;">UID/GID maps</td>
+        <td style="padding:0.5rem;">UID 0 inside → unprivileged UID on host</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <!-- Quiz 1 -->
+  <div class="quiz">
+    <div class="quiz-question">Which namespace makes a container process believe it is PID 1?</div>
+    <ul class="quiz-options">
+      <li data-correct="false">The <code>net</code> namespace</li>
+      <li data-correct="true">The <code>pid</code> namespace</li>
+      <li data-correct="false">The <code>mnt</code> namespace</li>
+      <li data-correct="false">Cgroups handle PID numbering</li>
+    </ul>
+    <div class="quiz-feedback"
+      data-correct="The PID namespace remaps process IDs so the first process inside sees itself as PID 1, regardless of its real host PID."
+      data-incorrect="Cgroups limit resources; namespaces provide isolation. PID isolation is specifically the pid namespace."></div>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>3. Cgroups — Resource Limits</h2>
+
+  <p><strong>Control groups (cgroups)</strong> answer a different question: not <em>what can the process see</em>, but <em>how much of the machine can it consume</em>. The kernel enforces hard limits on CPU time, RAM, disk I/O, and number of processes.</p>
+
+  <pre><code># Cap memory at 512 MB and CPU at 1.5 cores:
+$ docker run --memory=512m --cpus=1.5 nginx
+
+# Inspect actual cgroup settings:
+$ docker inspect web --format '{{.HostConfig.Memory}}'
+536870912          # 512 × 1024 × 1024 bytes
+
+$ docker inspect web --format '{{.HostConfig.NanoCpus}}'
+1500000000         # 1.5 × 10^9 nanocpus</code></pre>
+
+  <div class="callout industry">
+    <div class="callout-title">Industry: Kubernetes OOM Killer Uses Cgroups</div>
+    <p>When a Kubernetes pod exceeds its <code>resources.limits.memory</code>, the Linux OOM killer terminates the process. This is the cgroup memory limit triggering the kernel's out-of-memory handler — not Kubernetes code. The pod shows <code>OOMKilled</code> in <code>kubectl describe pod</code>. Same mechanism, same kernel feature you're learning right now.</p>
+  </div>
+
+  <!-- Quiz 2 -->
+  <div class="quiz">
+    <div class="quiz-question">A container is consuming 100% of the host CPU, slowing other workloads. What flag controls this?</div>
+    <ul class="quiz-options">
+      <li data-correct="false"><code>--isolate-cpu</code></li>
+      <li data-correct="false"><code>--namespace=cpu</code></li>
+      <li data-correct="true"><code>--cpus=&lt;value&gt;</code> (cgroup CPU quota)</li>
+      <li data-correct="false">CPU limits require a VM, not a container</li>
+    </ul>
+    <div class="quiz-feedback"
+      data-correct="--cpus sets a cgroup cpu.cfs_quota_us value that the kernel scheduler enforces as a hard ceiling."
+      data-incorrect="CPU limits are a cgroup concern, not a namespace concern. --cpus is the Docker flag for it."></div>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>4. Union Filesystem — Layers</h2>
+
+  <p>Container filesystems are built from <strong>stacked read-only image layers</strong> with a single <strong>writable layer</strong> on top. The kernel stitches them into one apparent filesystem using a union mount (OverlayFS on modern Linux). Reads fall through to whichever layer owns the file; writes go to the top layer only — <em>copy-on-write</em>.</p>
+
+  <div class="diagram">
+    <!-- SVG 2: layer stack -->
+    <svg viewBox="0 0 340 220" width="340" height="220" xmlns="http://www.w3.org/2000/svg" font-family="system-ui, sans-serif" font-size="13">
+      <!-- Writable layer (top) -->
+      <rect x="40" y="10" width="260" height="40" rx="5" fill="#dcfce7" stroke="#16a34a" stroke-width="2"/>
+      <text x="170" y="27" text-anchor="middle" font-weight="bold" fill="#166534">Container Layer</text>
+      <text x="170" y="44" text-anchor="middle" fill="#166534" font-size="11">Read-Write  ·  copy-on-write</text>
+      <!-- Arrows between layers -->
+      <text x="170" y="64" text-anchor="middle" fill="#94a3b8" font-size="16">↑ mount (OverlayFS) ↑</text>
+      <!-- App code layer -->
+      <rect x="40" y="72" width="260" height="36" rx="5" fill="#e0f2fe" stroke="#0369a1" stroke-width="1.5"/>
+      <text x="170" y="88" text-anchor="middle" font-weight="bold" fill="#0369a1">App Code Layer</text>
+      <text x="170" y="104" text-anchor="middle" fill="#0369a1" font-size="11">Read-Only</text>
+      <!-- App deps layer -->
+      <rect x="40" y="118" width="260" height="36" rx="5" fill="#e0f2fe" stroke="#0369a1" stroke-width="1.5"/>
+      <text x="170" y="134" text-anchor="middle" font-weight="bold" fill="#0369a1">App Dependencies Layer</text>
+      <text x="170" y="150" text-anchor="middle" fill="#0369a1" font-size="11">Read-Only</text>
+      <!-- Base OS layer -->
+      <rect x="40" y="164" width="260" height="46" rx="5" fill="#f1f5f9" stroke="#64748b" stroke-width="1.5"/>
+      <text x="170" y="182" text-anchor="middle" font-weight="bold" fill="#334155">Base OS Layer</text>
+      <text x="170" y="200" text-anchor="middle" fill="#334155" font-size="11">Read-Only  (e.g. debian:slim)</text>
+    </svg>
+    <div class="diagram-caption">Fig 2. Union filesystem stack. All image layers are read-only; only the container layer accepts writes. Deleted on <code>docker rm</code>.</div>
+  </div>
+
+  <p>Practical consequences: <strong>image layers are shared</strong> between containers that use the same base — ten nginx containers each get their own writable layer but share one copy of the nginx image layers on disk. And <strong>writes are ephemeral</strong> — the container layer vanishes with <code>docker rm</code>.</p>
+
+  <!-- Quiz 3 -->
+  <div class="quiz">
+    <div class="quiz-question">You write a 100 MB file inside a running container. Where does it go?</div>
+    <ul class="quiz-options">
+      <li data-correct="false">Into the base image layer, modifying it for future containers</li>
+      <li data-correct="true">Into the container's writable layer — deleted when the container is removed</li>
+      <li data-correct="false">Into a Docker-managed volume automatically</li>
+      <li data-correct="false">Nowhere — containers have a read-only filesystem</li>
+    </ul>
+    <div class="quiz-feedback"
+      data-correct="Writes land in the ephemeral container layer via copy-on-write. The image layers below are untouched. The data disappears on docker rm unless you use a volume."
+      data-incorrect="The union filesystem always provides a writable top layer per container, but it is ephemeral — it lives and dies with that container."></div>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>5. Putting It All Together: <code>docker run nginx</code></h2>
+
+  <p>When you run <code>docker run nginx</code>, runc executes these steps in order — all within a fraction of a second:</p>
+
+  <div class="diagram">
+    <!-- SVG 3: lifecycle flow — vertical steps -->
+    <svg viewBox="0 0 260 310" width="260" height="310" xmlns="http://www.w3.org/2000/svg" font-family="system-ui, sans-serif" font-size="13">
+      <defs>
+        <marker id="arr" markerWidth="8" markerHeight="8" refX="4" refY="4" orient="auto">
+          <path d="M1,1 L7,4 L1,7 Z" fill="#64748b"/>
+        </marker>
+      </defs>
+      <!-- Step boxes -->
+      <rect x="55" y="10"  width="150" height="34" rx="5" fill="#fef3c7" stroke="#f59e0b" stroke-width="1.5"/>
+      <text x="130" y="32" text-anchor="middle" font-weight="bold" fill="#92400e">1. fork()</text>
+
+      <line x1="130" y1="44" x2="130" y2="60" stroke="#64748b" stroke-width="1.5" marker-end="url(#arr)"/>
+
+      <rect x="55" y="62"  width="150" height="34" rx="5" fill="#e0f2fe" stroke="#0369a1" stroke-width="1.5"/>
+      <text x="130" y="84" text-anchor="middle" font-weight="bold" fill="#0c4a6e">2. unshare() namespaces</text>
+
+      <line x1="130" y1="96" x2="130" y2="112" stroke="#64748b" stroke-width="1.5" marker-end="url(#arr)"/>
+
+      <rect x="55" y="114" width="150" height="34" rx="5" fill="#fef3c7" stroke="#f59e0b" stroke-width="1.5"/>
+      <text x="130" y="136" text-anchor="middle" font-weight="bold" fill="#92400e">3. write cgroup limits</text>
+
+      <line x1="130" y1="148" x2="130" y2="164" stroke="#64748b" stroke-width="1.5" marker-end="url(#arr)"/>
+
+      <rect x="55" y="166" width="150" height="34" rx="5" fill="#f5f3ff" stroke="#7c3aed" stroke-width="1.5"/>
+      <text x="130" y="188" text-anchor="middle" font-weight="bold" fill="#5b21b6">4. mount OverlayFS</text>
+
+      <line x1="130" y1="200" x2="130" y2="216" stroke="#64748b" stroke-width="1.5" marker-end="url(#arr)"/>
+
+      <rect x="55" y="218" width="150" height="34" rx="5" fill="#dcfce7" stroke="#16a34a" stroke-width="1.5"/>
+      <text x="130" y="240" text-anchor="middle" font-weight="bold" fill="#166534">5. exec() nginx</text>
+
+      <line x1="130" y1="252" x2="130" y2="268" stroke="#64748b" stroke-width="1.5" marker-end="url(#arr)"/>
+
+      <rect x="55" y="270" width="150" height="34" rx="5" fill="#dcfce7" stroke="#16a34a" stroke-width="2"/>
+      <text x="130" y="292" text-anchor="middle" font-weight="bold" fill="#166534">Container running ✓</text>
+    </svg>
+    <div class="diagram-caption">Fig 3. runc start sequence for <code>docker run nginx</code>. Total elapsed: &lt;100 ms on a modern host.</div>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>6. Proving It: Inspect the Kernel Structures</h2>
+
+  <p>Every claim above is verifiable from the host without any special tooling — the Linux <code>/proc</code> filesystem exposes it all.</p>
+
+  <div class="hands-on">
+    <div class="hands-on-title">Task 1 — Find the Container PID on the Host</div>
+    <pre style="margin-bottom:0.8rem;"><code># Start a container
+$ docker run -d --name probe nginx
+
+# Ask Docker for the host PID
+$ docker inspect probe --format '{{.State.Pid}}'
+18432
+
+# Confirm it in the host process table
+$ ps -p 18432 -o pid,ppid,cmd</code></pre>
+    <p style="margin-bottom:0;">The PID you see is a real kernel PID — the same one the OOM killer would target if memory limits were breached.</p>
+  </div>
+
+  <div class="hands-on">
+    <div class="hands-on-title">Task 2 — Inspect Namespace File Descriptors</div>
+    <pre style="margin-bottom:0.8rem;"><code># Using the PID from Task 1:
+$ PID=$(docker inspect probe --format '{{.State.Pid}}')
+
+# List the namespace symlinks
+$ sudo ls -la /proc/$PID/ns/
+lrwxrwxrwx  ipc  -> ipc:[4026532305]
+lrwxrwxrwx  mnt  -> mnt:[4026532303]
+lrwxrwxrwx  net  -> net:[4026532308]
+lrwxrwxrwx  pid  -> pid:[4026532306]
+lrwxrwxrwx  uts  -> uts:[4026532304]
+lrwxrwxrwx  user -> user:[4026531837]
+
+# Compare with a host process — different inode numbers = different namespace
+$ sudo ls -la /proc/1/ns/</code></pre>
+    <p style="margin-bottom:0;">The inode numbers differ from the host's PID 1. That numerical difference is the isolation — the container is in a different namespace instance for each resource.</p>
+  </div>
+
+  <div class="hands-on">
+    <div class="hands-on-title">Task 3 — Test Memory Limits</div>
+    <pre style="margin-bottom:0.8rem;"><code># Start a container limited to 64 MB
+$ docker run -d --name memtest --memory=64m nginx
+
+# Check the cgroup limit (cgroups v2 path):
+$ PID=$(docker inspect memtest --format '{{.State.Pid}}')
+$ sudo cat /proc/$PID/cgroup
+0::/system.slice/docker-&lt;id&gt;.scope
+
+$ sudo cat /sys/fs/cgroup/system.slice/docker-&lt;id&gt;.scope/memory.max
+67108864    # 64 × 1024 × 1024
+
+# Or use docker stats:
+$ docker stats memtest --no-stream</code></pre>
+    <p style="margin-bottom:0;">The 64 MB value in <code>memory.max</code> is the cgroup hard limit. Exceed it and the kernel OOM-kills the process — exactly what Kubernetes reports as <code>OOMKilled</code>.</p>
+  </div>
+
+  <!-- Quiz 4 -->
+  <div class="quiz">
+    <div class="quiz-question">You have two containers running from the same nginx image. How many copies of the nginx image layers exist on disk?</div>
+    <ul class="quiz-options">
+      <li data-correct="false">Two — one per container</li>
+      <li data-correct="true">One shared copy; each container gets its own separate writable layer</li>
+      <li data-correct="false">Zero — layers are streamed from the registry at runtime</li>
+      <li data-correct="false">It depends on the storage driver</li>
+    </ul>
+    <div class="quiz-feedback"
+      data-correct="OverlayFS union mounts let many containers share the same read-only image layers. Only the thin writable layer is per-container, saving significant disk space."
+      data-incorrect="The whole point of union filesystems is layer sharing. The read-only image layers are shared; each container adds only its own small writable layer on top."></div>
+  </div>
+
+  <!-- ============================================================ -->
+  <div class="takeaways">
+    <h3>🔑 Key Takeaways</h3>
+    <ul>
+      <li><strong>A container is a process.</strong> <code>docker top</code> and <code>ps</code> on the host both show it. No separate kernel, no boot sequence.</li>
+      <li><strong>Namespaces create the illusion of isolation</strong> — six dimensions: PID, net, mnt, uts, ipc, user. Each is a kernel structure with a different inode number visible in <code>/proc/&lt;pid&gt;/ns/</code>.</li>
+      <li><strong>Cgroups enforce resource limits</strong> — CPU, memory, I/O, PIDs. The same mechanism Kubernetes uses when it reports <code>OOMKilled</code>.</li>
+      <li><strong>Union filesystems (OverlayFS) stack layers</strong> — read-only image layers shared across containers; one thin writable layer per container, discarded on <code>docker rm</code>.</li>
+      <li><strong>The full start sequence:</strong> fork → unshare namespaces → write cgroup limits → mount OverlayFS → exec. All in under 100 ms.</li>
+      <li><strong>Everything is verifiable</strong> from <code>/proc/&lt;pid&gt;/ns/</code>, <code>/proc/&lt;pid&gt;/cgroup</code>, and <code>docker inspect</code>.</li>
+    </ul>
+  </div>
+
+  <!-- ============================================================ -->
+  <nav class="lesson-nav">
+    <a href="0004-installing-docker-and-first-run.html">← Prev: Installing Docker &amp; First Run</a>
+    <a href="0006-images-deep-dive.html">Next: Images Deep Dive →</a>
+  </nav>
+
+  <script src="../assets/quiz.js"></script>
+</body>
+</html>

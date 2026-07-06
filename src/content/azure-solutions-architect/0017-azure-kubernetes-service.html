@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lesson 017 – Azure Kubernetes Service (AKS) | AZ-305 Study Guide</title>
+    <link rel="stylesheet" href="../assets/styles.css">
+    <script src="../assets/diagrams.js"></script>
+</head>
+<body>
+<div class="lesson-wrap">
+
+    <!-- Header -->
+    <header class="lesson-header fade-in">
+        <span class="lesson-number">Lesson 017 · 🟢 DEEP DIVE (~35 min)</span>
+        <h1>Azure Kubernetes Service (AKS)</h1>
+        <p>From cluster architecture and networking models to autoscaling, identity, and ingress — design production-grade Kubernetes on Azure for the AZ-305 exam and real workloads.</p>
+    </header>
+
+    <!-- Table of Contents -->
+    <nav class="toc fade-in">
+        <h2>In This Lesson</h2>
+        <ol>
+            <li><a href="#when-aks">When AKS Is Right vs Overkill</a></li>
+            <li><a href="#architecture">Cluster Architecture</a></li>
+            <li><a href="#networking">Networking Models</a></li>
+            <li><a href="#node-pools">Node Pool Design</a></li>
+            <li><a href="#scaling">Scaling: Autoscaler + HPA + KEDA</a></li>
+            <li><a href="#identity">Identity &amp; RBAC</a></li>
+            <li><a href="#ingress">Ingress &amp; Service Mesh</a></li>
+            <li><a href="#real-world">Real-World: Fintech Microservices</a></li>
+            <li><a href="#exam-tip">Exam Tip</a></li>
+            <li><a href="#quiz">Knowledge Check</a></li>
+        </ol>
+    </nav>
+
+    <!-- Section 1 -->
+    <section id="when-aks" class="fade-in">
+        <h2>1 · When AKS Is Right vs Overkill</h2>
+        <div class="compare-grid" data-columns="2">
+            <div class="compare-col pros">
+                <h3>✅ Choose AKS When</h3>
+                <ul>
+                    <li>10+ microservices needing independent release cadences</li>
+                    <li>Multi-team ownership — namespace isolation needed</li>
+                    <li>Complex scaling (mix of CPU, memory, queue-based)</li>
+                    <li>Service mesh / advanced traffic splitting required</li>
+                    <li>Hybrid workloads (Arc-enabled K8s on-prem)</li>
+                </ul>
+            </div>
+            <div class="compare-col cons">
+                <h3>⚠️ AKS Is Overkill When</h3>
+                <ul>
+                    <li>≤3 containers with simple HTTP scaling → Container Apps</li>
+                    <li>Single batch job or sidecar → ACI</li>
+                    <li>Team lacks K8s operational skills and budget for upskilling</li>
+                    <li>Monolith with no decomposition plan → App Service</li>
+                    <li>Event-driven functions only → Azure Functions</li>
+                </ul>
+            </div>
+        </div>
+    </section>
+
+    <!-- Section 2 -->
+    <section id="architecture" class="fade-in">
+        <h2>2 · Cluster Architecture</h2>
+        <div class="box-diagram" data-boxes='[
+            {"id":"cp","label":"Control Plane (Azure-managed)","sub":"API Server · etcd · Scheduler · Controller Manager","color":"blue"},
+            {"id":"sys","label":"System Node Pool","sub":"CoreDNS · kube-proxy · metrics-server","color":"green"},
+            {"id":"usr","label":"User Node Pool(s)","sub":"Your app pods · Daemonsets","color":"purple"},
+            {"id":"pod","label":"Pod","sub":"1+ containers sharing network namespace","color":"orange"},
+            {"id":"svc","label":"Service","sub":"ClusterIP · LoadBalancer · NodePort","color":"gray"}
+        ]' data-flow='[["cp","sys","manages"],["cp","usr","schedules"],["usr","pod","runs"],["pod","svc","exposed via"]]'></div>
+        <div class="callout info">
+            <strong>Free control plane:</strong> Azure manages and funds the control plane — you pay only for worker node VMs, storage, and networking.
+        </div>
+    </section>
+
+    <!-- Section 3 -->
+    <section id="networking" class="fade-in">
+        <h2>3 · Networking Models — Decision Matrix</h2>
+        <div class="compare-grid" data-columns="3">
+            <div class="compare-col">
+                <h3>Kubenet</h3>
+                <ul>
+                    <li>Pods get IPs from a virtual bridge (NAT)</li>
+                    <li>Conserves VNet address space</li>
+                    <li>No direct pod ↔ VNet communication</li>
+                    <li>Max 400 nodes per cluster</li>
+                    <li><strong>Use:</strong> Dev/test, small clusters</li>
+                </ul>
+            </div>
+            <div class="compare-col">
+                <h3>Azure CNI</h3>
+                <ul>
+                    <li>Every pod gets a VNet IP</li>
+                    <li>Direct connectivity — no NAT</li>
+                    <li>Consumes subnet IPs fast</li>
+                    <li>Network policies natively supported</li>
+                    <li><strong>Use:</strong> Enterprise, strict NSG/firewall rules</li>
+                </ul>
+            </div>
+            <div class="compare-col">
+                <h3>CNI Overlay</h3>
+                <ul>
+                    <li>Pod CIDR overlayed on node subnet</li>
+                    <li>Pods routable within cluster, NAT to VNet</li>
+                    <li>Saves IP space like kubenet</li>
+                    <li>Supports Network Policies</li>
+                    <li><strong>Use:</strong> Large clusters needing policies + IP conservation</li>
+                </ul>
+            </div>
+        </div>
+        <div class="callout tip">
+            <strong>Exam shortcut:</strong> "Pods need VNet-routable IPs" → Azure CNI. "Save IP space + network policies" → CNI Overlay. "Simple dev cluster" → Kubenet.
+        </div>
+    </section>
+
+    <!-- Section 4 -->
+    <section id="node-pools" class="fade-in">
+        <h2>4 · Node Pool Design</h2>
+        <table class="styled-table">
+            <thead><tr><th>Pool</th><th>Mode</th><th>VM SKU</th><th>Taints / Labels</th><th>Purpose</th></tr></thead>
+            <tbody>
+                <tr><td>system</td><td>System</td><td>Standard_D4s_v5</td><td>CriticalAddonsOnly=true:NoSchedule</td><td>CoreDNS, metrics</td></tr>
+                <tr><td>general</td><td>User</td><td>Standard_D8s_v5</td><td>workload=general</td><td>Stateless APIs</td></tr>
+                <tr><td>compute</td><td>User</td><td>Standard_F16s_v2</td><td>workload=cpu-intensive</td><td>ML inference</td></tr>
+                <tr><td>spot</td><td>User</td><td>Standard_D4s_v5 (Spot)</td><td>kubernetes.azure.com/scalesetpriority=spot:NoSchedule</td><td>Batch, tolerant workloads</td></tr>
+            </tbody>
+        </table>
+        <div class="callout warning">
+            <strong>Spot pools:</strong> Azure can evict nodes with 30 s notice. Use pod disruption budgets and tolerations — never run stateful primaries on spot.
+        </div>
+    </section>
+
+    <!-- Section 5 -->
+    <section id="scaling" class="fade-in">
+        <h2>5 · Scaling: Cluster Autoscaler + HPA + KEDA</h2>
+        <div class="box-diagram" data-boxes='[
+            {"id":"hpa","label":"HPA","sub":"Scales pod replicas on CPU/memory metrics","color":"green"},
+            {"id":"keda","label":"KEDA","sub":"Event-driven scaling (queues, cron, custom)","color":"purple"},
+            {"id":"ca","label":"Cluster Autoscaler","sub":"Adds/removes nodes when pods are unschedulable","color":"blue"},
+            {"id":"vn","label":"Virtual Nodes (ACI)","sub":"Burst overflow — serverless, per-second billing","color":"orange"}
+        ]' data-flow='[["hpa","ca","triggers node scale when pods pending"],["keda","ca","triggers node scale when pods pending"],["ca","vn","overflow option"]]'></div>
+        <h3>How They Interact</h3>
+        <ol>
+            <li><strong>HPA/KEDA</strong> increases desired pod count based on metrics or events.</li>
+            <li>If no node capacity, pods enter <code>Pending</code> state.</li>
+            <li><strong>Cluster Autoscaler</strong> detects pending pods → scales out VMSS.</li>
+            <li>Optionally, <strong>Virtual Nodes</strong> schedule overflow onto ACI instantly.</li>
+        </ol>
+        <div class="callout info">
+            <strong>KEDA for AZ-305:</strong> Scales to zero replicas (cost saving) and supports 60+ event sources (Service Bus, Event Hub, Cosmos DB change feed).
+        </div>
+    </section>
+
+    <!-- Section 6 -->
+    <section id="identity" class="fade-in">
+        <h2>6 · Identity &amp; RBAC</h2>
+        <h3>Workload Identity (Recommended)</h3>
+        <ul>
+            <li>Replaces pod-managed identity (deprecated).</li>
+            <li>Kubernetes Service Account → federated with Azure AD Managed Identity.</li>
+            <li>No secrets in pods — OIDC token exchange via projected volume.</li>
+        </ul>
+        <h3>Azure RBAC for Kubernetes</h3>
+        <ul>
+            <li>Unify Azure IAM and K8s RBAC — single policy plane.</li>
+            <li>Assign <code>Azure Kubernetes Service RBAC Reader/Writer/Admin/Cluster Admin</code> at namespace or cluster scope.</li>
+            <li>Conditional Access policies apply to <code>kubectl</code> sessions.</li>
+        </ul>
+        <div class="callout tip">
+            <strong>Best practice:</strong> Enable Azure RBAC + Workload Identity + disable local accounts for zero-secret, auditable clusters.
+        </div>
+    </section>
+
+    <!-- Section 7 -->
+    <section id="ingress" class="fade-in">
+        <h2>7 · Ingress &amp; Service Mesh</h2>
+        <table class="styled-table">
+            <thead><tr><th>Option</th><th>Layer</th><th>TLS</th><th>WAF</th><th>Best For</th></tr></thead>
+            <tbody>
+                <tr><td>NGINX Ingress Controller</td><td>L7</td><td>cert-manager</td><td>ModSecurity (DIY)</td><td>General web apps, OSS standard</td></tr>
+                <tr><td>Application Gateway Ingress (AGIC)</td><td>L7</td><td>Native + Key Vault</td><td>WAF v2 built-in</td><td>Enterprise WAF + Azure-native</td></tr>
+                <tr><td>Istio Service Mesh</td><td>L4-L7</td><td>mTLS auto</td><td>Via ext authz</td><td>Advanced traffic mgmt, observability</td></tr>
+            </tbody>
+        </table>
+        <div class="callout info">
+            <strong>AKS managed Istio:</strong> Azure now offers Istio as a managed add-on — control plane managed by Azure, reducing ops burden.
+        </div>
+    </section>
+
+    <!-- Section 8 -->
+    <section id="real-world" class="fade-in">
+        <h2>8 · Real-World: Fintech Microservices Platform</h2>
+        <div class="scenario-card">
+            <h3>Scenario</h3>
+            <p>A fintech company runs 25 microservices (payments, fraud detection, KYC, notifications) serving 50 K TPS at peak. Requirements: PCI-DSS compliance, zero-downtime deploys, burst during market open.</p>
+            <h3>Architecture Decisions</h3>
+            <ul>
+                <li><strong>Networking:</strong> Azure CNI — pods need direct VNet IPs for NSG rules + private endpoint access to Azure SQL / Cosmos DB.</li>
+                <li><strong>Node pools:</strong> System (3 nodes) + General API (6–20 nodes, autoscale) + GPU pool for fraud ML (2 spot + 1 on-demand) + Spot batch for report generation.</li>
+                <li><strong>Scaling:</strong> HPA on CPU for APIs + KEDA scaling on Service Bus queue depth for payment processing + Cluster Autoscaler min 6 / max 20.</li>
+                <li><strong>Identity:</strong> Workload Identity per service → least-privilege access to Key Vault, Storage, Cosmos. Azure RBAC, local accounts disabled.</li>
+                <li><strong>Ingress:</strong> AGIC with WAF v2 (OWASP 3.2 rules) + Istio mesh for mTLS between services (PCI requirement).</li>
+                <li><strong>Deployment:</strong> Flux GitOps with progressive delivery (Flagger canary) — automated rollback on error-rate spike.</li>
+            </ul>
+        </div>
+    </section>
+
+    <!-- Exam Tip -->
+    <section id="exam-tip" class="fade-in">
+        <h2>🎯 Exam Tip</h2>
+        <div class="callout tip">
+            AZ-305 loves scenario questions mixing networking + scaling + identity. Remember: <strong>Azure CNI</strong> when pods must be VNet-routable; <strong>KEDA</strong> when scaling on events (not just CPU); <strong>Workload Identity</strong> is the modern answer for pod-to-Azure auth (never store credentials in pods). If they mention "WAF for AKS" → AGIC + Application Gateway WAF v2.
+        </div>
+    </section>
+
+    <!-- Quiz -->
+    <section id="quiz" class="fade-in">
+        <h2>📝 Knowledge Check</h2>
+        <div class="quiz-container" id="lesson-quiz"></div>
+    </section>
+
+    <!-- Navigation -->
+    <nav class="lesson-nav fade-in">
+        <a href="0016-containers-aci-acr.html" class="prev">← Lesson 016: Containers ACI &amp; ACR</a>
+        <a href="0018-api-management-gateway.html" class="next">Lesson 018: API Management Gateway →</a>
+    </nav>
+</div>
+
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    // Render diagrams
+    if (window.AzureLessons) {
+        AzureLessons.BoxDiagram();
+    }
+
+    // Quiz
+    AzureLessons.Quiz('lesson-quiz', [
+        {
+            question: "A company needs pods to communicate directly with resources in a peered VNet using private endpoints — no NAT. Which networking model should you choose?",
+            options: [
+                "Kubenet",
+                "Azure CNI",
+                "CNI Overlay",
+                "Azure CNI with dynamic IP allocation only"
+            ],
+            correct: 1,
+            explanation: "Azure CNI assigns each pod a VNet IP, allowing direct routing to peered VNets and private endpoints without NAT. CNI Overlay uses NAT for pod-to-VNet traffic."
+        },
+        {
+            question: "Which scaling component allows AKS workloads to scale based on Azure Service Bus queue depth?",
+            options: [
+                "Horizontal Pod Autoscaler (HPA) with custom metrics adapter",
+                "KEDA with Service Bus scaler",
+                "Cluster Autoscaler",
+                "Virtual Node burst to ACI"
+            ],
+            correct: 1,
+            explanation: "KEDA natively supports 60+ event sources including Service Bus queues. While HPA could work with a custom metrics adapter, KEDA is the purpose-built and recommended solution — and can scale to zero."
+        },
+        {
+            question: "What is the recommended way for a pod to authenticate to Azure Key Vault without storing credentials?",
+            options: [
+                "Mount a service principal secret as a Kubernetes Secret",
+                "Use AAD Pod Identity (aad-pod-identity)",
+                "Use Workload Identity with a federated Managed Identity",
+                "Embed client certificate in the container image"
+            ],
+            correct: 2,
+            explanation: "Workload Identity federates a Kubernetes Service Account with an Azure Managed Identity via OIDC — no secrets stored. AAD Pod Identity is deprecated."
+        },
+        {
+            question: "Which ingress option provides a built-in Azure WAF v2 for AKS without additional third-party components?",
+            options: [
+                "NGINX Ingress Controller with ModSecurity",
+                "Istio Ingress Gateway",
+                "Application Gateway Ingress Controller (AGIC)",
+                "Traefik with CrowdSec plugin"
+            ],
+            correct: 2,
+            explanation: "AGIC integrates with Azure Application Gateway which has native WAF v2 support (OWASP rule sets). NGINX requires manual ModSecurity configuration."
+        },
+        {
+            question: "You need to run batch processing pods that can tolerate interruption to save 60–90% on compute. Which node pool configuration is correct?",
+            options: [
+                "System node pool with B-series VMs",
+                "User node pool with Spot priority and NoSchedule taint",
+                "User node pool with low-priority VMs and no taints",
+                "Virtual Nodes backed by ACI spot containers"
+            ],
+            correct: 1,
+            explanation: "Spot node pools use evictable VMs at up to 90% discount. The NoSchedule taint ensures only pods with matching tolerations land on spot nodes. ACI does not have a 'spot' tier."
+        }
+    ]);
+
+    // Initialize interactions
+    AzureLessons.ScrollReveal();
+    AzureLessons.Collapsible();
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lesson 27 — Image Signing & Verification (Cosign)</title>
+  <link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+
+  <div class="lesson-meta">
+    <span class="number">LESSON 27</span> &middot; Security Deep Dive + Hands-On &middot; ~15 minutes
+  </div>
+
+  <h1>Image Signing & Verification</h1>
+  <p>How do you know the image running in production was built by YOUR pipeline and not tampered with? Answer: cryptographic signing. This lesson teaches keyless signing with Sigstore/cosign — the industry standard.</p>
+
+  <div class="progress">
+    <span>Lesson 27 of 33</span>
+    <div class="progress-bar"><div class="progress-fill" style="width: 81%"></div></div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>The Supply Chain Problem</h2>
+
+  <div class="diagram">
+    <svg viewBox="0 0 700 100" xmlns="http://www.w3.org/2000/svg">
+      <rect x="20" y="15" width="660" height="70" rx="6" fill="#ffebee" stroke="#c62828"/>
+      <text x="350" y="35" text-anchor="middle" font-size="9" font-weight="bold" fill="#c62828">Without signing: anyone with registry push access can replace your image</text>
+      <text x="350" y="55" text-anchor="middle" font-size="8" fill="#555">Attacker pushes malicious image with YOUR tag → K8s pulls it → you're compromised</text>
+      <text x="350" y="72" text-anchor="middle" font-size="8" fill="#555">Real attacks: SolarWinds, Codecov, ua-parser-js — all supply chain compromises</text>
+    </svg>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>How Keyless Signing Works</h2>
+
+  <div class="diagram">
+    <svg viewBox="0 0 720 180" xmlns="http://www.w3.org/2000/svg">
+      <!-- Sign flow -->
+      <text x="360" y="18" text-anchor="middle" font-size="10" font-weight="bold">Signing (in CI pipeline)</text>
+      
+      <rect x="30" y="35" width="140" height="45" rx="4" fill="#e3f2fd" stroke="#1976d2"/>
+      <text x="100" y="53" text-anchor="middle" font-size="8" font-weight="bold">GitHub Actions</text>
+      <text x="100" y="68" text-anchor="middle" font-size="7" fill="#555">OIDC identity token</text>
+      
+      <line x1="170" y1="57" x2="210" y2="57" stroke="#333" stroke-width="1.5" marker-end="url(#g27)"/>
+      
+      <rect x="210" y="35" width="120" height="45" rx="4" fill="#fff3e0" stroke="#f57c00"/>
+      <text x="270" y="53" text-anchor="middle" font-size="8" font-weight="bold">Sigstore/Fulcio</text>
+      <text x="270" y="68" text-anchor="middle" font-size="7" fill="#555">Issues short-lived cert</text>
+      
+      <line x1="330" y1="57" x2="370" y2="57" stroke="#333" stroke-width="1.5" marker-end="url(#g27)"/>
+      
+      <rect x="370" y="35" width="120" height="45" rx="4" fill="#e8f5e9" stroke="#388e3c"/>
+      <text x="430" y="53" text-anchor="middle" font-size="8" font-weight="bold">cosign sign</text>
+      <text x="430" y="68" text-anchor="middle" font-size="7" fill="#555">Signs image digest</text>
+      
+      <line x1="490" y1="57" x2="530" y2="57" stroke="#333" stroke-width="1.5" marker-end="url(#g27)"/>
+      
+      <rect x="530" y="35" width="140" height="45" rx="4" fill="#f3e5f5" stroke="#7b1fa2"/>
+      <text x="600" y="53" text-anchor="middle" font-size="8" font-weight="bold">Rekor (log)</text>
+      <text x="600" y="68" text-anchor="middle" font-size="7" fill="#555">Records in transparency log</text>
+      
+      <!-- Verify flow -->
+      <text x="360" y="105" text-anchor="middle" font-size="10" font-weight="bold">Verification (at deploy time)</text>
+      
+      <rect x="100" y="120" width="180" height="45" rx="4" fill="#e8f5e9" stroke="#388e3c" stroke-width="2"/>
+      <text x="190" y="138" text-anchor="middle" font-size="8" font-weight="bold" fill="#2e7d32">cosign verify</text>
+      <text x="190" y="153" text-anchor="middle" font-size="7" fill="#555">"Was this signed by github.com/my-org?"</text>
+      
+      <rect x="350" y="120" width="180" height="45" rx="4" fill="#c8e6c9" stroke="#388e3c"/>
+      <text x="440" y="138" text-anchor="middle" font-size="8" font-weight="bold" fill="#2e7d32">✅ Verified</text>
+      <text x="440" y="153" text-anchor="middle" font-size="7" fill="#555">Image came from our pipeline</text>
+      
+      <line x1="280" y1="142" x2="350" y2="142" stroke="#388e3c" stroke-width="1.5" marker-end="url(#g27)"/>
+      
+      <defs><marker id="g27" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto"><polygon points="0 0, 7 2.5, 0 5" fill="#333"/></marker></defs>
+    </svg>
+    <figcaption>Keyless: no keys to manage. GitHub's OIDC identity proves who built the image. Sigstore records the proof in a public transparency log.</figcaption>
+  </div>
+
+  <div class="key-insight">
+    <strong>Keyless signing</strong> means no private keys to store, rotate, or leak. The pipeline's OIDC identity (same mechanism as Azure auth) IS the proof of provenance. The signature says: "This image was built by workflow X in repo Y on branch Z."
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>🏋️ Sign Images in Your Pipeline</h2>
+
+  <div class="exercise">
+<pre><code>  <span style="color:#89b4fa">sign:</span>
+    <span style="color:#89b4fa">name:</span> <span style="color:#a6e3a1">✍️ Sign Image</span>
+    <span style="color:#89b4fa">needs:</span> <span style="color:#a6e3a1">build</span>
+    <span style="color:#89b4fa">runs-on:</span> <span style="color:#a6e3a1">ubuntu-latest</span>
+    <span style="color:#89b4fa">permissions:</span>
+      <span style="color:#89b4fa">id-token:</span> <span style="color:#a6e3a1">write</span>   <span style="color:#6c7086"># Required for keyless signing</span>
+    <span style="color:#89b4fa">steps:</span>
+      - <span style="color:#89b4fa">uses:</span> <span style="color:#a6e3a1">sigstore/cosign-installer@v3</span>
+
+      - <span style="color:#89b4fa">uses:</span> <span style="color:#a6e3a1">azure/login@v2</span>
+        <span style="color:#89b4fa">with:</span>
+          <span style="color:#89b4fa">client-id:</span> <span style="color:#a6e3a1">${{ secrets.AZURE_CLIENT_ID }}</span>
+          <span style="color:#89b4fa">tenant-id:</span> <span style="color:#a6e3a1">${{ secrets.AZURE_TENANT_ID }}</span>
+          <span style="color:#89b4fa">subscription-id:</span> <span style="color:#a6e3a1">${{ secrets.AZURE_SUBSCRIPTION_ID }}</span>
+
+      - <span style="color:#89b4fa">run:</span> <span style="color:#a6e3a1">az acr login --name ${{ vars.ACR_NAME }}</span>
+
+      - <span style="color:#89b4fa">name:</span> <span style="color:#a6e3a1">Sign image (keyless)</span>
+        <span style="color:#89b4fa">run:</span> <span style="color:#a6e3a1">|</span>
+          <span style="color:#a6e3a1">cosign sign --yes \</span>
+            <span style="color:#a6e3a1">${{ vars.ACR_LOGIN_SERVER }}/cicd-mastery-api@${{ needs.build.outputs.digest }}</span>
+          <span style="color:#a6e3a1">echo "✅ Image signed!"</span>
+</code></pre>
+
+    <h3>Verify before deploy:</h3>
+<pre><code>      - <span style="color:#89b4fa">name:</span> <span style="color:#a6e3a1">Verify signature</span>
+        <span style="color:#89b4fa">run:</span> <span style="color:#a6e3a1">|</span>
+          <span style="color:#a6e3a1">cosign verify \</span>
+            <span style="color:#a6e3a1">--certificate-identity-regexp "https://github.com/YOUR_ORG/.*" \</span>
+            <span style="color:#a6e3a1">--certificate-oidc-issuer "https://token.actions.githubusercontent.com" \</span>
+            <span style="color:#a6e3a1">${{ vars.ACR_LOGIN_SERVER }}/cicd-mastery-api@${{ needs.build.outputs.digest }}</span>
+</code></pre>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>Enforce in Kubernetes: Admission Control</h2>
+
+  <p>Signing is useless if unsigned images can still deploy. Use a policy engine to BLOCK unsigned images:</p>
+
+<pre><code><span style="color:#6c7086"># Kyverno policy (alternative: Sigstore Policy Controller)</span>
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-signed-images
+spec:
+  validationFailureAction: Enforce
+  rules:
+    - name: verify-signature
+      match:
+        resources:
+          kinds: [Pod]
+          namespaces: [production]
+      verifyImages:
+        - imageReferences: ["acrcicdmastery*.azurecr.io/*"]
+          attestors:
+            - entries:
+                - keyless:
+                    issuer: "https://token.actions.githubusercontent.com"
+                    subject: "https://github.com/YOUR_ORG/*"
+</code></pre>
+
+  <div class="key-insight">
+    <strong>Defense in depth:</strong> Sign in CI (proves origin) + verify at admission (blocks unsigned). Even if someone gets registry push access, they can't deploy unsigned images to production. Only YOUR pipeline can.
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>🧠 Recall Check</h2>
+
+  <div class="recall">
+    <ol>
+      <li>What does "keyless" mean in cosign keyless signing?</li>
+      <li>What proves WHO built the image in keyless signing?</li>
+      <li>Why sign by digest (<code>@sha256:...</code>) instead of tag?</li>
+      <li>What prevents an unsigned image from deploying to production?</li>
+    </ol>
+    <details>
+      <summary>Reveal answers</summary>
+      <ol>
+        <li>No long-lived private key to manage. Instead, the signer's OIDC identity (from GitHub Actions) is used to get a short-lived certificate from Fulcio. The cert is the proof.</li>
+        <li>The <strong>OIDC identity token</strong> from GitHub Actions, which contains: repo name, branch, workflow path. This is embedded in the signing certificate.</li>
+        <li>Tags are mutable (someone can push a different image with the same tag). Digests are content-addressed hashes — they uniquely identify exactly ONE image. Sign the digest = sign the exact bytes.</li>
+        <li>An <strong>admission controller</strong> (Kyverno, Sigstore Policy Controller) that intercepts Pod creation and verifies the image signature before allowing it to run.</li>
+      </ol>
+    </details>
+  </div>
+
+  <p><strong>Next lesson:</strong> Policy-as-Code — enforcing organizational rules (no root containers, resource limits required) via OPA Gatekeeper.</p>
+
+</body>
+</html>

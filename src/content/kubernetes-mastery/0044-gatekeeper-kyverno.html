@@ -1,0 +1,349 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lesson 44: OPA/Gatekeeper & Kyverno</title>
+    <style>
+        :root {
+            --bg: #fafafa; --text: #1a1a1a; --accent: #326ce5;
+            --accent-light: #e8f0fe; --border: #e0e0e0; --code-bg: #f5f5f5;
+            --success: #2e7d32; --warn: #f57c00;
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: 'Georgia', serif; line-height: 1.7; color: var(--text); background: var(--bg); max-width: 780px; margin: 0 auto; padding: 2rem 1.5rem; }
+        h1 { font-size: 2rem; margin-bottom: 0.5rem; color: var(--accent); }
+        h2 { font-size: 1.4rem; margin-top: 2.5rem; margin-bottom: 0.8rem; border-bottom: 2px solid var(--accent); padding-bottom: 0.3rem; }
+        h3 { font-size: 1.1rem; margin-top: 1.5rem; margin-bottom: 0.5rem; }
+        p { margin-bottom: 1rem; }
+        .meta { color: #666; font-size: 0.9rem; margin-bottom: 2rem; }
+        .key-insight { background: var(--accent-light); border-left: 4px solid var(--accent); padding: 1rem 1.2rem; margin: 1.5rem 0; border-radius: 0 4px 4px 0; }
+        .key-insight strong { color: var(--accent); }
+        .production-note { background: #fff3e0; border-left: 4px solid var(--warn); padding: 1rem 1.2rem; margin: 1.5rem 0; border-radius: 0 4px 4px 0; }
+        .production-note::before { content: "🏭 Production: "; font-weight: bold; }
+        .exam-tip { background: #e8f5e9; border-left: 4px solid var(--success); padding: 1rem 1.2rem; margin: 1.5rem 0; border-radius: 0 4px 4px 0; }
+        .exam-tip::before { content: "🎯 Exam Tip: "; font-weight: bold; color: var(--success); }
+        code { font-family: 'Menlo', 'Consolas', monospace; font-size: 0.85em; background: var(--code-bg); padding: 0.15em 0.4em; border-radius: 3px; }
+        pre { background: var(--code-bg); padding: 1rem; border-radius: 4px; overflow-x: auto; margin: 1rem 0; font-size: 0.85rem; line-height: 1.5; }
+        ul, ol { margin: 0.5rem 0 1rem 1.5rem; }
+        li { margin-bottom: 0.4rem; }
+        table { width: 100%; border-collapse: collapse; margin: 1rem 0; font-size: 0.9rem; }
+        th, td { border: 1px solid var(--border); padding: 0.6rem 0.8rem; text-align: left; }
+        th { background: var(--accent-light); font-weight: bold; }
+        .cert-badge { display: inline-block; background: var(--accent); color: white; font-size: 0.7rem; padding: 0.15rem 0.5rem; border-radius: 10px; margin-left: 0.5rem; }
+        .quiz { background: #f9f9f9; border: 1px solid var(--border); border-radius: 8px; padding: 1.5rem; margin-top: 2rem; }
+        .quiz h2 { border-bottom: none; margin-top: 0; }
+        .quiz-q { margin-bottom: 1.2rem; }
+        .quiz-q p { font-weight: bold; margin-bottom: 0.3rem; }
+        .quiz-answer { display: none; background: #e8f5e9; padding: 0.5rem 0.8rem; border-radius: 4px; margin-top: 0.5rem; }
+        .reveal-btn { background: var(--accent); color: white; border: none; padding: 0.3rem 0.8rem; border-radius: 4px; cursor: pointer; font-size: 0.8rem; }
+        .reveal-btn:hover { opacity: 0.85; }
+    </style>
+</head>
+<body>
+
+<h1>Lesson 44: OPA/Gatekeeper & Kyverno</h1>
+<p class="meta">Chapter 8: Security — Advanced · <span class="cert-badge">CKS</span> · ~22 min</p>
+
+<p>Pod Security Standards give you three fixed levels. But real organizations need custom policies: "images must come from our registry," "all Deployments must have a team label," "no containers can run as UID 0." <strong>Policy engines</strong> — OPA/Gatekeeper and Kyverno — provide this flexibility using admission webhooks under the hood.</p>
+
+<h2>1. OPA/Gatekeeper</h2>
+
+<p><strong>OPA</strong> (Open Policy Agent) is a general-purpose policy engine. <strong>Gatekeeper</strong> is the Kubernetes-specific integration — it runs OPA policies as a validating admission webhook via CRDs.</p>
+
+<h3>Architecture</h3>
+
+<pre># Two CRD types:
+# 1. ConstraintTemplate — defines the POLICY LOGIC (reusable template in Rego)
+# 2. Constraint — APPLIES the template with specific parameters
+
+# Flow: API request → Gatekeeper webhook → evaluates Rego policy → allow/deny</pre>
+
+<h3>ConstraintTemplate — The Policy Template</h3>
+
+<pre>apiVersion: templates.gatekeeper.sh/v1
+kind: ConstraintTemplate
+metadata:
+  name: k8srequiredlabels
+spec:
+  crd:
+    spec:
+      names:
+        kind: K8sRequiredLabels         # Creates this CRD for Constraints
+      validation:
+        openAPIV3Schema:
+          type: object
+          properties:
+            labels:                      # Parameters the template accepts
+              type: array
+              items:
+                type: string
+  targets:
+    - target: admission.k8s.gatekeeper.sh
+      rego: |                            # Policy logic in Rego language
+        package k8srequiredlabels
+        
+        violation[{"msg": msg}] {
+          provided := {label | input.review.object.metadata.labels[label]}
+          required := {label | label := input.parameters.labels[_]}
+          missing := required - provided
+          count(missing) > 0
+          msg := sprintf("Missing required labels: %v", [missing])
+        }</pre>
+
+<h3>Constraint — Apply the Template</h3>
+
+<pre>apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: K8sRequiredLabels                  # Matches the ConstraintTemplate's CRD name
+metadata:
+  name: require-team-label
+spec:
+  enforcementAction: deny                # deny | dryrun | warn
+  match:
+    kinds:
+      - apiGroups: ["apps"]
+        kinds: ["Deployment"]
+    namespaces: ["production"]           # Only in these namespaces
+    excludedNamespaces: ["kube-system"]
+  parameters:
+    labels: ["team", "cost-center"]      # Parameters passed to Rego</pre>
+
+<pre># Result: any Deployment in "production" without "team" AND "cost-center" labels → REJECTED
+# Error: "Missing required labels: {"cost-center", "team"}"</pre>
+
+<h3>Enforcement Actions</h3>
+
+<table>
+    <tr><th>Action</th><th>Behavior</th><th>Use Case</th></tr>
+    <tr><td><code>deny</code></td><td>Reject the request</td><td>Production enforcement</td></tr>
+    <tr><td><code>dryrun</code></td><td>Allow but log the violation (audit)</td><td>Testing before enforcement</td></tr>
+    <tr><td><code>warn</code></td><td>Allow but return a warning to the user</td><td>Developer feedback</td></tr>
+</table>
+
+<h3>Audit Mode — Find Existing Violations</h3>
+
+<pre># Gatekeeper periodically scans existing resources against constraints:
+kubectl get k8srequiredlabels require-team-label -o yaml
+# status:
+#   totalViolations: 7
+#   violations:
+#     - enforcementAction: deny
+#       kind: Deployment
+#       name: legacy-app
+#       namespace: production
+#       message: "Missing required labels: {\"team\"}"</pre>
+
+<div class="key-insight">
+    <strong>Gatekeeper audits existing resources, not just new ones.</strong> Unlike admission webhooks (which only see new requests), Gatekeeper's audit controller periodically scans all resources and reports which ones violate constraints. This lets you see the full compliance picture — not just future violations.
+</div>
+
+<h2>2. Kyverno — Kubernetes-Native Policies</h2>
+
+<p>Kyverno takes a different approach: policies are written in <strong>YAML (no Rego)</strong>, using K8s-native constructs. It can validate, mutate, generate resources, and clean up — making it more than just a policy engine.</p>
+
+<h3>Validate Policy — Block Non-Compliant Resources</h3>
+
+<pre>apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-team-label
+spec:
+  validationFailureAction: Enforce      # Enforce | Audit
+  rules:
+    - name: check-team-label
+      match:
+        any:
+          - resources:
+              kinds: ["Deployment"]
+              namespaces: ["production"]
+      validate:
+        message: "Deployment must have a 'team' label"
+        pattern:
+          metadata:
+            labels:
+              team: "?*"                # ?* means "must exist, any value"</pre>
+
+<h3>Mutate Policy — Auto-Fix Resources</h3>
+
+<pre>apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: add-default-labels
+spec:
+  rules:
+    - name: add-managed-by
+      match:
+        any:
+          - resources:
+              kinds: ["Deployment", "StatefulSet"]
+      mutate:
+        patchStrategicMerge:
+          metadata:
+            labels:
+              managed-by: kyverno       # Auto-add this label if missing</pre>
+
+<h3>Generate Policy — Create Resources Automatically</h3>
+
+<pre>apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: generate-network-policy
+spec:
+  rules:
+    - name: default-deny
+      match:
+        any:
+          - resources:
+              kinds: ["Namespace"]
+      generate:
+        apiVersion: networking.k8s.io/v1
+        kind: NetworkPolicy
+        name: default-deny
+        namespace: "{{request.object.metadata.name}}"
+        data:
+          spec:
+            podSelector: {}
+            policyTypes: ["Ingress", "Egress"]
+# Result: every new namespace automatically gets a default-deny NetworkPolicy!</pre>
+
+<h3>Image Verification Policy</h3>
+
+<pre>apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: verify-image-signature
+spec:
+  validationFailureAction: Enforce
+  rules:
+    - name: verify-cosign
+      match:
+        any:
+          - resources:
+              kinds: ["Pod"]
+      verifyImages:
+        - imageReferences: ["registry.company.com/*"]
+          attestors:
+            - entries:
+                - keys:
+                    publicKeys: |
+                      -----BEGIN PUBLIC KEY-----
+                      MFkwEwYH...
+                      -----END PUBLIC KEY-----</pre>
+
+<div class="key-insight">
+    <strong>Kyverno's killer feature: mutation + generation.</strong> Gatekeeper only validates (accept/reject). Kyverno can validate AND mutate (fix things automatically) AND generate new resources (create NetworkPolicies, Secrets, RBAC). This makes it a full policy-as-code automation platform, not just a gatekeeper.
+</div>
+
+<h2>3. Gatekeeper vs Kyverno — When to Use Which</h2>
+
+<table>
+    <tr><th>Aspect</th><th>OPA/Gatekeeper</th><th>Kyverno</th></tr>
+    <tr><td><strong>Policy language</strong></td><td>Rego (dedicated logic language)</td><td>YAML (K8s-native, no new language)</td></tr>
+    <tr><td><strong>Learning curve</strong></td><td>Steep (Rego is unfamiliar)</td><td>Low (YAML patterns familiar to K8s users)</td></tr>
+    <tr><td><strong>Validate</strong></td><td>✅</td><td>✅</td></tr>
+    <tr><td><strong>Mutate</strong></td><td>❌ (validate only)</td><td>✅ (patch resources)</td></tr>
+    <tr><td><strong>Generate</strong></td><td>❌</td><td>✅ (create resources automatically)</td></tr>
+    <tr><td><strong>Image verification</strong></td><td>Via external data</td><td>✅ Built-in (cosign, Notary)</td></tr>
+    <tr><td><strong>Audit existing</strong></td><td>✅ (built-in audit controller)</td><td>✅ (policy reports)</td></tr>
+    <tr><td><strong>Complexity of rules</strong></td><td>Handles very complex logic (Rego is Turing-complete)</td><td>Good for pattern-based rules; complex logic is verbose</td></tr>
+    <tr><td><strong>Ecosystem</strong></td><td>CNCF graduated, broad non-K8s use</td><td>CNCF incubating, K8s-only</td></tr>
+    <tr><td><strong>CKS exam</strong></td><td>✅ Tested (know the CRD model)</td><td>May appear (newer)</td></tr>
+</table>
+
+<h3>Decision Guide</h3>
+
+<pre># Choose Gatekeeper when:
+# - You need complex logic (cross-resource validation, external data)
+# - Your team already knows Rego (or uses OPA elsewhere: Envoy, Terraform)
+# - You're in a large enterprise with a policy-as-code platform
+
+# Choose Kyverno when:
+# - Your team prefers YAML over learning a new language
+# - You need mutation (auto-fix resources) or generation (auto-create resources)
+# - You need built-in image verification (supply chain security)
+# - You want simpler pattern-based validation
+
+# Both work well. Pick one and standardize.</pre>
+
+<h2>4. Common Policy Examples</h2>
+
+<table>
+    <tr><th>Policy</th><th>Gatekeeper Approach</th><th>Kyverno Approach</th></tr>
+    <tr><td>Require labels</td><td>Rego: check <code>input.review.object.metadata.labels</code></td><td>Pattern: <code>metadata.labels.team: "?*"</code></td></tr>
+    <tr><td>Block privileged containers</td><td>Rego: deny if <code>securityContext.privileged == true</code></td><td>Pattern: <code>=(securityContext.privileged): false</code></td></tr>
+    <tr><td>Restrict image registries</td><td>Rego: deny if image not in allowed list</td><td><code>validate.deny</code> with image pattern match</td></tr>
+    <tr><td>Require resource limits</td><td>Rego: check containers[].resources.limits</td><td>Pattern: <code>containers[].resources.limits.memory: "?*"</code></td></tr>
+    <tr><td>Auto-add network policy</td><td>❌ Can't generate</td><td>Generate rule on Namespace creation</td></tr>
+    <tr><td>Verify image signatures</td><td>External data + Rego</td><td>Built-in <code>verifyImages</code></td></tr>
+</table>
+
+<h3>Policy Library</h3>
+
+<pre># Both have pre-built policy libraries:
+# Gatekeeper: https://open-policy-agent.github.io/gatekeeper-library/
+# Kyverno: https://kyverno.io/policies/
+
+# Don't write from scratch — start with library policies and customize</pre>
+
+<div class="production-note">
+    In production, start with 5-10 critical policies (require labels, restrict registries, block privileged, require resource limits, require probes) in <code>Audit</code> mode. Review violations for 2 weeks, fix the worst offenders, then switch to <code>Enforce</code>. Don't enable enforcement on day one — you'll break existing workloads.
+</div>
+
+<h2>Summary</h2>
+
+<table>
+    <tr><th>Concept</th><th>Key Point</th></tr>
+    <tr><td>Policy engines</td><td>Custom admission logic beyond Pod Security Standards</td></tr>
+    <tr><td>Gatekeeper</td><td>OPA + Rego, validate-only, ConstraintTemplate + Constraint CRDs</td></tr>
+    <tr><td>Kyverno</td><td>YAML policies, validate + mutate + generate, ClusterPolicy CRD</td></tr>
+    <tr><td>ConstraintTemplate</td><td>Reusable policy logic (Rego) — parameterized</td></tr>
+    <tr><td>Constraint</td><td>Instance of a template — applies to specific resources/namespaces</td></tr>
+    <tr><td>enforcementAction</td><td>deny (block), dryrun (log), warn (feedback)</td></tr>
+    <tr><td>Audit</td><td>Both scan existing resources for violations (not just new requests)</td></tr>
+    <tr><td>Kyverno generate</td><td>Auto-create resources (NetworkPolicy, RBAC) when triggers match</td></tr>
+    <tr><td>Policy libraries</td><td>Don't write from scratch — use pre-built policies from official repos</td></tr>
+</table>
+
+<!-- Quiz -->
+<div class="quiz">
+    <h2>📝 Quiz: OPA/Gatekeeper & Kyverno</h2>
+    
+    <div class="quiz-q">
+        <p>Q1: What's the relationship between a ConstraintTemplate and a Constraint in Gatekeeper?</p>
+        <button class="reveal-btn" onclick="this.nextElementSibling.style.display='block'">Show Answer</button>
+        <div class="quiz-answer"><strong>ConstraintTemplate</strong> defines the reusable policy logic (in Rego) and creates a new CRD. <strong>Constraint</strong> is an instance of that CRD — it applies the template to specific resources with specific parameters. Like class vs instance: Template = "check for required labels (parameterized)," Constraint = "require 'team' label on Deployments in production."</div>
+    </div>
+    
+    <div class="quiz-q">
+        <p>Q2: A Gatekeeper Constraint has <code>enforcementAction: dryrun</code>. A non-compliant Deployment is created. What happens?</p>
+        <button class="reveal-btn" onclick="this.nextElementSibling.style.display='block'">Show Answer</button>
+        <div class="quiz-answer">The Deployment is <strong>allowed</strong> (created successfully). The violation is <strong>logged in the Constraint's status</strong> (audit results). The user doesn't see any error or warning. Use dryrun to assess impact before switching to deny. Check violations with: <code>kubectl get constraint require-team-label -o yaml | grep -A20 violations</code></div>
+    </div>
+    
+    <div class="quiz-q">
+        <p>Q3: What can Kyverno do that Gatekeeper cannot?</p>
+        <button class="reveal-btn" onclick="this.nextElementSibling.style.display='block'">Show Answer</button>
+        <div class="quiz-answer">Three things: <strong>(1) Mutate</strong> — automatically modify resources (add labels, set defaults). <strong>(2) Generate</strong> — create new resources when triggers fire (e.g., NetworkPolicy per Namespace). <strong>(3) Built-in image verification</strong> — verify cosign/Notary signatures natively. Gatekeeper is validate-only (though Gatekeeper v3.14+ has experimental mutation).</div>
+    </div>
+    
+    <div class="quiz-q">
+        <p>Q4: You want every new namespace to automatically get a default-deny NetworkPolicy. Which tool and what policy type?</p>
+        <button class="reveal-btn" onclick="this.nextElementSibling.style.display='block'">Show Answer</button>
+        <div class="quiz-answer"><strong>Kyverno with a generate rule.</strong> Create a ClusterPolicy that matches Namespace creation and generates a NetworkPolicy in the new namespace. Gatekeeper can't do this (no generation capability). The Kyverno policy watches for new Namespaces and auto-creates the NetworkPolicy — no manual step needed.</div>
+    </div>
+    
+    <div class="quiz-q">
+        <p>Q5: Both Gatekeeper and Kyverno can audit existing resources. Why is this important beyond just admission?</p>
+        <button class="reveal-btn" onclick="this.nextElementSibling.style.display='block'">Show Answer</button>
+        <div class="quiz-answer">Admission webhooks only see <strong>new requests</strong>. Resources created before the policy was installed are never checked by admission. Audit mode scans <strong>all existing resources</strong> and reports violations — showing you the full compliance gap. This is essential for: (1) Seeing the impact before enabling enforcement. (2) Tracking compliance over time. (3) Finding resources that predate the policy.</div>
+    </div>
+    
+    <div class="quiz-q">
+        <p>Q6: You're on the CKS exam. The question says "ensure containers only use images from registry.company.com." Which approach is fastest?</p>
+        <button class="reveal-btn" onclick="this.nextElementSibling.style.display='block'">Show Answer</button>
+        <div class="quiz-answer">If Gatekeeper is installed: create a ConstraintTemplate (Rego that checks <code>input.review.object.spec.containers[_].image</code> starts with "registry.company.com") + a Constraint applying it. If Kyverno is installed: create a ClusterPolicy with a <code>validate.deny</code> rule matching images that don't start with the allowed prefix. If neither is installed and it's K8s 1.28+: use a <strong>ValidatingAdmissionPolicy</strong> with CEL — no external tool needed.</div>
+    </div>
+</div>
+
+</body>
+</html>

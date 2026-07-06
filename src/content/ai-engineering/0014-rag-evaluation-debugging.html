@@ -1,0 +1,612 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lesson 14: RAG Evaluation & Debugging | AI Engineering</title>
+    <link rel="stylesheet" href="../assets/lesson.css">
+    <link rel="stylesheet" href="../assets/prism-theme.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-python.min.js"></script>
+    <script src="../assets/diagrams.js"></script>
+</head>
+<body>
+    <div class="lesson-header">
+        <div class="module-badge">Module 3: RAG Pipeline</div>
+        <h1>RAG Evaluation & Debugging</h1>
+        <p class="lesson-subtitle">Measure retrieval quality, detect hallucinations, diagnose failure modes, and build systematic evaluation pipelines with RAGAS and custom metrics.</p>
+    </div>
+
+    <div class="lesson-meta">
+        <span class="pill">Lesson 14</span>
+        <span class="pill">~25 min</span>
+        <span class="pill">Advanced</span>
+    </div>
+
+    <main class="lesson-content">
+        <!-- Section 1: Why Evaluation Matters -->
+        <section>
+            <h2>Why RAG Evaluation Is Hard</h2>
+            <div class="concept-box">
+                <h3>The Evaluation Challenge</h3>
+                <p>RAG systems fail silently. The LLM generates fluent, confident-sounding answers even when retrieval returns garbage. Without systematic evaluation, you can't tell if your pipeline is working, broken, or degrading over time. You need metrics for <strong>both</strong> retrieval quality AND generation quality.</p>
+            </div>
+
+            <p>RAG evaluation splits into two independent problems:</p>
+            <ul>
+                <li><strong>Retrieval evaluation:</strong> Did we find the right documents? (Precision, Recall, MRR)</li>
+                <li><strong>Generation evaluation:</strong> Is the answer correct, faithful, and relevant? (Faithfulness, Relevance, Hallucination)</li>
+            </ul>
+        </section>
+
+        <!-- Section 2: Retrieval Metrics -->
+        <section>
+            <h2>Retrieval Metrics</h2>
+
+            <div class="comparison-table">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Metric</th>
+                            <th>Formula</th>
+                            <th>What It Measures</th>
+                            <th>Target</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><strong>Precision@K</strong></td>
+                            <td>relevant_in_top_k / k</td>
+                            <td>How many retrieved docs are actually relevant?</td>
+                            <td>> 0.7</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Recall@K</strong></td>
+                            <td>relevant_in_top_k / total_relevant</td>
+                            <td>Did we find all the relevant docs?</td>
+                            <td>> 0.8</td>
+                        </tr>
+                        <tr>
+                            <td><strong>MRR (Mean Reciprocal Rank)</strong></td>
+                            <td>1 / rank_of_first_relevant</td>
+                            <td>How high is the first relevant result?</td>
+                            <td>> 0.8</td>
+                        </tr>
+                        <tr>
+                            <td><strong>NDCG@K</strong></td>
+                            <td>DCG@K / ideal_DCG@K</td>
+                            <td>Are results in the correct order?</td>
+                            <td>> 0.75</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Hit Rate@K</strong></td>
+                            <td>queries_with_any_relevant / total_queries</td>
+                            <td>For what % of queries do we find anything?</td>
+                            <td>> 0.9</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <div class="code-block">
+                <pre><code class="language-python">"""Retrieval Metrics Implementation"""
+import numpy as np
+from typing import List, Set
+
+def precision_at_k(retrieved_ids: List[str], relevant_ids: Set[str], k: int) -> float:
+    """What fraction of top-K results are relevant?"""
+    top_k = retrieved_ids[:k]
+    relevant_in_k = sum(1 for doc_id in top_k if doc_id in relevant_ids)
+    return relevant_in_k / k
+
+def recall_at_k(retrieved_ids: List[str], relevant_ids: Set[str], k: int) -> float:
+    """What fraction of ALL relevant docs appear in top-K?"""
+    top_k = retrieved_ids[:k]
+    relevant_in_k = sum(1 for doc_id in top_k if doc_id in relevant_ids)
+    return relevant_in_k / len(relevant_ids) if relevant_ids else 0.0
+
+def mrr(retrieved_ids: List[str], relevant_ids: Set[str]) -> float:
+    """Reciprocal rank of the FIRST relevant result."""
+    for i, doc_id in enumerate(retrieved_ids):
+        if doc_id in relevant_ids:
+            return 1.0 / (i + 1)
+    return 0.0
+
+def ndcg_at_k(retrieved_ids: List[str], relevant_ids: Set[str], k: int) -> float:
+    """Normalized Discounted Cumulative Gain."""
+    def dcg(ids):
+        score = 0.0
+        for i, doc_id in enumerate(ids[:k]):
+            rel = 1.0 if doc_id in relevant_ids else 0.0
+            score += rel / np.log2(i + 2)  # +2 because log2(1) = 0
+        return score
+    
+    actual_dcg = dcg(retrieved_ids)
+    # Ideal: all relevant docs at top
+    ideal_ids = [d for d in retrieved_ids if d in relevant_ids] + \
+                [d for d in retrieved_ids if d not in relevant_ids]
+    ideal_dcg = dcg(ideal_ids)
+    
+    return actual_dcg / ideal_dcg if ideal_dcg > 0 else 0.0
+
+# --- Evaluate a retrieval system ---
+def evaluate_retrieval(test_set: list[dict], retriever_fn) -> dict:
+    """
+    test_set: [{"query": str, "relevant_doc_ids": set}, ...]
+    retriever_fn: query → list of doc_ids (ranked)
+    """
+    metrics = {"precision@5": [], "recall@5": [], "mrr": [], "ndcg@5": []}
+    
+    for case in test_set:
+        retrieved = retriever_fn(case["query"])
+        relevant = case["relevant_doc_ids"]
+        
+        metrics["precision@5"].append(precision_at_k(retrieved, relevant, 5))
+        metrics["recall@5"].append(recall_at_k(retrieved, relevant, 5))
+        metrics["mrr"].append(mrr(retrieved, relevant))
+        metrics["ndcg@5"].append(ndcg_at_k(retrieved, relevant, 5))
+    
+    return {k: np.mean(v) for k, v in metrics.items()}
+</code></pre>
+            </div>
+        </section>
+
+        <!-- Section 3: Generation Metrics -->
+        <section>
+            <h2>Generation Metrics</h2>
+
+            <div class="diagram-container" id="metrics-bars"></div>
+
+            <div class="concept-box">
+                <h3>Three Pillars of Generation Quality</h3>
+                <ul>
+                    <li><strong>Faithfulness:</strong> Is the answer supported by the retrieved context? (Detects hallucination)</li>
+                    <li><strong>Answer Relevance:</strong> Does the answer actually address the question asked?</li>
+                    <li><strong>Context Relevance:</strong> Was the retrieved context relevant to the question?</li>
+                </ul>
+            </div>
+
+            <div class="code-block">
+                <pre><code class="language-python">"""LLM-as-Judge Generation Metrics"""
+from openai import OpenAI
+
+client = OpenAI()
+
+def evaluate_faithfulness(answer: str, context: str) -> dict:
+    """Check if answer is grounded in context (no hallucination)."""
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{
+            "role": "user",
+            "content": f"""Evaluate if the answer is faithful to the context.
+            
+Context: {context}
+
+Answer: {answer}
+
+For each claim in the answer, determine if it's:
+- SUPPORTED: directly stated or clearly implied by context
+- NOT_SUPPORTED: not found in context (hallucination)
+
+Output JSON:
+{{"claims": [{{"claim": "...", "verdict": "SUPPORTED|NOT_SUPPORTED"}}], "faithfulness_score": 0.0-1.0}}"""
+        }],
+        temperature=0,
+        response_format={"type": "json_object"}
+    )
+    
+    return json.loads(response.choices[0].message.content)
+
+
+def evaluate_relevance(question: str, answer: str) -> dict:
+    """Check if answer addresses the question."""
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{
+            "role": "user",
+            "content": f"""Rate how well this answer addresses the question.
+
+Question: {question}
+Answer: {answer}
+
+Score 0-1 where:
+- 1.0: Directly and completely answers the question
+- 0.5: Partially answers or is tangentially related
+- 0.0: Doesn't address the question at all
+
+Output JSON: {{"score": 0.0-1.0, "reasoning": "..."}}"""
+        }],
+        temperature=0,
+        response_format={"type": "json_object"}
+    )
+    
+    return json.loads(response.choices[0].message.content)
+</code></pre>
+            </div>
+        </section>
+
+        <!-- Section 4: Failure Taxonomy -->
+        <section>
+            <h2>RAG Failure Taxonomy</h2>
+            <p>RAG fails in four distinct ways. Identifying the failure mode tells you what to fix:</p>
+
+            <div class="diagram-container" id="failure-modes"></div>
+
+            <div class="comparison-table">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Failure Mode</th>
+                            <th>Symptom</th>
+                            <th>Root Cause</th>
+                            <th>Fix</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><strong>🔴 Retrieval Miss</strong></td>
+                            <td>Answer says "I don't know" when info exists in corpus</td>
+                            <td>Poor chunking, embedding mismatch, no hybrid search</td>
+                            <td>Better chunking, query expansion, hybrid search</td>
+                        </tr>
+                        <tr>
+                            <td><strong>🟠 Retrieval Noise</strong></td>
+                            <td>Irrelevant context confuses LLM</td>
+                            <td>Too many results, no reranking, poor filters</td>
+                            <td>Reranking, lower K, metadata filtering</td>
+                        </tr>
+                        <tr>
+                            <td><strong>🟡 Generation Hallucination</strong></td>
+                            <td>Answer contains info NOT in context</td>
+                            <td>Weak grounding prompt, high temperature</td>
+                            <td>Stronger system prompt, temperature=0.1, citation enforcement</td>
+                        </tr>
+                        <tr>
+                            <td><strong>🔵 Generation Miss</strong></td>
+                            <td>Context has the answer but LLM misses it</td>
+                            <td>Too much context, answer buried, complex reasoning needed</td>
+                            <td>Context compression, better prompt structure, stronger model</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <div class="callout">
+                <strong>🔍 Debugging Workflow:</strong> When a query fails, check retrieval FIRST. If the right chunks are in the top-5, it's a generation problem. If not, it's a retrieval problem. Never tune prompts to fix retrieval issues.
+            </div>
+        </section>
+
+        <!-- Section 5: RAGAS Framework -->
+        <section>
+            <h2>RAGAS: Systematic RAG Evaluation</h2>
+            <p>RAGAS is an open-source framework that automates RAG evaluation using LLM-based judges.</p>
+
+            <div class="code-block">
+                <pre><code class="language-python">"""RAGAS Evaluation Pipeline"""
+from ragas import evaluate
+from ragas.metrics import (
+    faithfulness,
+    answer_relevancy,
+    context_precision,
+    context_recall,
+)
+from datasets import Dataset
+
+# Prepare evaluation dataset
+eval_data = {
+    "question": [
+        "How do I deploy with Docker?",
+        "What is the rate limit for the API?",
+        "How do I handle authentication errors?",
+    ],
+    "answer": [
+        # Answers generated by your RAG system
+        "To deploy with Docker, create a Dockerfile...",
+        "The API rate limit is 100 requests per minute...",
+        "Authentication errors return 401 status codes...",
+    ],
+    "contexts": [
+        # Retrieved context chunks (list of lists)
+        ["Docker deployment guide: Create a Dockerfile with...", "Use docker-compose for..."],
+        ["Rate limits: Free tier allows 100 req/min...", "Enterprise tier has no limits"],
+        ["Error handling: 401 errors indicate invalid tokens...", "Retry with refresh token"],
+    ],
+    "ground_truth": [
+        # Human-written reference answers
+        "Deploy using Docker by creating a Dockerfile and running docker-compose up",
+        "100 requests per minute on free tier",
+        "401 errors mean invalid token; refresh and retry",
+    ]
+}
+
+dataset = Dataset.from_dict(eval_data)
+
+# Run evaluation
+results = evaluate(
+    dataset,
+    metrics=[
+        faithfulness,          # Is answer grounded in context?
+        answer_relevancy,      # Does answer address the question?
+        context_precision,     # Are retrieved docs relevant?
+        context_recall,        # Did we find all relevant docs?
+    ]
+)
+
+print(results)
+# {'faithfulness': 0.92, 'answer_relevancy': 0.88, 
+#  'context_precision': 0.85, 'context_recall': 0.78}
+
+# Per-question breakdown
+df = results.to_pandas()
+print(df[['question', 'faithfulness', 'answer_relevancy']])
+</code></pre>
+            </div>
+
+            <div class="concept-box">
+                <h3>Building a Ground-Truth Test Set</h3>
+                <p>RAGAS works best with a curated evaluation set. Here's how to build one:</p>
+                <ol>
+                    <li><strong>Collect real queries:</strong> Log production questions or brainstorm 50+ diverse queries</li>
+                    <li><strong>Write ground-truth answers:</strong> Manually answer each query using your source documents</li>
+                    <li><strong>Tag relevant docs:</strong> For each query, mark which source documents contain the answer</li>
+                    <li><strong>Include edge cases:</strong> Questions with no answer, multi-hop questions, ambiguous queries</li>
+                </ol>
+            </div>
+        </section>
+
+        <!-- Section 6: Debugging Workflows -->
+        <section>
+            <h2>Debugging Workflows</h2>
+            <div class="code-block">
+                <pre><code class="language-python">"""RAG Debugging Toolkit"""
+import json
+from dataclasses import dataclass
+
+@dataclass
+class DebugTrace:
+    query: str
+    retrieved_chunks: list[dict]  # content, score, source
+    generated_answer: str
+    ground_truth: str = None
+    
+    def diagnose(self) -> str:
+        """Identify the most likely failure mode."""
+        # Check retrieval quality
+        if not self.retrieved_chunks:
+            return "RETRIEVAL_MISS: No documents retrieved"
+        
+        top_score = self.retrieved_chunks[0]["score"]
+        if top_score < 0.6:
+            return f"RETRIEVAL_MISS: Low relevance (top score: {top_score:.3f})"
+        
+        # Check if ground truth info is in context
+        if self.ground_truth:
+            context_text = " ".join(c["content"] for c in self.retrieved_chunks)
+            # Simple keyword overlap check
+            gt_words = set(self.ground_truth.lower().split())
+            ctx_words = set(context_text.lower().split())
+            overlap = len(gt_words & ctx_words) / len(gt_words)
+            
+            if overlap < 0.3:
+                return f"RETRIEVAL_MISS: Ground truth not in context (overlap: {overlap:.0%})"
+            
+            # Context has the info — check generation
+            if self.ground_truth.lower() not in self.generated_answer.lower():
+                return "GENERATION_MISS: Context has answer but LLM missed it"
+        
+        return "LIKELY_OK: Retrieval and generation appear functional"
+
+
+def debug_pipeline(rag, test_queries: list[dict]):
+    """Run diagnostics on a set of test queries."""
+    issues = {"RETRIEVAL_MISS": [], "RETRIEVAL_NOISE": [], 
+              "GENERATION_MISS": [], "HALLUCINATION": [], "OK": []}
+    
+    for case in test_queries:
+        result = rag.query(case["query"])
+        
+        trace = DebugTrace(
+            query=case["query"],
+            retrieved_chunks=result.sources,
+            generated_answer=result.answer,
+            ground_truth=case.get("expected_answer")
+        )
+        
+        diagnosis = trace.diagnose()
+        category = diagnosis.split(":")[0]
+        
+        if category in issues:
+            issues[category].append({
+                "query": case["query"],
+                "diagnosis": diagnosis,
+                "top_score": trace.retrieved_chunks[0]["score"] if trace.retrieved_chunks else 0
+            })
+        else:
+            issues["OK"].append(case["query"])
+    
+    # Summary report
+    print("\n=== RAG Health Report ===")
+    total = len(test_queries)
+    for category, items in issues.items():
+        pct = len(items) / total * 100
+        print(f"  {category}: {len(items)}/{total} ({pct:.0f}%)")
+        if items and category != "OK":
+            print(f"    Example: {items[0]['query']}")
+    
+    return issues
+</code></pre>
+            </div>
+        </section>
+
+        <!-- Section 7: Continuous Monitoring -->
+        <section>
+            <h2>Production Monitoring</h2>
+            <div class="key-points">
+                <h3>🔑 What to Track in Production</h3>
+                <ul>
+                    <li><strong>Retrieval scores distribution:</strong> Alert if average similarity drops (corpus drift or embedding model issue)</li>
+                    <li><strong>Answer latency:</strong> Track P50/P95 end-to-end latency</li>
+                    <li><strong>"I don't know" rate:</strong> If this spikes, your corpus may be missing content</li>
+                    <li><strong>User feedback:</strong> 👍/👎 on answers → cheapest quality signal</li>
+                    <li><strong>Citation verification:</strong> Spot-check that cited sources actually support claims</li>
+                    <li><strong>Query clustering:</strong> Embed user queries, cluster them → find underserved topics</li>
+                </ul>
+            </div>
+
+            <div class="code-block">
+                <pre><code class="language-python">"""Production Monitoring Hooks"""
+import time
+from datetime import datetime
+
+class RAGMonitor:
+    def __init__(self):
+        self.logs = []
+    
+    def log_query(self, query, result, latency_ms):
+        self.logs.append({
+            "timestamp": datetime.now().isoformat(),
+            "query": query,
+            "answer_length": len(result.answer),
+            "top_retrieval_score": max(result.retrieval_scores) if result.retrieval_scores else 0,
+            "avg_retrieval_score": sum(result.retrieval_scores) / len(result.retrieval_scores) if result.retrieval_scores else 0,
+            "num_sources": len(result.sources),
+            "latency_ms": latency_ms,
+            "is_abstention": "don't have" in result.answer.lower() or "not sure" in result.answer.lower(),
+        })
+    
+    def get_health_summary(self, last_n: int = 100):
+        recent = self.logs[-last_n:]
+        return {
+            "avg_latency_ms": np.mean([l["latency_ms"] for l in recent]),
+            "p95_latency_ms": np.percentile([l["latency_ms"] for l in recent], 95),
+            "avg_retrieval_score": np.mean([l["avg_retrieval_score"] for l in recent]),
+            "abstention_rate": np.mean([l["is_abstention"] for l in recent]),
+            "low_confidence_rate": np.mean([l["top_retrieval_score"] < 0.6 for l in recent]),
+        }
+    
+    def alert_if_degraded(self):
+        summary = self.get_health_summary()
+        alerts = []
+        if summary["abstention_rate"] > 0.3:
+            alerts.append(f"⚠️ High abstention rate: {summary['abstention_rate']:.0%}")
+        if summary["avg_retrieval_score"] < 0.65:
+            alerts.append(f"⚠️ Low retrieval quality: {summary['avg_retrieval_score']:.3f}")
+        if summary["p95_latency_ms"] > 5000:
+            alerts.append(f"⚠️ High latency: P95={summary['p95_latency_ms']:.0f}ms")
+        return alerts
+</code></pre>
+            </div>
+        </section>
+
+        <!-- Mini Project -->
+        <section>
+            <div class="project-box">
+                <h2>🛠️ Mini-Project: RAG Evaluation Dashboard</h2>
+                <p>Build a comprehensive evaluation suite for your RAG pipeline from Lesson 12.</p>
+
+                <div class="step-list">
+                    <h4>Steps:</h4>
+                    <ol>
+                        <li>Create a test set: 20 queries with ground-truth answers and relevant doc IDs</li>
+                        <li>Implement retrieval metrics (Precision@5, Recall@5, MRR)</li>
+                        <li>Implement generation metrics using LLM-as-judge (faithfulness, relevance)</li>
+                        <li>Run RAGAS evaluation on your test set</li>
+                        <li>Build the DebugTrace class to diagnose each failure</li>
+                        <li>Generate a report: which queries fail, why, and suggested fixes</li>
+                        <li><strong>Bonus:</strong> Add the RAGMonitor class and log 50+ queries with timing data</li>
+                    </ol>
+                </div>
+
+                <div class="code-block">
+                    <pre><code class="language-python">"""RAG Evaluation Dashboard - Starter"""
+
+# Step 1: Build test set
+test_set = [
+    {
+        "query": "How do I install the package?",
+        "expected_answer": "pip install my-package",
+        "relevant_doc_ids": {"doc_setup_1", "doc_readme_0"}
+    },
+    {
+        "query": "What's the maximum file size?",
+        "expected_answer": "100MB per file",
+        "relevant_doc_ids": {"doc_limits_2"}
+    },
+    # ... 18 more queries
+]
+
+# Step 2: Run evaluation
+from rag_pipeline import RAGPipeline
+rag = RAGPipeline(db_path="./docs_db")
+
+print("=== Retrieval Evaluation ===")
+retrieval_results = evaluate_retrieval(
+    test_set, 
+    retriever_fn=lambda q: rag.retrieve_ids(q)
+)
+for metric, value in retrieval_results.items():
+    print(f"  {metric}: {value:.3f}")
+
+print("\n=== Generation Evaluation ===")
+for case in test_set[:5]:
+    result = rag.query(case["query"])
+    faith = evaluate_faithfulness(result.answer, "\n".join(result.sources))
+    print(f"  Q: {case['query']}")
+    print(f"  Faithfulness: {faith['faithfulness_score']}")
+
+print("\n=== Failure Diagnosis ===")
+issues = debug_pipeline(rag, test_set)
+</code></pre>
+                </div>
+            </div>
+        </section>
+
+        <!-- Key Takeaways -->
+        <section>
+            <div class="key-points">
+                <h3>📋 Key Takeaways</h3>
+                <ul>
+                    <li>Always evaluate retrieval and generation independently — they fail for different reasons</li>
+                    <li>Precision@K and MRR are your primary retrieval metrics; Faithfulness is your primary generation metric</li>
+                    <li>The 4 failure modes (retrieval miss, retrieval noise, generation hallucination, generation miss) each have different fixes</li>
+                    <li>RAGAS automates evaluation but requires a curated test set — invest time in building one</li>
+                    <li>Production RAG needs continuous monitoring: track retrieval scores, latency, and abstention rates</li>
+                    <li>When debugging: check retrieval first, then generation. Never fix retrieval problems with prompt engineering.</li>
+                </ul>
+            </div>
+        </section>
+    </main>
+
+    <nav class="nav-links">
+        <a href="0013-advanced-rag.html" class="prev">← Lesson 13: Advanced RAG</a>
+        <a href="0015-agent-architecture.html" class="next">Lesson 15: Agent Architecture →</a>
+    </nav>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            if (window.Diagrams) {
+                Diagrams.createComparisonBar(
+                    document.getElementById('metrics-bars'),
+                    [
+                        { label: 'Faithfulness', value: 92, max: 100, color: '#22c55e' },
+                        { label: 'Answer Relevancy', value: 88, max: 100, color: '#22d3ee' },
+                        { label: 'Context Precision', value: 79, max: 100, color: '#f59e0b' },
+                        { label: 'Context Recall', value: 74, max: 100, color: '#6366f1' },
+                        { label: 'Hallucination Rate (lower=better)', value: 12, max: 100, color: '#ef4444' }
+                    ]
+                );
+
+                Diagrams.createFlowDiagram(
+                    document.getElementById('failure-modes'),
+                    [
+                        { label: '🔴 Retrieval Miss', sublabel: 'Relevant docs not found', color: '#ef4444' },
+                        { label: '🟠 Retrieval Noise', sublabel: 'Irrelevant docs in top-K', color: '#f59e0b' },
+                        { label: '🟡 Generation Hallucination', sublabel: 'Answer not grounded in context', color: '#f59e0b' },
+                        { label: '🔵 Generation Miss', sublabel: 'Context has answer, LLM misses it', color: '#6366f1' }
+                    ]
+                );
+            }
+        });
+    </script>
+</body>
+</html>

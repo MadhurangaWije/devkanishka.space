@@ -1,0 +1,916 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>L44 · The Python Object Model: Memory, gc &amp; Weak References — Python A→Z</title>
+<link rel="stylesheet" href="../assets/style.css" />
+</head>
+<body>
+<div id="sidebar-placeholder"></div>
+<div id="main">
+  <div id="lesson-header">
+    <div class="lesson-track track-internals">🟠 Python Internals</div>
+    <h1>The Python Object Model: Memory, gc &amp; Weak References</h1>
+    <div class="lesson-meta">
+      <span>📖 Lesson 44</span>
+      <span>⏱ 60 min</span>
+      <span>🧪 5 questions</span>
+      <span>💻 3 exercises</span>
+    </div>
+  </div>
+  <div id="content">
+
+    <div class="objectives"><h4>🎯 Learning Objectives</h4><ul>
+      <li>Understand CPython's <code>PyObject</code> C struct layout and how every Python object is represented in memory</li>
+      <li>Explain reference counting: how <code>ob_refcnt</code> works, <code>Py_INCREF</code>/<code>Py_DECREF</code>, and the consequences of cycles</li>
+      <li>Trace reference count changes using <code>sys.getrefcount()</code> and <code>ctypes</code></li>
+      <li>Understand the generational garbage collector: generations, thresholds, and the <code>gc</code> module</li>
+      <li>Identify and break reference cycles with <code>__del__</code>, <code>gc.collect()</code>, and <code>weakref</code></li>
+      <li>Use <code>weakref.ref</code>, <code>WeakValueDictionary</code>, and <code>WeakSet</code> for cache and observer patterns</li>
+      <li>Understand object interning, small-integer caching, and string interning — and when <code>is</code> lies</li>
+    </ul></div>
+
+    <h2 id="pyobject">1 — Every Object is a PyObject</h2>
+
+    <p>In CPython, every Python object — integer, string, list, class instance — is a C struct that starts with <code>PyObject_HEAD</code>. This is the fundamental building block of CPython's object system: a uniform header that gives the runtime everything it needs to manage memory and dispatch type operations.</p>
+
+    <div style="position:relative"><pre><code class="language-c">/* Every Python object starts with this header */
+typedef struct _object {
+    Py_ssize_t ob_refcnt;    /* reference count — atomic in free-threaded mode */
+    PyTypeObject *ob_type;   /* pointer to the type object (int, str, list …) */
+} PyObject;
+
+/* Objects with variable length (list, tuple, str) add ob_size */
+typedef struct {
+    PyObject_HEAD
+    Py_ssize_t ob_size;      /* number of items */
+} PyVarObject;
+
+/* Example: a Python integer */
+typedef struct {
+    PyObject_HEAD
+    _PyLongValue long_value; /* actual integer value (arbitrary precision) */
+} PyLongObject;</code></pre><span class="code-label">CPython/Objects/object.h</span></div>
+
+    <p>The key fields:</p>
+    <ul>
+      <li><strong><code>ob_refcnt</code></strong>: the reference count. Incremented every time a new reference to the object is created; decremented when a reference is removed. When it hits zero, <code>tp_dealloc</code> is called and memory is freed immediately.</li>
+      <li><strong><code>ob_type</code></strong>: pointer to the type object. <code>type(x)</code> in Python is just <code>x-&gt;ob_type-&gt;tp_name</code>. This is how Python's type system works — every object knows its type via this single pointer.</li>
+      <li>Memory layout is compact and cache-friendly for simple types; for Python-level objects <code>__dict__</code> is a separate heap allocation.</li>
+    </ul>
+
+    <div style="position:relative"><pre><code class="language-python">import sys
+import ctypes
+
+x = [1, 2, 3]
+
+# How many bytes does this object occupy?
+print(sys.getsizeof(x))           # 88 bytes (list shell; elements not counted)
+print(sys.getsizeof(x[0]))        # 28 bytes (small int — CPython 3.12)
+
+# Reference count (getrefcount adds 1 for the argument itself)
+print(sys.getrefcount(x))         # 2 (x + getrefcount's argument)
+
+# Read ob_refcnt directly via ctypes
+id_x = id(x)
+refcnt = ctypes.c_ssize_t.from_address(id_x).value
+print(f"ob_refcnt via ctypes: {refcnt}")
+
+# ob_type pointer
+ob_type_ptr = ctypes.c_size_t.from_address(id_x + ctypes.sizeof(ctypes.c_ssize_t)).value
+print(f"ob_type pointer: 0x{ob_type_ptr:x}")
+print(f"type(x): {type(x)}")</code></pre><span class="code-label">pyobject_inspect.py</span></div>
+
+    <div class="callout callout-concept"><strong>Concept:</strong> <code>id(obj)</code> in CPython returns the memory address of the object — its <code>PyObject*</code> pointer. This is CPython-specific; PyPy, Jython, and other implementations have different <code>id()</code> semantics.</div>
+
+    <h2 id="reference-counting">2 — Reference Counting in Depth</h2>
+
+    <p>Reference counting is CPython's primary memory management mechanism. A reference count is incremented when:</p>
+    <ul>
+      <li>A name binding is created: <code>x = obj</code></li>
+      <li>An object is added to a container: <code>lst.append(obj)</code></li>
+      <li>An object is passed as a function argument</li>
+      <li>An object is returned from a function</li>
+      <li>An attribute is set: <code>self.attr = obj</code></li>
+    </ul>
+
+    <p>And decremented when:</p>
+    <ul>
+      <li>A name goes out of scope</li>
+      <li><code>del x</code> is executed</li>
+      <li>A container is cleared or destroyed</li>
+      <li>A function call returns</li>
+    </ul>
+
+    <div style="position:relative"><pre><code class="language-python">import sys
+
+a = []             # refcount = 1  (a)
+b = a              # refcount = 2  (a, b)
+c = [a]            # refcount = 3  (a, b, c[0])
+
+print(sys.getrefcount(a))  # 4 — +1 for getrefcount's own argument
+
+del b              # refcount = 3
+c.clear()          # refcount = 2 (a, getrefcount arg)
+
+# When refcount hits 0, __del__ is called immediately (if defined)
+class Tracked:
+    def __init__(self, name): self.name = name
+    def __del__(self):        print(f"{self.name} freed")
+
+t = Tracked("A")   # refcount=1
+del t              # prints "A freed" immediately — deterministic!</code></pre><span class="code-label">refcount_demo.py</span></div>
+
+    <p>Reference counting alone cannot handle <strong>cycles</strong>:</p>
+
+    <div style="position:relative"><pre><code class="language-python"># Cycle: a → b → a
+a = {}
+b = {"ref": a}
+a["ref"] = b
+
+import sys
+print(sys.getrefcount(a))   # 3 (a, b["ref"], getrefcount arg)
+print(sys.getrefcount(b))   # 3
+
+del a
+del b
+# Both still have refcount=1 from each other — never freed by refcounting alone
+# Requires the cyclic GC to collect</code></pre><span class="code-label">cycle_leak.py</span></div>
+
+    <div class="callout callout-warn"><strong>Warning:</strong> Objects with <code>__del__</code> methods in a reference cycle used to be uncollectable (Python ≤ 3.3) because CPython couldn't determine safe finalisation order. Python 3.4+ (PEP 442) fixed this — <code>__del__</code> is called even for objects in cycles, but the order is still undefined. Avoid relying on <code>__del__</code> for critical cleanup; use context managers instead.</div>
+
+    <h2 id="generational-gc">3 — The Generational Garbage Collector</h2>
+
+    <p>CPython's cyclic GC (<code>gc</code> module) complements reference counting by collecting objects involved in reference cycles. It uses a generational scheme based on the empirical observation that most objects are short-lived.</p>
+
+    <p>Three generations based on object age and survival:</p>
+    <table>
+      <thead><tr><th>Generation</th><th>Contains</th><th>Default Threshold</th><th>Collection Frequency</th></tr></thead>
+      <tbody>
+        <tr><td>0</td><td>Newly allocated objects</td><td>700 allocations</td><td>Most frequent</td></tr>
+        <tr><td>1</td><td>Survived one gen-0 collection</td><td>10 gen-0 collections</td><td>Less often</td></tr>
+        <tr><td>2</td><td>Long-lived objects</td><td>10 gen-1 collections</td><td>Rarely</td></tr>
+      </tbody>
+    </table>
+
+    <div style="position:relative"><pre><code class="language-python">import gc
+
+# Current thresholds
+print(gc.get_threshold())     # (700, 10, 10) by default
+
+# Force a full collection
+collected = gc.collect()
+print(f"Collected {collected} objects")
+
+# Collect only generation 0
+gc.collect(0)
+
+# Disable the cyclic GC (useful in scripts with no cycles, saves ~10% overhead)
+gc.disable()
+# ... do work ...
+gc.enable()
+
+# Manual generation inspection
+print(gc.get_count())         # (n0, n1, n2) — current object counts per gen
+
+# Find what objects are tracked
+tracked = gc.get_objects(generation=0)
+print(f"Gen 0 tracked: {len(tracked)} objects")
+
+# Diagnostics: what's in a cycle?
+gc.set_debug(gc.DEBUG_SAVEALL)  # save unreachable objects to gc.garbage
+gc.collect()
+if gc.garbage:
+    print("Uncollected:", gc.garbage)
+gc.set_debug(0)</code></pre><span class="code-label">gc_exploration.py</span></div>
+
+    <p>Complete cycle creation → detection → collection example:</p>
+
+    <div style="position:relative"><pre><code class="language-python">import gc
+
+class Node:
+    def __init__(self, name):
+        self.name = name
+        self.partner = None
+    def __repr__(self):
+        return f"Node({self.name!r})"
+    def __del__(self):
+        print(f"  🗑️  {self.name} collected")
+
+# Disable automatic GC so we control timing
+gc.disable()
+
+# Create a cycle
+n1 = Node("alpha")
+n2 = Node("beta")
+n1.partner = n2
+n2.partner = n1
+
+print("Before del — objects alive")
+del n1
+del n2
+print("After del — objects STILL alive (cycle holds them)")
+
+# Now trigger collection
+print("Running gc.collect()...")
+collected = gc.collect()
+print(f"Collected {collected} objects")  # Prints "alpha collected", "beta collected"
+
+gc.enable()</code></pre><span class="code-label">gc_cycle_demo.py</span></div>
+
+    <div class="callout callout-tip"><strong>Tip:</strong> In long-running server processes you can tune GC thresholds: <code>gc.set_threshold(1000, 15, 15)</code> reduces GC frequency at the cost of higher peak memory. Facebook's Instagram team famously disabled gen-2 GC entirely for their Django workers and saw ~10% throughput improvement because their requests were short-lived and cycle-free.</div>
+
+    <h2 id="del-finalisation">4 — <code>__del__</code>, Finalisation &amp; Context Managers</h2>
+
+    <div style="position:relative"><pre><code class="language-python">import gc, weakref
+
+class Resource:
+    _count = 0
+
+    def __init__(self, name: str):
+        self.name = name
+        Resource._count += 1
+        print(f"  [+] {name} created  (total={Resource._count})")
+
+    def __del__(self):
+        Resource._count -= 1
+        print(f"  [-] {self.name} freed  (total={Resource._count})")
+
+# Normal case: freed deterministically when refcount → 0
+r = Resource("R1")
+del r      # prints immediately
+
+# Cycle case: NOT freed until GC runs
+r2 = Resource("R2")
+r2.self_ref = r2   # cycle!
+del r2
+print("After del r2 (still alive due to cycle)")
+gc.collect()       # now freed
+print("After gc.collect()")</code></pre><span class="code-label">finalisation.py</span></div>
+
+    <div style="position:relative"><pre><code class="language-python"># The __del__ gotcha: accessing global state during interpreter shutdown
+# is dangerous — globals may already be None
+import atexit
+
+class SafeResource:
+    def __init__(self, name):
+        self.name = name
+
+    def close(self):
+        print(f"Closing {self.name}")
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+        return False
+
+# Always prefer context managers over __del__ for deterministic cleanup
+with SafeResource("DB connection") as res:
+    pass   # __exit__ guaranteed to run</code></pre><span class="code-label">context_manager.py</span></div>
+
+    <div class="callout callout-warn"><strong>Warning:</strong> During interpreter shutdown (<code>atexit</code>, module teardown), global variables are set to <code>None</code> in an unspecified order. If <code>__del__</code> tries to access a module-level name (e.g. <code>open</code>, <code>print</code>) it may get <code>None</code> and raise <code>TypeError</code>. This is why CPython sometimes prints <code>Exception ignored in: &lt;function ...&gt;</code> during shutdown.</div>
+
+    <h2 id="interning-identity">5 — Object Interning &amp; Identity</h2>
+
+    <p>CPython interns (reuses) certain objects to save memory and speed up comparisons:</p>
+
+    <div style="position:relative"><pre><code class="language-python"># ── Small integers: cached in range [-5, 256] ──
+a = 256;  b = 256;  print(a is b)    # True  — same object
+a = 257;  b = 257;  print(a is b)    # False — different objects (CPython)
+
+# ── String interning ──
+s1 = "hello"
+s2 = "hello"
+print(s1 is s2)        # True  — interned (looks like an identifier)
+
+s3 = "hello world"
+s4 = "hello world"
+print(s3 is s4)        # True in CPython (compile-time constant folding)
+# But:
+s5 = "hello" + " world"   # runtime concatenation
+s6 = "hello" + " world"
+print(s5 is s6)            # False — NOT the same object
+
+import sys
+s7 = sys.intern("my-non-identifier string!")
+s8 = sys.intern("my-non-identifier string!")
+print(s7 is s8)            # True — explicitly interned
+
+# ── Tuple interning ──
+t1 = ()
+t2 = ()
+print(t1 is t2)   # True — empty tuple is singleton
+
+t3 = (1, 2)
+t4 = (1, 2)
+print(t3 is t4)   # True in CPython (small constant tuples may be interned)
+
+# ── None, True, False are singletons ──
+print(None is None)    # always True
+print(True  is True)   # always True</code></pre><span class="code-label">interning_demo.py</span></div>
+
+    <p>The rules:</p>
+    <ul>
+      <li><strong>Small ints</strong> (<code>-5</code> to <code>256</code>): cached at interpreter startup in a pre-allocated array.</li>
+      <li><strong>Compile-time string constants</strong> that look like identifiers: interned automatically.</li>
+      <li><strong><code>sys.intern()</code></strong>: explicitly intern any string — useful for dictionary keys that are looked up millions of times.</li>
+      <li><strong>Empty tuples</strong> and <code>None</code>/<code>True</code>/<code>False</code>: singletons.</li>
+    </ul>
+
+    <div class="callout callout-warn"><strong>Warning:</strong> Never use <code>is</code> to compare values — use <code>==</code>. <code>is</code> tests identity (same memory address), not equality. <code>a is b</code> means <code>id(a) == id(b)</code>, which is only meaningful for singletons and interned objects. Writing <code>if x is "active":</code> is a bug waiting to happen — use <code>if x == "active":</code>.</div>
+
+    <h2 id="getsizeof-memory">6 — <code>sys.getsizeof</code> &amp; Memory Layout</h2>
+
+    <div style="position:relative"><pre><code class="language-python">import sys
+
+# Base sizes (CPython 3.12, 64-bit Linux)
+print(sys.getsizeof(None))           # 16
+print(sys.getsizeof(True))           # 28
+print(sys.getsizeof(0))              # 28
+print(sys.getsizeof(2**30))          # 32  (larger int, more limbs)
+print(sys.getsizeof(2**300))         # 68
+print(sys.getsizeof(""))             # 49
+print(sys.getsizeof("a"))            # 50  (+1 per Latin-1 char)
+print(sys.getsizeof("α"))            # 76  (UCS-2 — non-Latin chars)
+print(sys.getsizeof([]))             # 56  (empty list shell)
+print(sys.getsizeof([1]))            # 64  (+8 bytes per pointer)
+print(sys.getsizeof({}))             # 64  (empty dict)
+print(sys.getsizeof(set()))          # 216 (empty set — pre-allocated hash table)
+print(sys.getsizeof(lambda: None))   # 144
+
+# getsizeof does NOT include referenced objects
+lst = [1, 2, 3]
+print(sys.getsizeof(lst))            # 88 — shell only, not the integers</code></pre><span class="code-label">sizeof_basics.py</span></div>
+
+    <p>To get the <strong>deep</strong> (recursive) size of an object graph:</p>
+
+    <div style="position:relative"><pre><code class="language-python">import sys, gc
+
+def deep_sizeof(obj, seen=None):
+    if seen is None: seen = set()
+    obj_id = id(obj)
+    if obj_id in seen: return 0
+    seen.add(obj_id)
+    size = sys.getsizeof(obj)
+    if isinstance(obj, dict):
+        size += sum(deep_sizeof(k, seen) + deep_sizeof(v, seen) for k, v in obj.items())
+    elif hasattr(obj, '__dict__'):
+        size += deep_sizeof(obj.__dict__, seen)
+    elif hasattr(obj, '__iter__') and not isinstance(obj, (str, bytes)):
+        size += sum(deep_sizeof(i, seen) for i in obj)
+    return size
+
+print(deep_sizeof([1, 2, 3]))   # ~140 bytes including the integers</code></pre><span class="code-label">deep_sizeof.py</span></div>
+
+    <p>Python's string internals use three encodings (PEP 393 — flexible string representation):</p>
+
+    <table>
+      <thead><tr><th>Encoding</th><th>Bytes per Char</th><th>Used When</th></tr></thead>
+      <tbody>
+        <tr><td>Latin-1</td><td>1</td><td>All code points ≤ U+00FF</td></tr>
+        <tr><td>UCS-2</td><td>2</td><td>Highest code point ≤ U+FFFF</td></tr>
+        <tr><td>UCS-4</td><td>4</td><td>Any code point &gt; U+FFFF (emoji, rare CJK)</td></tr>
+      </tbody>
+    </table>
+
+    <p>The encoding is chosen based on the highest code point in the string. A single emoji in an otherwise ASCII string forces the <em>entire</em> string to UCS-4 (4 bytes per character).</p>
+
+    <h2 id="weak-references">7 — Weak References</h2>
+
+    <p>A <strong>weak reference</strong> does not increment the reference count — the referenced object can be garbage-collected even while the weak reference exists. This is critical for caches, observer patterns, and any structure where you want to <em>observe</em> an object without <em>owning</em> it.</p>
+
+    <div style="position:relative"><pre><code class="language-python">import weakref
+import gc
+
+class BigCache:
+    def __init__(self, key): self.key = key
+    def __repr__(self): return f"BigCache({self.key!r})"
+
+# ── Basic weak reference ──
+obj = BigCache("data")
+ref = weakref.ref(obj)
+
+print(ref())        # <BigCache('data')>  — object alive
+print(ref() is obj) # True
+
+del obj
+gc.collect()
+print(ref())        # None — object was collected
+
+# ── Callback on collection ──
+def on_finalize(ref):
+    print(f"Object collected: {ref}")
+
+obj2 = BigCache("x")
+ref2 = weakref.ref(obj2, on_finalize)
+del obj2   # prints "Object collected: <weakref at 0x... ; dead>"
+
+# ── WeakValueDictionary — auto-evicts dead entries ──
+cache: weakref.WeakValueDictionary[str, BigCache] = weakref.WeakValueDictionary()
+item = BigCache("item1")
+cache["item1"] = item
+
+print(dict(cache))   # {'item1': BigCache('item1')}
+del item
+gc.collect()
+print(dict(cache))   # {}  — entry automatically removed
+
+# ── WeakSet — set of weakly-referenced objects ──
+class Subscriber:
+    def __init__(self, name): self.name = name
+
+ws: weakref.WeakSet[Subscriber] = weakref.WeakSet()
+s1 = Subscriber("Alice")
+s2 = Subscriber("Bob")
+ws.add(s1); ws.add(s2)
+print([s.name for s in ws])   # ['Alice', 'Bob']
+del s1
+gc.collect()
+print([s.name for s in ws])   # ['Bob']  — Alice auto-removed</code></pre><span class="code-label">weakref_basics.py</span></div>
+
+    <p>The <strong>observer/event-bus pattern</strong> using <code>WeakSet</code> — subscribers that go out of scope are automatically unregistered, preventing memory leaks:</p>
+
+    <div style="position:relative"><pre><code class="language-python">import weakref
+
+class EventBus:
+    def __init__(self):
+        self._handlers: weakref.WeakSet = weakref.WeakSet()
+
+    def subscribe(self, handler):
+        self._handlers.add(handler)
+
+    def publish(self, event):
+        for h in list(self._handlers):
+            h(event)
+
+bus = EventBus()
+
+class Handler:
+    def __init__(self, name): self.name = name
+    def __call__(self, event): print(f"{self.name} received: {event}")
+
+h1 = Handler("Logger")
+h2 = Handler("Alerter")
+bus.subscribe(h1); bus.subscribe(h2)
+
+bus.publish("login")   # both fire
+del h1
+import gc; gc.collect()
+bus.publish("logout")  # only Alerter fires — Logger auto-unregistered</code></pre><span class="code-label">event_bus_weakset.py</span></div>
+
+    <div class="callout callout-concept"><strong>Concept:</strong> <code>WeakSet</code> requires objects to be <strong>hashable and weak-referenceable</strong>. Most user-defined classes are both by default. Types that do NOT support weak references: <code>int</code>, <code>str</code>, <code>tuple</code>, <code>bytes</code>, <code>bool</code> — because they lack the <code>tp_weaklistoffset</code> slot in their C struct. Add <code>__weakref__</code> to your class (or inherit from a class that has it) if you're using <code>__slots__</code>.</div>
+
+    <!-- ── 8. Memory Pools & the Object Allocator ── -->
+    <h2 id="memory-allocator">Memory Pools &amp; the Object Allocator</h2>
+    <p>
+      CPython does not call <code>malloc()</code> / <code>free()</code> for every object.
+      It uses a three-tier allocator to avoid fragmentation and allocation overhead.
+    </p>
+    <pre style="background:#1a1a2e;padding:16px;border-radius:8px;overflow-x:auto;font-size:0.82rem;color:#e0e0f0;">
+Tier 3 — OS / malloc (objects &gt; 512 bytes)
+    ↑ falls through for large allocations
+
+Tier 2 — pymalloc (objects ≤ 512 bytes)
+    Manages Arenas (256 KB blocks from the OS)
+    Each Arena is divided into Pools (4 KB each)
+    Each Pool holds fixed-size Blocks for one size class
+
+Tier 1 — Object-specific allocators
+    e.g. intobject freelist (small ints cached), listobject freelist,
+    frameobject freelist — recycle recently freed objects of the same type
+    </pre>
+    <p>
+      The <strong>pymalloc arena/pool/block</strong> hierarchy means that allocating a
+      20-byte Python dict entry does not involve a kernel call — it just pops the next
+      free block from the appropriate pool's free-list.
+    </p>
+    <div style="position:relative">
+      <pre><code class="language-python">import sys
+
+# Object freelists — CPython recycles recently freed objects
+# E.g. list freelist: up to 80 empty list shells are kept ready
+
+a = []
+id_a = id(a)
+del a
+b = []
+print(id(b) == id_a)   # True on CPython — same memory address reused from freelist!
+
+# Frame freelist: function call overhead is low partly because
+# frame objects are recycled from a per-type freelist
+import dis
+
+def inner(): pass
+def outer():
+    for _ in range(5):
+        inner()   # frame recycled each iteration
+
+# tracemalloc: track Python-level allocations
+import tracemalloc
+tracemalloc.start()
+
+data = [dict(x=i) for i in range(10_000)]
+
+snapshot = tracemalloc.take_snapshot()
+stats = snapshot.statistics("lineno")
+for stat in stats[:5]:
+    print(stat)</code></pre>
+      <span class="code-label">allocator.py</span>
+    </div>
+    <div class="callout callout-tip">
+      Use <code>tracemalloc</code> to hunt memory leaks in long-running services.
+      <code>tracemalloc.take_snapshot()</code> records per-line allocation statistics.
+      Compare two snapshots with <code>snapshot2.compare_to(snapshot1, "lineno")</code>
+      to see which lines are allocating the most memory between two points in time.
+    </div>
+
+    <!-- ── 9. Detecting & Fixing Memory Leaks ── -->
+    <h2 id="memory-leaks">Detecting &amp; Fixing Memory Leaks</h2>
+    <p>
+      In Python, a "memory leak" usually means objects are being kept alive unintentionally
+      — by a reference cycle, a global cache that never evicts, or a closure holding
+      a large object.
+    </p>
+    <div style="position:relative">
+      <pre><code class="language-python">import gc, tracemalloc, weakref
+
+# ── Pattern 1: Unbounded global cache ──
+_cache: dict = {}
+
+def get_data(key):
+    if key not in _cache:
+        _cache[key] = {"data": b"x" * 1024 * 10}   # 10 KB per entry
+    return _cache[key]
+
+# Fix: use WeakValueDictionary or limit size with functools.lru_cache
+from functools import lru_cache
+
+@lru_cache(maxsize=128)
+def get_data_cached(key):
+    return {"data": b"x" * 1024 * 10}   # auto-evicts oldest entries
+
+# ── Pattern 2: Cycle with __del__ ──
+class Node:
+    def __init__(self, val):
+        self.val = val
+        self.next = None
+    def __del__(self):
+        pass   # even trivial __del__ can trap cycles pre-3.4
+
+a = Node(1)
+b = Node(2)
+a.next = b
+b.next = a    # cycle
+del a, b
+print(f"Collected: {gc.collect()}")   # 2
+
+# ── Pattern 3: Closures holding large objects ──
+def make_leak():
+    large = list(range(100_000))   # 800 KB
+    def inner():
+        return large[0]            # inner holds ref to large forever
+    return inner                   # large lives as long as inner lives
+
+# Fix: only capture what you need
+def make_fixed():
+    large = list(range(100_000))
+    first = large[0]               # capture only the scalar
+    del large                      # large freed here
+    def inner():
+        return first
+    return inner
+
+# ── tracemalloc snapshot diff ──
+tracemalloc.start()
+snap1 = tracemalloc.take_snapshot()
+
+data = [Node(i) for i in range(1000)]
+
+snap2 = tracemalloc.take_snapshot()
+for stat in snap2.compare_to(snap1, "lineno")[:3]:
+    print(stat)</code></pre>
+      <span class="code-label">leaks.py</span>
+    </div>
+
+    <!-- ── 10. Object Identity, Equality & Hash Protocol ── -->
+    <h2 id="identity-equality-hash">Identity, Equality &amp; the Hash Protocol</h2>
+    <p>
+      Understanding the relationship between <code>is</code>, <code>==</code>,
+      <code>id()</code>, <code>__hash__</code>, and <code>__eq__</code> is essential
+      for writing correct Python — and for understanding how dicts and sets work internally.
+    </p>
+    <div style="position:relative">
+      <pre><code class="language-python"># ── Identity vs Equality ──
+a = [1, 2, 3]
+b = [1, 2, 3]
+c = a
+
+print(a == b)      # True  — same value (__eq__)
+print(a is b)      # False — different objects (different id)
+print(a is c)      # True  — same object
+
+# ── Hash contract: equal objects MUST have equal hashes ──
+# If __eq__ is defined, __hash__ must also be defined (or set to None for unhashable)
+
+class Point:
+    def __init__(self, x, y):
+        self.x, self.y = x, y
+
+    def __eq__(self, other):
+        return isinstance(other, Point) and self.x == other.x and self.y == other.y
+
+    def __hash__(self):
+        return hash((self.x, self.y))   # tuple hash — fast, well-distributed
+
+p1 = Point(1, 2)
+p2 = Point(1, 2)
+print(p1 == p2)    # True
+print(p1 is p2)    # False
+print(hash(p1) == hash(p2))  # True
+print({p1, p2})    # {Point(1,2)} — deduplicated in set
+
+# ── Hash collisions — still equal objects must compare equal ──
+# Python's dict/set resolves collisions by calling __eq__ after hash match
+# hash("abc") == hash("abc") — always
+# Two distinct objects CAN have the same hash (collision), so __eq__ is the tiebreaker
+
+# ── Mutable objects and hashing ──
+lst = [1, 2, 3]
+# hash(lst)  → TypeError: unhashable type: 'list'
+# Lists define __eq__ but set __hash__ = None → unhashable
+
+# ── id() uniqueness guarantee ──
+# id() is unique only for SIMULTANEOUSLY ALIVE objects
+# After del x, a new object can get the same id
+x = object()
+xid = id(x)
+del x
+y = object()
+print(id(y) == xid)   # Possibly True! ids can be reused after deallocation
+
+# ── Interning and the is trap ──
+import sys
+a = sys.intern("cached_key")
+b = sys.intern("cached_key")
+print(a is b)   # True  — safe to use is for interned strings in caches
+
+# ── __eq__ without __hash__ ──
+class NoHash:
+    def __eq__(self, other): return True
+    # __hash__ automatically set to None by Python when __eq__ is defined without __hash__
+
+nh = NoHash()
+try:
+    hash(nh)
+except TypeError as e:
+    print(e)   # unhashable type: 'NoHash'</code></pre>
+      <span class="code-label">identity_equality.py</span>
+    </div>
+    <div class="callout callout-concept">
+      The <strong>hash contract</strong>: if <code>a == b</code>, then <code>hash(a) == hash(b)</code>
+      MUST hold. The converse is not required (hash collisions are allowed).
+      Python enforces this by setting <code>__hash__ = None</code> whenever you define
+      <code>__eq__</code> without also defining <code>__hash__</code> — making the object
+      unhashable and preventing it from being used as a dict key or set member.
+    </div>
+
+    <!-- ── Best Practices ── -->
+    <h2 id="best-practices">Best Practices</h2>
+    <ul>
+      <li><strong>Never use <code>is</code> for value comparison</strong> — only use <code>is</code> for <code>None</code>, <code>True</code>, <code>False</code>, and explicitly interned singletons. All other comparisons must use <code>==</code>.</li>
+      <li><strong>Prefer context managers over <code>__del__</code></strong> — <code>__del__</code> is non-deterministic in cycles, dangerous during shutdown, and easy to misuse. Use <code>with</code> / <code>__enter__</code> / <code>__exit__</code> for deterministic cleanup.</li>
+      <li><strong>Break large cycles explicitly</strong> — if you must have a cycle (e.g. parent ↔ child), use a <code>weakref.ref</code> for the back-pointer to avoid keeping both objects alive.</li>
+      <li><strong>Use <code>WeakValueDictionary</code> for caches</strong> — entries are automatically evicted when the cached value is no longer referenced elsewhere, preventing unbounded growth.</li>
+      <li><strong>Always define <code>__hash__</code> when you define <code>__eq__</code></strong> — use <code>hash(tuple_of_fields)</code> for immutable classes; set <code>__hash__ = None</code> explicitly for mutable classes that should be unhashable.</li>
+      <li><strong>Use <code>tracemalloc</code> to profile allocations</strong> — compare snapshots before and after suspected leaky operations to pinpoint the source file and line.</li>
+      <li><strong>Add <code>__weakref__</code> to <code>__slots__</code> classes</strong> — without it, instances of a <code>__slots__</code> class cannot be weak-referenced: <code>__slots__ = ('x', 'y', '__weakref__')</code>.</li>
+      <li><strong>Tune GC thresholds for server workloads</strong> — short-lived request-handling processes with few cycles can safely increase gen-0 threshold or disable gen-2 collection to reduce GC pauses.</li>
+    </ul>
+
+    <!-- ── Exercises ── -->
+    <h2 id="exercises">Exercises</h2>
+    <div class="exercise-section">
+
+      <div class="exercise">
+        <h3>Exercise 1 — Reference Count Tracker</h3>
+        <p>
+          Build a context manager <code>RefCountMonitor</code> that tracks the reference
+          count delta of a specific object across the block:
+        </p>
+        <ul>
+          <li>On <code>__enter__</code>, record <code>sys.getrefcount(obj) - 1</code> (subtract the monitor's own reference).</li>
+          <li>On <code>__exit__</code>, record it again and print the delta.</li>
+          <li>Test it across: simple name assignment, appending to a list, passing as an argument, storing as an attribute, and deleting the reference.</li>
+          <li>Verify that passing to a function adds +1 during the call and returns to baseline after.</li>
+        </ul>
+        <details>
+          <summary>💡 Hint</summary>
+          <pre><code class="language-python">import sys
+
+class RefCountMonitor:
+    def __init__(self, obj, label=""):
+        self.obj   = obj
+        self.label = label
+
+    def count(self):
+        # subtract 1 for self.obj, 1 for getrefcount arg
+        return sys.getrefcount(self.obj) - 2
+
+    def __enter__(self):
+        self._start = self.count()
+        print(f"[{self.label}] start refcount = {self._start}")
+        return self
+
+    def __exit__(self, *_):
+        end = self.count()
+        print(f"[{self.label}] end refcount = {end}  (delta={end - self._start})")
+
+x = object()
+with RefCountMonitor(x, "basic") as m:
+    y = x             # +1
+    lst = [x, x]      # +2
+print()
+# y and lst go out of scope at the end of the with block</code></pre>
+        </details>
+      </div>
+
+      <div class="exercise">
+        <h3>Exercise 2 — Cycle Detector</h3>
+        <p>
+          Write a function <code>find_cycles(obj)</code> that detects whether a given
+          object is part of a reference cycle without using the <code>gc</code> module's
+          built-in cycle finder:
+        </p>
+        <ul>
+          <li>Use <code>gc.get_referents(obj)</code> to walk the object graph.</li>
+          <li>Track visited object IDs to detect when you encounter an already-seen object.</li>
+          <li>Return a list of <code>(object, referrer_chain)</code> tuples for each cycle found.</li>
+          <li>Test with: a simple cycle (<code>a.x = a</code>), a two-node cycle (<code>a.x = b; b.x = a</code>), and a cycle-free object graph.</li>
+          <li>Compare your results against <code>gc.collect()</code> output.</li>
+        </ul>
+        <details>
+          <summary>💡 Hint</summary>
+          <pre><code class="language-python">import gc
+
+def find_cycles(root, _seen=None, _path=None):
+    if _seen is None: _seen = {}
+    if _path is None: _path = []
+
+    obj_id = id(root)
+    if obj_id in _seen:
+        return [_path + [root]]   # cycle detected!
+
+    _seen = dict(_seen)
+    _seen[obj_id] = root
+    _path = _path + [root]
+
+    cycles = []
+    for ref in gc.get_referents(root):
+        if not isinstance(ref, type):   # skip type objects
+            cycles.extend(find_cycles(ref, _seen, _path))
+    return cycles
+
+# Test
+class Node:
+    def __init__(self, v): self.v, self.next = v, None
+
+a = Node(1); b = Node(2)
+a.next = b; b.next = a   # cycle
+print(f"Cycles found: {len(find_cycles(a))}")</code></pre>
+        </details>
+      </div>
+
+      <div class="exercise">
+        <h3>Exercise 3 — Weak-Reference Event Bus</h3>
+        <p>
+          Build a production-quality <code>EventBus</code> using weak references:
+        </p>
+        <ul>
+          <li>Use <code>weakref.WeakSet</code> to store subscribers per event name.</li>
+          <li>Support <code>subscribe(event, handler)</code>, <code>unsubscribe(event, handler)</code>, and <code>publish(event, *args, **kwargs)</code>.</li>
+          <li>When a subscriber object is garbage-collected, it should automatically be removed from all subscriptions without any explicit unsubscribe call.</li>
+          <li>Write tests: (a) subscriber receives events while alive; (b) after <code>del subscriber</code> + <code>gc.collect()</code>, no dead handlers are called and no errors are raised; (c) explicitly unsubscribing works.</li>
+          <li>Add a <code>subscriber_count(event)</code> method that returns the number of live subscribers.</li>
+        </ul>
+        <details>
+          <summary>💡 Hint</summary>
+          <pre><code class="language-python">import weakref, gc
+from collections import defaultdict
+
+class EventBus:
+    def __init__(self):
+        self._subs: dict[str, weakref.WeakSet] = defaultdict(weakref.WeakSet)
+
+    def subscribe(self, event: str, handler) -> None:
+        self._subs[event].add(handler)
+
+    def unsubscribe(self, event: str, handler) -> None:
+        self._subs[event].discard(handler)
+
+    def publish(self, event: str, *args, **kwargs) -> int:
+        called = 0
+        for h in list(self._subs.get(event, [])):
+            h(*args, **kwargs)
+            called += 1
+        return called
+
+    def subscriber_count(self, event: str) -> int:
+        return len(self._subs.get(event, []))
+
+# Test
+bus = EventBus()
+log = []
+
+class Handler:
+    def __init__(self, name): self.name = name
+    def __call__(self, msg):  log.append(f"{self.name}: {msg}")
+
+h1, h2 = Handler("A"), Handler("B")
+bus.subscribe("msg", h1)
+bus.subscribe("msg", h2)
+bus.publish("msg", "hello")     # both fire
+del h1
+gc.collect()
+bus.publish("msg", "world")     # only B fires
+print(log)</code></pre>
+        </details>
+      </div>
+
+    </div><!-- /exercise-section -->
+
+    <div id="quiz-section"></div>
+    <div id="lesson-nav-footer"></div>
+  </div><!-- /content -->
+</div><!-- /main -->
+
+<script src="../assets/nav-data.js"></script>
+<script src="../assets/nav.js"></script>
+<script src="../assets/quiz.js"></script>
+<script src="../assets/highlight.js"></script>
+
+<script>
+buildLessonFooter();
+
+QuizWidget.render("quiz-section", [
+  {
+    question: "What does `sys.getrefcount(obj)` return, and why is the number always at least 1 higher than you expect?",
+    options: [
+      "It returns the total number of Python names that have ever pointed to the object since it was created",
+      "It returns the current reference count, which is always at least 1 higher than the 'real' count because passing `obj` to getrefcount() itself creates a temporary reference for the duration of the call",
+      "It returns 0 when the object is about to be garbage-collected, and a positive number otherwise",
+      "It returns the number of times the object has been passed as a function argument"
+    ],
+    correct: 1,
+    explanation: "sys.getrefcount(obj) passes obj as an argument to the C function, which increments ob_refcnt by 1 for the duration of the call. So if you write `x = []; print(sys.getrefcount(x))`, you see 2: one for the name `x` and one for the temporary reference held by getrefcount's argument slot. Always subtract 1 from the result to get the 'real' reference count. This is also why objects passed to getrefcount are never freed inside the call — the temporary reference keeps them alive."
+  },
+  {
+    question: "Why can reference counting alone not collect objects involved in a reference cycle?",
+    options: [
+      "Reference counting is only used for objects smaller than 512 bytes; larger objects use the generational GC exclusively",
+      "In a cycle (a → b → a), each object's reference count remains at least 1 even after all external references are deleted, so ob_refcnt never reaches zero and tp_dealloc is never called",
+      "Reference counting uses locks that prevent cycle detection in multithreaded code",
+      "Cycles are automatically broken by Python before reference counting runs"
+    ],
+    correct: 1,
+    explanation: "When you do `del a; del b` on two objects that reference each other, both ob_refcnts drop from 2 to 1 — each object still holds a reference to the other. Since neither count reaches zero, neither tp_dealloc is called and the memory is never freed by the reference counter. This is why CPython adds a generational cyclic garbage collector (the `gc` module) that periodically traces the object graph, identifies groups of mutually-referencing objects with no external references, and frees them."
+  },
+  {
+    question: "What are CPython's three GC generations and what determines when each one is collected?",
+    options: [
+      "Generations represent object size: gen-0 for small objects, gen-1 for medium, gen-2 for large",
+      "Gen-0 holds newly allocated objects and is collected after ~700 new allocations; surviving objects are promoted to gen-1, collected after 10 gen-0 collections; gen-2 holds long-lived objects and is collected after 10 gen-1 collections",
+      "Generations represent object type: gen-0 for instances, gen-1 for containers, gen-2 for types",
+      "All three generations are collected simultaneously on every GC run; the generation label only affects collection order"
+    ],
+    correct: 1,
+    explanation: "CPython's generational GC is based on the weak generational hypothesis: most objects die young. Gen-0 is for freshly allocated objects; it is collected frequently (every ~700 net new allocations by default). Objects that survive a gen-0 collection are promoted to gen-1, which is collected less frequently (after 10 gen-0 collections). Survivors of gen-1 move to gen-2, which is collected rarely (after 10 gen-1 collections). This means long-lived objects (module-level dicts, class objects) are rarely scanned, keeping GC overhead low for typical workloads."
+  },
+  {
+    question: "What is the key difference between a strong reference and a `weakref.ref`?",
+    options: [
+      "Strong references use more memory than weak references; weak references are a compact representation",
+      "A strong reference increments ob_refcnt, keeping the object alive; a weak reference does NOT increment ob_refcnt, so the object can be collected while the weak reference still exists — after collection, calling the weak reference returns None",
+      "Weak references can only point to instances of classes that explicitly inherit from weakref.Referenceable",
+      "Strong references are garbage-collected by the cyclic GC; weak references are collected by reference counting"
+    ],
+    correct: 1,
+    explanation: "A normal Python name or container element is a strong reference — it increments ob_refcnt, guaranteeing the object stays alive as long as any strong reference exists. A weakref.ref is a special object that stores the target's pointer WITHOUT incrementing ob_refcnt. If all strong references to the target are removed, ob_refcnt drops to zero, the object is freed, and the weak reference is automatically set to None (its callback is called if one was provided). This makes weak references ideal for caches (WeakValueDictionary auto-evicts dead entries) and observer patterns (dead subscribers are automatically deregistered)."
+  },
+  {
+    question: "Why does Python automatically set `__hash__ = None` when you define `__eq__` without also defining `__hash__`?",
+    options: [
+      "It is a performance optimisation — computing hashes for objects with custom equality is expensive",
+      "The hash contract requires equal objects to have equal hashes; if you define __eq__ to make two objects equal without providing a consistent __hash__, those objects could end up in different hash buckets in a dict/set, violating correctness — Python prevents this by making the object unhashable",
+      "Objects with custom __eq__ are always mutable and therefore should not be hashable",
+      "It is a backward-compatibility requirement from Python 2 where all objects were hashable by default"
+    ],
+    correct: 1,
+    explanation: "The hash contract: if a == b then hash(a) must equal hash(b). Python's dict and set rely on this contract — they first compare hashes (cheap) and only call __eq__ on hash matches. If you define __eq__ without __hash__, two objects that compare equal might have different hashes (the default id-based hash) and end up in different buckets, so `obj in my_set` could return False even when an equal object is in the set. Python protects you by setting __hash__ = None, making the type unhashable with a clear TypeError, forcing you to either define __hash__ explicitly or accept that instances cannot be used in dicts/sets."
+  }
+]);
+</script>
+</body>
+</html>

@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lesson 15: Environment Variables & the Downward API</title>
+    <style>
+        :root {
+            --bg: #fafafa; --text: #1a1a1a; --accent: #326ce5;
+            --accent-light: #e8f0fe; --border: #e0e0e0; --code-bg: #f5f5f5;
+            --success: #2e7d32; --warn: #f57c00;
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: 'Georgia', serif; line-height: 1.7; color: var(--text); background: var(--bg); max-width: 780px; margin: 0 auto; padding: 2rem 1.5rem; }
+        h1 { font-size: 2rem; margin-bottom: 0.5rem; color: var(--accent); }
+        h2 { font-size: 1.4rem; margin-top: 2.5rem; margin-bottom: 0.8rem; border-bottom: 2px solid var(--accent); padding-bottom: 0.3rem; }
+        h3 { font-size: 1.1rem; margin-top: 1.5rem; margin-bottom: 0.5rem; }
+        p { margin-bottom: 1rem; }
+        .meta { color: #666; font-size: 0.9rem; margin-bottom: 2rem; }
+        .key-insight { background: var(--accent-light); border-left: 4px solid var(--accent); padding: 1rem 1.2rem; margin: 1.5rem 0; border-radius: 0 4px 4px 0; }
+        .key-insight strong { color: var(--accent); }
+        .production-note { background: #fff3e0; border-left: 4px solid var(--warn); padding: 1rem 1.2rem; margin: 1.5rem 0; border-radius: 0 4px 4px 0; }
+        .production-note::before { content: "🏭 Production: "; font-weight: bold; }
+        .exam-tip { background: #e8f5e9; border-left: 4px solid var(--success); padding: 1rem 1.2rem; margin: 1.5rem 0; border-radius: 0 4px 4px 0; }
+        .exam-tip::before { content: "🎯 Exam Tip: "; font-weight: bold; color: var(--success); }
+        code { font-family: 'Menlo', 'Consolas', monospace; font-size: 0.85em; background: var(--code-bg); padding: 0.15em 0.4em; border-radius: 3px; }
+        pre { background: var(--code-bg); padding: 1rem; border-radius: 4px; overflow-x: auto; margin: 1rem 0; font-size: 0.85rem; line-height: 1.5; }
+        ul, ol { margin: 0.5rem 0 1rem 1.5rem; }
+        li { margin-bottom: 0.4rem; }
+        table { width: 100%; border-collapse: collapse; margin: 1rem 0; font-size: 0.9rem; }
+        th, td { border: 1px solid var(--border); padding: 0.6rem 0.8rem; text-align: left; }
+        th { background: var(--accent-light); font-weight: bold; }
+        .diagram { background: white; border: 1px solid var(--border); border-radius: 8px; padding: 1.5rem; margin: 1.5rem 0; text-align: center; }
+        .cert-badge { display: inline-block; background: var(--accent); color: white; font-size: 0.7rem; padding: 0.15rem 0.5rem; border-radius: 10px; margin-left: 0.5rem; }
+        .quiz { background: #f9f9f9; border: 1px solid var(--border); border-radius: 8px; padding: 1.5rem; margin-top: 2rem; }
+        .quiz h2 { border-bottom: none; margin-top: 0; }
+        .quiz-q { margin-bottom: 1.2rem; }
+        .quiz-q p { font-weight: bold; margin-bottom: 0.3rem; }
+        .quiz-answer { display: none; background: #e8f5e9; padding: 0.5rem 0.8rem; border-radius: 4px; margin-top: 0.5rem; }
+        .reveal-btn { background: var(--accent); color: white; border: none; padding: 0.3rem 0.8rem; border-radius: 4px; cursor: pointer; font-size: 0.8rem; }
+        .reveal-btn:hover { opacity: 0.85; }
+    </style>
+</head>
+<body>
+
+<h1>Lesson 15: Environment Variables & the Downward API</h1>
+<p class="meta">Chapter 3: Configuration & Secrets · <span class="cert-badge">CKA</span> <span class="cert-badge">CKAD</span> · ~15 min</p>
+
+<p>Beyond ConfigMaps and Secrets, Kubernetes provides ways to inject <strong>Pod-specific runtime information</strong> into containers — the Pod's name, namespace, IP, node, resource limits, and labels. This is the <strong>Downward API</strong>: a way for Pods to learn about themselves without calling the API server.</p>
+
+<h2>1. All Environment Variable Sources</h2>
+
+<p>A container's env vars can come from five sources:</p>
+
+<table>
+    <tr><th>Source</th><th>Field</th><th>Use Case</th></tr>
+    <tr><td>Static value</td><td><code>env.value</code></td><td>Hardcoded config, simple defaults</td></tr>
+    <tr><td>ConfigMap</td><td><code>env.valueFrom.configMapKeyRef</code></td><td>Non-sensitive config</td></tr>
+    <tr><td>Secret</td><td><code>env.valueFrom.secretKeyRef</code></td><td>Passwords, tokens</td></tr>
+    <tr><td>Downward API (field)</td><td><code>env.valueFrom.fieldRef</code></td><td>Pod metadata (name, namespace, IP, node)</td></tr>
+    <tr><td>Downward API (resource)</td><td><code>env.valueFrom.resourceFieldRef</code></td><td>Container resource limits/requests</td></tr>
+</table>
+
+<h3>Complete Example: All Sources in One Pod</h3>
+
+<pre>spec:
+  containers:
+    - name: app
+      image: myapp:latest
+      env:
+        # 1. Static value
+        - name: APP_ENV
+          value: production
+        
+        # 2. From ConfigMap
+        - name: LOG_LEVEL
+          valueFrom:
+            configMapKeyRef:
+              name: app-config
+              key: LOG_LEVEL
+        
+        # 3. From Secret
+        - name: DB_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: db-creds
+              key: password
+        
+        # 4. Downward API — Pod field
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        
+        # 5. Downward API — Resource field
+        - name: MEMORY_LIMIT
+          valueFrom:
+            resourceFieldRef:
+              containerName: app
+              resource: limits.memory</pre>
+
+<h3>Dependent Environment Variables</h3>
+
+<pre>env:
+  - name: DB_HOST
+    value: postgres.default.svc
+  - name: DB_PORT
+    value: "5432"
+  - name: DATABASE_URL
+    value: "postgresql://$(DB_HOST):$(DB_PORT)/mydb"   # ← variable interpolation!
+# K8s resolves $(VAR_NAME) from previously-defined env vars
+# Order matters: referenced vars must be defined above</pre>
+
+<div class="key-insight">
+    <strong><code>$(VAR_NAME)</code> expansion:</strong> Kubernetes expands <code>$(VAR)</code> references using previously defined env vars (in order). This is done at Pod creation time, not shell expansion. Use <code>$$(VAR)</code> to escape if you need a literal <code>$(VAR)</code> in the value.
+</div>
+
+<h2>2. Downward API — fieldRef</h2>
+
+<p>Inject Pod metadata into the container without calling the API server:</p>
+
+<h3>Available Fields</h3>
+
+<table>
+    <tr><th>fieldPath</th><th>Value Example</th><th>Use Case</th></tr>
+    <tr><td><code>metadata.name</code></td><td><code>web-abc123</code></td><td>Logging, tracing (identify Pod)</td></tr>
+    <tr><td><code>metadata.namespace</code></td><td><code>production</code></td><td>Multi-tenant apps that need to know their namespace</td></tr>
+    <tr><td><code>metadata.uid</code></td><td><code>a1b2c3d4-...</code></td><td>Unique correlation IDs</td></tr>
+    <tr><td><code>metadata.labels['key']</code></td><td><code>v2</code></td><td>Version-aware behavior</td></tr>
+    <tr><td><code>metadata.annotations['key']</code></td><td><code>team-platform</code></td><td>Injected metadata from CI/CD</td></tr>
+    <tr><td><code>spec.nodeName</code></td><td><code>worker-3</code></td><td>Node-aware routing, logging</td></tr>
+    <tr><td><code>spec.serviceAccountName</code></td><td><code>web-sa</code></td><td>Identity-aware behavior</td></tr>
+    <tr><td><code>status.podIP</code></td><td><code>10.244.1.5</code></td><td>Self-registration with service discovery</td></tr>
+    <tr><td><code>status.hostIP</code></td><td><code>192.168.1.10</code></td><td>Node-level metrics endpoint</td></tr>
+</table>
+
+<pre>env:
+  - name: MY_POD_NAME
+    valueFrom:
+      fieldRef:
+        fieldPath: metadata.name
+  - name: MY_POD_IP
+    valueFrom:
+      fieldRef:
+        fieldPath: status.podIP
+  - name: MY_NODE
+    valueFrom:
+      fieldRef:
+        fieldPath: spec.nodeName
+  - name: MY_VERSION
+    valueFrom:
+      fieldRef:
+        fieldPath: metadata.labels['version']</pre>
+
+<h3>resourceFieldRef — Container Resources</h3>
+
+<pre>env:
+  - name: MEMORY_LIMIT
+    valueFrom:
+      resourceFieldRef:
+        containerName: app          # which container (required in multi-container)
+        resource: limits.memory     # in bytes by default
+        divisor: "1Mi"              # convert to MiB (optional)
+  - name: CPU_REQUEST
+    valueFrom:
+      resourceFieldRef:
+        resource: requests.cpu
+        divisor: "1m"               # in millicores</pre>
+
+<table>
+    <tr><th>resource</th><th>Returns</th></tr>
+    <tr><td><code>requests.cpu</code></td><td>CPU requests (default: cores as decimal)</td></tr>
+    <tr><td><code>limits.cpu</code></td><td>CPU limits</td></tr>
+    <tr><td><code>requests.memory</code></td><td>Memory requests (default: bytes)</td></tr>
+    <tr><td><code>limits.memory</code></td><td>Memory limits</td></tr>
+</table>
+
+<div class="production-note">
+    Common pattern: Java apps need <code>-Xmx</code> to match the container memory limit. Use <code>resourceFieldRef</code> to inject the limit, then set <code>-Xmx</code> to ~75% of it. This prevents OOMKill from the JVM allocating more than the cgroup allows.
+</div>
+
+<h2>3. Downward API via Volume</h2>
+
+<p>Labels and annotations can change after Pod creation (unlike most metadata). To see live updates, use a <strong>downwardAPI volume</strong> instead of env vars:</p>
+
+<pre>spec:
+  containers:
+    - name: app
+      volumeMounts:
+        - name: pod-info
+          mountPath: /etc/podinfo
+          readOnly: true
+  volumes:
+    - name: pod-info
+      downwardAPI:
+        items:
+          - path: "labels"           # → /etc/podinfo/labels
+            fieldRef:
+              fieldPath: metadata.labels
+          - path: "annotations"      # → /etc/podinfo/annotations
+            fieldRef:
+              fieldPath: metadata.annotations
+          - path: "cpu_limit"        # → /etc/podinfo/cpu_limit
+            resourceFieldRef:
+              containerName: app
+              resource: limits.cpu
+              divisor: "1m"</pre>
+
+<pre># Inside the container:
+cat /etc/podinfo/labels
+# app="web"
+# version="v2"
+# environment="production"
+
+cat /etc/podinfo/cpu_limit
+# 500</pre>
+
+<h3>Env Var vs Volume: When to Use Each</h3>
+
+<table>
+    <tr><th>Method</th><th>Updates Live?</th><th>Best For</th></tr>
+    <tr><td>Env var (<code>fieldRef</code>)</td><td>❌ No (fixed at start)</td><td>Immutable info: Pod name, namespace, node, IP</td></tr>
+    <tr><td>Volume (<code>downwardAPI</code>)</td><td>✅ Yes (labels/annotations change)</td><td>Labels, annotations that may be updated post-creation</td></tr>
+</table>
+
+<div class="key-insight">
+    <strong>Labels can change, Pod name can't.</strong> Use env vars for things that are fixed for the Pod's lifetime (name, namespace, IP, node). Use volumes for things that can be updated dynamically (labels, annotations). The kubelet updates volume files when labels/annotations change.
+</div>
+
+<h2>4. Practical Production Uses</h2>
+
+<table>
+    <tr><th>Pattern</th><th>Implementation</th></tr>
+    <tr><td>Structured logging</td><td>Inject <code>POD_NAME</code>, <code>NAMESPACE</code>, <code>NODE</code> as env vars → include in every log line</td></tr>
+    <tr><td>JVM memory tuning</td><td>Inject <code>limits.memory</code> → set <code>-Xmx</code> to 75% of limit</td></tr>
+    <tr><td>Prometheus metrics</td><td>Inject <code>POD_NAME</code> → use as instance label in metrics</td></tr>
+    <tr><td>Service registration</td><td>Inject <code>status.podIP</code> → register with Consul/etcd</td></tr>
+    <tr><td>Canary detection</td><td>Mount labels as volume → sidecar reads <code>version</code> label to adjust behavior</td></tr>
+    <tr><td>Cost allocation</td><td>Inject <code>metadata.labels['team']</code> → tag cloud metrics by team</td></tr>
+</table>
+
+<div class="production-note">
+    Every production Pod should inject at least <code>POD_NAME</code> and <code>NAMESPACE</code> as env vars. Without them, correlating logs and metrics to a specific Pod instance is painful. Most logging frameworks (Fluentd, structured logging) use these to enrich log entries automatically.
+</div>
+
+<h2>Summary</h2>
+
+<table>
+    <tr><th>Concept</th><th>Key Point</th></tr>
+    <tr><td>5 env var sources</td><td>Static, ConfigMap, Secret, fieldRef, resourceFieldRef</td></tr>
+    <tr><td><code>$(VAR)</code> expansion</td><td>Reference earlier env vars — order matters</td></tr>
+    <tr><td>fieldRef</td><td>Pod metadata: name, namespace, IP, node, labels, annotations</td></tr>
+    <tr><td>resourceFieldRef</td><td>Container CPU/memory requests and limits</td></tr>
+    <tr><td>downwardAPI volume</td><td>Files that auto-update when labels/annotations change</td></tr>
+    <tr><td>Env vars are fixed</td><td>Set at container start, never change during lifetime</td></tr>
+</table>
+
+<!-- Quiz -->
+<div class="quiz">
+    <h2>📝 Quiz: Environment Variables & the Downward API</h2>
+    
+    <div class="quiz-q">
+        <p>Q1: How does a container learn its own Pod IP without calling the Kubernetes API?</p>
+        <button class="reveal-btn" onclick="this.nextElementSibling.style.display='block'">Show Answer</button>
+        <div class="quiz-answer">Use the Downward API with <code>fieldRef</code>:<br><code>env:<br>- name: POD_IP<br>  valueFrom:<br>    fieldRef:<br>      fieldPath: status.podIP</code><br>The kubelet injects this at Pod start — no API server call needed.</div>
+    </div>
+    
+    <div class="quiz-q">
+        <p>Q2: You define <code>DATABASE_URL: "postgres://$(DB_HOST):$(DB_PORT)/mydb"</code>. <code>DB_PORT</code> is defined AFTER <code>DATABASE_URL</code> in the env list. What value does <code>DATABASE_URL</code> get?</p>
+        <button class="reveal-btn" onclick="this.nextElementSibling.style.display='block'">Show Answer</button>
+        <div class="quiz-answer"><code>DATABASE_URL</code> will be <code>postgres://&lt;DB_HOST_value&gt;:$(DB_PORT)/mydb</code>. <code>$(DB_HOST)</code> is expanded (defined earlier), but <code>$(DB_PORT)</code> is left as a <strong>literal string</strong> because it hasn't been defined yet. Order matters — referenced vars must be defined above.</div>
+    </div>
+    
+    <div class="quiz-q">
+        <p>Q3: A label on a running Pod is changed via <code>kubectl label pod web version=v3</code>. An env var uses <code>fieldRef: metadata.labels['version']</code>. Does the env var update?</p>
+        <button class="reveal-btn" onclick="this.nextElementSibling.style.display='block'">Show Answer</button>
+        <div class="quiz-answer"><strong>No.</strong> Environment variables are fixed at container start and never change. To see live label updates, use a <code>downwardAPI</code> volume mount instead — the file will be updated when the label changes.</div>
+    </div>
+    
+    <div class="quiz-q">
+        <p>Q4: A Java app is OOMKilled. Its container has <code>limits.memory: 512Mi</code>. How do you set JVM heap correctly using the Downward API?</p>
+        <button class="reveal-btn" onclick="this.nextElementSibling.style.display='block'">Show Answer</button>
+        <div class="quiz-answer">Inject the memory limit:<br><code>- name: MEM_LIMIT<br>  valueFrom:<br>    resourceFieldRef:<br>      resource: limits.memory<br>      divisor: "1Mi"</code><br>Then in the container command: <code>-Xmx$(echo "$MEM_LIMIT * 75 / 100" | bc)m</code> or use a modern JVM with <code>-XX:MaxRAMPercentage=75.0</code> which reads cgroup limits directly.</div>
+    </div>
+    
+    <div class="quiz-q">
+        <p>Q5: What's the difference between <code>fieldRef</code> and <code>resourceFieldRef</code>?</p>
+        <button class="reveal-btn" onclick="this.nextElementSibling.style.display='block'">Show Answer</button>
+        <div class="quiz-answer"><code>fieldRef</code>: Exposes <strong>Pod-level metadata</strong> — name, namespace, UID, IP, node name, labels, annotations. These are the same for all containers in the Pod.<br><code>resourceFieldRef</code>: Exposes <strong>container-level resource settings</strong> — CPU/memory requests and limits. These can differ between containers in the same Pod (requires <code>containerName</code> in multi-container Pods).</div>
+    </div>
+    
+    <div class="quiz-q">
+        <p>Q6: You need to pass ALL of a Pod's labels to a container. Can you do this with env vars?</p>
+        <button class="reveal-btn" onclick="this.nextElementSibling.style.display='block'">Show Answer</button>
+        <div class="quiz-answer"><strong>No</strong> — not as env vars. <code>fieldRef</code> for labels requires a specific key: <code>metadata.labels['key']</code>. To expose ALL labels (without knowing them in advance), use a <code>downwardAPI</code> volume with <code>fieldRef: metadata.labels</code>. This creates a file containing all labels as key=value pairs.</div>
+    </div>
+</div>
+
+</body>
+</html>

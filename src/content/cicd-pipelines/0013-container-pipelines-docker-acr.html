@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lesson 13 — Container Pipelines: Docker Build & Push to ACR</title>
+  <link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+
+  <div class="lesson-meta">
+    <span class="number">LESSON 13</span> &middot; Deep Dive + Hands-On &middot; ~25 minutes
+  </div>
+
+  <h1>Container Pipelines: Docker Build & Push to ACR</h1>
+  <p>Deploying files works. But containers are the standard for Kubernetes. In this lesson you'll write a production Dockerfile, build it in CI, scan for vulnerabilities, and push to Azure Container Registry.</p>
+
+  <div class="progress">
+    <span>Lesson 13 of 33</span>
+    <div class="progress-bar"><div class="progress-fill" style="width: 39%"></div></div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>Why Containers for Deployment?</h2>
+
+  <div class="diagram">
+    <svg viewBox="0 0 700 120" xmlns="http://www.w3.org/2000/svg">
+      <!-- File deploy -->
+      <rect x="20" y="20" width="310" height="80" rx="6" fill="#ffebee" stroke="#c62828"/>
+      <text x="175" y="42" text-anchor="middle" font-size="10" font-weight="bold" fill="#c62828">File-based deploy (App Service)</text>
+      <text x="175" y="62" text-anchor="middle" font-size="8" fill="#555">• Runtime configured separately from code</text>
+      <text x="175" y="76" text-anchor="middle" font-size="8" fill="#555">• "Works on my machine" still possible</text>
+      <text x="175" y="90" text-anchor="middle" font-size="8" fill="#555">• Different envs may have different system libs</text>
+      
+      <!-- Container deploy -->
+      <rect x="370" y="20" width="310" height="80" rx="6" fill="#e8f5e9" stroke="#388e3c"/>
+      <text x="525" y="42" text-anchor="middle" font-size="10" font-weight="bold" fill="#388e3c">Container deploy (K8s, ACA)</text>
+      <text x="525" y="62" text-anchor="middle" font-size="8" fill="#555">• EVERYTHING in one image (code + runtime + deps)</text>
+      <text x="525" y="76" text-anchor="middle" font-size="8" fill="#555">• Identical everywhere: dev = CI = prod</text>
+      <text x="525" y="90" text-anchor="middle" font-size="8" fill="#555">• Immutable artifact — deploy any version instantly</text>
+    </svg>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>Multi-Stage Dockerfile (Production Quality)</h2>
+
+  <div class="diagram">
+    <svg viewBox="0 0 700 160" xmlns="http://www.w3.org/2000/svg">
+      <!-- Stage 1 -->
+      <rect x="20" y="20" width="200" height="120" rx="6" fill="#e3f2fd" stroke="#1976d2"/>
+      <text x="120" y="42" text-anchor="middle" font-size="10" font-weight="bold" fill="#1976d2">Stage 1: deps</text>
+      <text x="120" y="62" text-anchor="middle" font-size="8" fill="#555">node:20-alpine</text>
+      <text x="120" y="80" text-anchor="middle" font-size="8" fill="#555">COPY package*.json</text>
+      <text x="120" y="95" text-anchor="middle" font-size="8" fill="#555">RUN npm ci --production</text>
+      <text x="120" y="115" text-anchor="middle" font-size="8" fill="#999">~200 MB (includes npm)</text>
+      
+      <!-- Arrow -->
+      <line x1="220" y1="80" x2="250" y2="80" stroke="#333" stroke-width="1.5" marker-end="url(#d13)"/>
+      <text x="235" y="72" font-size="7" fill="#555">COPY --from</text>
+      
+      <!-- Stage 2 -->
+      <rect x="250" y="20" width="200" height="120" rx="6" fill="#e8f5e9" stroke="#388e3c"/>
+      <text x="350" y="42" text-anchor="middle" font-size="10" font-weight="bold" fill="#388e3c">Stage 2: runtime</text>
+      <text x="350" y="62" text-anchor="middle" font-size="8" fill="#555">node:20-alpine</text>
+      <text x="350" y="80" text-anchor="middle" font-size="8" fill="#555">COPY --from=deps node_modules</text>
+      <text x="350" y="95" text-anchor="middle" font-size="8" fill="#555">COPY src/</text>
+      <text x="350" y="115" text-anchor="middle" font-size="8" fill="#388e3c" font-weight="bold">~80 MB final image!</text>
+      
+      <!-- vs single stage -->
+      <rect x="500" y="40" width="180" height="80" rx="6" fill="#ffebee" stroke="#c62828"/>
+      <text x="590" y="62" text-anchor="middle" font-size="9" font-weight="bold" fill="#c62828">Single stage</text>
+      <text x="590" y="80" text-anchor="middle" font-size="8" fill="#555">node:20 (full)</text>
+      <text x="590" y="95" text-anchor="middle" font-size="8" fill="#c62828">~950 MB 😱</text>
+      <text x="590" y="110" text-anchor="middle" font-size="8" fill="#c62828">Includes build tools, npm cache</text>
+      
+      <defs>
+        <marker id="d13" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto">
+          <polygon points="0 0, 7 2.5, 0 5" fill="#333"/>
+        </marker>
+      </defs>
+    </svg>
+    <figcaption>Multi-stage builds copy only what's needed into the final image. 10× smaller, faster to pull, less attack surface.</figcaption>
+  </div>
+
+  <div class="exercise">
+    <h3>Create your Dockerfile</h3>
+<pre><code># Dockerfile
+# ═══ Stage 1: Install production deps ═══
+FROM node:20-alpine AS deps
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev && npm cache clean --force
+
+# ═══ Stage 2: Production runtime ═══
+FROM node:20-alpine AS runtime
+
+# Security: non-root user
+RUN addgroup -g 1001 -S app && adduser -S app -u 1001 -G app
+WORKDIR /app
+
+# Copy deps from stage 1
+COPY --from=deps /app/node_modules ./node_modules
+COPY src/ ./src/
+COPY package.json ./
+
+# Own the files
+RUN chown -R app:app /app
+USER app
+
+EXPOSE 3000
+
+HEALTHCHECK --interval=30s --timeout=3s \
+  CMD wget --spider -q http://localhost:3000/health || exit 1
+
+ENV NODE_ENV=production
+CMD ["node", "src/server.js"]
+</code></pre>
+
+    <h3>Create .dockerignore</h3>
+<pre><code>node_modules
+.git
+.github
+coverage
+reports
+tests
+*.md
+.eslintrc*
+</code></pre>
+
+    <h3>Test locally</h3>
+<pre><code>docker build -t cicd-mastery:local .
+docker run -p 3000:3000 cicd-mastery:local
+# Visit http://localhost:3000/health
+</code></pre>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>Image Tagging Strategy</h2>
+
+  <div class="compare">
+    <div class="compare-bad">
+      <p><code>myapp:latest</code></p>
+      <p style="font-size:0.8rem;">Which version is this? When was it built? Can't rollback to "the one before latest."</p>
+    </div>
+    <div class="compare-good">
+      <p><code>myapp:sha-a1b2c3d</code></p>
+      <p style="font-size:0.8rem;">Tied to exact commit. Immutable. Rollback = deploy previous SHA. Full traceability.</p>
+    </div>
+  </div>
+
+  <table>
+    <thead><tr><th>Tag</th><th>Use For</th><th>Example</th></tr></thead>
+    <tbody>
+      <tr><td><code>sha-&lt;short&gt;</code></td><td>CI builds (traceability)</td><td><code>sha-a1b2c3d</code></td></tr>
+      <tr><td><code>v1.2.3</code></td><td>Releases (semver)</td><td><code>v1.2.3</code></td></tr>
+      <tr><td><code>main-42</code></td><td>Branch + run number</td><td><code>main-42</code></td></tr>
+      <tr><td><code>latest</code></td><td>Only as convenience, never for deploys</td><td>—</td></tr>
+    </tbody>
+  </table>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>🏋️ Container Build Pipeline</h2>
+
+  <div class="exercise">
+    <h3>Create ACR (one-time setup)</h3>
+<pre><code>ACR_NAME="acrcicdmastery$(openssl rand -hex 3)"
+
+az acr create \
+  --name $ACR_NAME \
+  --resource-group rg-cicd-mastery \
+  --sku Basic
+
+# Grant your GitHub Actions SP the AcrPush role
+ACR_ID=$(az acr show --name $ACR_NAME --query id -o tsv)
+az role assignment create \
+  --assignee $APP_ID \
+  --role "AcrPush" \
+  --scope $ACR_ID
+
+# Add as GitHub variables:
+# ACR_NAME = acrcicdmasteryXXX
+# ACR_LOGIN_SERVER = acrcicdmasteryXXX.azurecr.io
+</code></pre>
+
+    <h3>The workflow</h3>
+<pre><code><span style="color:#6c7086"># .github/workflows/container.yml</span>
+<span style="color:#89b4fa">name:</span> <span style="color:#a6e3a1">Container Build</span>
+
+<span style="color:#89b4fa">on:</span>
+  <span style="color:#89b4fa">push:</span>
+    <span style="color:#89b4fa">branches:</span> <span style="color:#a6e3a1">[main]</span>
+  <span style="color:#89b4fa">pull_request:</span>
+    <span style="color:#89b4fa">branches:</span> <span style="color:#a6e3a1">[main]</span>
+
+<span style="color:#89b4fa">permissions:</span>
+  <span style="color:#89b4fa">id-token:</span> <span style="color:#a6e3a1">write</span>
+  <span style="color:#89b4fa">contents:</span> <span style="color:#a6e3a1">read</span>
+
+<span style="color:#89b4fa">env:</span>
+  <span style="color:#89b4fa">IMAGE:</span> <span style="color:#a6e3a1">cicd-mastery-api</span>
+
+<span style="color:#89b4fa">jobs:</span>
+  <span style="color:#89b4fa">build-push:</span>
+    <span style="color:#89b4fa">name:</span> <span style="color:#a6e3a1">🐳 Build & Push</span>
+    <span style="color:#89b4fa">runs-on:</span> <span style="color:#a6e3a1">ubuntu-latest</span>
+    <span style="color:#89b4fa">outputs:</span>
+      <span style="color:#89b4fa">image-tag:</span> <span style="color:#a6e3a1">${{ steps.tag.outputs.value }}</span>
+    <span style="color:#89b4fa">steps:</span>
+      - <span style="color:#89b4fa">uses:</span> <span style="color:#a6e3a1">actions/checkout@v4</span>
+
+      - <span style="color:#89b4fa">name:</span> <span style="color:#a6e3a1">Set image tag</span>
+        <span style="color:#89b4fa">id:</span> <span style="color:#a6e3a1">tag</span>
+        <span style="color:#89b4fa">run:</span> <span style="color:#a6e3a1">echo "value=sha-$(echo ${{ github.sha }} | cut -c1-7)" >> $GITHUB_OUTPUT</span>
+
+      - <span style="color:#89b4fa">name:</span> <span style="color:#a6e3a1">Set up Docker Buildx</span>
+        <span style="color:#89b4fa">uses:</span> <span style="color:#a6e3a1">docker/setup-buildx-action@v3</span>
+
+      - <span style="color:#89b4fa">name:</span> <span style="color:#a6e3a1">Azure Login</span>
+        <span style="color:#89b4fa">if:</span> <span style="color:#a6e3a1">github.event_name == 'push'</span>
+        <span style="color:#89b4fa">uses:</span> <span style="color:#a6e3a1">azure/login@v2</span>
+        <span style="color:#89b4fa">with:</span>
+          <span style="color:#89b4fa">client-id:</span> <span style="color:#a6e3a1">${{ secrets.AZURE_CLIENT_ID }}</span>
+          <span style="color:#89b4fa">tenant-id:</span> <span style="color:#a6e3a1">${{ secrets.AZURE_TENANT_ID }}</span>
+          <span style="color:#89b4fa">subscription-id:</span> <span style="color:#a6e3a1">${{ secrets.AZURE_SUBSCRIPTION_ID }}</span>
+
+      - <span style="color:#89b4fa">name:</span> <span style="color:#a6e3a1">Login to ACR</span>
+        <span style="color:#89b4fa">if:</span> <span style="color:#a6e3a1">github.event_name == 'push'</span>
+        <span style="color:#89b4fa">run:</span> <span style="color:#a6e3a1">az acr login --name ${{ vars.ACR_NAME }}</span>
+
+      - <span style="color:#89b4fa">name:</span> <span style="color:#a6e3a1">Build and push</span>
+        <span style="color:#89b4fa">uses:</span> <span style="color:#a6e3a1">docker/build-push-action@v5</span>
+        <span style="color:#89b4fa">with:</span>
+          <span style="color:#89b4fa">context:</span> <span style="color:#a6e3a1">.</span>
+          <span style="color:#89b4fa">push:</span> <span style="color:#a6e3a1">${{ github.event_name == 'push' }}</span>  <span style="color:#6c7086"># Only push on main</span>
+          <span style="color:#89b4fa">tags:</span> <span style="color:#a6e3a1">|</span>
+            <span style="color:#a6e3a1">${{ vars.ACR_LOGIN_SERVER }}/${{ env.IMAGE }}:${{ steps.tag.outputs.value }}</span>
+            <span style="color:#a6e3a1">${{ vars.ACR_LOGIN_SERVER }}/${{ env.IMAGE }}:latest</span>
+          <span style="color:#89b4fa">cache-from:</span> <span style="color:#a6e3a1">type=gha</span>
+          <span style="color:#89b4fa">cache-to:</span> <span style="color:#a6e3a1">type=gha,mode=max</span>
+
+  <span style="color:#89b4fa">scan:</span>
+    <span style="color:#89b4fa">name:</span> <span style="color:#a6e3a1">🔍 Vulnerability Scan</span>
+    <span style="color:#89b4fa">needs:</span> <span style="color:#a6e3a1">build-push</span>
+    <span style="color:#89b4fa">if:</span> <span style="color:#a6e3a1">github.event_name == 'push'</span>
+    <span style="color:#89b4fa">runs-on:</span> <span style="color:#a6e3a1">ubuntu-latest</span>
+    <span style="color:#89b4fa">steps:</span>
+      - <span style="color:#89b4fa">name:</span> <span style="color:#a6e3a1">Azure Login</span>
+        <span style="color:#89b4fa">uses:</span> <span style="color:#a6e3a1">azure/login@v2</span>
+        <span style="color:#89b4fa">with:</span>
+          <span style="color:#89b4fa">client-id:</span> <span style="color:#a6e3a1">${{ secrets.AZURE_CLIENT_ID }}</span>
+          <span style="color:#89b4fa">tenant-id:</span> <span style="color:#a6e3a1">${{ secrets.AZURE_TENANT_ID }}</span>
+          <span style="color:#89b4fa">subscription-id:</span> <span style="color:#a6e3a1">${{ secrets.AZURE_SUBSCRIPTION_ID }}</span>
+      - <span style="color:#89b4fa">run:</span> <span style="color:#a6e3a1">az acr login --name ${{ vars.ACR_NAME }}</span>
+      - <span style="color:#89b4fa">name:</span> <span style="color:#a6e3a1">Trivy scan</span>
+        <span style="color:#89b4fa">uses:</span> <span style="color:#a6e3a1">aquasecurity/trivy-action@master</span>
+        <span style="color:#89b4fa">with:</span>
+          <span style="color:#89b4fa">image-ref:</span> <span style="color:#a6e3a1">${{ vars.ACR_LOGIN_SERVER }}/${{ env.IMAGE }}:${{ needs.build-push.outputs.image-tag }}</span>
+          <span style="color:#89b4fa">severity:</span> <span style="color:#a6e3a1">'HIGH,CRITICAL'</span>
+          <span style="color:#89b4fa">exit-code:</span> <span style="color:#a6e3a1">'1'</span>
+</code></pre>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>The Container Pipeline Flow</h2>
+
+  <div class="diagram">
+    <svg viewBox="0 0 700 100" xmlns="http://www.w3.org/2000/svg">
+      <rect x="20" y="25" width="100" height="50" rx="4" fill="#e3f2fd" stroke="#1976d2"/>
+      <text x="70" y="45" text-anchor="middle" font-size="8" font-weight="bold">Build image</text>
+      <text x="70" y="60" text-anchor="middle" font-size="7" fill="#555">docker build</text>
+      
+      <line x1="120" y1="50" x2="150" y2="50" stroke="#333" stroke-width="1.5" marker-end="url(#d13b)"/>
+      
+      <rect x="150" y="25" width="100" height="50" rx="4" fill="#fff3e0" stroke="#f57c00"/>
+      <text x="200" y="45" text-anchor="middle" font-size="8" font-weight="bold">Push to ACR</text>
+      <text x="200" y="60" text-anchor="middle" font-size="7" fill="#555">tagged: sha-abc</text>
+      
+      <line x1="250" y1="50" x2="280" y2="50" stroke="#333" stroke-width="1.5" marker-end="url(#d13b)"/>
+      
+      <rect x="280" y="25" width="100" height="50" rx="4" fill="#f3e5f5" stroke="#7b1fa2"/>
+      <text x="330" y="45" text-anchor="middle" font-size="8" font-weight="bold">Scan (Trivy)</text>
+      <text x="330" y="60" text-anchor="middle" font-size="7" fill="#555">HIGH/CRITICAL</text>
+      
+      <line x1="380" y1="50" x2="410" y2="50" stroke="#333" stroke-width="1.5" marker-end="url(#d13b)"/>
+      
+      <rect x="410" y="25" width="120" height="50" rx="4" fill="#e8f5e9" stroke="#388e3c"/>
+      <text x="470" y="45" text-anchor="middle" font-size="8" font-weight="bold">Ready to deploy</text>
+      <text x="470" y="60" text-anchor="middle" font-size="7" fill="#555">acr.io/api:sha-abc</text>
+      
+      <line x1="530" y1="50" x2="560" y2="50" stroke="#333" stroke-width="1.5" marker-end="url(#d13b)"/>
+      
+      <rect x="560" y="25" width="120" height="50" rx="4" fill="#c8e6c9" stroke="#388e3c" stroke-width="2"/>
+      <text x="620" y="45" text-anchor="middle" font-size="8" font-weight="bold">Deploy to K8s</text>
+      <text x="620" y="60" text-anchor="middle" font-size="7" fill="#555">(next lesson!)</text>
+      
+      <defs>
+        <marker id="d13b" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto">
+          <polygon points="0 0, 7 2.5, 0 5" fill="#333"/>
+        </marker>
+      </defs>
+    </svg>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>Key Details</h2>
+
+  <h3>Why <code>docker/build-push-action</code>?</h3>
+  <p>You could <code>run: docker build && docker push</code>. But the action gives you:</p>
+  <ul>
+    <li><strong>Buildx</strong> — faster, supports caching natively</li>
+    <li><strong>GHA cache</strong> — <code>cache-from: type=gha</code> reuses layers between runs</li>
+    <li><strong>Multi-platform</strong> — build for amd64 + arm64 in one go</li>
+    <li><strong>Conditional push</strong> — <code>push: false</code> on PRs (just validate the build)</li>
+  </ul>
+
+  <h3>Why scan AFTER push?</h3>
+  <p>Trivy needs to pull the image from a registry to scan it. The pattern is: push → scan → only deploy if scan passes.</p>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>🧠 Recall Check</h2>
+
+  <div class="recall">
+    <ol>
+      <li>Why use multi-stage Dockerfiles instead of single-stage?</li>
+      <li>What does <code>cache-from: type=gha</code> do?</li>
+      <li>Why is the image tagged with the git SHA instead of "latest"?</li>
+      <li>What does Trivy do and when should it block the pipeline?</li>
+    </ol>
+    <details>
+      <summary>Reveal answers</summary>
+      <ol>
+        <li>Final image only contains runtime essentials (no build tools, npm cache, dev deps). Result: ~80MB vs ~950MB. Smaller = faster pulls, less attack surface, cheaper storage.</li>
+        <li>Uses GitHub Actions' built-in cache to store Docker layers between workflow runs. Subsequent builds skip unchanged layers — typically 3-5× faster.</li>
+        <li><strong>Traceability and immutability.</strong> SHA ties the image to an exact commit. You can always trace what code is in a running container. "latest" is ambiguous and mutable.</li>
+        <li>Trivy scans container images for known CVEs. Set <code>exit-code: 1</code> + <code>severity: HIGH,CRITICAL</code> to block deployment if serious vulnerabilities are found in your base image or dependencies.</li>
+      </ol>
+    </details>
+  </div>
+
+  <div class="key-insight">
+    You now have a containerised application in ACR, scanned for vulnerabilities, tagged with its git SHA. This image is what gets deployed to Kubernetes. Next lesson: deploying it to AKS.
+  </div>
+
+</body>
+</html>

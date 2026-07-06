@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lesson 008: Network Security & Routing | Azure Solutions Architect</title>
+    <link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<div class="lesson-wrap">
+
+    <header class="lesson-header">
+        <span class="lesson-number">008</span>
+        <h1>Network Security Groups & Routing</h1>
+        <p class="subtitle">🟡 REVIEW — NSG vs Azure Firewall vs NVA decisions, UDR design for forced tunnelling, and scalable micro-segmentation</p>
+        <div class="lesson-meta">~20 min read | Phase 2: Core Infrastructure | Design Focus</div>
+    </header>
+
+    <nav class="toc">
+        <h2>Contents</h2>
+        <ol>
+            <li><a href="#layered">Layered Network Security Model</a></li>
+            <li><a href="#decision">NSG vs Azure Firewall vs NVA</a></li>
+            <li><a href="#firewall-tiers">Azure Firewall Tiers</a></li>
+            <li><a href="#udr">UDR Design Patterns</a></li>
+            <li><a href="#asg">Application Security Groups</a></li>
+            <li><a href="#flow-logs">NSG Flow Logs & Traffic Analytics</a></li>
+            <li><a href="#case-study">Real-World: Regulated Healthcare</a></li>
+            <li><a href="#quiz">Quiz</a></li>
+        </ol>
+    </nav>
+
+    <!-- Section 1 -->
+    <section id="layered" class="fade-in">
+        <h2>Layered Network Security Model</h2>
+        <p>Defense in depth means multiple layers. Each layer catches what the previous one misses. The architect's job is deciding <strong>which layers are worth the cost</strong>.</p>
+
+        <div class="diagram">
+            <div data-diagram='{"nodes":[{"id":"internet","label":"Internet","x":50,"y":110,"w":100,"h":40,"shape":"rounded","icon":"🌐"},{"id":"ddos","label":"DDoS Protection","x":180,"y":110,"w":140,"h":40,"shape":"rect","icon":"🛡️"},{"id":"waf","label":"WAF (L7)","x":350,"y":110,"w":110,"h":40,"shape":"rect","icon":"🔒"},{"id":"fw","label":"Azure Firewall","x":490,"y":110,"w":140,"h":40,"shape":"rect","icon":"🔥"},{"id":"nsg","label":"NSG (Subnet)","x":660,"y":110,"w":120,"h":40,"shape":"rect","icon":"📋"},{"id":"app","label":"Application","x":810,"y":110,"w":110,"h":40,"shape":"rounded","icon":"💻"}],"edges":[{"from":"internet","to":"ddos"},{"from":"ddos","to":"waf"},{"from":"waf","to":"fw"},{"from":"fw","to":"nsg"},{"from":"nsg","to":"app"}]}'></div>
+            <figcaption>Defense in depth: Internet → DDoS → WAF → Firewall → NSG → App</figcaption>
+        </div>
+
+        <div class="key-concept">
+            <h3>Not Every Layer Is Always Needed</h3>
+            <ul>
+                <li><strong>Internal-only workloads</strong> (no public endpoint): Skip DDoS & WAF; NSG + Firewall may suffice</li>
+                <li><strong>Simple web app</strong> (App Service + managed DB): WAF on Front Door/App Gateway + NSG; no Firewall needed</li>
+                <li><strong>Regulated enterprise</strong>: All layers, plus NVA for IDS/IPS if compliance demands specific vendor</li>
+            </ul>
+        </div>
+    </section>
+
+    <!-- Section 2 -->
+    <section id="decision" class="fade-in">
+        <h2>NSG vs Azure Firewall vs NVA — Decision Framework</h2>
+
+        <div class="compare-grid">
+            <table>
+                <thead><tr><th>Criterion</th><th>NSG</th><th>Azure Firewall</th><th>NVA (3rd party)</th></tr></thead>
+                <tbody>
+                    <tr><td><strong>Layer</strong></td><td>L3/L4 (IP + port)</td><td>L3-L7 (FQDN, TLS inspection)</td><td>L3-L7 (vendor-specific)</td></tr>
+                    <tr><td><strong>Scope</strong></td><td>Per subnet / NIC</td><td>Centralized in hub</td><td>Centralized in hub</td></tr>
+                    <tr><td><strong>Cost</strong></td><td>Free</td><td>~$900-1,500/mo (Standard)</td><td>$2,000-10,000+/mo</td></tr>
+                    <tr><td><strong>FQDN filtering</strong></td><td>No</td><td>Yes</td><td>Yes</td></tr>
+                    <tr><td><strong>TLS inspection</strong></td><td>No</td><td>Yes (Premium)</td><td>Yes</td></tr>
+                    <tr><td><strong>IDS/IPS</strong></td><td>No</td><td>Yes (Premium)</td><td>Yes (specialized)</td></tr>
+                    <tr><td><strong>Logging</strong></td><td>Flow logs (raw)</td><td>Structured logs + Workbooks</td><td>Vendor-specific SIEM</td></tr>
+                    <tr><td><strong>Management</strong></td><td>Per-subnet rules</td><td>Centralized policy</td><td>Vendor console</td></tr>
+                    <tr><td><strong>Best for</strong></td><td>Micro-segmentation within VNet</td><td>Centralized egress/E-W control</td><td>Compliance requiring specific vendor (Palo Alto, Fortinet)</td></tr>
+                </tbody>
+            </table>
+        </div>
+
+        <div class="exam-tip">
+            <h3>AZ-305 Exam Tip</h3>
+            <p>If the scenario mentions "FQDN-based filtering" or "TLS inspection" — the answer involves Azure Firewall Premium or NVA, not NSGs. If it mentions "compliance requires Palo Alto/Fortinet" — that's NVA territory. NSG alone is only sufficient for simple port-based rules.</p>
+        </div>
+    </section>
+
+    <!-- Section 3 -->
+    <section id="firewall-tiers" class="fade-in">
+        <h2>Azure Firewall Tiers</h2>
+
+        <div class="compare-grid">
+            <table>
+                <thead><tr><th>Feature</th><th>Basic</th><th>Standard</th><th>Premium</th></tr></thead>
+                <tbody>
+                    <tr><td><strong>Cost</strong></td><td>~$300/mo</td><td>~$900/mo</td><td>~$1,500/mo</td></tr>
+                    <tr><td><strong>Throughput</strong></td><td>250 Mbps</td><td>30 Gbps</td><td>100 Gbps</td></tr>
+                    <tr><td><strong>FQDN filtering</strong></td><td>✅</td><td>✅</td><td>✅</td></tr>
+                    <tr><td><strong>Threat intelligence</strong></td><td>Alert only</td><td>Alert & deny</td><td>Alert & deny</td></tr>
+                    <tr><td><strong>TLS inspection</strong></td><td>❌</td><td>❌</td><td>✅</td></tr>
+                    <tr><td><strong>IDPS</strong></td><td>❌</td><td>❌</td><td>✅</td></tr>
+                    <tr><td><strong>URL filtering</strong></td><td>❌</td><td>❌</td><td>✅ (full URL path)</td></tr>
+                    <tr><td><strong>Web categories</strong></td><td>❌</td><td>FQDN-based</td><td>Full URL-based</td></tr>
+                    <tr><td><strong>Best for</strong></td><td>SMB, dev/test</td><td>Production enterprise</td><td>Regulated (finance, healthcare)</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </section>
+
+    <!-- Section 4 -->
+    <section id="udr" class="fade-in">
+        <h2>UDR Design Patterns</h2>
+        <p>User-Defined Routes override Azure's default routing. They're how you <strong>force traffic through a firewall</strong> — the backbone of hub-spoke security.</p>
+
+        <div class="diagram">
+            <div data-diagram='{"nodes":[{"id":"spoke1","label":"Spoke VNet 1","x":80,"y":30,"w":140,"h":40,"shape":"rounded"},{"id":"spoke2","label":"Spoke VNet 2","x":480,"y":30,"w":140,"h":40,"shape":"rounded"},{"id":"fw","label":"Azure Firewall","x":280,"y":120,"w":150,"h":50,"shape":"rect","icon":"🔥"},{"id":"onprem","label":"On-Premises","x":280,"y":230,"w":150,"h":40,"shape":"rounded","icon":"🏢"},{"id":"internet","label":"Internet","x":500,"y":230,"w":120,"h":40,"shape":"rounded","icon":"🌐"}],"edges":[{"from":"spoke1","to":"fw","label":"UDR 0.0.0.0/0"},{"from":"spoke2","to":"fw","label":"UDR 0.0.0.0/0"},{"from":"fw","to":"onprem","label":"VPN/ER"},{"from":"fw","to":"internet","label":"filtered egress"}],"groups":[{"label":"Hub VNet","x":240,"y":90,"w":230,"h":100}]}'></div>
+            <figcaption>Forced tunnelling: All spoke traffic routes through hub firewall via UDR 0.0.0.0/0</figcaption>
+        </div>
+
+        <h3>Common UDR Patterns</h3>
+        <ul>
+            <li><strong>Default route override</strong> (<code>0.0.0.0/0 → Firewall NIC</code>) — forces all internet-bound traffic through firewall</li>
+            <li><strong>Spoke-to-spoke via hub</strong> — prevents direct VNet peering bypass; all east-west traffic inspected</li>
+            <li><strong>Forced tunnelling to on-prem</strong> — route internet traffic through on-prem proxy (compliance requirement)</li>
+            <li><strong>Service bypass</strong> — specific routes for Azure PaaS that shouldn't go through firewall (e.g., AzureCloud service tag)</li>
+        </ul>
+
+        <div class="callout-warning">
+            <h3>Asymmetric Routing Pitfall</h3>
+            <p>If traffic goes <strong>out</strong> through the firewall but the <strong>return</strong> takes a different path, the firewall drops it (stateful inspection fails). Always ensure return traffic follows the same path. Common mistake: adding UDR on app subnet but not on the GatewaySubnet.</p>
+        </div>
+    </section>
+
+    <!-- Section 5 -->
+    <section id="asg" class="fade-in">
+        <h2>Application Security Groups</h2>
+        <p>ASGs let you group VMs by role (web, app, db) and write NSG rules using <strong>logical names instead of IP addresses</strong>. This scales far better than per-IP rules.</p>
+
+        <h3>Without ASGs (IP-based)</h3>
+        <pre data-lang="text"><code>Allow 10.1.1.4, 10.1.1.5, 10.1.1.6 → 10.1.2.4, 10.1.2.5 : Port 443
+Allow 10.1.2.4, 10.1.2.5 → 10.1.3.4 : Port 1433</code></pre>
+
+        <h3>With ASGs (role-based)</h3>
+        <pre data-lang="text"><code>Allow ASG:web-servers → ASG:app-servers : Port 443
+Allow ASG:app-servers → ASG:db-servers : Port 1433</code></pre>
+
+        <div class="key-concept">
+            <h3>ASG Architecture Benefits</h3>
+            <ul>
+                <li>Rules survive VM scale-out — new VMs auto-join the ASG</li>
+                <li>No rule updates when IPs change</li>
+                <li>Self-documenting security rules (readable by auditors)</li>
+                <li>Works across subnets within the same VNet</li>
+            </ul>
+        </div>
+    </section>
+
+    <!-- Section 6 -->
+    <section id="flow-logs" class="fade-in">
+        <h2>NSG Flow Logs & Traffic Analytics</h2>
+        <p>Flow logs capture every connection attempt at the NSG level. Traffic Analytics processes them into actionable insights.</p>
+
+        <h3>Architecture for Compliance</h3>
+        <ul>
+            <li><strong>NSG Flow Logs v2</strong> → Storage Account (retention for audit) → Log Analytics workspace</li>
+            <li><strong>Traffic Analytics</strong> processes flow data: top talkers, geo mapping, open ports, malicious IPs</li>
+            <li><strong>Integration</strong>: Export to Microsoft Sentinel for SIEM correlation</li>
+            <li><strong>Cost consideration</strong>: Flow logs generate significant storage — use lifecycle policies for tiering</li>
+        </ul>
+    </section>
+
+    <!-- Section 7: Case Study -->
+    <section id="case-study" class="fade-in">
+        <div class="real-world-example">
+            <h3>Real-World: MedSecure — Regulated Healthcare Platform</h3>
+            <p><strong>Scenario:</strong> Healthcare SaaS handling PHI (Protected Health Information). Must comply with HIPAA. Requires: encrypted transit, no direct internet access from data tier, full traffic audit, IDS/IPS.</p>
+
+            <h4>Network Security Architecture</h4>
+            <ul>
+                <li><strong>DDoS Protection Standard</strong> on VNet (HIPAA requires availability protection)</li>
+                <li><strong>Front Door + WAF</strong> for public API endpoints (OWASP rules, rate limiting, geo-filtering)</li>
+                <li><strong>Azure Firewall Premium</strong> in hub (TLS inspection for egress, IDPS for known threats, FQDN-allow-list for data tier)</li>
+                <li><strong>NSGs + ASGs</strong> on every subnet: web-asg → app-asg → data-asg (only needed ports)</li>
+                <li><strong>UDRs</strong>: 0.0.0.0/0 → Firewall on all spokes; data subnet has NO internet route at all</li>
+                <li><strong>NSG Flow Logs v2</strong> → Storage (365-day retention) → Traffic Analytics → Sentinel</li>
+                <li><strong>Private Endpoints</strong> for all PaaS (SQL, Storage, Key Vault) — no public access</li>
+            </ul>
+
+            <h4>Cost: ~$3,200/mo for security infrastructure</h4>
+            <p>DDoS ($2,944) + Firewall Premium ($1,500) + Flow Logs storage (~$200). The DDoS cost is shared across all VNets in the subscription. Worth it for HIPAA compliance and the $1.5M penalty avoidance.</p>
+        </div>
+    </section>
+
+    <!-- Quiz -->
+    <section id="quiz" class="fade-in">
+        <div class="quiz">
+            <h2>Knowledge Check</h2>
+
+            <div class="quiz-question" data-correct="c">
+                <p><strong>1.</strong> A workload requires FQDN-based egress filtering (allow only *.microsoft.com and api.partner.com). NSGs can't do this. What's the most cost-effective solution?</p>
+                <div class="quiz-options">
+                    <label><input type="radio" name="q1" value="a"> NVA (Palo Alto)</label>
+                    <label><input type="radio" name="q1" value="b"> Azure Firewall Premium</label>
+                    <label><input type="radio" name="q1" value="c"> Azure Firewall Standard</label>
+                    <label><input type="radio" name="q1" value="d"> NSG with service tags</label>
+                </div>
+                <div class="quiz-feedback" data-explanation="FQDN filtering is available in Azure Firewall Standard (~$900/mo). Premium adds TLS inspection and IDPS but isn't needed for basic FQDN filtering. NVA is overkill and more expensive."></div>
+            </div>
+
+            <div class="quiz-question" data-correct="b">
+                <p><strong>2.</strong> Spoke-to-spoke traffic is bypassing the hub firewall even though UDRs are configured. What's the most likely cause?</p>
+                <div class="quiz-options">
+                    <label><input type="radio" name="q2" value="a"> NSGs are blocking the traffic</label>
+                    <label><input type="radio" name="q2" value="b"> VNet peering has 'Allow forwarded traffic' disabled or UDR doesn't cover the spoke CIDR</label>
+                    <label><input type="radio" name="q2" value="c"> Azure Firewall needs a network rule</label>
+                    <label><input type="radio" name="q2" value="d"> The spokes need direct peering</label>
+                </div>
+                <div class="quiz-feedback" data-explanation="For hub-spoke transit routing: spokes need UDR pointing to firewall, peering must allow forwarded traffic, and the hub needs 'Allow gateway transit' or IP forwarding on the NVA/Firewall. Missing any of these breaks the flow."></div>
+            </div>
+
+            <div class="quiz-question" data-correct="d">
+                <p><strong>3.</strong> You have 50 web servers that scale dynamically. Writing NSG rules with IP addresses is unmanageable. What's the best approach?</p>
+                <div class="quiz-options">
+                    <label><input type="radio" name="q3" value="a"> Use a /24 subnet and allow the entire range</label>
+                    <label><input type="radio" name="q3" value="b"> Use Azure Firewall for all traffic</label>
+                    <label><input type="radio" name="q3" value="c"> Use service tags</label>
+                    <label><input type="radio" name="q3" value="d"> Use Application Security Groups — VMs auto-join by membership</label>
+                </div>
+                <div class="quiz-feedback" data-explanation="ASGs let you write rules like 'Allow ASG:web → ASG:app on 443'. New VMs automatically inherit rules when added to the ASG. No IP management needed."></div>
+            </div>
+
+            <div class="quiz-question" data-correct="a">
+                <p><strong>4.</strong> Traffic exits through Azure Firewall but return traffic comes directly back to the VM (bypassing firewall). The connection fails. Why?</p>
+                <div class="quiz-options">
+                    <label><input type="radio" name="q4" value="a"> Asymmetric routing — the firewall drops return packets it didn't see the initial request for</label>
+                    <label><input type="radio" name="q4" value="b"> The NSG is blocking return traffic</label>
+                    <label><input type="radio" name="q4" value="c"> Azure Firewall has a connection limit</label>
+                    <label><input type="radio" name="q4" value="d"> The VM's NIC doesn't have IP forwarding</label>
+                </div>
+                <div class="quiz-feedback" data-explanation="Azure Firewall is stateful — it tracks connection state. If return traffic bypasses it, the firewall has no record of the original request and drops the packet. Solution: ensure symmetric routing with UDRs on all involved subnets."></div>
+            </div>
+        </div>
+    </section>
+
+    <!-- Nav -->
+    <div class="lesson-summary">
+        <h2>Key Takeaways</h2>
+        <ul>
+            <li>NSGs are free micro-segmentation (L3/L4); Azure Firewall adds centralized L7 control; NVAs for specific compliance vendors</li>
+            <li>UDRs force traffic through firewalls — always ensure symmetric routing to avoid drops</li>
+            <li>ASGs scale network rules with dynamic workloads — use them instead of IP-based rules</li>
+            <li>Flow Logs + Traffic Analytics = network visibility for compliance audits</li>
+        </ul>
+    </div>
+
+    <nav class="lesson-nav">
+        <a href="0007-virtual-networks-subnets.html">← 007: Virtual Networks</a>
+        <a href="0009-vnet-peering-hybrid-connectivity.html">009: Peering & Hybrid →</a>
+    </nav>
+
+</div>
+
+<script src="../assets/diagrams.js"></script>
+<script>
+    document.addEventListener('DOMContentLoaded', function() {
+        AzureLessons.Diagrams.renderAll();
+        AzureLessons.Quiz.init();
+        AzureLessons.ScrollReveal.init();
+        AzureLessons.Collapsible.init();
+    });
+</script>
+</body>
+</html>

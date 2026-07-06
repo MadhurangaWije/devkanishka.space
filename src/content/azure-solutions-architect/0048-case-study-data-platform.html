@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lesson 048 – Case Study: Global E-Commerce Data Platform | AZ-305 Study Guide</title>
+    <link rel="stylesheet" href="../assets/styles.css">
+    <script src="../assets/diagrams.js"></script>
+</head>
+<body>
+<div class="lesson-wrap">
+
+    <header class="lesson-header fade-in">
+        <span class="lesson-number">Lesson 048 · 🟢 DEEP DIVE (~35 min)</span>
+        <h1>Case Study: Global E-Commerce Data Platform</h1>
+        <p>Design a globally distributed data layer for GlobalMart — 10 M active users, five workload types, GDPR/PCI compliance — using Cosmos DB, Azure SQL, Redis, and Synapse.</p>
+    </header>
+
+    <nav class="toc fade-in">
+        <h2>In This Lesson</h2>
+        <ol>
+            <li><a href="#scenario">The Scenario</a></li>
+            <li><a href="#decisions">Architecture Decisions</a></li>
+            <li><a href="#diagram-arch">Overall Data Architecture</a></li>
+            <li><a href="#diagram-flow">Order Processing Data Flow</a></li>
+            <li><a href="#compliance">Compliance Deep-Dive</a></li>
+            <li><a href="#cost">Cost Optimization</a></li>
+            <li><a href="#exam-tip">Exam Tip</a></li>
+            <li><a href="#quiz">Knowledge Check</a></li>
+        </ol>
+    </nav>
+
+    <!-- 1. Scenario -->
+    <section id="scenario" class="fade-in">
+        <h2>1. The Scenario — GlobalMart</h2>
+        <table class="compact-table">
+            <tr><th>Attribute</th><th>Detail</th></tr>
+            <tr><td>Users</td><td>10 M active across US, EU, APAC</td></tr>
+            <tr><td>Product Catalog</td><td>5 M SKUs — read-heavy, &lt;10 ms latency globally</td></tr>
+            <tr><td>Order Processing</td><td>Transactional, ACID, ~50 K orders/day</td></tr>
+            <tr><td>Sessions &amp; Carts</td><td>Ephemeral, high throughput, sub-ms reads</td></tr>
+            <tr><td>Analytics</td><td>Historical orders, product performance, executive dashboards</td></tr>
+            <tr><td>Compliance</td><td>GDPR (EU data residency), PCI-DSS (payment isolation)</td></tr>
+            <tr><td>Budget</td><td>Optimize cost; invest in critical paths (payments, catalog)</td></tr>
+        </table>
+    </section>
+
+    <!-- 2. Decisions -->
+    <section id="decisions" class="fade-in">
+        <h2>2. Architecture Decisions</h2>
+
+        <h3>A. Product Catalog → Cosmos DB (NoSQL API)</h3>
+        <ul>
+            <li><strong>Why:</strong> Multi-region read replicas deliver &lt;10 ms reads in every region; schema-flexible for varied product attributes.</li>
+            <li><strong>Consistency:</strong> Session — guarantees read-your-writes for merchandising editors while keeping global latency low.</li>
+            <li><strong>Partition key:</strong> <code>categoryId</code> — even distribution across 50+ categories; hot partitions avoided.</li>
+            <li><strong>Cost lever:</strong> Autoscale RU/s; reserved capacity for baseline.</li>
+        </ul>
+
+        <h3>B. Orders → Azure SQL Hyperscale</h3>
+        <ul>
+            <li><strong>Why:</strong> Full ACID, relational integrity for orders/line-items/payments.</li>
+            <li><strong>HA:</strong> Failover group across US-East ↔ US-West; geo-replication read replica in EU for local reporting.</li>
+            <li><strong>Tier:</strong> vCore (Gen5, 8 vCores) — predictable compute for transaction bursts.</li>
+            <li><strong>Scaling:</strong> Hyperscale allows up to 100 TB; read scale-out for analytics queries.</li>
+        </ul>
+
+        <h3>C. Sessions &amp; Carts → Azure Cache for Redis (Premium)</h3>
+        <ul>
+            <li><strong>Why:</strong> Sub-millisecond reads, built-in TTL for ephemeral data.</li>
+            <li><strong>Geo-replication:</strong> Active geo-replication across two regions for session continuity during failover.</li>
+            <li><strong>Eviction:</strong> <code>volatile-lru</code> — expire carts after 24 h inactivity.</li>
+        </ul>
+
+        <h3>D. Analytics → Azure Synapse + Power BI</h3>
+        <ul>
+            <li><strong>Pattern:</strong> Change Data Capture (CDC) from SQL → Synapse dedicated pool for historical analysis.</li>
+            <li><strong>Power BI:</strong> DirectQuery to Synapse for executive dashboards; Import mode for self-service.</li>
+            <li><strong>Alternative:</strong> SQL read replicas for lightweight operational reports.</li>
+        </ul>
+
+        <h3>E. Payment Data → Isolated Azure SQL + CMK</h3>
+        <ul>
+            <li><strong>Isolation:</strong> Separate resource group, separate subscription for PCI scope reduction.</li>
+            <li><strong>Encryption:</strong> Customer-Managed Key (CMK) via Key Vault; TDE + Always Encrypted for card data.</li>
+            <li><strong>Network:</strong> Private Endpoints only — no public access; NSG restricts to payment microservice subnet.</li>
+        </ul>
+
+        <h3>F. Data Integration → Event Grid + Functions</h3>
+        <ul>
+            <li><strong>Catalog updates:</strong> Merchandising service publishes to Event Grid → Azure Function fans out to Cosmos DB replicas and CDN invalidation.</li>
+            <li><strong>Order events:</strong> SQL triggers CDC → Event Hub → downstream analytics and notification services.</li>
+        </ul>
+    </section>
+
+    <!-- 3. Architecture Diagram -->
+    <section id="diagram-arch" class="fade-in">
+        <h2>3. Overall Data Architecture</h2>
+        <div class="diagram-container">
+            <div class="box-diagram" data-boxes='[
+                {"id":"users","label":"10M Users\n(US / EU / APAC)","x":300,"y":10,"color":"blue"},
+                {"id":"apigw","label":"API Gateway\n(APIM + Front Door)","x":300,"y":90,"color":"gray"},
+                {"id":"cosmos","label":"Cosmos DB\nProduct Catalog\n(Multi-Region)","x":80,"y":200,"color":"green"},
+                {"id":"redis","label":"Azure Cache\nfor Redis\n(Sessions/Carts)","x":300,"y":200,"color":"orange"},
+                {"id":"sql","label":"Azure SQL\nHyperscale\n(Orders)","x":520,"y":200,"color":"blue"},
+                {"id":"payment","label":"Isolated SQL\nPayment (PCI)\nCMK + Private EP","x":520,"y":330,"color":"red"},
+                {"id":"synapse","label":"Azure Synapse\nAnalytics","x":80,"y":330,"color":"purple"},
+                {"id":"eventgrid","label":"Event Grid\n+ Functions","x":300,"y":330,"color":"gray"},
+                {"id":"powerbi","label":"Power BI\nDashboards","x":80,"y":430,"color":"purple"}
+            ]' data-arrows='[
+                ["users","apigw","HTTPS"],
+                ["apigw","cosmos","reads"],
+                ["apigw","redis","session"],
+                ["apigw","sql","orders"],
+                ["sql","payment","payment ref"],
+                ["sql","eventgrid","CDC events"],
+                ["eventgrid","cosmos","catalog sync"],
+                ["eventgrid","synapse","analytics"],
+                ["synapse","powerbi","DirectQuery"]
+            ]'></div>
+        </div>
+    </section>
+
+    <!-- 4. Order Flow Diagram -->
+    <section id="diagram-flow" class="fade-in">
+        <h2>4. Order Processing Data Flow</h2>
+        <div class="diagram-container">
+            <div class="box-diagram" data-boxes='[
+                {"id":"client","label":"Client App","x":50,"y":10,"color":"blue"},
+                {"id":"cart","label":"Redis\n(Cart)","x":50,"y":100,"color":"orange"},
+                {"id":"ordersvc","label":"Order Service\n(App Service)","x":250,"y":100,"color":"gray"},
+                {"id":"sqlord","label":"Azure SQL\n(Order DB)","x":250,"y":220,"color":"blue"},
+                {"id":"paysvc","label":"Payment Service","x":450,"y":100,"color":"red"},
+                {"id":"paydb","label":"Payment SQL\n(PCI Isolated)","x":450,"y":220,"color":"red"},
+                {"id":"evthub","label":"Event Hub","x":250,"y":330,"color":"purple"},
+                {"id":"notify","label":"Notification\nFunction","x":80,"y":400,"color":"gray"},
+                {"id":"analytics","label":"Synapse\nIngestion","x":420,"y":400,"color":"purple"}
+            ]' data-arrows='[
+                ["client","cart","add items"],
+                ["client","ordersvc","checkout"],
+                ["ordersvc","cart","read cart"],
+                ["ordersvc","sqlord","INSERT order"],
+                ["ordersvc","paysvc","charge"],
+                ["paysvc","paydb","store token"],
+                ["sqlord","evthub","CDC"],
+                ["evthub","notify","order confirmed"],
+                ["evthub","analytics","historical"]
+            ]'></div>
+        </div>
+    </section>
+
+    <!-- 5. Compliance -->
+    <section id="compliance" class="fade-in">
+        <h2>5. Compliance Deep-Dive</h2>
+        <table class="compact-table">
+            <tr><th>Requirement</th><th>Implementation</th></tr>
+            <tr><td>GDPR — EU data residency</td><td>Cosmos DB write region = West Europe; Azure SQL geo-replica in EU; Azure Policy denies non-EU resource creation in EU subscription</td></tr>
+            <tr><td>GDPR — Right to erasure</td><td>Soft-delete + scheduled purge pipeline; Cosmos DB TTL for session data</td></tr>
+            <tr><td>PCI-DSS — Scope reduction</td><td>Payment DB in isolated subscription; tokenization — only tokens stored in Order DB</td></tr>
+            <tr><td>PCI-DSS — Encryption</td><td>TDE + Always Encrypted (CMK in HSM-backed Key Vault); TLS 1.2 in transit</td></tr>
+            <tr><td>PCI-DSS — Network</td><td>Private Endpoints; dedicated subnet; NSG allow-list; no public IP</td></tr>
+        </table>
+    </section>
+
+    <!-- 6. Cost -->
+    <section id="cost" class="fade-in">
+        <h2>6. Cost Optimization</h2>
+        <ul>
+            <li><strong>Cosmos DB:</strong> Autoscale RU/s (pay for peak only when needed) + 1-year reserved capacity for baseline.</li>
+            <li><strong>SQL Hyperscale:</strong> Reserved instances (3-year) for order DB; serverless tier for dev/test.</li>
+            <li><strong>Redis:</strong> Premium P1 with clustering only if &gt;53 GB; otherwise Standard C3 suffices for sessions.</li>
+            <li><strong>Synapse:</strong> Serverless SQL pool for ad-hoc; dedicated pool paused outside business hours.</li>
+            <li><strong>Networking:</strong> Front Door caching reduces Cosmos RU consumption by ~40 % for catalog reads.</li>
+        </ul>
+    </section>
+
+    <!-- Exam Tip -->
+    <section id="exam-tip" class="fade-in callout-box">
+        <h2>🎯 Exam Tip</h2>
+        <p>AZ-305 case studies ask you to match workload characteristics (read-heavy vs. transactional, ephemeral vs. durable) to the correct Azure data service. Always justify <strong>consistency model</strong>, <strong>partition key</strong>, and <strong>compliance controls</strong> — these are the differentiators examiners look for.</p>
+    </section>
+
+    <!-- Quiz -->
+    <section id="quiz" class="fade-in">
+        <h2>📝 Knowledge Check</h2>
+        <div class="quiz-container" data-questions='[
+            {"question":"GlobalMart needs sub-10 ms product catalog reads in US, EU, and APAC. Which service and configuration best meets this requirement?","options":["Azure SQL with geo-replication","Cosmos DB with multi-region reads and session consistency","Azure Table Storage with GRS","Azure Cache for Redis Enterprise"],"answer":1,"explanation":"Cosmos DB with multi-region read replicas places data close to users in each region, achieving single-digit-ms latency with session consistency for read-your-writes."},
+            {"question":"Why is categoryId a good partition key for the product catalog in Cosmos DB?","options":["It never changes so updates are cheap","It distributes data evenly across 50+ logical partitions avoiding hot spots","It matches the primary key of Azure SQL","Cosmos DB requires a string partition key"],"answer":1,"explanation":"A partition key that distributes ~5 M SKUs across 50+ categories prevents hot partitions and balances RU consumption. Cardinality and even distribution are the key criteria."},
+            {"question":"To comply with PCI-DSS, GlobalMart isolates payment data. Which combination provides the STRONGEST isolation?","options":["Same SQL server with row-level security","Separate database on same server with CMK","Separate subscription, private endpoints, CMK, Always Encrypted","Cosmos DB with customer-managed encryption"],"answer":2,"explanation":"A separate subscription provides a blast-radius boundary (network, RBAC, billing). Combined with private endpoints and Always Encrypted with CMK, it minimizes PCI scope and meets audit requirements."},
+            {"question":"For the shopping cart workload (ephemeral, high throughput, sub-ms reads), which data store is most appropriate?","options":["Azure SQL Serverless","Cosmos DB with strong consistency","Azure Cache for Redis Premium with TTL-based eviction","Azure Blob Storage Hot tier"],"answer":2,"explanation":"Redis provides sub-millisecond latency, native TTL for automatic cart expiration, and Premium tier supports geo-replication for HA — ideal for ephemeral, high-throughput session data."},
+            {"question":"GlobalMart wants historical order analytics without impacting transactional performance. Which approach is recommended?","options":["Run Power BI DirectQuery against the primary SQL database","Use CDC to feed data into Azure Synapse; Power BI queries Synapse","Increase SQL DTUs during reporting hours","Export CSV files nightly to Blob Storage"],"answer":1,"explanation":"CDC decouples analytics from OLTP. Synapse is purpose-built for large-scale analytical queries, and offloading reporting preserves order-processing performance on Azure SQL."}
+        ]'></div>
+    </section>
+
+    <nav class="lesson-nav">
+        <a href="0047-service-level-objectives.html" class="prev">← Lesson 047</a>
+        <a href="0049-azure-openai-integration.html" class="next">Lesson 049 →</a>
+    </nav>
+</div>
+</body>
+</html>

@@ -1,0 +1,497 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lesson 22: Cost, Latency & Scaling</title>
+    <link rel="stylesheet" href="../assets/lesson.css">
+    <link rel="stylesheet" href="../assets/prism-theme.css">
+</head>
+<body>
+    <div class="lesson-header">
+        <span class="pill">Module 5: Production &amp; Safety</span>
+        <h1>Lesson 22: Cost, Latency &amp; Scaling</h1>
+        <div class="lesson-meta">
+            <span>📘 Lesson 22 of 23</span>
+            <span>⏱️ ~25 min</span>
+        </div>
+    </div>
+
+    <main>
+        <!-- Semantic Caching -->
+        <section>
+            <h2>Semantic Caching</h2>
+            <div class="concept-box">
+                <h3>Why Semantic Caching?</h3>
+                <p>Traditional caching uses exact string matches. But users ask the same question in many different ways. <strong>Semantic caching</strong> embeds each query into a vector and checks cosine similarity against previously cached queries. If similarity exceeds a threshold (typically &gt; 0.95), we return the cached response — skipping the LLM call entirely.</p>
+                <ul>
+                    <li><strong>Embed</strong> the incoming query using a fast embedding model</li>
+                    <li><strong>Compare</strong> against stored query embeddings via cosine similarity</li>
+                    <li><strong>Hit</strong> if similarity &gt; 0.95 → return cached response (0 latency, 0 cost)</li>
+                    <li><strong>Miss</strong> → call the LLM, then store the new (embedding, response) pair</li>
+                </ul>
+            </div>
+
+            <div class="code-block">
+                <pre><code class="language-python">import numpy as np
+from openai import OpenAI
+
+client = OpenAI()
+
+class SemanticCache:
+    """Cache LLM responses using embedding similarity."""
+
+    def __init__(self, threshold: float = 0.95):
+        self.threshold = threshold
+        self.entries: list[tuple[list[float], str]] = []  # (embedding, response)
+
+    def _embed(self, text: str) -> list[float]:
+        result = client.embeddings.create(
+            model="text-embedding-3-small",
+            input=text
+        )
+        return result.data[0].embedding
+
+    def _cosine_sim(self, a: list[float], b: list[float]) -> float:
+        a_arr, b_arr = np.array(a), np.array(b)
+        return float(np.dot(a_arr, b_arr) / (np.linalg.norm(a_arr) * np.linalg.norm(b_arr)))
+
+    def get(self, query: str) -> str | None:
+        """Return cached response if a similar query exists."""
+        query_embedding = self._embed(query)
+        for stored_embedding, response in self.entries:
+            if self._cosine_sim(query_embedding, stored_embedding) > self.threshold:
+                return response
+        return None
+
+    def set(self, query: str, response: str) -> None:
+        """Store a new query-response pair."""
+        embedding = self._embed(query)
+        self.entries.append((embedding, response))
+
+
+# Usage
+cache = SemanticCache(threshold=0.95)
+
+query = "What is the capital of France?"
+cached = cache.get(query)
+if cached:
+    print(f"Cache hit: {cached}")
+else:
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": query}]
+    ).choices[0].message.content
+    cache.set(query, response)
+    print(f"Cache miss, stored: {response}")</code></pre>
+            </div>
+
+            <div class="callout tip">
+                <strong>Tip:</strong> In production, replace the list scan with a vector database (Pinecone, Qdrant, pgvector) for O(log n) lookups instead of O(n). Add a TTL to expire stale entries.
+            </div>
+        </section>
+
+        <!-- Response Streaming -->
+        <section>
+            <h2>Response Streaming UX</h2>
+            <div class="concept-box">
+                <h3>Why Streaming Feels Faster</h3>
+                <p>Even when total generation time is identical, streaming the response token-by-token dramatically improves <strong>perceived latency</strong>. The user sees the first token in ~200ms instead of waiting 3-5 seconds for the full response.</p>
+                <ul>
+                    <li><strong>Time to First Token (TTFT)</strong> — the metric users actually feel</li>
+                    <li><strong>Progressive rendering</strong> — the brain starts processing while generation continues</li>
+                    <li><strong>Cancellation</strong> — users can stop early if the answer is off-track</li>
+                </ul>
+            </div>
+
+            <div class="code-block">
+                <pre><code class="language-python">from openai import OpenAI
+
+client = OpenAI()
+
+# Streaming response — user sees tokens immediately
+stream = client.chat.completions.create(
+    model="gpt-4o-mini",
+    messages=[{"role": "user", "content": "Explain quantum computing briefly"}],
+    stream=True
+)
+
+for chunk in stream:
+    delta = chunk.choices[0].delta.content
+    if delta:
+        print(delta, end="", flush=True)  # Render incrementally</code></pre>
+            </div>
+        </section>
+
+        <!-- Request Batching -->
+        <section>
+            <h2>Request Batching for Throughput</h2>
+            <div class="concept-box">
+                <h3>Batch When Latency Is Flexible</h3>
+                <p>For offline tasks (summarization pipelines, classification jobs, embedding generation), batch multiple requests together. OpenAI's Batch API offers <strong>50% cost savings</strong> with a 24-hour SLA. For self-hosted models, batching maximizes GPU utilization.</p>
+            </div>
+
+            <div class="code-block">
+                <pre><code class="language-python">import asyncio
+import httpx
+from dataclasses import dataclass
+
+@dataclass
+class BatchRequest:
+    prompt: str
+    callback: asyncio.Future
+
+class RequestBatcher:
+    """Collect requests and flush as a batch for throughput."""
+
+    def __init__(self, max_batch_size: int = 10, max_wait_ms: int = 100):
+        self.max_batch_size = max_batch_size
+        self.max_wait_ms = max_wait_ms
+        self.queue: list[BatchRequest] = []
+        self._lock = asyncio.Lock()
+
+    async def submit(self, prompt: str) -> str:
+        future = asyncio.get_event_loop().create_future()
+        async with self._lock:
+            self.queue.append(BatchRequest(prompt=prompt, callback=future))
+            if len(self.queue) >= self.max_batch_size:
+                await self._flush()
+        return await future
+
+    async def _flush(self):
+        batch = self.queue[:]
+        self.queue.clear()
+        # Process batch in parallel
+        async with httpx.AsyncClient() as client:
+            tasks = [self._call_llm(client, req.prompt) for req in batch]
+            results = await asyncio.gather(*tasks)
+        for req, result in zip(batch, results):
+            req.callback.set_result(result)
+
+    async def _call_llm(self, client: httpx.AsyncClient, prompt: str) -> str:
+        # Replace with actual API call
+        resp = await client.post("https://api.openai.com/v1/chat/completions", ...)
+        return resp.json()["choices"][0]["message"]["content"]</code></pre>
+            </div>
+        </section>
+
+        <!-- Model Routing -->
+        <section>
+            <h2>Model Routing</h2>
+            <div class="concept-box">
+                <h3>Route by Complexity</h3>
+                <p>Not every query needs GPT-4. A <strong>model router</strong> classifies incoming queries by complexity and routes them to the appropriate model — saving 80-90% on simple queries while preserving quality for complex ones.</p>
+            </div>
+
+            <div class="diagram-container">
+                <h4>Router Flow</h4>
+                <div id="router-flow"></div>
+            </div>
+
+            <div class="code-block">
+                <pre><code class="language-python">from openai import OpenAI
+from dataclasses import dataclass, field
+from datetime import datetime
+
+client = OpenAI()
+
+@dataclass
+class CostTracker:
+    records: list[dict] = field(default_factory=list)
+
+    def log(self, model: str, tokens: int, cost: float):
+        self.records.append({
+            "model": model,
+            "tokens": tokens,
+            "cost": cost,
+            "timestamp": datetime.now().isoformat()
+        })
+
+    @property
+    def total_cost(self) -> float:
+        return sum(r["cost"] for r in self.records)
+
+
+class ModelRouter:
+    """Route queries to cheap or powerful models based on complexity."""
+
+    COST_PER_1K = {"gpt-4o": 0.015, "gpt-4o-mini": 0.000075}
+
+    def __init__(self, cache: "SemanticCache"):
+        self.cache = cache
+        self.cost_tracker = CostTracker()
+
+    def _classify_complexity(self, query: str) -> str:
+        """Use a cheap model to classify query complexity."""
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": (
+                    "Classify the query complexity as 'simple' or 'complex'. "
+                    "Simple: factual lookups, basic questions. "
+                    "Complex: multi-step reasoning, analysis, code generation. "
+                    "Reply with one word only."
+                )},
+                {"role": "user", "content": query}
+            ],
+            max_tokens=5
+        )
+        return response.choices[0].message.content.strip().lower()
+
+    def route(self, query: str) -> str:
+        """Check cache, classify, then route to appropriate model."""
+        # Step 1: Check semantic cache
+        cached = self.cache.get(query)
+        if cached:
+            return cached
+
+        # Step 2: Classify complexity
+        complexity = self._classify_complexity(query)
+
+        # Step 3: Route to model
+        model = "gpt-4o" if complexity == "complex" else "gpt-4o-mini"
+
+        response = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": query}]
+        )
+        result = response.choices[0].message.content
+        tokens = response.usage.total_tokens
+        cost = (tokens / 1000) * self.COST_PER_1K[model]
+
+        # Track cost and cache result
+        self.cost_tracker.log(model, tokens, cost)
+        self.cache.set(query, result)
+
+        return result
+
+
+# Usage
+cache = SemanticCache(threshold=0.95)
+router = ModelRouter(cache=cache)
+
+answer = router.route("What is 2 + 2?")          # → gpt-4o-mini
+answer = router.route("Design a microservices architecture for...")  # → gpt-4o
+print(f"Total spend: ${router.cost_tracker.total_cost:.4f}")</code></pre>
+            </div>
+        </section>
+
+        <!-- Cost Comparison -->
+        <section>
+            <h2>Cost Monitoring</h2>
+            <div class="concept-box">
+                <h3>Track Spend Per User, Feature, and Day</h3>
+                <p>Without cost monitoring, a single runaway feature or abusive user can burn through your budget. Instrument every LLM call with metadata: user ID, feature name, timestamp. Aggregate into dashboards and set alerts.</p>
+            </div>
+
+            <div class="diagram-container">
+                <h4>Cost per 1M output tokens (USD)</h4>
+                <div id="cost-chart"></div>
+            </div>
+
+            <table class="comparison-table">
+                <thead>
+                    <tr>
+                        <th>Strategy</th>
+                        <th>Cost Reduction</th>
+                        <th>Latency Impact</th>
+                        <th>Quality Impact</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td>Semantic caching</td>
+                        <td>30-60%</td>
+                        <td>~0ms for hits</td>
+                        <td>None (exact replay)</td>
+                    </tr>
+                    <tr>
+                        <td>Model routing</td>
+                        <td>50-80%</td>
+                        <td>+50ms classifier</td>
+                        <td>Minimal if routed well</td>
+                    </tr>
+                    <tr>
+                        <td>Prompt compression</td>
+                        <td>20-40%</td>
+                        <td>Slight improvement</td>
+                        <td>Low risk if careful</td>
+                    </tr>
+                    <tr>
+                        <td>Smaller model + fine-tune</td>
+                        <td>90%+</td>
+                        <td>Faster inference</td>
+                        <td>Depends on training data</td>
+                    </tr>
+                </tbody>
+            </table>
+        </section>
+
+        <!-- Async Patterns -->
+        <section>
+            <h2>Async Patterns for Parallel LLM Calls</h2>
+            <div class="concept-box">
+                <h3>Concurrency with asyncio + httpx</h3>
+                <p>When you need multiple LLM calls (e.g., map-reduce summarization, parallel tool calls), run them concurrently. A sequential chain of 5 calls × 2s each = 10s. In parallel = ~2s.</p>
+            </div>
+
+            <div class="code-block">
+                <pre><code class="language-python">import asyncio
+from openai import AsyncOpenAI
+
+aclient = AsyncOpenAI()
+
+async def summarize_chunk(chunk: str) -> str:
+    response = await aclient.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {"role": "system", "content": "Summarize this text concisely."},
+            {"role": "user", "content": chunk}
+        ]
+    )
+    return response.choices[0].message.content
+
+async def parallel_summarize(chunks: list[str]) -> list[str]:
+    """Summarize all chunks concurrently."""
+    tasks = [summarize_chunk(chunk) for chunk in chunks]
+    return await asyncio.gather(*tasks)
+
+# 10 chunks processed in parallel — ~2s instead of ~20s
+chunks = ["chunk 1...", "chunk 2...", "chunk 3..."]  # etc.
+summaries = asyncio.run(parallel_summarize(chunks))
+
+# With rate limiting using a semaphore
+async def rate_limited_summarize(chunks: list[str], max_concurrent: int = 5):
+    semaphore = asyncio.Semaphore(max_concurrent)
+
+    async def limited_call(chunk: str) -> str:
+        async with semaphore:
+            return await summarize_chunk(chunk)
+
+    return await asyncio.gather(*[limited_call(c) for c in chunks])</code></pre>
+            </div>
+
+            <div class="callout tip">
+                <strong>Tip:</strong> Always use a semaphore to limit concurrency. Hitting rate limits causes retries and actually slows you down. Start with 5-10 concurrent requests and tune upward.
+            </div>
+        </section>
+
+        <!-- Edge Deployment -->
+        <section>
+            <h2>Edge Deployment Considerations</h2>
+            <div class="concept-box">
+                <h3>When to Deploy at the Edge</h3>
+                <p>Running models closer to users reduces network latency, but introduces constraints. Edge deployment makes sense for specific scenarios:</p>
+                <ul>
+                    <li><strong>Latency-critical</strong> — real-time autocomplete, on-device classification</li>
+                    <li><strong>Privacy-sensitive</strong> — data never leaves the user's region/device</li>
+                    <li><strong>Offline-capable</strong> — mobile apps, IoT with intermittent connectivity</li>
+                    <li><strong>High-volume, low-complexity</strong> — embeddings, intent classification</li>
+                </ul>
+            </div>
+
+            <div class="step-list">
+                <h4>Edge Deployment Checklist</h4>
+                <ol>
+                    <li><strong>Quantize the model</strong> — INT8/INT4 reduces size 4-8× with minimal quality loss</li>
+                    <li><strong>Choose runtime</strong> — ONNX Runtime, TensorRT, llama.cpp, MLX</li>
+                    <li><strong>Set memory budget</strong> — edge devices have 4-16GB RAM typically</li>
+                    <li><strong>Implement fallback</strong> — route to cloud API when edge model confidence is low</li>
+                    <li><strong>Version management</strong> — OTA updates for model weights</li>
+                </ol>
+            </div>
+
+            <div class="code-block">
+                <pre><code class="language-python">class EdgeWithFallback:
+    """Try local model first, fall back to cloud if confidence is low."""
+
+    def __init__(self, local_model, cloud_client, confidence_threshold=0.8):
+        self.local_model = local_model
+        self.cloud_client = cloud_client
+        self.confidence_threshold = confidence_threshold
+
+    async def predict(self, query: str) -> dict:
+        # Try edge model first
+        local_result = self.local_model.predict(query)
+
+        if local_result["confidence"] >= self.confidence_threshold:
+            return {"source": "edge", "result": local_result["output"]}
+
+        # Fall back to cloud
+        response = await self.cloud_client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": query}]
+        )
+        return {"source": "cloud", "result": response.choices[0].message.content}</code></pre>
+            </div>
+        </section>
+
+        <!-- Key Points -->
+        <section class="key-points">
+            <h2>Key Takeaways</h2>
+            <ul>
+                <li><strong>Semantic caching</strong> eliminates redundant LLM calls using embedding similarity (cosine &gt; 0.95)</li>
+                <li><strong>Streaming</strong> reduces perceived latency by showing tokens immediately (TTFT matters most)</li>
+                <li><strong>Batching</strong> maximizes throughput for offline workloads — use the Batch API for 50% savings</li>
+                <li><strong>Model routing</strong> sends simple queries to cheap models and complex ones to powerful models — 50-80% savings</li>
+                <li><strong>Cost monitoring</strong> per user/feature/day prevents budget surprises and enables optimization</li>
+                <li><strong>Async patterns</strong> with asyncio.gather parallelize independent LLM calls for massive speedups</li>
+                <li><strong>Edge deployment</strong> suits latency-critical, privacy-sensitive, or offline scenarios — always have a cloud fallback</li>
+            </ul>
+        </section>
+
+        <!-- Mini-Project -->
+        <div class="project-box">
+            <h3>🛠️ Mini-Project: Smart Model Router</h3>
+            <p>Build a complete model routing system with semantic caching, complexity-based routing, and a cost-tracking dashboard.</p>
+            <div class="step-list">
+                <h4>Requirements</h4>
+                <ol>
+                    <li><strong>Semantic Cache</strong> — implement with a vector store (use numpy for cosine similarity). Support TTL expiration and cache invalidation.</li>
+                    <li><strong>Complexity Classifier</strong> — use a cheap model to classify queries as simple/complex. Add a "medium" tier for intermediate queries.</li>
+                    <li><strong>Model Router</strong> — route simple → GPT-4o-mini, medium → Claude 3 Haiku, complex → GPT-4o. Check cache before routing.</li>
+                    <li><strong>Cost Tracker</strong> — log every call with model, tokens, cost, user ID, and timestamp. Aggregate spend per model and per hour.</li>
+                    <li><strong>Dashboard</strong> — build a simple CLI or Streamlit dashboard showing: total spend today, spend by model (pie chart), spend per hour (line chart), cache hit rate, and top users by cost.</li>
+                    <li><strong>Load Test</strong> — run 100 sample queries through the router. Compare total cost vs. sending everything to GPT-4o. Target: 60%+ cost reduction with &lt;5% quality degradation.</li>
+                </ol>
+            </div>
+        </div>
+    </main>
+
+    <!-- Navigation -->
+    <nav class="nav-links">
+        <a href="0021-guardrails-content-moderation.html">&larr; Previous: Guardrails &amp; Content Moderation</a>
+        <a href="0023-monitoring-observability.html">Next: Monitoring &amp; Observability &rarr;</a>
+    </nav>
+
+    <!-- Scripts -->
+    <script src="../assets/diagrams.js"></script>
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            // Router flow diagram
+            const routerEl = document.getElementById('router-flow');
+            if (routerEl) {
+                Diagrams.createFlowDiagram(routerEl, [
+                    { label: 'Incoming Query' },
+                    { label: 'Semantic Cache Check', sublabel: 'similarity > 0.95?' },
+                    { label: 'Complexity Classifier', sublabel: 'simple vs complex' },
+                    { label: 'Route to Model', sublabel: 'GPT-3.5 or GPT-4' }
+                ]);
+            }
+
+            // Cost comparison chart
+            const costEl = document.getElementById('cost-chart');
+            if (costEl) {
+                Diagrams.createComparisonBar(costEl, [
+                    { label: 'GPT-4o', value: 15, max: 20, color: '#ef4444' },
+                    { label: 'Claude 3 Sonnet', value: 3, max: 20, color: '#f59e0b' },
+                    { label: 'Claude 3 Haiku', value: 1.25, max: 20, color: '#22d3ee' },
+                    { label: 'Llama 3 (self-hosted)', value: 0.2, max: 20, color: '#22c55e' }
+                ]);
+            }
+        });
+    </script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-python.min.js"></script>
+</body>
+</html>

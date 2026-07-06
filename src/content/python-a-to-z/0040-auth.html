@@ -1,0 +1,740 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>L40 · Auth: OAuth2 &amp; JWT — Python A→Z</title>
+<link rel="stylesheet" href="../assets/style.css" />
+</head>
+<body>
+<div id="sidebar-placeholder"></div>
+<div id="main">
+  <div id="lesson-header">
+    <div class="lesson-track track-fastapi">🟩 FastAPI</div>
+    <h1>Auth: OAuth2 &amp; JWT</h1>
+    <div class="lesson-meta">
+      <span>📖 Lesson 40</span>
+      <span>⏱ 50 min</span>
+      <span>🧪 5 questions</span>
+      <span>💻 3 exercises</span>
+    </div>
+  </div>
+  <div id="content">
+
+    <div class="objectives"><h4>🎯 Learning Objectives</h4><ul>
+      <li>Understand the difference between authentication and authorisation</li>
+      <li>Explain the OAuth2 Password Flow and when to use it</li>
+      <li>Understand JWT structure (header, payload, signature) and how claims work</li>
+      <li>Issue JWTs with expiry using <code>python-jose</code> or <code>PyJWT</code></li>
+      <li>Hash and verify passwords with <code>passlib</code> and <code>bcrypt</code></li>
+      <li>Build a complete login endpoint that issues access tokens</li>
+      <li>Protect routes with a <code>get_current_user</code> dependency that validates JWTs</li>
+    </ul></div>
+
+    <!-- ════════════════════════════════════════ Section 1 ════════════════════════════════════════ -->
+    <h2 id="authentication-vs-authorisation">Authentication vs Authorisation</h2>
+
+    <p><strong>Authentication</strong> (AuthN): <em>who are you?</em> — verifying identity (login, token validation).</p>
+    <p><strong>Authorisation</strong> (AuthZ): <em>what can you do?</em> — checking permissions/roles after identity is confirmed.</p>
+
+    <table>
+      <thead>
+        <tr>
+          <th>Strategy</th>
+          <th>How it works</th>
+          <th>Best for</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Session cookies</td>
+          <td>Server stores session; browser sends cookie</td>
+          <td>Traditional web apps</td>
+        </tr>
+        <tr>
+          <td>API keys</td>
+          <td>Static secret in header</td>
+          <td>Server-to-server, simple APIs</td>
+        </tr>
+        <tr>
+          <td>OAuth2 + JWT</td>
+          <td>Short-lived signed tokens, stateless</td>
+          <td>SPAs, mobile apps, microservices</td>
+        </tr>
+        <tr>
+          <td>OAuth2 + refresh tokens</td>
+          <td>Access token (short) + refresh token (long)</td>
+          <td>Production apps needing token rotation</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <div class="callout callout-concept">
+      <p>JWT-based auth is <strong>stateless</strong> — the server stores no session. The token itself contains the claims; any server can verify it with the secret key. This is what makes it ideal for microservices and horizontal scaling.</p>
+    </div>
+
+    <!-- ════════════════════════════════════════ Section 2 ════════════════════════════════════════ -->
+    <h2 id="jwt-structure">JWT Structure</h2>
+
+    <p>A JWT consists of three parts separated by dots: <code>header.payload.signature</code></p>
+
+    <h3>Header (base64url-encoded JSON)</h3>
+    <div style="position:relative"><pre><code class="language-json">{ "alg": "HS256", "typ": "JWT" }</code></pre><span class="code-label">header.json</span></div>
+
+    <h3>Payload (base64url-encoded JSON) — standard claims</h3>
+    <div style="position:relative"><pre><code class="language-json">{
+  "sub": "42",
+  "email": "alice@example.com",
+  "role": "admin",
+  "exp": 1719878400,
+  "iat": 1719792000,
+  "jti": "unique-token-id"
+}</code></pre><span class="code-label">payload.json</span></div>
+
+    <p>Standard claims explained:</p>
+    <ul>
+      <li><code>sub</code> — subject (user id)</li>
+      <li><code>exp</code> — expiry (Unix timestamp)</li>
+      <li><code>iat</code> — issued-at</li>
+      <li><code>jti</code> — JWT ID (for revocation)</li>
+      <li><code>iss</code> — issuer</li>
+      <li><code>aud</code> — audience</li>
+    </ul>
+
+    <h3>Signature</h3>
+    <p><code>HMACSHA256(base64url(header) + "." + base64url(payload), secret)</code></p>
+
+    <h3>Decoding (NOT verifying) a token</h3>
+    <div style="position:relative"><pre><code class="language-python">import base64, json
+
+token = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI0MiIsInJvbGUiOiJhZG1pbiIsImV4cCI6MTcxOTg3ODQwMH0.SIGNATURE"
+header_b64, payload_b64, sig = token.split(".")
+# Add padding
+payload_b64 += "=" * (-len(payload_b64) % 4)
+print(json.loads(base64.urlsafe_b64decode(payload_b64)))
+# {'sub': '42', 'role': 'admin', 'exp': 1719878400}</code></pre><span class="code-label">decode_demo.py</span></div>
+
+    <div class="callout callout-warn">
+      <p>The payload is <strong>base64-encoded, not encrypted</strong> — anyone can read it. Never put passwords, credit card numbers, or secrets in JWT claims. The signature only proves the token wasn't tampered with.</p>
+    </div>
+
+    <!-- ════════════════════════════════════════ Section 3 ════════════════════════════════════════ -->
+    <h2 id="password-hashing">Password Hashing with passlib</h2>
+
+    <div style="position:relative"><pre><code class="language-bash">pip install passlib[bcrypt]</code></pre><span class="code-label">terminal</span></div>
+
+    <div style="position:relative"><pre><code class="language-python">from passlib.context import CryptContext
+
+# bcrypt is the recommended algorithm — slow by design (resists brute force)
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+def hash_password(plain: str) -> str:
+    return pwd_context.hash(plain)
+
+def verify_password(plain: str, hashed: str) -> bool:
+    return pwd_context.verify(plain, hashed)
+
+# Usage
+hashed = hash_password("MySecret123")
+print(hashed)                                  # $2b$12$...  (bcrypt hash)
+print(verify_password("MySecret123", hashed))  # True
+print(verify_password("WrongPass",   hashed))  # False</code></pre><span class="code-label">hashing.py</span></div>
+
+    <div class="callout callout-warn">
+      <p>Never store plain-text passwords. Never use MD5 or SHA-256 for passwords — they are fast, making brute-force trivial. bcrypt, argon2, or scrypt are purposely slow. The <code>deprecated="auto"</code> flag automatically rehashes old passwords on next login if you upgrade the algorithm.</p>
+    </div>
+
+    <!-- ════════════════════════════════════════ Section 4 ════════════════════════════════════════ -->
+    <h2 id="issuing-jwts">Issuing JWTs with PyJWT</h2>
+
+    <div style="position:relative"><pre><code class="language-bash">pip install PyJWT</code></pre><span class="code-label">terminal</span></div>
+
+    <div style="position:relative"><pre><code class="language-python">import jwt
+from datetime import datetime, timedelta, timezone
+from typing import Any
+
+SECRET_KEY = "your-256-bit-secret-change-in-production"  # use secrets.token_hex(32)
+ALGORITHM  = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 30
+
+def create_access_token(
+    subject: str | int,
+    extra_claims: dict[str, Any] | None = None,
+    expires_delta: timedelta | None = None,
+) -> str:
+    expire = datetime.now(timezone.utc) + (
+        expires_delta or timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    )
+    payload = {
+        "sub": str(subject),
+        "exp": expire,
+        "iat": datetime.now(timezone.utc),
+    }
+    if extra_claims:
+        payload.update(extra_claims)
+    return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
+
+def decode_access_token(token: str) -> dict:
+    try:
+        return jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+    except jwt.ExpiredSignatureError:
+        raise ValueError("Token has expired")
+    except jwt.InvalidTokenError as e:
+        raise ValueError(f"Invalid token: {e}")
+
+# Issue a token
+token = create_access_token(subject=42, extra_claims={"role": "admin"})
+print(token)
+
+# Verify and decode
+claims = decode_access_token(token)
+print(claims["sub"])   # "42"
+print(claims["role"])  # "admin"</code></pre><span class="code-label">token_utils.py</span></div>
+
+    <p>Generate a secure secret key:</p>
+    <div style="position:relative"><pre><code class="language-python">import secrets
+print(secrets.token_hex(32))  # 64-char hex — use this as SECRET_KEY</code></pre><span class="code-label">generate_key.py</span></div>
+
+    <div class="callout callout-tip">
+      <p>Store <code>SECRET_KEY</code> in an environment variable (via <code>pydantic-settings</code>), never in source code. Rotate keys periodically by supporting multiple keys during a transition period.</p>
+    </div>
+
+    <!-- ════════════════════════════════════════ Section 5 ════════════════════════════════════════ -->
+    <h2 id="oauth2-password-flow">The OAuth2 Password Flow</h2>
+
+    <pre style="background:#1a1a2e;padding:16px;border-radius:8px;overflow-x:auto;font-size:0.82rem;">
+Client                    FastAPI
+  │                          │
+  │  POST /auth/token         │
+  │  {username, password}    │
+  │ ─────────────────────── ▶│
+  │                          │  1. Lookup user by username
+  │                          │  2. verify_password(plain, hashed)
+  │                          │  3. create_access_token(user.id)
+  │  {access_token, type}    │
+  │ ◀─────────────────────── │
+  │                          │
+  │  GET /me                  │
+  │  Authorization: Bearer …  │
+  │ ─────────────────────── ▶│
+  │                          │  4. Extract token from header
+  │                          │  5. decode_access_token(token)
+  │                          │  6. Lookup user by sub claim
+  │  {user data}             │
+  │ ◀─────────────────────── │
+</pre>
+
+    <div style="position:relative"><pre><code class="language-python">from fastapi import FastAPI, Depends, HTTPException, status
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from pydantic import BaseModel
+from passlib.context import CryptContext
+import jwt
+from datetime import datetime, timedelta, timezone
+
+app = FastAPI()
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/token")
+
+SECRET_KEY = "change-me-in-production"
+ALGORITHM  = "HS256"
+EXPIRE_MIN = 30
+
+# ── Fake user DB ──
+class UserInDB(BaseModel):
+    id: int
+    username: str
+    email: str
+    hashed_password: str
+    role: str = "user"
+
+USERS_DB: dict[str, UserInDB] = {
+    "alice": UserInDB(
+        id=1, username="alice", email="alice@example.com",
+        hashed_password=pwd_context.hash("secret123"),
+        role="admin",
+    ),
+}
+
+# ── Helpers ──
+def get_user(username: str) -> UserInDB | None:
+    return USERS_DB.get(username)
+
+def authenticate_user(username: str, password: str) -> UserInDB | None:
+    user = get_user(username)
+    if not user or not pwd_context.verify(password, user.hashed_password):
+        return None
+    return user
+
+def create_token(subject: str, role: str) -> str:
+    expire = datetime.now(timezone.utc) + timedelta(minutes=EXPIRE_MIN)
+    return jwt.encode({"sub": subject, "role": role, "exp": expire}, SECRET_KEY, ALGORITHM)
+
+# ── Token endpoint ──
+class Token(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+
+@app.post("/auth/token", response_model=Token)
+def login(form: OAuth2PasswordRequestForm = Depends()):
+    user = authenticate_user(form.username, form.password)
+    if not user:
+        raise HTTPException(
+            status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect username or password",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    token = create_token(str(user.id), user.role)
+    return Token(access_token=token)</code></pre><span class="code-label">main.py</span></div>
+
+    <!-- ════════════════════════════════════════ Section 6 ════════════════════════════════════════ -->
+    <h2 id="protecting-routes">Protecting Routes with <code>get_current_user</code></h2>
+
+    <div style="position:relative"><pre><code class="language-python">class UserOut(BaseModel):
+    id: int
+    username: str
+    email: str
+    role: str
+
+def get_current_user(token: str = Depends(oauth2_scheme)) -> UserInDB:
+    credentials_exception = HTTPException(
+        status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        user_id: str = payload.get("sub")
+        if user_id is None:
+            raise credentials_exception
+    except jwt.InvalidTokenError:
+        raise credentials_exception
+
+    # Look up user (in production: DB query by id)
+    user = next((u for u in USERS_DB.values() if str(u.id) == user_id), None)
+    if user is None:
+        raise credentials_exception
+    return user
+
+def require_admin(user: UserInDB = Depends(get_current_user)) -> UserInDB:
+    if user.role != "admin":
+        raise HTTPException(status.HTTP_403_FORBIDDEN, detail="Admin only")
+    return user
+
+@app.get("/me", response_model=UserOut)
+def me(user: UserInDB = Depends(get_current_user)):
+    return user
+
+@app.get("/admin/dashboard")
+def dashboard(_: UserInDB = Depends(require_admin)):
+    return {"message": "Welcome, admin"}</code></pre><span class="code-label">main.py</span></div>
+
+    <!-- ════════════════════════════════════════ Section 7 ════════════════════════════════════════ -->
+    <h2 id="refresh-tokens">Refresh Tokens</h2>
+
+    <p>Access tokens are short-lived (15–60 min); refresh tokens are long-lived (7–30 days) and stored securely (httpOnly cookie). When the access token expires, the client uses the refresh token to get a new one without re-logging in.</p>
+
+    <div style="position:relative"><pre><code class="language-python">from fastapi import Response, Cookie
+import secrets
+
+REFRESH_TOKEN_EXPIRE_DAYS = 7
+refresh_token_store: dict[str, str] = {}   # token → user_id (use Redis in production)
+
+def create_refresh_token(user_id: str) -> str:
+    token = secrets.token_urlsafe(32)
+    refresh_token_store[token] = user_id
+    return token
+
+@app.post("/auth/refresh")
+def refresh(
+    response: Response,
+    refresh_token: str = Cookie(default=None),
+):
+    if not refresh_token or refresh_token not in refresh_token_store:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="Invalid refresh token")
+
+    user_id = refresh_token_store[refresh_token]
+    # Rotate: invalidate old, issue new refresh token
+    del refresh_token_store[refresh_token]
+    new_refresh = create_refresh_token(user_id)
+
+    response.set_cookie(
+        key="refresh_token",
+        value=new_refresh,
+        httponly=True,      # not accessible via JS
+        secure=True,        # HTTPS only
+        samesite="lax",
+        max_age=60 * 60 * 24 * REFRESH_TOKEN_EXPIRE_DAYS,
+    )
+
+    # Also issue a new access token
+    user = next((u for u in USERS_DB.values() if str(u.id) == user_id), None)
+    new_access = create_token(user_id, user.role if user else "user")
+    return Token(access_token=new_access)</code></pre><span class="code-label">main.py</span></div>
+
+    <div class="callout callout-tip">
+      <p>Always rotate refresh tokens on use (issue a new one, invalidate the old one). This limits the window of exposure if a refresh token is stolen. Store refresh tokens in Redis or a DB — never in a JWT (that defeats revocability).</p>
+    </div>
+
+    <!-- ── 8. Token Revocation & Blocklists ── -->
+    <h2 id="token-revocation">Token Revocation &amp; Blocklists</h2>
+    <p>
+      JWTs are stateless — once issued, they are valid until they expire. To revoke a token
+      before expiry (on logout, password change, or compromise), you need a blocklist.
+    </p>
+    <div style="position:relative">
+      <pre><code class="language-python">import redis
+from fastapi import FastAPI, Depends, HTTPException, status
+from fastapi.security import OAuth2PasswordBearer
+import jwt
+from datetime import datetime, timezone
+
+app = FastAPI()
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/token")
+
+# Redis blocklist — store revoked JTI (JWT ID) until expiry
+r = redis.Redis(host="localhost", port=6379, decode_responses=True)
+
+SECRET_KEY = "change-me"
+ALGORITHM  = "HS256"
+
+def get_current_user(token: str = Depends(oauth2_scheme)):
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+    except jwt.InvalidTokenError:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+
+    jti = payload.get("jti")
+    if jti and r.exists(f"blocklist:{jti}"):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="Token has been revoked")
+
+    return payload
+
+@app.post("/auth/logout")
+def logout(payload: dict = Depends(get_current_user)):
+    jti = payload.get("jti")
+    exp = payload.get("exp", 0)
+    ttl = max(0, exp - int(datetime.now(timezone.utc).timestamp()))
+    if jti and ttl > 0:
+        r.setex(f"blocklist:{jti}", ttl, "revoked")
+    return {"message": "Logged out"}</code></pre>
+      <span class="code-label">revocation.py</span>
+    </div>
+
+    <div class="callout callout-tip">
+      Always include a <code>jti</code> (JWT ID) claim — a <code>uuid4()</code> or
+      <code>secrets.token_urlsafe(16)</code> — when issuing tokens you may need to revoke.
+      Set the Redis TTL equal to the token's remaining lifetime so blocklist entries
+      auto-expire and don't accumulate forever.
+    </div>
+
+    <!-- ── 9. HTTPS, CORS & Security Headers ── -->
+    <h2 id="security-headers">HTTPS, CORS &amp; Security Headers</h2>
+    <p>
+      Auth tokens are only as safe as the transport layer. FastAPI makes it easy to
+      add CORS restrictions and security headers.
+    </p>
+    <div style="position:relative">
+      <pre><code class="language-python">from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.httpsredirect import HTTPSRedirectMiddleware
+
+app = FastAPI()
+
+# ── HTTPS redirect (production only) ──
+# app.add_middleware(HTTPSRedirectMiddleware)
+
+# ── CORS — restrict which origins can call your API ──
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["https://myapp.com", "https://www.myapp.com"],
+    allow_credentials=True,     # needed to send cookies (refresh tokens)
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
+    allow_headers=["Authorization", "Content-Type"],
+)
+
+# ── Security headers middleware ──
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request
+
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"]        = "DENY"
+        response.headers["Referrer-Policy"]        = "strict-origin-when-cross-origin"
+        return response
+
+app.add_middleware(SecurityHeadersMiddleware)</code></pre>
+      <span class="code-label">middleware.py</span>
+    </div>
+
+    <div class="callout callout-warn">
+      Never use <code>allow_origins=["*"]</code> with <code>allow_credentials=True</code> — browsers
+      will block it and it defeats the purpose of CORS. Always list explicit allowed origins
+      in production. In development, <code>allow_origins=["http://localhost:3000"]</code> is fine.
+    </div>
+
+    <!-- ── 10. Complete Auth Module Layout ── -->
+    <h2 id="auth-layout">Complete Auth Module Layout</h2>
+    <p>A clean, production-ready auth module layout for a FastAPI project:</p>
+    <div style="position:relative">
+      <pre><code>myapi/
+├── auth/
+│   ├── __init__.py
+│   ├── router.py        ← /auth/token, /auth/refresh, /auth/logout
+│   ├── dependencies.py  ← get_current_user, require_admin, require_role
+│   ├── schemas.py       ← Token, TokenData, UserCreate, UserOut
+│   ├── service.py       ← authenticate_user, create_token, hash/verify password
+│   └── models.py        ← SQLAlchemy User model (Lesson 41)
+├── config.py            ← Settings (SECRET_KEY, EXPIRE_MIN, etc.)
+└── main.py</code></pre>
+      <span class="code-label">project layout</span>
+    </div>
+    <div style="position:relative">
+      <pre><code class="language-python"># auth/dependencies.py — the three reusable auth deps
+from fastapi import Depends, HTTPException, status
+from fastapi.security import OAuth2PasswordBearer
+import jwt
+from .service import decode_token
+from .schemas import TokenData
+
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/token")
+
+def get_current_user(token: str = Depends(oauth2_scheme)) -> TokenData:
+    try:
+        payload = decode_token(token)
+        return TokenData(**payload)
+    except ValueError as e:
+        raise HTTPException(
+            status.HTTP_401_UNAUTHORIZED,
+            detail=str(e),
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+def require_role(role: str):
+    def _checker(user: TokenData = Depends(get_current_user)):
+        if user.role != role:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, detail=f"{role} required")
+        return user
+    return _checker
+
+require_admin = require_role("admin")</code></pre>
+      <span class="code-label">auth/dependencies.py</span>
+    </div>
+
+    <!-- ── Best Practices ── -->
+    <h2 id="best-practices">Best Practices</h2>
+    <ul>
+      <li><strong>Use short-lived access tokens</strong> — 15 to 60 minutes maximum. Pair with refresh tokens for seamless UX without long-lived, hard-to-revoke tokens.</li>
+      <li><strong>Always include <code>exp</code> in every JWT</strong> — tokens without an expiry claim are valid forever and a security risk.</li>
+      <li><strong>Include a <code>jti</code> claim</strong> for any token that may need revocation (logout, password reset, account suspension).</li>
+      <li><strong>Store the <code>SECRET_KEY</code> in an environment variable</strong> — never hardcode it. Use <code>secrets.token_hex(32)</code> to generate a strong key.</li>
+      <li><strong>Use bcrypt (or argon2) for password hashing</strong> — never MD5, SHA-1, or unsalted SHA-256.</li>
+      <li><strong>Store refresh tokens server-side</strong> (Redis or DB) so they can be revoked. An httpOnly + Secure cookie is the safest client-side storage option.</li>
+      <li><strong>Never put sensitive data in JWT claims</strong> — the payload is only base64-encoded, not encrypted. Include only what is needed (user id, role) — never passwords, SSNs, or financial data.</li>
+      <li><strong>Restrict CORS origins explicitly</strong> — <code>allow_origins=["*"]</code> with credentials is blocked by browsers and is insecure.</li>
+    </ul>
+
+    <!-- ── Exercises ── -->
+    <h2 id="exercises">Exercises</h2>
+    <div class="exercise-section">
+
+      <div class="exercise">
+        <h3>Exercise 1 — Complete Login &amp; Protected Routes</h3>
+        <p>Build a working auth system from scratch:</p>
+        <ul>
+          <li>Create an in-memory user store with two users: <code>alice</code> (admin) and <code>bob</code> (user), both with bcrypt-hashed passwords.</li>
+          <li>Implement <code>POST /auth/token</code> using <code>OAuth2PasswordRequestForm</code> — return a signed JWT with <code>sub</code>, <code>role</code>, and <code>exp</code>.</li>
+          <li>Implement <code>GET /me</code> — returns the current user's id, username, and role (no password).</li>
+          <li>Implement <code>GET /admin/stats</code> — returns <code>{"users": 2}</code> but raises 403 for non-admins.</li>
+          <li>Test all three endpoints using <code>TestClient</code>: successful login, wrong password (401), user accessing admin route (403), admin accessing admin route (200).</li>
+        </ul>
+        <details>
+          <summary>💡 Hint — test structure</summary>
+          <pre><code class="language-python">from fastapi.testclient import TestClient
+from main import app
+
+client = TestClient(app)
+
+def get_token(username, password):
+    resp = client.post("/auth/token", data={"username": username, "password": password})
+    assert resp.status_code == 200
+    return resp.json()["access_token"]
+
+def test_wrong_password():
+    resp = client.post("/auth/token", data={"username": "alice", "password": "wrong"})
+    assert resp.status_code == 401
+
+def test_me():
+    token = get_token("alice", "secret123")
+    resp = client.get("/me", headers={"Authorization": f"Bearer {token}"})
+    assert resp.status_code == 200
+    assert resp.json()["username"] == "alice"
+
+def test_user_cannot_access_admin():
+    token = get_token("bob", "bobsecret")
+    resp = client.get("/admin/stats", headers={"Authorization": f"Bearer {token}"})
+    assert resp.status_code == 403
+
+def test_admin_can_access_admin():
+    token = get_token("alice", "secret123")
+    resp = client.get("/admin/stats", headers={"Authorization": f"Bearer {token}"})
+    assert resp.status_code == 200</code></pre>
+        </details>
+      </div>
+
+      <div class="exercise">
+        <h3>Exercise 2 — Token Expiry &amp; Refresh Flow</h3>
+        <p>Extend the auth system with refresh tokens:</p>
+        <ul>
+          <li>Modify <code>POST /auth/token</code> to also set an httpOnly cookie named <code>refresh_token</code> containing a <code>secrets.token_urlsafe(32)</code> value (stored server-side in a dict).</li>
+          <li>Implement <code>POST /auth/refresh</code> — reads the cookie, validates it, rotates it (delete old, issue new), and returns a new access token.</li>
+          <li>Implement <code>POST /auth/logout</code> — removes the refresh token from the store and clears the cookie.</li>
+          <li>Write tests for the refresh flow: login → get tokens → call refresh → confirm old refresh token is invalid → confirm new access token works.</li>
+        </ul>
+        <details>
+          <summary>💡 Hint — setting and reading cookies</summary>
+          <pre><code class="language-python">from fastapi import Response, Cookie
+
+@app.post("/auth/token")
+def login(response: Response, form: OAuth2PasswordRequestForm = Depends()):
+    # ... validate user ...
+    refresh = secrets.token_urlsafe(32)
+    refresh_store[refresh] = str(user.id)
+    response.set_cookie("refresh_token", refresh, httponly=True, secure=False, samesite="lax")
+    return Token(access_token=create_token(str(user.id), user.role))
+
+@app.post("/auth/refresh")
+def refresh(response: Response, refresh_token: str = Cookie(default=None)):
+    if not refresh_token or refresh_token not in refresh_store:
+        raise HTTPException(401, "Invalid refresh token")
+    user_id = refresh_store.pop(refresh_token)
+    new_refresh = secrets.token_urlsafe(32)
+    refresh_store[new_refresh] = user_id
+    response.set_cookie("refresh_token", new_refresh, httponly=True, secure=False, samesite="lax")
+    return Token(access_token=create_token(user_id, "user"))</code></pre>
+        </details>
+      </div>
+
+      <div class="exercise">
+        <h3>Exercise 3 — Password Change with Token Invalidation</h3>
+        <p>Implement a secure password-change endpoint:</p>
+        <ul>
+          <li>Add <code>POST /me/password</code> — accepts <code>{"current_password": "…", "new_password": "…"}</code>.</li>
+          <li>Verify the current password; reject with 401 if wrong.</li>
+          <li>Enforce the new password complexity rules (min 8 chars, at least one uppercase, one digit).</li>
+          <li>After changing the password, invalidate all existing refresh tokens for that user (remove them from the store).</li>
+          <li>Return 200 with <code>{"message": "Password updated. Please log in again."}</code>.</li>
+          <li>Write tests confirming: wrong current password → 401, weak new password → 422, successful change → old refresh token invalid.</li>
+        </ul>
+        <details>
+          <summary>💡 Hint</summary>
+          <pre><code class="language-python">from pydantic import BaseModel, field_validator
+
+class PasswordChange(BaseModel):
+    current_password: str
+    new_password: str
+
+    @field_validator("new_password")
+    @classmethod
+    def strength(cls, v):
+        if len(v) < 8:
+            raise ValueError("min 8 characters")
+        if not any(c.isupper() for c in v):
+            raise ValueError("must contain uppercase")
+        if not any(c.isdigit() for c in v):
+            raise ValueError("must contain a digit")
+        return v
+
+@app.post("/me/password")
+def change_password(
+    body: PasswordChange,
+    user: UserInDB = Depends(get_current_user),
+):
+    if not pwd_context.verify(body.current_password, user.hashed_password):
+        raise HTTPException(401, "Current password is incorrect")
+    # Update hash
+    USERS_DB[user.username].hashed_password = pwd_context.hash(body.new_password)
+    # Invalidate all refresh tokens for this user
+    to_delete = [k for k, v in refresh_store.items() if v == str(user.id)]
+    for k in to_delete:
+        del refresh_store[k]
+    return {"message": "Password updated. Please log in again."}</code></pre>
+        </details>
+      </div>
+
+    </div><!-- /exercise-section -->
+
+    <div id="quiz-section"></div>
+    <div id="lesson-nav-footer"></div>
+  </div><!-- /content -->
+</div><!-- /main -->
+
+<script src="../assets/nav-data.js"></script>
+<script src="../assets/nav.js"></script>
+<script src="../assets/quiz.js"></script>
+<script src="../assets/highlight.js"></script>
+
+<script>
+buildLessonFooter();
+
+QuizWidget.render("quiz-section", [
+  {
+    question: "Why is the JWT payload NOT a safe place to store sensitive data like passwords?",
+    options: [
+      "The payload is encrypted with AES and can be decrypted by anyone with the public key",
+      "The payload is only base64url-encoded — not encrypted — so anyone who intercepts the token can read it",
+      "FastAPI automatically logs JWT payloads, making them visible in server logs",
+      "JWT payloads are limited to 256 bytes, so sensitive data would be truncated"
+    ],
+    correct: 1,
+    explanation: "A JWT consists of three base64url-encoded sections separated by dots. The payload is NOT encrypted — it is only encoded, which is trivially reversible. Anyone who obtains the token string can decode and read all claims without knowing the secret key. The HMAC signature only proves the token wasn't tampered with; it provides no confidentiality. Only put non-sensitive identifiers (user id, role) in JWT claims."
+  },
+  {
+    question: "Why should you use bcrypt (or argon2) for password hashing rather than SHA-256?",
+    options: [
+      "bcrypt produces longer hash strings, making them harder to store",
+      "SHA-256 is not supported by Python's passlib library",
+      "bcrypt is intentionally slow and has a configurable cost factor, making brute-force attacks impractical; SHA-256 is extremely fast, allowing billions of guesses per second on modern hardware",
+      "bcrypt automatically salts passwords; SHA-256 always produces the same hash for the same input"
+    ],
+    correct: 2,
+    explanation: "The critical difference is speed. SHA-256 can compute billions of hashes per second on a GPU, making dictionary and brute-force attacks trivial. bcrypt (and argon2, scrypt) are designed to be slow — adjustable via a cost factor — so even with powerful hardware, an attacker can only test a few hundred hashes per second. bcrypt also automatically generates and embeds a random salt, but the slowness is the primary security property."
+  },
+  {
+    question: "What is the purpose of the `jti` (JWT ID) claim?",
+    options: [
+      "It identifies the JWT version number for backward compatibility",
+      "It provides a unique identifier per token that can be stored in a blocklist to enable token revocation before expiry",
+      "It is the user's unique identifier, equivalent to the `sub` claim",
+      "It tells the client how many times the token can be used"
+    ],
+    correct: 1,
+    explanation: "jti (JWT ID) is a unique identifier for the specific token instance — typically a UUID or random string. By itself it adds nothing to security. Its value is in revocation: when a user logs out or changes their password, you store the jti in a Redis blocklist with a TTL equal to the token's remaining lifetime. The get_current_user dependency checks the blocklist and rejects tokens whose jti is present, effectively revoking them before natural expiry."
+  },
+  {
+    question: "Why should refresh tokens be stored server-side (in Redis or a DB) rather than as a JWT?",
+    options: [
+      "Refresh tokens are too long to fit in a JWT payload",
+      "Server-side storage allows instant revocation — you can invalidate a refresh token by deleting it, regardless of its expiry. A refresh token issued as a JWT cannot be revoked before its expiry.",
+      "FastAPI does not support parsing JWTs as refresh tokens",
+      "Server-side storage is faster because it avoids base64 decoding"
+    ],
+    correct: 1,
+    explanation: "The whole point of a refresh token is that you can revoke it — on logout, password change, account compromise. If you issue the refresh token as a JWT, it is valid until it expires and you cannot invalidate it without a blocklist. Storing an opaque random string server-side means revocation is as simple as deleting the record. This is the key difference: opaque server-side tokens are revocable by design; JWTs are stateless and difficult to revoke."
+  },
+  {
+    question: "What does `OAuth2PasswordBearer(tokenUrl='/auth/token')` do in FastAPI?",
+    options: [
+      "It creates the /auth/token endpoint automatically",
+      "It is a dependency that extracts the Bearer token from the Authorization header and documents the tokenUrl in the OpenAPI spec for the Swagger UI 'Authorize' button",
+      "It validates the JWT signature and returns the decoded payload",
+      "It redirects unauthenticated requests to the /auth/token login page"
+    ],
+    correct: 1,
+    explanation: "OAuth2PasswordBearer does two things: (1) it is a callable dependency that reads the Authorization: Bearer <token> header and returns the raw token string — it does NOT validate the JWT itself, that is your job in get_current_user; (2) it registers the tokenUrl in the OpenAPI schema so the Swagger UI /docs shows an 'Authorize' button that lets you log in and test protected endpoints interactively. You must still call jwt.decode() yourself to validate the token."
+  }
+]);
+</script>
+</body>
+</html>

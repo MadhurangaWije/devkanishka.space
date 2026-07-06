@@ -1,0 +1,429 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lesson 23: Why Orchestration?</title>
+  <link rel="stylesheet" href="../assets/lesson-style.css">
+</head>
+<body>
+
+  <div class="lesson-meta">
+    <span>📦 Lesson 23 of 30</span>
+    <span>⏱️ 15–20 minutes</span>
+    <span>🎯 Orchestration Concepts</span>
+  </div>
+
+  <h1>Why Orchestration?</h1>
+  <p class="subtitle">Docker Compose is great — until you need a second server. This lesson motivates container orchestration: what breaks at scale, what problems orchestrators solve, and the declarative mental model that underpins every orchestration tool from Kubernetes to Nomad.</p>
+
+  <!-- ============================================================ -->
+  <h2>1. The Single-Host Ceiling</h2>
+
+  <p>Docker Compose runs all your services on <strong>one machine</strong>. That works beautifully for development and small production workloads. But production at scale demands things a single host cannot provide:</p>
+
+  <ul>
+    <li><strong>Redundancy</strong> — if the host dies, everything dies with it</li>
+    <li><strong>Capacity</strong> — one server has finite CPU, RAM, and disk</li>
+    <li><strong>Rolling updates</strong> — you can't update a service with zero downtime if there's only one instance</li>
+    <li><strong>Auto-recovery</strong> — restart policies help, but who restarts the host?</li>
+    <li><strong>Geographic distribution</strong> — latency demands services near users</li>
+  </ul>
+
+  <p>The moment you need a second server, you face a wall of new problems that <code>docker-compose up</code> was never designed to solve.</p>
+
+  <div class="callout">
+    <strong>The Threshold:</strong> If your app requires more availability than "one server staying up," or more capacity than one machine can offer, you've hit the single-host ceiling.
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>2. The Problems Orchestration Solves</h2>
+
+  <!-- SVG: Multi-host problems without orchestration -->
+  <svg viewBox="0 0 700 320" style="width:100%;max-width:700px;display:block;margin:1.5rem auto;" role="img" aria-label="Problems of multi-host deployment without orchestration">
+    <rect x="10" y="10" width="680" height="300" rx="8" fill="#1a1a2e" stroke="#333" stroke-width="1.5"/>
+    <text x="350" y="40" text-anchor="middle" fill="#ef4444" font-size="14" font-weight="bold">Without Orchestration: Manual Multi-Host</text>
+
+    <!-- Server 1 -->
+    <rect x="40" y="60" width="180" height="120" rx="6" fill="#2a2a4a" stroke="#555"/>
+    <text x="130" y="82" text-anchor="middle" fill="#ccc" font-size="11">Server 1</text>
+    <rect x="55" y="92" width="65" height="30" rx="3" fill="#3b82f6" opacity="0.8"/>
+    <text x="87" y="111" text-anchor="middle" fill="#fff" font-size="9">web x3</text>
+    <rect x="130" y="92" width="75" height="30" rx="3" fill="#10b981" opacity="0.8"/>
+    <text x="167" y="111" text-anchor="middle" fill="#fff" font-size="9">db (primary)</text>
+    <text x="130" y="155" text-anchor="middle" fill="#f59e0b" font-size="10">⚠️ Overloaded</text>
+    <text x="130" y="172" text-anchor="middle" fill="#888" font-size="9">CPU: 95%</text>
+
+    <!-- Server 2 -->
+    <rect x="260" y="60" width="180" height="120" rx="6" fill="#2a2a4a" stroke="#555"/>
+    <text x="350" y="82" text-anchor="middle" fill="#ccc" font-size="11">Server 2</text>
+    <rect x="285" y="92" width="55" height="30" rx="3" fill="#8b5cf6" opacity="0.8"/>
+    <text x="312" y="111" text-anchor="middle" fill="#fff" font-size="9">cache</text>
+    <text x="350" y="155" text-anchor="middle" fill="#888" font-size="10">🤷 Mostly idle</text>
+    <text x="350" y="172" text-anchor="middle" fill="#888" font-size="9">CPU: 12%</text>
+
+    <!-- Server 3 -->
+    <rect x="480" y="60" width="180" height="120" rx="6" fill="#2a2a4a" stroke="#ef4444"/>
+    <text x="570" y="82" text-anchor="middle" fill="#ccc" font-size="11">Server 3</text>
+    <text x="570" y="120" text-anchor="middle" fill="#ef4444" font-size="12">💀 DOWN</text>
+    <text x="570" y="142" text-anchor="middle" fill="#ef4444" font-size="9">No failover</text>
+    <text x="570" y="158" text-anchor="middle" fill="#ef4444" font-size="9">No auto-restart</text>
+    <text x="570" y="174" text-anchor="middle" fill="#ef4444" font-size="9">Worker lost</text>
+
+    <!-- Problem labels -->
+    <text x="130" y="210" text-anchor="middle" fill="#f59e0b" font-size="10">❌ Manual placement</text>
+    <text x="350" y="210" text-anchor="middle" fill="#f59e0b" font-size="10">❌ No discovery</text>
+    <text x="570" y="210" text-anchor="middle" fill="#f59e0b" font-size="10">❌ No failover</text>
+
+    <!-- Bottom summary -->
+    <rect x="60" y="240" width="580" height="50" rx="6" fill="#331a1a" stroke="#ef4444" stroke-width="1" stroke-dasharray="4"/>
+    <text x="350" y="260" text-anchor="middle" fill="#ef4444" font-size="11">You become the orchestrator: SSH-ing, checking, restarting, rebalancing manually</text>
+    <text x="350" y="278" text-anchor="middle" fill="#888" font-size="10">At 3 AM. On a Saturday. During a traffic spike.</text>
+  </svg>
+
+  <p>Orchestration solves eight fundamental problems:</p>
+
+  <h3>Scheduling</h3>
+  <p><em>Which host runs which container?</em> An orchestrator performs <strong>bin-packing</strong> — fitting containers onto nodes based on available CPU, memory, and other constraints. You don't SSH into a server and run <code>docker run</code>; the scheduler decides the optimal placement.</p>
+
+  <h3>Self-Healing</h3>
+  <p>A container crashes? The orchestrator detects it (via health checks) and <strong>automatically restarts or reschedules</strong> it on a healthy node. A whole node goes down? Its workloads migrate to surviving nodes — no human intervention needed.</p>
+
+  <h3>Scaling</h3>
+  <p>Need more capacity? Tell the orchestrator "run 10 replicas" instead of 3. It finds nodes with room and spins them up. With autoscaling, this happens <strong>automatically based on metrics</strong> — CPU usage, request count, queue depth.</p>
+
+  <h3>Rolling Updates</h3>
+  <p>Deploy v2 without downtime: the orchestrator replaces instances one-by-one, health-checking each new replica before killing an old one. If the new version is unhealthy, it <strong>automatically rolls back</strong>.</p>
+
+  <h3>Service Discovery</h3>
+  <p>How does service A find service B when B might be on any of 50 nodes? Orchestrators provide <strong>built-in DNS and service registries</strong>. Containers refer to each other by name; the platform resolves the rest.</p>
+
+  <h3>Load Balancing</h3>
+  <p>Traffic is distributed across all healthy replicas of a service. The orchestrator maintains the mapping and removes unhealthy instances from rotation automatically.</p>
+
+  <h3>Secret Management</h3>
+  <p>Secrets (API keys, TLS certs, database passwords) need to reach containers on any node without being baked into images. Orchestrators provide <strong>encrypted secret distribution</strong> — inject at runtime, rotate without redeployment.</p>
+
+  <h3>Resource Management</h3>
+  <p>Prevent a runaway service from consuming all CPU/memory on a node. Orchestrators enforce <strong>resource requests and limits</strong> — guaranteeing minimums and capping maximums per container.</p>
+
+  <!-- ============================================================ -->
+  <h2>3. The Evolution</h2>
+
+  <p>How did we get here? Each step was a response to the previous one's limitations:</p>
+
+  <table>
+    <thead>
+      <tr><th>Era</th><th>Approach</th><th>What Broke</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>Manual</strong></td>
+        <td>SSH in, <code>docker run</code>, configure by hand</td>
+        <td>Human error, no reproducibility, doesn't scale past 3–5 servers</td>
+      </tr>
+      <tr>
+        <td><strong>Shell scripts</strong></td>
+        <td>Bash scripts for deploy, rollback, health checks</td>
+        <td>Fragile, no state awareness, each script is bespoke</td>
+      </tr>
+      <tr>
+        <td><strong>Config management</strong></td>
+        <td>Ansible/Chef/Puppet push desired config to hosts</td>
+        <td>Declarative for host state but <em>not container-aware</em>. No scheduling, no failover, no scaling.</td>
+      </tr>
+      <tr>
+        <td><strong>Container orchestration</strong></td>
+        <td>Kubernetes, Swarm, Nomad — cluster-level scheduling</td>
+        <td>Complexity! But it solves the multi-host container problem properly.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <p>Config management tools like Ansible are excellent for provisioning hosts, but they operate on a <strong>push model</strong> — they don't continuously watch and reconcile. Orchestrators run a <strong>continuous control loop</strong>: observe → diff → act → repeat.</p>
+
+  <!-- ============================================================ -->
+  <h2>4. Orchestrator Landscape</h2>
+
+  <table>
+    <thead>
+      <tr><th>Tool</th><th>Positioning</th><th>Best For</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>Kubernetes</strong></td>
+        <td>Industry standard, massive ecosystem, steep learning curve</td>
+        <td>Teams needing full control, multi-cloud, large scale</td>
+      </tr>
+      <tr>
+        <td><strong>Docker Swarm</strong></td>
+        <td>Built into Docker, simple setup, limited features</td>
+        <td>Small teams wanting orchestration without K8s complexity</td>
+      </tr>
+      <tr>
+        <td><strong>HashiCorp Nomad</strong></td>
+        <td>Flexible (containers, VMs, binaries), simple architecture</td>
+        <td>Mixed workloads, teams already using HashiCorp tools</td>
+      </tr>
+      <tr>
+        <td><strong>Amazon ECS</strong></td>
+        <td>AWS-native, tight integration, no cluster management</td>
+        <td>AWS-committed teams wanting managed orchestration</td>
+      </tr>
+      <tr>
+        <td><strong>Cloud Run / Fargate</strong></td>
+        <td>Serverless containers — no nodes to manage at all</td>
+        <td>Stateless HTTP services, event-driven workloads</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="callout">
+    <strong>🏭 Industry Note — From Borg to Kubernetes:</strong> Google ran its internal orchestrator <em>Borg</em> for over a decade, managing billions of containers across millions of machines. Kubernetes (2014) was Google's open-source reimagining of Borg's lessons — and it rapidly became the industry standard. The paper <em>"Large-scale cluster management at Google with Borg"</em> (2015) is a foundational read for understanding why orchestration works the way it does.
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>5. Do You Need an Orchestrator?</h2>
+
+  <p><strong>Not always.</strong> Orchestration adds real complexity — more moving parts, more concepts to learn, more things that can go wrong. For many workloads, simpler solutions are perfectly valid:</p>
+
+  <ul>
+    <li><strong>Single server + Compose + systemd</strong> — handles restarts, runs your stack, good for small-to-medium traffic</li>
+    <li><strong>Managed PaaS</strong> (Render, Railway, Fly.io) — orchestration hidden behind a UI/CLI</li>
+    <li><strong>Serverless containers</strong> (Cloud Run, Fargate) — auto-scaling without cluster management</li>
+  </ul>
+
+  <h3>Decision Framework</h3>
+  <table>
+    <thead>
+      <tr><th>Factor</th><th>You Probably Don't Need Orchestration</th><th>You Probably Do</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>Team size</strong></td>
+        <td>1–3 engineers</td>
+        <td>5+ engineers, multiple services</td>
+      </tr>
+      <tr>
+        <td><strong>Scale</strong></td>
+        <td>Fits on one beefy server</td>
+        <td>Multiple nodes required</td>
+      </tr>
+      <tr>
+        <td><strong>Availability</strong></td>
+        <td>Minutes of downtime acceptable</td>
+        <td>99.9%+ SLA required</td>
+      </tr>
+      <tr>
+        <td><strong>Deployment freq</strong></td>
+        <td>Weekly or less</td>
+        <td>Multiple deploys per day</td>
+      </tr>
+      <tr>
+        <td><strong>Services</strong></td>
+        <td>Monolith or 2–3 services</td>
+        <td>10+ microservices</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <!-- ============================================================ -->
+  <h2>6. The Declarative Model</h2>
+
+  <p>The most important concept across <em>all</em> orchestrators is the <strong>declarative reconciliation loop</strong>:</p>
+
+  <ol>
+    <li>You declare <strong>desired state</strong>: "I want 3 replicas of nginx:1.25, each with 256MB RAM"</li>
+    <li>The orchestrator observes <strong>current state</strong>: "There are 2 replicas running, one is unhealthy"</li>
+    <li>It <strong>computes the diff</strong>: "Need to kill the unhealthy one and start 2 new ones"</li>
+    <li>It <strong>acts</strong> to reconcile — then loops back to step 2</li>
+  </ol>
+
+  <p>This is fundamentally different from imperative commands ("start a container", "stop that one"). You never say <em>how</em> — you say <em>what you want</em>, and the system figures out the how, continuously.</p>
+
+  <!-- SVG: Declarative reconciliation loop -->
+  <svg viewBox="0 0 600 280" style="width:100%;max-width:600px;display:block;margin:1.5rem auto;" role="img" aria-label="Declarative reconciliation loop diagram">
+    <rect x="5" y="5" width="590" height="270" rx="8" fill="#1a1a2e" stroke="#333" stroke-width="1.5"/>
+
+    <!-- Desired State -->
+    <rect x="220" y="25" width="160" height="45" rx="6" fill="#1e3a5f" stroke="#3b82f6" stroke-width="2"/>
+    <text x="300" y="52" text-anchor="middle" fill="#93c5fd" font-size="12" font-weight="bold">Desired State</text>
+    <text x="300" y="65" text-anchor="middle" fill="#64748b" font-size="9">"3 replicas, healthy"</text>
+
+    <!-- Compare -->
+    <rect x="420" y="110" width="130" height="45" rx="6" fill="#3b1f5e" stroke="#8b5cf6" stroke-width="2"/>
+    <text x="485" y="137" text-anchor="middle" fill="#c4b5fd" font-size="12" font-weight="bold">Compare (Diff)</text>
+
+    <!-- Current State -->
+    <rect x="220" y="200" width="160" height="45" rx="6" fill="#1a3a2e" stroke="#10b981" stroke-width="2"/>
+    <text x="300" y="227" text-anchor="middle" fill="#6ee7b7" font-size="12" font-weight="bold">Current State</text>
+    <text x="300" y="240" text-anchor="middle" fill="#64748b" font-size="9">"2 running, 1 crashed"</text>
+
+    <!-- Act -->
+    <rect x="50" y="110" width="130" height="45" rx="6" fill="#3b2f1a" stroke="#f59e0b" stroke-width="2"/>
+    <text x="115" y="137" text-anchor="middle" fill="#fcd34d" font-size="12" font-weight="bold">Act (Reconcile)</text>
+
+    <!-- Arrows -->
+    <path d="M380 50 Q500 50 500 110" fill="none" stroke="#8b5cf6" stroke-width="2" marker-end="url(#arrow-purple)"/>
+    <path d="M500 155 Q500 225 380 225" fill="none" stroke="#10b981" stroke-width="2" marker-end="url(#arrow-green)"/>
+    <path d="M220 225 Q100 225 100 155" fill="none" stroke="#f59e0b" stroke-width="2" marker-end="url(#arrow-amber)"/>
+    <path d="M100 110 Q100 50 220 50" fill="none" stroke="#3b82f6" stroke-width="2" marker-end="url(#arrow-blue)"/>
+
+    <!-- Arrow markers -->
+    <defs>
+      <marker id="arrow-purple" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#8b5cf6"/></marker>
+      <marker id="arrow-green" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#10b981"/></marker>
+      <marker id="arrow-amber" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#f59e0b"/></marker>
+      <marker id="arrow-blue" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#3b82f6"/></marker>
+    </defs>
+
+    <!-- Center label -->
+    <text x="300" y="135" text-anchor="middle" fill="#888" font-size="10">Continuous</text>
+    <text x="300" y="148" text-anchor="middle" fill="#888" font-size="10">Control Loop</text>
+  </svg>
+
+  <p>This model means the orchestrator is <strong>self-correcting</strong>. Drift from desired state — whether caused by crashes, network failures, or resource pressure — is automatically detected and fixed.</p>
+
+  <pre><code># Declarative: you state WHAT you want
+replicas: 3
+image: nginx:1.25
+resources:
+  limits:
+    memory: 256Mi
+
+# The orchestrator figures out HOW:
+# - Which nodes have capacity?
+# - Which replicas are already running?
+# - Which need to be created/destroyed?</code></pre>
+
+  <!-- ============================================================ -->
+  <h2>🧪 Interactive Quizzes</h2>
+
+  <div class="quiz" data-quiz="orchestration-needed">
+    <h3>Quiz 1: When is orchestration needed?</h3>
+    <p>Your startup has a 3-service app running on a single $80/month server. Traffic is moderate and 5 minutes of downtime during deploys is acceptable. You deploy once a week. Should you adopt Kubernetes?</p>
+    <div class="quiz-options">
+      <button data-correct="true">No — Compose + systemd is sufficient for this scale</button>
+      <button>Yes — all production apps need orchestration</button>
+      <button>Yes — microservices require Kubernetes</button>
+      <button>No — but only because the server is too small for K8s</button>
+    </div>
+    <div class="quiz-explanation">
+      <p><strong>Correct!</strong> This workload fits comfortably on a single host. The team is small, downtime tolerance is reasonable, and deploy frequency is low. Adding Kubernetes would introduce massive operational complexity for zero benefit. Compose + systemd + a solid backup strategy is the right answer here.</p>
+    </div>
+  </div>
+
+  <div class="quiz" data-quiz="declarative-vs-imperative">
+    <h3>Quiz 2: Declarative vs. Imperative</h3>
+    <p>Which of these is a <strong>declarative</strong> statement?</p>
+    <div class="quiz-options">
+      <button>Run <code>docker run nginx</code> on server-3</button>
+      <button>SSH into server-2 and restart the API container</button>
+      <button data-correct="true">Ensure 3 healthy replicas of nginx are always running</button>
+      <button>Stop container abc123, then start a new one with updated image</button>
+    </div>
+    <div class="quiz-explanation">
+      <p><strong>Correct!</strong> "Ensure 3 healthy replicas are always running" describes the <em>desired state</em> without specifying how to achieve it. The orchestrator decides where to place them, when to restart them, and how to handle failures. The other options are all imperative — they specify exact steps to execute.</p>
+    </div>
+  </div>
+
+  <div class="quiz" data-quiz="scheduling-purpose">
+    <h3>Quiz 3: What does the scheduler do?</h3>
+    <p>In orchestration, what is the primary job of the <strong>scheduler</strong>?</p>
+    <div class="quiz-options">
+      <button>Run containers at specific times (like cron)</button>
+      <button data-correct="true">Decide which node should run a given container based on available resources</button>
+      <button>Order containers to start in dependency sequence</button>
+      <button>Schedule maintenance windows for the cluster</button>
+    </div>
+    <div class="quiz-explanation">
+      <p><strong>Correct!</strong> The scheduler's job is <em>placement</em> — examining available resources across all nodes (CPU, memory, disk, affinity rules) and choosing the optimal node for each container. This is bin-packing: fitting workloads onto nodes efficiently. It has nothing to do with time-based scheduling (that's a separate concept).</p>
+    </div>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>🔬 Hands-On Task</h2>
+
+  <div class="hands-on">
+    <h3>Task: Identify What Breaks at Multi-Host Scale</h3>
+    <p>Take this Compose file and identify everything that would break if you needed to run it across 3 servers:</p>
+
+    <pre><code>version: "3.8"
+services:
+  web:
+    image: myapp:latest
+    ports:
+      - "80:8080"
+    environment:
+      - DB_HOST=db
+      - REDIS_HOST=cache
+    depends_on:
+      - db
+      - cache
+
+  db:
+    image: postgres:16
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    environment:
+      - POSTGRES_PASSWORD=secret123
+
+  cache:
+    image: redis:7-alpine
+
+  worker:
+    image: myapp:latest
+    command: ["./worker"]
+    environment:
+      - DB_HOST=db
+      - REDIS_HOST=cache
+
+volumes:
+  pgdata:</code></pre>
+
+    <h4>Questions to Answer:</h4>
+    <ol>
+      <li><strong>Service discovery:</strong> <code>DB_HOST=db</code> relies on Compose's internal DNS. What happens if <code>db</code> runs on server-2 but <code>web</code> runs on server-1?</li>
+      <li><strong>Port conflicts:</strong> If you run 3 replicas of <code>web</code> on the same host, what happens with port 80?</li>
+      <li><strong>Volume locality:</strong> The <code>pgdata</code> volume is local to one host. What if Postgres gets rescheduled to a different node?</li>
+      <li><strong>Secrets:</strong> <code>POSTGRES_PASSWORD=secret123</code> is in plaintext. How would you distribute this across 3 servers securely?</li>
+      <li><strong>Load balancing:</strong> With 3 replicas of <code>web</code>, how does traffic reach all of them?</li>
+      <li><strong>Failover:</strong> If server-1 dies and it was running <code>db</code>, what happens?</li>
+    </ol>
+
+    <details>
+      <summary>Reveal Analysis</summary>
+      <ol>
+        <li><strong>Discovery breaks.</strong> Compose DNS is host-local. Across hosts, you need a cluster-wide DNS or service registry (which orchestrators provide).</li>
+        <li><strong>Port conflict.</strong> Only one process can bind port 80. You need a load balancer in front, and containers should use dynamic ports.</li>
+        <li><strong>Data loss risk.</strong> Local volumes don't follow containers. You need network-attached storage (EBS, NFS, Ceph) or a database service.</li>
+        <li><strong>Secrets exposure.</strong> You'd need to copy env files to each server or use a secret management system (Vault, orchestrator secrets).</li>
+        <li><strong>No load balancing.</strong> You need an external LB (nginx, HAProxy, cloud LB) or the orchestrator's built-in service mesh.</li>
+        <li><strong>Total outage for that service.</strong> No failover mechanism exists — an orchestrator would reschedule to a surviving node.</li>
+      </ol>
+    </details>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>Key Takeaways</h2>
+
+  <div class="takeaways">
+    <ul>
+      <li><strong>Single-host has a ceiling</strong> — Compose can't provide multi-node redundancy, failover, or horizontal scaling</li>
+      <li><strong>Orchestrators solve 8 core problems</strong> — scheduling, self-healing, scaling, rolling updates, service discovery, load balancing, secret management, and resource management</li>
+      <li><strong>The industry evolved</strong> from manual → scripts → config management → orchestration, each step addressing the previous one's inadequacy</li>
+      <li><strong>Not every app needs orchestration</strong> — complexity has a cost. Use the decision framework to evaluate honestly</li>
+      <li><strong>Declarative > imperative</strong> — state <em>what</em> you want, let the system figure out <em>how</em>. The reconciliation loop is the fundamental mental model</li>
+      <li><strong>Kubernetes dominates</strong> but isn't the only option — Swarm, Nomad, ECS, and serverless containers each serve different niches</li>
+    </ul>
+  </div>
+
+  <!-- ============================================================ -->
+  <div class="lesson-nav">
+    <a href="0022-image-supply-chain-security.html">← Lesson 22: Image Supply Chain Security</a>
+    <a href="0024-kubernetes-10000ft-view.html">Lesson 24: Kubernetes — 10,000ft View →</a>
+  </div>
+
+  <script src="../assets/quiz.js"></script>
+</body>
+</html>

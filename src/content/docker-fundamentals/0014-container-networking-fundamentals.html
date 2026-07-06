@@ -1,0 +1,489 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lesson 14: Container Networking Fundamentals</title>
+  <link rel="stylesheet" href="../assets/lesson-style.css">
+</head>
+<body>
+
+  <div class="lesson-meta">
+    <span>🌐 Lesson 14 of 20</span>
+    <span>⏱️ 16–22 minutes</span>
+    <span>🔗 Networking</span>
+  </div>
+
+  <h1>Container Networking Fundamentals</h1>
+  <p class="subtitle">Networking is where most container confusion happens. This lesson demystifies how containers talk to each other and the outside world — from virtual bridges to DNS-based service discovery.</p>
+
+  <!-- ============================================================ -->
+  <h2>1. How Container Networking Works</h2>
+
+  <p>Each container gets its own <strong>network namespace</strong> — an isolated copy of the network stack with its own interfaces, IP addresses, routing table, and iptables rules. From the container's perspective, it has a full network environment just like a standalone machine.</p>
+
+  <p>Docker creates <em>virtual network infrastructure</em> to connect these isolated namespaces together and to the outside world.</p>
+
+  <div class="callout analogy">
+    <div class="callout-title">🏗️ Analogy: Virtual LAN</div>
+    <p>Think of each container as a computer on a virtual LAN. Docker acts as the network administrator — it creates virtual switches (bridges), assigns IP addresses (DHCP), configures routing, and sets up port forwarding (NAT) so the outside world can reach specific containers.</p>
+  </div>
+
+  <p>Key components of Docker networking:</p>
+  <ul>
+    <li><strong>Network namespace</strong> — isolated network stack per container</li>
+    <li><strong>veth pair</strong> — virtual ethernet cable connecting container to bridge</li>
+    <li><strong>Bridge</strong> — virtual switch connecting containers together</li>
+    <li><strong>iptables/nftables</strong> — NAT and port forwarding rules</li>
+    <li><strong>Embedded DNS</strong> — name resolution between containers</li>
+  </ul>
+
+  <!-- ============================================================ -->
+  <h2>2. Network Drivers</h2>
+
+  <p>Docker uses a pluggable driver model. Each driver provides different connectivity and isolation characteristics:</p>
+
+  <table>
+    <thead>
+      <tr>
+        <th>Driver</th>
+        <th>Description</th>
+        <th>Use Case</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>bridge</code></td>
+        <td>Virtual switch on single host; containers get private IPs</td>
+        <td>Default for standalone containers; most common for development</td>
+      </tr>
+      <tr>
+        <td><code>host</code></td>
+        <td>Container shares host's network namespace directly</td>
+        <td>Performance-critical apps; tools that need raw host network access</td>
+      </tr>
+      <tr>
+        <td><code>none</code></td>
+        <td>No networking; container only has loopback</td>
+        <td>Security-sensitive batch jobs that need no network</td>
+      </tr>
+      <tr>
+        <td><code>overlay</code></td>
+        <td>Multi-host networking via VXLAN tunnels</td>
+        <td>Docker Swarm / multi-node clusters</td>
+      </tr>
+      <tr>
+        <td><code>macvlan</code></td>
+        <td>Container gets a real MAC address on the physical network</td>
+        <td>Legacy apps that need to appear as physical devices on the LAN</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <!-- ============================================================ -->
+  <h2>3. Bridge Network (Default)</h2>
+
+  <p>When Docker starts, it creates a virtual bridge called <code>docker0</code>. Every container that uses the default bridge network gets:</p>
+
+  <ol>
+    <li>A <strong>veth pair</strong> — one end in the container (usually <code>eth0</code>), one end attached to <code>docker0</code></li>
+    <li>A private IP address from the bridge's subnet (typically <code>172.17.0.0/16</code>)</li>
+    <li>A default route via the bridge to reach the host and internet</li>
+  </ol>
+
+  <!-- SVG: Bridge Network Diagram -->
+  <svg viewBox="0 0 700 380" style="width:100%;max-width:700px;margin:1.5rem auto;display:block;font-family:system-ui,sans-serif">
+    <!-- Host boundary -->
+    <rect x="20" y="10" width="660" height="360" rx="8" fill="#f0f4f8" stroke="#94a3b8" stroke-width="2"/>
+    <text x="40" y="35" font-size="13" fill="#475569" font-weight="bold">HOST</text>
+
+    <!-- docker0 bridge -->
+    <rect x="200" y="170" width="300" height="40" rx="6" fill="#3b82f6" stroke="#1d4ed8" stroke-width="2"/>
+    <text x="350" y="195" font-size="13" fill="white" text-anchor="middle" font-weight="bold">docker0 bridge (172.17.0.1)</text>
+
+    <!-- Container A -->
+    <rect x="80" y="50" width="160" height="90" rx="6" fill="#dbeafe" stroke="#3b82f6" stroke-width="2"/>
+    <text x="160" y="75" font-size="12" text-anchor="middle" font-weight="bold" fill="#1e40af">Container A</text>
+    <text x="160" y="95" font-size="11" text-anchor="middle" fill="#475569">eth0: 172.17.0.2</text>
+    <text x="160" y="112" font-size="11" text-anchor="middle" fill="#475569">nginx :80</text>
+
+    <!-- Container B -->
+    <rect x="460" y="50" width="160" height="90" rx="6" fill="#dbeafe" stroke="#3b82f6" stroke-width="2"/>
+    <text x="540" y="75" font-size="12" text-anchor="middle" font-weight="bold" fill="#1e40af">Container B</text>
+    <text x="540" y="95" font-size="11" text-anchor="middle" fill="#475569">eth0: 172.17.0.3</text>
+    <text x="540" y="112" font-size="11" text-anchor="middle" fill="#475569">redis :6379</text>
+
+    <!-- veth pairs -->
+    <line x1="160" y1="140" x2="160" y2="170" stroke="#3b82f6" stroke-width="2" stroke-dasharray="4"/>
+    <text x="170" y="158" font-size="9" fill="#6b7280">veth</text>
+    <line x1="540" y1="140" x2="540" y2="170" stroke="#3b82f6" stroke-width="2" stroke-dasharray="4"/>
+    <text x="550" y="158" font-size="9" fill="#6b7280">veth</text>
+
+    <!-- Connection to bridge -->
+    <line x1="160" y1="170" x2="250" y2="190" stroke="#3b82f6" stroke-width="2"/>
+    <line x1="540" y1="170" x2="450" y2="190" stroke="#3b82f6" stroke-width="2"/>
+
+    <!-- Host eth0 and internet -->
+    <rect x="270" y="250" width="160" height="35" rx="6" fill="#fef3c7" stroke="#d97706" stroke-width="2"/>
+    <text x="350" y="272" font-size="12" text-anchor="middle" font-weight="bold" fill="#92400e">Host eth0</text>
+
+    <line x1="350" y1="210" x2="350" y2="250" stroke="#64748b" stroke-width="2"/>
+    <text x="360" y="235" font-size="9" fill="#6b7280">NAT</text>
+
+    <!-- Port mapping arrow -->
+    <rect x="250" y="310" width="200" height="35" rx="6" fill="#fecaca" stroke="#dc2626" stroke-width="2"/>
+    <text x="350" y="332" font-size="12" text-anchor="middle" font-weight="bold" fill="#991b1b">External: host:8080 → :80</text>
+
+    <line x1="350" y1="285" x2="350" y2="310" stroke="#dc2626" stroke-width="2" marker-end="url(#arrowRed)"/>
+
+    <defs>
+      <marker id="arrowRed" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+        <polygon points="0 0, 8 3, 0 6" fill="#dc2626"/>
+      </marker>
+    </defs>
+  </svg>
+
+  <div class="callout warning">
+    <div class="callout-title">⚠️ Default Bridge Limitation</div>
+    <p>On the <em>default</em> bridge network, containers can communicate by IP address but <strong>NOT by container name</strong>. There's no automatic DNS resolution. You must use user-defined bridge networks for name-based discovery.</p>
+  </div>
+
+  <pre><code># Inspect the default bridge
+docker network inspect bridge
+
+# See the veth pairs on the host
+ip link show type veth
+
+# Container's network view
+docker exec mycontainer ip addr show eth0</code></pre>
+
+  <!-- ============================================================ -->
+  <h2>4. Port Mapping</h2>
+
+  <p>Containers have private IPs that are <strong>not reachable from outside the host</strong>. To expose a container's service to the outside world, you map a host port to a container port:</p>
+
+  <pre><code># Map host port 8080 → container port 80
+docker run -d -p 8080:80 nginx
+
+# Map on specific interface only
+docker run -d -p 127.0.0.1:8080:80 nginx
+
+# Map a range
+docker run -d -p 8000-8010:8000-8010 myapp
+
+# Let Docker pick a random host port
+docker run -d -p 80 nginx
+docker port &lt;container&gt;    # shows assigned port</code></pre>
+
+  <!-- SVG: Port Mapping -->
+  <svg viewBox="0 0 600 200" style="width:100%;max-width:600px;margin:1.5rem auto;display:block;font-family:system-ui,sans-serif">
+    <!-- External client -->
+    <rect x="20" y="70" width="110" height="50" rx="6" fill="#e0e7ff" stroke="#4f46e5" stroke-width="2"/>
+    <text x="75" y="100" font-size="12" text-anchor="middle" font-weight="bold" fill="#3730a3">Client</text>
+
+    <!-- Arrow to host -->
+    <line x1="130" y1="95" x2="190" y2="95" stroke="#4f46e5" stroke-width="2" marker-end="url(#arrowBlue)"/>
+    <text x="160" y="85" font-size="10" fill="#475569">:8080</text>
+
+    <!-- Host iptables -->
+    <rect x="190" y="60" width="140" height="70" rx="6" fill="#fef3c7" stroke="#d97706" stroke-width="2"/>
+    <text x="260" y="85" font-size="11" text-anchor="middle" font-weight="bold" fill="#92400e">Host iptables</text>
+    <text x="260" y="105" font-size="10" text-anchor="middle" fill="#78350f">DNAT rule</text>
+    <text x="260" y="120" font-size="9" text-anchor="middle" fill="#78350f">8080 → 172.17.0.2:80</text>
+
+    <!-- Arrow to container -->
+    <line x1="330" y1="95" x2="400" y2="95" stroke="#d97706" stroke-width="2" marker-end="url(#arrowOrange)"/>
+
+    <!-- Container -->
+    <rect x="400" y="60" width="160" height="70" rx="6" fill="#dbeafe" stroke="#3b82f6" stroke-width="2"/>
+    <text x="480" y="85" font-size="11" text-anchor="middle" font-weight="bold" fill="#1e40af">Container</text>
+    <text x="480" y="105" font-size="10" text-anchor="middle" fill="#475569">172.17.0.2</text>
+    <text x="480" y="120" font-size="10" text-anchor="middle" fill="#475569">nginx :80</text>
+
+    <defs>
+      <marker id="arrowBlue" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+        <polygon points="0 0, 8 3, 0 6" fill="#4f46e5"/>
+      </marker>
+      <marker id="arrowOrange" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+        <polygon points="0 0, 8 3, 0 6" fill="#d97706"/>
+      </marker>
+    </defs>
+  </svg>
+
+  <p>Under the hood, <code>-p 8080:80</code> creates an <strong>iptables DNAT rule</strong>:</p>
+
+  <pre><code># Docker adds rules like this automatically:
+iptables -t nat -A DOCKER -p tcp --dport 8080 \
+  -j DNAT --to-destination 172.17.0.2:80</code></pre>
+
+  <div class="callout info">
+    <div class="callout-title">💡 Port Syntax Mnemonic</div>
+    <p><code>-p HOST:CONTAINER</code> — "left is the outside (host), right is the inside (container)." Same order as volume mounts (<code>-v host:container</code>).</p>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>5. User-Defined Bridge Networks</h2>
+
+  <p>User-defined bridges are <strong>superior to the default bridge</strong> in almost every way:</p>
+
+  <table>
+    <thead>
+      <tr>
+        <th>Feature</th>
+        <th>Default Bridge</th>
+        <th>User-Defined Bridge</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>DNS by container name</td>
+        <td>❌ No</td>
+        <td>✅ Yes</td>
+      </tr>
+      <tr>
+        <td>Automatic isolation</td>
+        <td>All containers share one bridge</td>
+        <td>Each network is isolated</td>
+      </tr>
+      <tr>
+        <td>Connect/disconnect at runtime</td>
+        <td>Must stop container</td>
+        <td>✅ Hot-plug</td>
+      </tr>
+      <tr>
+        <td>Custom subnets</td>
+        <td>❌</td>
+        <td>✅ <code>--subnet</code></td>
+      </tr>
+    </tbody>
+  </table>
+
+  <pre><code># Create a user-defined bridge network
+docker network create mynet
+
+# Run containers on that network
+docker run -d --name web --network mynet nginx
+docker run -d --name api --network mynet node-app
+
+# Containers can reach each other BY NAME
+docker exec api ping web        # resolves to web's IP!
+docker exec api curl http://web  # works!
+
+# Connect a running container to another network
+docker network connect mynet existing-container
+
+# Disconnect
+docker network disconnect mynet existing-container
+
+# Inspect the network
+docker network inspect mynet
+
+# Clean up
+docker network rm mynet</code></pre>
+
+  <p>Multi-container communication on a user-defined network uses Docker's embedded DNS — no hardcoded IPs, no manual <code>/etc/hosts</code> editing, and containers can be replaced (new IP) without breaking connections.</p>
+
+  <!-- ============================================================ -->
+  <h2>6. Host Network</h2>
+
+  <p>With <code>--network host</code>, the container <strong>shares the host's network namespace directly</strong>. There is no network isolation — the container sees all host interfaces, uses the host's IP, and binds directly to host ports.</p>
+
+  <pre><code># Container binds directly to host port 80
+docker run -d --network host nginx
+
+# No -p needed — nginx is listening on host:80 directly
+curl http://localhost:80</code></pre>
+
+  <p><strong>Trade-offs:</strong></p>
+  <ul>
+    <li>✅ No NAT overhead — slightly better network performance</li>
+    <li>✅ Container can see all host traffic (useful for monitoring tools)</li>
+    <li>✅ No port mapping complexity</li>
+    <li>❌ No network isolation — container can bind any port</li>
+    <li>❌ Port conflicts — two containers can't both use port 80</li>
+    <li>❌ Only works on Linux (on Mac/Windows, Docker runs in a VM so "host" is the VM, not your machine)</li>
+  </ul>
+
+  <div class="callout info">
+    <div class="callout-title">When to Use Host Networking</div>
+    <p>Performance-critical applications where NAT overhead matters (high-throughput proxies, real-time streaming), or network tools that need to capture/inspect all host traffic (tcpdump, Prometheus node-exporter).</p>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>7. None Network</h2>
+
+  <p>With <code>--network none</code>, the container gets <strong>complete network isolation</strong>. It only has a loopback interface (<code>lo</code>) — no external connectivity at all.</p>
+
+  <pre><code># Completely isolated container
+docker run --network none alpine ip addr show
+# Only shows: lo (127.0.0.1)
+
+# No internet, no container-to-container communication
+docker run --network none alpine ping 8.8.8.8
+# ping: sendto: Network is unreachable</code></pre>
+
+  <p><strong>Use cases:</strong></p>
+  <ul>
+    <li>Batch processing jobs that process local data and need no network</li>
+    <li>Security-sensitive computation (cryptographic operations, secret generation)</li>
+    <li>Testing application behavior when network is unavailable</li>
+  </ul>
+
+  <!-- ============================================================ -->
+  <h2>8. DNS &amp; Service Discovery</h2>
+
+  <p>Docker runs an <strong>embedded DNS server</strong> at <code>127.0.0.11</code> inside every container on a user-defined network. This server resolves container names to their current IP addresses.</p>
+
+  <pre><code># Inside a container on a user-defined network:
+cat /etc/resolv.conf
+# nameserver 127.0.0.11
+
+# Resolution happens by container name
+nslookup web
+# Address: 172.18.0.2
+
+# Also works with network aliases
+docker run -d --name db --network mynet --network-alias database postgres
+# Both "db" and "database" resolve to this container</code></pre>
+
+  <p>This is the foundation of <strong>microservice communication</strong>. Services refer to each other by name, not by IP:</p>
+
+  <pre><code># Application code connects to "redis" not "172.18.0.4"
+redis.createClient({ host: 'redis', port: 6379 })
+
+# If the redis container is replaced (new IP), the name still resolves
+docker stop redis
+docker run -d --name redis --network mynet redis:7
+# Other containers automatically resolve the new IP</code></pre>
+
+  <div class="callout analogy">
+    <div class="callout-title">🏗️ Like Internal DNS at a Company</div>
+    <p>Just as a company's internal DNS lets you reach <code>mail.internal</code> without knowing the server's IP (and it still works when the server is migrated), Docker's embedded DNS lets containers find each other by name regardless of IP changes.</p>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>Knowledge Check</h2>
+
+  <div class="quiz" data-quiz="q1">
+    <p class="quiz-question">You run two containers on the <strong>default</strong> bridge network. Can container A reach container B by name (e.g., <code>ping containerB</code>)?</p>
+    <ul class="quiz-options">
+      <li data-correct="false">Yes — all Docker containers can resolve each other by name</li>
+      <li data-correct="true">No — the default bridge does NOT provide DNS resolution by name</li>
+      <li data-correct="false">Yes — but only if you use <code>--link</code></li>
+      <li data-correct="false">Only if both containers expose ports</li>
+    </ul>
+    <div class="quiz-feedback" data-correct="Correct! The default bridge has no automatic DNS. You must use a user-defined bridge network for name-based resolution." data-incorrect="The default bridge network does NOT provide automatic DNS resolution. Use a user-defined bridge (docker network create) for name-based communication."></div>
+  </div>
+
+  <div class="quiz" data-quiz="q2">
+    <p class="quiz-question">What does <code>-p 3000:80</code> mean?</p>
+    <ul class="quiz-options">
+      <li data-correct="false">Map container port 3000 to host port 80</li>
+      <li data-correct="true">Map host port 3000 to container port 80</li>
+      <li data-correct="false">Expose port 3000 and port 80 on both host and container</li>
+      <li data-correct="false">Forward traffic from port 80 to port 3000 inside the container</li>
+    </ul>
+    <div class="quiz-feedback" data-correct="Correct! The format is HOST:CONTAINER — left is outside, right is inside." data-incorrect="Remember: -p HOST:CONTAINER. Left is the host (outside), right is the container (inside). So -p 3000:80 means host:3000 → container:80."></div>
+  </div>
+
+  <div class="quiz" data-quiz="q3">
+    <p class="quiz-question">What is the main trade-off of using <code>--network host</code>?</p>
+    <ul class="quiz-options">
+      <li data-correct="false">Better security but worse performance</li>
+      <li data-correct="true">Better performance but no network isolation</li>
+      <li data-correct="false">Enables multi-host networking but requires Swarm</li>
+      <li data-correct="false">Automatic DNS but no port mapping support</li>
+    </ul>
+    <div class="quiz-feedback" data-correct="Correct! Host networking eliminates NAT overhead for better performance, but the container has full access to the host's network — no isolation." data-incorrect="Host networking removes the network namespace isolation. The container shares the host's network directly — better performance (no NAT) but zero network isolation."></div>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>Hands-On Tasks</h2>
+
+  <div class="callout task">
+    <div class="callout-title">🔬 Task 1: User-Defined Network Communication</div>
+    <p>Create a network, run two containers, and verify name resolution:</p>
+    <pre><code># 1. Create a user-defined bridge network
+docker network create testnet
+
+# 2. Run two containers on that network
+docker run -d --name server1 --network testnet alpine sleep 3600
+docker run -d --name server2 --network testnet alpine sleep 3600
+
+# 3. Ping by name (should work!)
+docker exec server1 ping -c 3 server2
+
+# 4. Verify DNS resolution
+docker exec server1 nslookup server2
+
+# 5. Compare with default bridge — this will FAIL:
+docker run -d --name server3 alpine sleep 3600
+docker run -d --name server4 alpine sleep 3600
+docker exec server3 ping -c 1 server4   # fails!
+
+# 6. Clean up
+docker stop server1 server2 server3 server4
+docker rm server1 server2 server3 server4
+docker network rm testnet</code></pre>
+  </div>
+
+  <div class="callout task">
+    <div class="callout-title">🔬 Task 2: Host Network vs Bridge + Port Mapping</div>
+    <p>Compare the two approaches for exposing nginx:</p>
+    <pre><code># Approach A: Bridge with port mapping
+docker run -d --name nginx-bridge -p 8080:80 nginx
+curl http://localhost:8080    # works via iptables DNAT
+
+# Check — container has its OWN IP:
+docker exec nginx-bridge ip addr show eth0
+
+# Approach B: Host network (Linux only)
+docker run -d --name nginx-host --network host nginx
+curl http://localhost:80      # direct, no NAT
+
+# Check — container uses HOST's network:
+docker exec nginx-host ip addr show
+# You'll see the host's real interfaces!
+
+# Compare performance (optional, run ab or wrk)
+# Host networking has slightly lower latency for high-throughput
+
+# Clean up
+docker stop nginx-bridge nginx-host
+docker rm nginx-bridge nginx-host</code></pre>
+  </div>
+
+  <!-- ============================================================ -->
+  <div class="callout info">
+    <div class="callout-title">🌍 Not Just Docker</div>
+    <p><strong>Podman</strong> uses <strong>CNI</strong> (Container Network Interface) or the newer <strong>Netavark</strong> for networking — same concepts (bridges, port mapping) but different plumbing. <strong>Kubernetes</strong> uses CNI plugins like <strong>Calico</strong>, <strong>Cilium</strong>, or <strong>Flannel</strong> — every pod gets an IP, and a flat network model means any pod can reach any other pod by IP (no NAT between pods). The concepts you learned here (namespaces, veth pairs, bridges, DNS discovery) apply everywhere.</p>
+  </div>
+
+  <div class="callout info">
+    <div class="callout-title">🏢 Industry: Service Meshes</div>
+    <p><strong>Service meshes</strong> like <strong>Istio</strong> and <strong>Linkerd</strong> build on top of container networking. They inject sidecar proxy containers (Envoy) alongside your application containers. These proxies intercept all network traffic to provide mutual TLS, load balancing, retries, circuit breaking, and observability — all without changing your application code. The foundation is the same networking primitives: network namespaces, iptables rules, and DNS-based service discovery.</p>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>Key Takeaways</h2>
+
+  <ul>
+    <li><strong>Each container has its own network namespace</strong> — isolated interfaces, IPs, and routing</li>
+    <li><strong>Bridge is the default</strong> — containers get private IPs and connect via a virtual switch</li>
+    <li><strong>Port mapping (<code>-p HOST:CONTAINER</code>)</strong> exposes container services externally via iptables DNAT</li>
+    <li><strong>User-defined bridges are better</strong> — automatic DNS, better isolation, runtime connect/disconnect</li>
+    <li><strong>Host network = no isolation</strong> — container shares host's network stack, good for performance</li>
+    <li><strong>None network = full isolation</strong> — only loopback, for security-sensitive workloads</li>
+    <li><strong>Docker's embedded DNS (127.0.0.11)</strong> enables service discovery by container name on user-defined networks</li>
+    <li><strong>Never hardcode container IPs</strong> — use names and let DNS handle resolution</li>
+  </ul>
+
+  <!-- ============================================================ -->
+  <nav class="lesson-nav">
+    <a href="0013-volumes-and-persistent-data.html">← Prev: Volumes &amp; Persistent Data</a>
+    <a href="0015-docker-compose.html">Next: Docker Compose →</a>
+  </nav>
+
+  <script src="../assets/quiz.js"></script>
+</body>
+</html>

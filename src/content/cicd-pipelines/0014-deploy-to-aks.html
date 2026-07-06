@@ -1,0 +1,302 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lesson 14 — Deploy to AKS</title>
+  <link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+
+  <div class="lesson-meta">
+    <span class="number">LESSON 14</span> &middot; Hands-On &middot; ~25 minutes
+  </div>
+
+  <h1>Deploy to AKS from GitHub Actions</h1>
+  <p>The image is in ACR. AKS is running. Now we connect them — a pipeline that deploys your container to Kubernetes with zero-downtime rolling updates. Since you already know K8s, we'll focus on the CI/CD integration.</p>
+
+  <div class="progress">
+    <span>Lesson 14 of 33</span>
+    <div class="progress-bar"><div class="progress-fill" style="width: 42%"></div></div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>The Full Picture</h2>
+
+  <div class="diagram">
+    <svg viewBox="0 0 720 160" xmlns="http://www.w3.org/2000/svg">
+      <!-- Pipeline stages -->
+      <rect x="20" y="40" width="90" height="50" rx="4" fill="#e3f2fd" stroke="#1976d2"/>
+      <text x="65" y="60" text-anchor="middle" font-size="8" font-weight="bold">CI</text>
+      <text x="65" y="75" text-anchor="middle" font-size="7" fill="#555">test</text>
+      
+      <line x1="110" y1="65" x2="130" y2="65" stroke="#333" stroke-width="1" marker-end="url(#d14)"/>
+      
+      <rect x="130" y="40" width="90" height="50" rx="4" fill="#fff3e0" stroke="#f57c00"/>
+      <text x="175" y="60" text-anchor="middle" font-size="8" font-weight="bold">Build</text>
+      <text x="175" y="75" text-anchor="middle" font-size="7" fill="#555">docker → ACR</text>
+      
+      <line x1="220" y1="65" x2="240" y2="65" stroke="#333" stroke-width="1" marker-end="url(#d14)"/>
+      
+      <rect x="240" y="40" width="90" height="50" rx="4" fill="#f3e5f5" stroke="#7b1fa2"/>
+      <text x="285" y="60" text-anchor="middle" font-size="8" font-weight="bold">Scan</text>
+      <text x="285" y="75" text-anchor="middle" font-size="7" fill="#555">trivy</text>
+      
+      <line x1="330" y1="65" x2="350" y2="65" stroke="#333" stroke-width="1" marker-end="url(#d14)"/>
+      
+      <rect x="350" y="40" width="110" height="50" rx="4" fill="#e8f5e9" stroke="#388e3c" stroke-width="2"/>
+      <text x="405" y="60" text-anchor="middle" font-size="8" font-weight="bold" fill="#388e3c">Deploy Staging</text>
+      <text x="405" y="75" text-anchor="middle" font-size="7" fill="#555">helm → AKS</text>
+      
+      <line x1="460" y1="65" x2="480" y2="65" stroke="#333" stroke-width="1" marker-end="url(#d14)"/>
+      
+      <rect x="480" y="40" width="90" height="50" rx="4" fill="#fff3e0" stroke="#f57c00"/>
+      <text x="525" y="60" text-anchor="middle" font-size="8" font-weight="bold">Verify</text>
+      <text x="525" y="75" text-anchor="middle" font-size="7" fill="#555">smoke test</text>
+      
+      <line x1="570" y1="65" x2="590" y2="65" stroke="#333" stroke-width="1" marker-end="url(#d14)"/>
+      
+      <rect x="590" y="40" width="110" height="50" rx="4" fill="#ffebee" stroke="#c62828" stroke-width="2"/>
+      <text x="645" y="60" text-anchor="middle" font-size="8" font-weight="bold" fill="#c62828">Deploy Prod</text>
+      <text x="645" y="75" text-anchor="middle" font-size="7" fill="#555">approval → helm</text>
+      
+      <!-- Time -->
+      <text x="360" y="120" text-anchor="middle" font-size="9" fill="#555">Same image through every stage — build once, deploy everywhere</text>
+      <text x="360" y="140" text-anchor="middle" font-size="8" fill="#999">Push to main → Production in ~5 minutes (excluding approval)</text>
+      
+      <defs>
+        <marker id="d14" markerWidth="6" markerHeight="4" refX="6" refY="2" orient="auto">
+          <polygon points="0 0, 6 2, 0 4" fill="#333"/>
+        </marker>
+      </defs>
+    </svg>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>🏋️ Step 1: Provision AKS (If Not Done)</h2>
+
+  <div class="exercise">
+<pre><code>CLUSTER_NAME="aks-cicd-mastery"
+RESOURCE_GROUP="rg-cicd-mastery"
+
+# Create AKS cluster
+az aks create \
+  --resource-group $RESOURCE_GROUP \
+  --name $CLUSTER_NAME \
+  --node-count 2 \
+  --node-vm-size Standard_B2s \
+  --enable-managed-identity \
+  --attach-acr $ACR_NAME \
+  --generate-ssh-keys
+
+# Get credentials
+az aks get-credentials --resource-group $RESOURCE_GROUP --name $CLUSTER_NAME
+
+# Verify
+kubectl get nodes
+
+# Grant GitHub Actions access
+AKS_ID=$(az aks show -g $RESOURCE_GROUP -n $CLUSTER_NAME --query id -o tsv)
+az role assignment create --assignee $APP_ID \
+  --role "Azure Kubernetes Service Cluster User Role" --scope $AKS_ID
+az role assignment create --assignee $APP_ID \
+  --role "Azure Kubernetes Service RBAC Writer" --scope $AKS_ID
+</code></pre>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>🏋️ Step 2: K8s Manifests</h2>
+
+  <div class="exercise">
+    <p>Create <code>k8s/deployment.yml</code>:</p>
+<pre><code>apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cicd-mastery-api
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: cicd-mastery-api
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0    # Zero downtime
+  template:
+    metadata:
+      labels:
+        app: cicd-mastery-api
+    spec:
+      containers:
+        - name: api
+          image: IMAGE_PLACEHOLDER   # Replaced by pipeline
+          ports:
+            - containerPort: 3000
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 3000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 3000
+            initialDelaySeconds: 15
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits:   { cpu: 500m, memory: 256Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: cicd-mastery-api
+spec:
+  type: ClusterIP
+  selector:
+    app: cicd-mastery-api
+  ports:
+    - port: 80
+      targetPort: 3000
+</code></pre>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>🏋️ Step 3: The AKS Deploy Pipeline</h2>
+
+  <div class="exercise">
+<pre><code><span style="color:#6c7086"># .github/workflows/deploy-aks.yml</span>
+<span style="color:#89b4fa">name:</span> <span style="color:#a6e3a1">Deploy to AKS</span>
+
+<span style="color:#89b4fa">on:</span>
+  <span style="color:#89b4fa">workflow_run:</span>
+    <span style="color:#89b4fa">workflows:</span> <span style="color:#a6e3a1">["Container Build"]</span>
+    <span style="color:#89b4fa">types:</span> <span style="color:#a6e3a1">[completed]</span>
+    <span style="color:#89b4fa">branches:</span> <span style="color:#a6e3a1">[main]</span>
+
+<span style="color:#89b4fa">permissions:</span>
+  <span style="color:#89b4fa">id-token:</span> <span style="color:#a6e3a1">write</span>
+  <span style="color:#89b4fa">contents:</span> <span style="color:#a6e3a1">read</span>
+
+<span style="color:#89b4fa">jobs:</span>
+  <span style="color:#89b4fa">deploy:</span>
+    <span style="color:#89b4fa">name:</span> <span style="color:#a6e3a1">🚀 Deploy to AKS</span>
+    <span style="color:#89b4fa">if:</span> <span style="color:#a6e3a1">${{ github.event.workflow_run.conclusion == 'success' }}</span>
+    <span style="color:#89b4fa">runs-on:</span> <span style="color:#a6e3a1">ubuntu-latest</span>
+    <span style="color:#89b4fa">environment:</span> <span style="color:#a6e3a1">staging</span>
+    <span style="color:#89b4fa">steps:</span>
+      - <span style="color:#89b4fa">uses:</span> <span style="color:#a6e3a1">actions/checkout@v4</span>
+
+      - <span style="color:#89b4fa">name:</span> <span style="color:#a6e3a1">Azure Login</span>
+        <span style="color:#89b4fa">uses:</span> <span style="color:#a6e3a1">azure/login@v2</span>
+        <span style="color:#89b4fa">with:</span>
+          <span style="color:#89b4fa">client-id:</span> <span style="color:#a6e3a1">${{ secrets.AZURE_CLIENT_ID }}</span>
+          <span style="color:#89b4fa">tenant-id:</span> <span style="color:#a6e3a1">${{ secrets.AZURE_TENANT_ID }}</span>
+          <span style="color:#89b4fa">subscription-id:</span> <span style="color:#a6e3a1">${{ secrets.AZURE_SUBSCRIPTION_ID }}</span>
+
+      - <span style="color:#89b4fa">name:</span> <span style="color:#a6e3a1">Get AKS credentials</span>
+        <span style="color:#89b4fa">run:</span> <span style="color:#a6e3a1">|</span>
+          <span style="color:#a6e3a1">az aks get-credentials \</span>
+            <span style="color:#a6e3a1">--resource-group ${{ vars.RESOURCE_GROUP }} \</span>
+            <span style="color:#a6e3a1">--name ${{ vars.CLUSTER_NAME }} \</span>
+            <span style="color:#a6e3a1">--overwrite-existing</span>
+
+      - <span style="color:#89b4fa">name:</span> <span style="color:#a6e3a1">Set image and deploy</span>
+        <span style="color:#89b4fa">run:</span> <span style="color:#a6e3a1">|</span>
+          <span style="color:#a6e3a1">IMAGE="${{ vars.ACR_LOGIN_SERVER }}/cicd-mastery-api:sha-$(echo ${{ github.event.workflow_run.head_sha }} | cut -c1-7)"</span>
+          
+          <span style="color:#6c7086"># Replace placeholder with actual image</span>
+          <span style="color:#a6e3a1">sed -i "s|IMAGE_PLACEHOLDER|$IMAGE|" k8s/deployment.yml</span>
+          
+          <span style="color:#6c7086"># Apply</span>
+          <span style="color:#a6e3a1">kubectl create namespace staging --dry-run=client -o yaml | kubectl apply -f -</span>
+          <span style="color:#a6e3a1">kubectl apply -f k8s/deployment.yml -n staging</span>
+          
+          <span style="color:#6c7086"># Wait for rollout to complete</span>
+          <span style="color:#a6e3a1">kubectl rollout status deployment/cicd-mastery-api -n staging --timeout=180s</span>
+
+      - <span style="color:#89b4fa">name:</span> <span style="color:#a6e3a1">Verify</span>
+        <span style="color:#89b4fa">run:</span> <span style="color:#a6e3a1">|</span>
+          <span style="color:#a6e3a1">kubectl get pods -n staging -l app=cicd-mastery-api</span>
+          <span style="color:#a6e3a1">echo "## 🚀 AKS Deployment Complete" >> $GITHUB_STEP_SUMMARY</span>
+          <span style="color:#a6e3a1">kubectl get pods -n staging -l app=cicd-mastery-api -o wide >> $GITHUB_STEP_SUMMARY</span>
+</code></pre>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>Critical K8s Deployment Concepts for CI/CD</h2>
+
+  <div class="diagram">
+    <svg viewBox="0 0 700 130" xmlns="http://www.w3.org/2000/svg">
+      <!-- Rolling update visualization -->
+      <text x="350" y="18" text-anchor="middle" font-size="10" font-weight="bold">kubectl rollout status — what it watches</text>
+      
+      <!-- Pods -->
+      <rect x="50" y="35" width="80" height="30" rx="4" fill="#c8e6c9" stroke="#388e3c"/>
+      <text x="90" y="54" text-anchor="middle" font-size="8">Pod (v1) ✓</text>
+      
+      <rect x="140" y="35" width="80" height="30" rx="4" fill="#c8e6c9" stroke="#388e3c"/>
+      <text x="180" y="54" text-anchor="middle" font-size="8">Pod (v1) ✓</text>
+      
+      <rect x="230" y="35" width="80" height="30" rx="4" fill="#fff9c4" stroke="#f57f17"/>
+      <text x="270" y="54" text-anchor="middle" font-size="8">Pod (v2) 🔄</text>
+      
+      <!-- Status -->
+      <rect x="350" y="30" width="320" height="40" rx="4" fill="#1e1e2e"/>
+      <text x="360" y="48" font-family="monospace" font-size="8" fill="#a6e3a1">Waiting for deployment rollout...</text>
+      <text x="360" y="62" font-family="monospace" font-size="8" fill="#cdd6f4">1/2 replicas updated, 1 available</text>
+      
+      <!-- After -->
+      <rect x="50" y="85" width="80" height="30" rx="4" fill="#bbdefb" stroke="#1976d2"/>
+      <text x="90" y="104" text-anchor="middle" font-size="8">Pod (v2) ✓</text>
+      
+      <rect x="140" y="85" width="80" height="30" rx="4" fill="#bbdefb" stroke="#1976d2"/>
+      <text x="180" y="104" text-anchor="middle" font-size="8">Pod (v2) ✓</text>
+      
+      <rect x="350" y="80" width="320" height="40" rx="4" fill="#1e1e2e"/>
+      <text x="360" y="98" font-family="monospace" font-size="8" fill="#a6e3a1">deployment "cicd-mastery-api" successfully rolled out</text>
+      <text x="360" y="112" font-family="monospace" font-size="8" fill="#cdd6f4">2/2 replicas updated, 2 available ✓</text>
+    </svg>
+    <figcaption><code>kubectl rollout status</code> blocks until ALL pods are updated and passing readiness checks — your pipeline waits for success.</figcaption>
+  </div>
+
+  <div class="key-insight">
+    <strong><code>rollout status</code> is your deployment verification.</strong> It won't return success until:
+    <ul style="margin-top:0.3rem;">
+      <li>All old pods are replaced</li>
+      <li>All new pods pass their readinessProbe</li>
+      <li>Or it times out (= deployment failed)</li>
+    </ul>
+    This is why readinessProbe on your Deployment is critical — without it, K8s can't tell the pipeline "yes, this is healthy."
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>🧠 Recall Check</h2>
+
+  <div class="recall">
+    <ol>
+      <li>Why do we use <code>sed</code> to replace IMAGE_PLACEHOLDER instead of hardcoding the image in the manifest?</li>
+      <li>What does <code>maxUnavailable: 0</code> guarantee during a rolling update?</li>
+      <li>Why is <code>kubectl rollout status --timeout=180s</code> essential in a pipeline?</li>
+      <li>What triggers this workflow? (Hint: look at the <code>on:</code> block)</li>
+    </ol>
+    <details>
+      <summary>Reveal answers</summary>
+      <ol>
+        <li>The image tag changes every build (git SHA). We keep the manifest generic (placeholder) and inject the specific tag at deploy time. This supports "same manifest, different image per deploy."</li>
+        <li><strong>Zero downtime.</strong> K8s will never terminate an old pod until a new one is ready. At least 2 pods are always serving traffic.</li>
+        <li>Without it, <code>kubectl apply</code> returns immediately (just submits the change). <code>rollout status</code> blocks until pods are ACTUALLY running — so the pipeline knows if deployment succeeded or failed.</li>
+        <li><code>workflow_run</code> — it triggers when the "Container Build" workflow completes successfully on main. This chains workflows: build finishes → deploy starts.</li>
+      </ol>
+    </details>
+  </div>
+
+  <div class="key-insight">
+    You now have a complete CI/CD pipeline deploying containers to Kubernetes. But this is <strong>push-based CD</strong> — the pipeline pushes to the cluster. In the GitOps section (Lessons 20+), we'll replace this with <strong>pull-based CD</strong> using ArgoCD, which is more secure and self-healing.
+  </div>
+
+  <p><strong>Next lesson:</strong> Helm-based Deployments — templating your manifests for multi-environment reuse.</p>
+
+</body>
+</html>

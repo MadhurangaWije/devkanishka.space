@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lesson 034 – High Availability Design | AZ-305 Study Guide</title>
+    <link rel="stylesheet" href="../assets/styles.css">
+    <script src="../assets/diagrams.js"></script>
+</head>
+<body>
+<div class="lesson-wrap">
+
+    <header class="lesson-header fade-in">
+        <span class="lesson-number">Lesson 034 · 🟢 DEEP DIVE (~30 min)</span>
+        <h1>High Availability Design</h1>
+        <p>Master HA vs DR, SLA composition math, multi-region patterns, health modeling, and chaos engineering to design solutions that meet 99.99%+ uptime targets.</p>
+    </header>
+
+    <nav class="toc fade-in">
+        <h2>In This Lesson</h2>
+        <ol>
+            <li><a href="#ha-vs-dr">HA vs DR</a></li>
+            <li><a href="#sla-math">SLA Composition Math</a></li>
+            <li><a href="#patterns">Patterns to Increase Availability</a></li>
+            <li><a href="#azure-sla-tiers">Azure SLA Tiers</a></li>
+            <li><a href="#active-active">Multi-Region Active-Active</a></li>
+            <li><a href="#active-passive">Multi-Region Active-Passive</a></li>
+            <li><a href="#health-modeling">Health Modeling</a></li>
+            <li><a href="#chaos">Chaos Engineering</a></li>
+            <li><a href="#real-world">Real-World Scenario</a></li>
+            <li><a href="#exam-tip">Exam Tip</a></li>
+            <li><a href="#quiz">Knowledge Check</a></li>
+        </ol>
+    </nav>
+
+    <section id="ha-vs-dr" class="fade-in">
+        <h2>1. HA vs DR</h2>
+        <ul>
+            <li><strong>High Availability (HA)</strong> — Minimize downtime during normal operations. Goal: near-zero interruption (seconds to minutes).</li>
+            <li><strong>Disaster Recovery (DR)</strong> — Recover from catastrophic failure (region outage, data loss). Goal: defined RTO/RPO.</li>
+            <li>HA handles <em>component</em> failures transparently; DR handles <em>site-level</em> failures with explicit failover.</li>
+            <li>Both are needed — HA doesn't protect against regional disasters; DR alone doesn't prevent everyday outages.</li>
+        </ul>
+    </section>
+
+    <section id="sla-math" class="fade-in">
+        <h2>2. SLA Composition Math</h2>
+        <p><strong>Serial dependencies</strong> — Composite SLA = SLA<sub>A</sub> × SLA<sub>B</sub> × SLA<sub>C</sub>. Every component in the chain <em>reduces</em> overall availability.</p>
+        <div class="box-diagram" data-boxes='[
+            {"label":"Front Door","sublabel":"99.99%"},
+            {"label":"App Service","sublabel":"99.95%"},
+            {"label":"SQL Database","sublabel":"99.99%"},
+            {"label":"Composite SLA","sublabel":"99.99% × 99.95% × 99.99% = 99.93%"}
+        ]' data-flow="linear" data-title="SLA Composition Chain (Serial)"></div>
+        <ul>
+            <li><strong>Key insight</strong>: 3 services at 99.9% each → composite = 99.7% (≈ 26 hrs downtime/year, not 8.7 hrs).</li>
+            <li><strong>Parallel redundancy improves SLA</strong>: P(both fail) = (1 − SLA)<sup>2</sup>. Two 99.9% instances → 99.9999%.</li>
+            <li>Always calculate composite SLA for critical paths — the exam tests this arithmetic.</li>
+        </ul>
+    </section>
+
+    <section id="patterns" class="fade-in">
+        <h2>3. Patterns to Increase Availability</h2>
+        <ul>
+            <li><strong>Redundancy</strong> — Deploy multiple instances behind a load balancer.</li>
+            <li><strong>Active-Active</strong> — All instances serve traffic simultaneously; highest availability.</li>
+            <li><strong>Active-Passive</strong> — Standby instance activated on failure; simpler but higher RTO.</li>
+            <li><strong>Health probes</strong> — Load balancers and Traffic Manager detect unhealthy instances and reroute.</li>
+            <li><strong>Availability Zones</strong> — Spread across fault-isolated datacenters within a region.</li>
+            <li><strong>Queue-based load leveling</strong> — Decouple producers/consumers to absorb spikes.</li>
+        </ul>
+    </section>
+
+    <section id="azure-sla-tiers" class="fade-in">
+        <h2>4. Azure SLA Tiers</h2>
+        <ul>
+            <li><strong>Single VM (Premium SSD)</strong> — 99.9% (≈ 8.7 hrs/year downtime)</li>
+            <li><strong>Availability Set</strong> — 99.95% (≈ 4.4 hrs/year)</li>
+            <li><strong>Availability Zones</strong> — 99.99% (≈ 52 min/year)</li>
+            <li><strong>Multi-region active-active</strong> — Target 99.999% (≈ 5 min/year)</li>
+        </ul>
+        <p>Each tier adds cost and complexity — design for the SLA the business actually needs.</p>
+    </section>
+
+    <section id="active-active" class="fade-in">
+        <h2>5. Multi-Region Active-Active</h2>
+        <div class="box-diagram" data-boxes='[
+            {"label":"Azure Front Door","sublabel":"Global LB + WAF"},
+            {"label":"Region A (East US)","sublabel":"App + SQL (read-write)"},
+            {"label":"Region B (West US)","sublabel":"App + SQL (read-write)"},
+            {"label":"Cosmos DB / SQL AG","sublabel":"Multi-region writes"},
+            {"label":"Users","sublabel":"Routed to nearest healthy region"}
+        ]' data-flow="tree" data-title="Active-Active Multi-Region Architecture"></div>
+        <ul>
+            <li><strong>Front Door</strong> routes traffic to the nearest healthy region based on latency.</li>
+            <li><strong>Data layer</strong>: Cosmos DB multi-region writes or SQL Always On AG with readable secondaries.</li>
+            <li><strong>Challenge</strong>: Conflict resolution for concurrent writes; eventual consistency trade-offs.</li>
+            <li><strong>Cost</strong>: Double compute + premium data replication — justified only for mission-critical workloads.</li>
+        </ul>
+    </section>
+
+    <section id="active-passive" class="fade-in">
+        <h2>6. Multi-Region Active-Passive</h2>
+        <div class="compare-grid" data-cols="3" data-header="Aspect|Active-Active|Active-Passive">
+            <div class="compare-cell">Traffic handling</div>
+            <div class="compare-cell">Both regions serve requests</div>
+            <div class="compare-cell">Passive region idle until failover</div>
+
+            <div class="compare-cell">RTO</div>
+            <div class="compare-cell">Near-zero (automatic)</div>
+            <div class="compare-cell">Minutes (DNS propagation + warm-up)</div>
+
+            <div class="compare-cell">Cost</div>
+            <div class="compare-cell">2× compute & data</div>
+            <div class="compare-cell">Lower — passive can use smaller SKUs</div>
+
+            <div class="compare-cell">Data consistency</div>
+            <div class="compare-cell">Conflict resolution needed</div>
+            <div class="compare-cell">Simpler — single write region</div>
+
+            <div class="compare-cell">Complexity</div>
+            <div class="compare-cell">High (sync, conflicts, testing)</div>
+            <div class="compare-cell">Moderate (failover automation)</div>
+
+            <div class="compare-cell">Best for</div>
+            <div class="compare-cell">99.999% SLA, global users</div>
+            <div class="compare-cell">99.99% SLA, cost-sensitive DR</div>
+        </div>
+        <ul>
+            <li>Use <strong>Azure paired regions</strong> for sequenced updates and priority recovery.</li>
+            <li>Automate failover with Traffic Manager health probes + Azure Automation runbooks.</li>
+            <li>Test failover regularly — an untested DR plan is not a plan.</li>
+        </ul>
+    </section>
+
+    <section id="health-modeling" class="fade-in">
+        <h2>7. Health Modeling</h2>
+        <ul>
+            <li><strong>Composite health endpoint</strong> — A single /health API that checks all critical dependencies (DB, cache, messaging).</li>
+            <li><strong>Dependency mapping</strong> — Classify each dependency as critical (blocks requests) or degraded (graceful fallback).</li>
+            <li>Return <code>Healthy</code>, <code>Degraded</code>, or <code>Unhealthy</code> — load balancers act on the response.</li>
+            <li><strong>Health probes should be lightweight</strong> — avoid heavy queries; cache dependency status briefly.</li>
+            <li>Use Application Insights availability tests for external monitoring.</li>
+        </ul>
+    </section>
+
+    <section id="chaos" class="fade-in">
+        <h2>8. Chaos Engineering</h2>
+        <ul>
+            <li><strong>Principle</strong>: Inject controlled failures in production/staging to validate HA assumptions.</li>
+            <li><strong>Azure Chaos Studio</strong> — Managed service for running chaos experiments (VM shutdown, network faults, DNS failures).</li>
+            <li>Define <strong>steady-state hypothesis</strong> → inject fault → observe → improve.</li>
+            <li>Start in staging, graduate to production with blast-radius controls (target specific resource groups, abort conditions).</li>
+            <li>Common experiments: kill an AZ, saturate CPU, add network latency, revoke DB credentials.</li>
+        </ul>
+    </section>
+
+    <section id="real-world" class="fade-in callout-box real-world-box">
+        <h2>🌍 Real-World Scenario</h2>
+        <p>An e-commerce company needs 99.99% availability for their checkout flow. They calculate the serial SLA: Front Door (99.99%) × App Service zone-redundant (99.95%) × Azure SQL Business Critical zone-redundant (99.995%) = <strong>99.935%</strong> — below target. Fix: add a second region in active-passive with auto-failover SQL group → composite becomes 1 − (1−0.99935)<sup>2</sup> = <strong>99.99996%</strong> for the data tier, lifting the overall path above 99.99%. They validate monthly with Chaos Studio experiments that kill the primary region and measure actual RTO (target &lt; 60s, achieved 42s).</p>
+    </section>
+
+    <section id="exam-tip" class="fade-in callout-box exam-tip-box">
+        <h2>🎯 Exam Tip</h2>
+        <p>AZ-305 frequently asks you to calculate composite SLAs. Remember: serial = multiply SLAs (availability goes <em>down</em>); parallel redundancy = 1 − (1−SLA)<sup>n</sup> (availability goes <em>up</em>). Know that Availability Zones give 99.99% for most services, and that multi-region is needed only when the composite drops below your target. Front Door is the go-to global load balancer for multi-region web workloads.</p>
+    </section>
+
+    <section id="quiz" class="fade-in">
+        <h2>🧪 Knowledge Check</h2>
+        <div class="quiz-wrapper" data-quiz='[
+            {"question":"Three services in series each have 99.9% SLA. What is the composite SLA?","options":["99.9%","99.7%","99.97%","99.99%"],"answer":1,"explanation":"Serial composite = 0.999 × 0.999 × 0.999 = 0.997 = 99.7%. Each dependency multiplies and reduces availability."},
+            {"question":"What is the primary difference between HA and DR?","options":["HA prevents all failures; DR fixes bugs","HA minimizes routine downtime; DR recovers from catastrophic failures","DR is cheaper than HA","HA requires multiple regions; DR does not"],"answer":1,"explanation":"HA handles component-level failures transparently (seconds). DR handles site-level disasters with defined RTO/RPO (minutes to hours)."},
+            {"question":"Which Azure service provides global HTTP load balancing for multi-region active-active?","options":["Azure Load Balancer","Application Gateway","Azure Front Door","Traffic Manager"],"answer":2,"explanation":"Front Door is a global Layer-7 load balancer with built-in WAF, SSL offload, and instant failover — ideal for multi-region active-active web apps."},
+            {"question":"How does parallel redundancy affect composite SLA?","options":["It divides the SLA by the number of instances","It multiplies SLAs together reducing availability","Availability = 1 − (1−SLA)^n — dramatically increases availability","It has no effect on SLA"],"answer":2,"explanation":"With two parallel instances at 99.9%, P(both down) = 0.001² = 0.000001, giving 99.9999% availability."},
+            {"question":"What does Azure Chaos Studio help validate?","options":["Cost optimization recommendations","High-availability assumptions by injecting controlled failures","Network throughput benchmarks","Compliance with regulatory standards"],"answer":1,"explanation":"Chaos Studio runs controlled experiments (VM kills, network faults) to verify that HA patterns work as designed under real failure conditions."}
+        ]'></div>
+    </section>
+
+    <nav class="lesson-nav fade-in">
+        <a href="0033-defender-for-cloud.html" class="prev-link">← Lesson 033</a>
+        <a href="0035-disaster-recovery-bcdr.html" class="next-link">Lesson 035 →</a>
+    </nav>
+</div>
+
+<script>
+    document.addEventListener('DOMContentLoaded', function() {
+        AzureLessons.Diagrams.renderAll();
+        AzureLessons.Quiz.init();
+        AzureLessons.ScrollReveal.init();
+        AzureLessons.Collapsible.init();
+    });
+</script>
+</body>
+</html>

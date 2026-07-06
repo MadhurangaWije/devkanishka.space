@@ -1,0 +1,433 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lesson 16: Health Checks & Restart Policies</title>
+  <link rel="stylesheet" href="../assets/lesson-style.css">
+</head>
+<body>
+
+  <div class="lesson-meta">
+    <span>📦 Lesson 16 of 20</span>
+    <span>⏱️ 14–18 minutes</span>
+    <span>🏥 Reliability & Self-Healing</span>
+  </div>
+
+  <h1>Health Checks &amp; Restart Policies</h1>
+  <p class="subtitle">A running container isn't necessarily a <em>working</em> container. Health checks let Docker know when your app is truly alive, and restart policies define what happens when it isn't. Together they form the foundation of self-healing infrastructure.</p>
+
+  <!-- ============================================================ -->
+  <h2>1. Why Health Checks?</h2>
+
+  <p>Docker tracks whether a container's main process (PID 1) is running. But a process can be alive while the application inside is completely broken:</p>
+
+  <ul>
+    <li><strong>Deadlock</strong> — threads are stuck waiting on each other; the process exists but serves nothing</li>
+    <li><strong>Memory exhaustion</strong> — the app is thrashing, responding to no requests</li>
+    <li><strong>Dependency failure</strong> — the database connection is gone; the app returns 500 on every request</li>
+    <li><strong>Startup hang</strong> — the process started but never finished initialization</li>
+  </ul>
+
+  <p>Without health checks, Docker reports the container as "running" and load balancers keep sending traffic to a black hole. Health checks close this observability gap.</p>
+
+  <div class="callout warning">
+    <div class="callout-title">Process ≠ Application Health</div>
+    <p>A Java app with a deadlocked thread pool still has PID 1 running. A Node.js server stuck in an infinite loop still shows "Up 3 hours" in <code>docker ps</code>. The process is alive; the application is dead.</p>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>2. HEALTHCHECK Instruction</h2>
+
+  <p>The <code>HEALTHCHECK</code> instruction in a Dockerfile tells Docker how to test whether a container is working:</p>
+
+  <pre><code>HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD curl -f http://localhost:3000/health || exit 1</code></pre>
+
+  <h3>Parameters Explained</h3>
+
+  <table>
+    <thead><tr><th>Flag</th><th>Default</th><th>Purpose</th></tr></thead>
+    <tbody>
+      <tr><td><code>--interval</code></td><td>30s</td><td>Time between health checks</td></tr>
+      <tr><td><code>--timeout</code></td><td>30s</td><td>Max time a single check can take before it's considered failed</td></tr>
+      <tr><td><code>--start-period</code></td><td>0s</td><td>Grace period after container start — failures during this window don't count toward retries</td></tr>
+      <tr><td><code>--retries</code></td><td>3</td><td>Consecutive failures needed to mark container unhealthy</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Health States</h3>
+
+  <p>A container with a health check moves through three states:</p>
+
+  <ul>
+    <li><strong>starting</strong> — container just started; within the start-period grace window</li>
+    <li><strong>healthy</strong> — the health check command returned exit code 0</li>
+    <li><strong>unhealthy</strong> — the health check failed <code>retries</code> consecutive times</li>
+  </ul>
+
+  <!-- SVG: Health Check State Machine -->
+  <svg viewBox="0 0 600 220" style="width:100%;max-width:600px;display:block;margin:2rem auto;" role="img" aria-label="Health check state machine diagram">
+    <!-- States -->
+    <rect x="30" y="80" width="130" height="50" rx="10" fill="#fef3c7" stroke="#d97706" stroke-width="2"/>
+    <text x="95" y="110" text-anchor="middle" font-family="system-ui,sans-serif" font-size="14" font-weight="bold" fill="#92400e">starting</text>
+
+    <rect x="235" y="80" width="130" height="50" rx="10" fill="#dcfce7" stroke="#16a34a" stroke-width="2"/>
+    <text x="300" y="110" text-anchor="middle" font-family="system-ui,sans-serif" font-size="14" font-weight="bold" fill="#166534">healthy</text>
+
+    <rect x="440" y="80" width="130" height="50" rx="10" fill="#fee2e2" stroke="#dc2626" stroke-width="2"/>
+    <text x="505" y="110" text-anchor="middle" font-family="system-ui,sans-serif" font-size="14" font-weight="bold" fill="#991b1b">unhealthy</text>
+
+    <!-- Arrows -->
+    <defs><marker id="ah" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><polygon points="0,0 8,3 0,6" fill="#374151"/></marker></defs>
+
+    <!-- starting → healthy -->
+    <line x1="160" y1="100" x2="230" y2="100" stroke="#374151" stroke-width="2" marker-end="url(#ah)"/>
+    <text x="195" y="90" text-anchor="middle" font-family="system-ui,sans-serif" font-size="11" fill="#374151">pass</text>
+
+    <!-- healthy → unhealthy -->
+    <line x1="365" y1="95" x2="435" y2="95" stroke="#374151" stroke-width="2" marker-end="url(#ah)"/>
+    <text x="400" y="85" text-anchor="middle" font-family="system-ui,sans-serif" font-size="11" fill="#374151">N fails</text>
+
+    <!-- unhealthy → healthy -->
+    <path d="M 435 120 Q 400 160 365 120" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#ah)"/>
+    <text x="400" y="155" text-anchor="middle" font-family="system-ui,sans-serif" font-size="11" fill="#374151">pass</text>
+
+    <!-- starting → unhealthy (after start-period) -->
+    <path d="M 130 130 Q 300 200 460 130" fill="none" stroke="#374151" stroke-width="1.5" stroke-dasharray="4,3" marker-end="url(#ah)"/>
+    <text x="300" y="195" text-anchor="middle" font-family="system-ui,sans-serif" font-size="11" fill="#6b7280">N fails after start-period</text>
+
+    <!-- Legend -->
+    <text x="300" y="20" text-anchor="middle" font-family="system-ui,sans-serif" font-size="13" font-weight="bold" fill="#374151">Health Check State Machine</text>
+  </svg>
+
+  <pre><code># Disable health check (e.g., in debug images)
+HEALTHCHECK NONE
+
+# Override at runtime
+docker run --health-cmd="curl -f http://localhost/" \
+  --health-interval=10s --health-retries=2 myapp</code></pre>
+
+  <!-- ============================================================ -->
+  <h2>3. Health Check in Compose</h2>
+
+  <p>In <code>compose.yaml</code>, health checks are defined with the <code>healthcheck</code> key:</p>
+
+  <pre><code>services:
+  api:
+    image: myapp:latest
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  worker:
+    image: myworker:latest
+    depends_on:
+      api:
+        condition: service_healthy</code></pre>
+
+  <p>The <code>depends_on</code> with <code>condition: service_healthy</code> ensures <code>worker</code> won't start until <code>api</code> passes its health check. This gives you proper startup ordering based on actual readiness, not just process start.</p>
+
+  <div class="callout">
+    <div class="callout-title">Without condition</div>
+    <p>Plain <code>depends_on: [api]</code> only waits for the container to <em>start</em>, not become healthy. Your worker might connect to a database that hasn't finished initializing yet.</p>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>4. Custom Health Check Patterns</h2>
+
+  <h3>HTTP Endpoint (Most Common)</h3>
+  <pre><code>HEALTHCHECK CMD curl -f http://localhost:8080/health || exit 1</code></pre>
+  <p>Best for web APIs. The <code>/health</code> endpoint should return 200 if the app is ready to serve traffic.</p>
+
+  <h3>TCP Socket Check</h3>
+  <pre><code>HEALTHCHECK CMD nc -z localhost 5432 || exit 1</code></pre>
+  <p>Good for databases and services where you just need to confirm the port is accepting connections.</p>
+
+  <h3>Command Execution</h3>
+  <pre><code>HEALTHCHECK CMD redis-cli ping | grep -q PONG</code></pre>
+  <p>Use the application's own CLI tool to verify internal state.</p>
+
+  <h3>Database Connection Test</h3>
+  <pre><code>HEALTHCHECK CMD pg_isready -U postgres || exit 1</code></pre>
+  <p>PostgreSQL ships <code>pg_isready</code>; MySQL has <code>mysqladmin ping</code>.</p>
+
+  <div class="callout warning">
+    <div class="callout-title">Keep Health Checks FAST and CHEAP</div>
+    <p>A health check that queries every table or runs a full test suite defeats the purpose. Aim for &lt;100ms execution. Check that the app can respond, not that every feature works. A slow health check can itself cause cascading failures under load.</p>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>5. Restart Policies Revisited</h2>
+
+  <table>
+    <thead><tr><th>Policy</th><th>Behavior</th></tr></thead>
+    <tbody>
+      <tr><td><code>no</code></td><td>Never restart (default). Container stays stopped.</td></tr>
+      <tr><td><code>on-failure[:max]</code></td><td>Restart only if exit code ≠ 0. Optional max retry count.</td></tr>
+      <tr><td><code>always</code></td><td>Always restart regardless of exit code. Also starts on daemon boot.</td></tr>
+      <tr><td><code>unless-stopped</code></td><td>Like <code>always</code>, but won't restart if manually stopped before daemon restart.</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Restart Policies + Health Checks: The Misconception</h3>
+
+  <div class="callout warning">
+    <div class="callout-title">Docker Does NOT Auto-Restart Unhealthy Containers</div>
+    <p>A common misconception: <code>restart: always</code> will restart a container marked <em>unhealthy</em>. <strong>It won't.</strong> Docker's restart policy only triggers when the container <em>process exits</em>. An unhealthy container with a running process stays running (and unhealthy) forever — unless an orchestrator acts on it.</p>
+  </div>
+
+  <p>This means:</p>
+  <ul>
+    <li><strong>Standalone Docker</strong> — health checks are informational only (visible in <code>docker ps</code>, events, inspect)</li>
+    <li><strong>Docker Swarm</strong> — the orchestrator kills and replaces unhealthy tasks</li>
+    <li><strong>Kubernetes</strong> — liveness probes trigger pod restarts</li>
+    <li><strong>Compose + autoheal</strong> — third-party tools like <code>willfarrell/autoheal</code> watch for unhealthy containers and restart them</li>
+  </ul>
+
+  <!-- ============================================================ -->
+  <h2>6. Self-Healing Patterns</h2>
+
+  <p>True self-healing requires three layers working together:</p>
+
+  <!-- SVG: Self-Healing Loop -->
+  <svg viewBox="0 0 500 280" style="width:100%;max-width:500px;display:block;margin:2rem auto;" role="img" aria-label="Self-healing loop diagram">
+    <defs><marker id="ah2" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><polygon points="0,0 8,3 0,6" fill="#374151"/></marker></defs>
+
+    <text x="250" y="20" text-anchor="middle" font-family="system-ui,sans-serif" font-size="13" font-weight="bold" fill="#374151">Self-Healing Loop</text>
+
+    <!-- Nodes -->
+    <rect x="180" y="40" width="140" height="40" rx="8" fill="#e0f2fe" stroke="#0369a1" stroke-width="2"/>
+    <text x="250" y="65" text-anchor="middle" font-family="system-ui,sans-serif" font-size="13" fill="#0c4a6e">Health Check</text>
+
+    <rect x="360" y="120" width="120" height="40" rx="8" fill="#fee2e2" stroke="#dc2626" stroke-width="2"/>
+    <text x="420" y="145" text-anchor="middle" font-family="system-ui,sans-serif" font-size="13" fill="#991b1b">Unhealthy</text>
+
+    <rect x="180" y="200" width="140" height="40" rx="8" fill="#fef3c7" stroke="#d97706" stroke-width="2"/>
+    <text x="250" y="225" text-anchor="middle" font-family="system-ui,sans-serif" font-size="13" fill="#92400e">Restart</text>
+
+    <rect x="20" y="120" width="120" height="40" rx="8" fill="#dcfce7" stroke="#16a34a" stroke-width="2"/>
+    <text x="80" y="145" text-anchor="middle" font-family="system-ui,sans-serif" font-size="13" fill="#166534">Healthy ✓</text>
+
+    <!-- Arrows: Check → Unhealthy -->
+    <line x1="310" y1="70" x2="375" y2="120" stroke="#374151" stroke-width="2" marker-end="url(#ah2)"/>
+    <text x="355" y="85" font-family="system-ui,sans-serif" font-size="11" fill="#dc2626">fail</text>
+
+    <!-- Unhealthy → Restart -->
+    <line x1="400" y1="160" x2="310" y2="200" stroke="#374151" stroke-width="2" marker-end="url(#ah2)"/>
+    <text x="370" y="190" font-family="system-ui,sans-serif" font-size="11" fill="#374151">orchestrator</text>
+
+    <!-- Restart → Check -->
+    <line x1="200" y1="200" x2="200" y2="85" stroke="#374151" stroke-width="2" marker-end="url(#ah2)"/>
+    <text x="170" y="150" font-family="system-ui,sans-serif" font-size="11" fill="#374151" transform="rotate(-90,170,150)">re-check</text>
+
+    <!-- Check → Healthy -->
+    <line x1="185" y1="70" x2="125" y2="120" stroke="#374151" stroke-width="2" marker-end="url(#ah2)"/>
+    <text x="140" y="85" font-family="system-ui,sans-serif" font-size="11" fill="#16a34a">pass</text>
+  </svg>
+
+  <h3>Layer 1: Application Resilience</h3>
+  <p>The app itself handles transient failures — retries, circuit breakers, graceful degradation.</p>
+
+  <h3>Layer 2: Container Restart</h3>
+  <pre><code># Compose: restart on process crash
+services:
+  api:
+    restart: on-failure:5
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 15s
+      retries: 3</code></pre>
+
+  <h3>Layer 3: Orchestrator Recovery</h3>
+  <pre><code># Kubernetes: liveness probe triggers pod restart
+livenessProbe:
+  httpGet:
+    path: /health
+    port: 3000
+  initialDelaySeconds: 10
+  periodSeconds: 15
+  failureThreshold: 3</code></pre>
+
+  <div class="callout">
+    <div class="callout-title">🏭 Industry: Kubernetes Three-Probe Pattern</div>
+    <p>Kubernetes distinguishes three types of probes:</p>
+    <ul>
+      <li><strong>Startup Probe</strong> — "Has the app finished initializing?" Disables liveness/readiness checks until it passes. For slow-starting apps.</li>
+      <li><strong>Liveness Probe</strong> — "Is the app still alive?" Failure → pod restart. Catches deadlocks and hangs.</li>
+      <li><strong>Readiness Probe</strong> — "Can it handle traffic?" Failure → remove from Service endpoints (no restart). For temporary overload or dependency issues.</li>
+    </ul>
+    <p>Don't conflate them. A liveness probe that checks the database will restart your pod every time the DB has a hiccup — use readiness for that.</p>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>7. Monitoring Health</h2>
+
+  <h3>Inspect Container Health</h3>
+  <pre><code># Current health status
+docker inspect --format='{{.State.Health.Status}}' mycontainer
+
+# Full health details (last 5 check results)
+docker inspect --format='{{json .State.Health}}' mycontainer | jq .
+
+# Watch health events in real-time
+docker events --filter event=health_status</code></pre>
+
+  <h3>Compose Health Overview</h3>
+  <pre><code># See health status of all services
+docker compose ps
+# NAME    IMAGE    COMMAND    SERVICE    STATUS           PORTS
+# api     myapp    ...        api        Up (healthy)     0.0.0.0:3000->3000/tcp
+# db      pg:16    ...        db         Up (unhealthy)   5432/tcp</code></pre>
+
+  <h3>Integration with Monitoring</h3>
+  <p>Health check results feed into monitoring stacks:</p>
+  <ul>
+    <li><strong>Prometheus</strong> — export container health as a metric via cAdvisor</li>
+    <li><strong>Docker events</strong> — stream to Elasticsearch/Loki for alerting</li>
+    <li><strong>Uptime monitors</strong> — external tools (Pingdom, UptimeRobot) hit the same <code>/health</code> endpoint from outside</li>
+  </ul>
+
+  <div class="callout">
+    <div class="callout-title">🐧 Not Just Docker</div>
+    <p><strong>Podman</strong> supports the same <code>HEALTHCHECK</code> instruction and <code>podman healthcheck run</code> command. For rootless containers managed by <strong>systemd</strong>, you can combine Podman health checks with systemd's <code>Restart=on-failure</code> and <code>ExecStartPre</code> for dependency ordering — achieving Compose-like self-healing without a daemon.</p>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>Hands-On Tasks</h2>
+
+  <div class="hands-on">
+    <h3>🔬 Task 1: Observe Health State Transitions</h3>
+    <p>Add a health check to a container and watch it transition through states:</p>
+    <pre><code># Run nginx with a health check
+docker run -d --name healthy-nginx \
+  --health-cmd="curl -f http://localhost/ || exit 1" \
+  --health-interval=5s \
+  --health-retries=3 \
+  --health-start-period=3s \
+  nginx:alpine
+
+# Watch it transition from 'starting' to 'healthy'
+watch -n1 "docker inspect --format='{{.State.Health.Status}}' healthy-nginx"
+
+# Now break it — block the port inside the container
+docker exec healthy-nginx sh -c "nginx -s stop"
+
+# Watch it go 'unhealthy' (process exits, container stops)
+# Try with a subtler failure:
+docker run -d --name broken-app \
+  --health-cmd="curl -f http://localhost:8080/ || exit 1" \
+  --health-interval=5s \
+  --health-retries=2 \
+  nginx:alpine
+# nginx listens on 80, not 8080 — health check will fail
+# Observe: container is "running" but "unhealthy"
+
+docker inspect --format='{{json .State.Health}}' broken-app | jq .
+
+# Cleanup
+docker rm -f healthy-nginx broken-app</code></pre>
+  </div>
+
+  <div class="hands-on">
+    <h3>🔬 Task 2: Compose Startup Ordering with Health Checks</h3>
+    <p>Create a setup where Service B waits for Service A to be healthy:</p>
+    <pre><code># compose.yaml
+services:
+  database:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_PASSWORD: secret
+      POSTGRES_DB: myapp
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+
+  api:
+    image: nginx:alpine  # stand-in for your app
+    depends_on:
+      database:
+        condition: service_healthy
+    ports:
+      - "8080:80"</code></pre>
+    <pre><code># Start and observe ordering
+docker compose up
+
+# You'll see:
+# database: starting...
+# database: healthy
+# api: starting (only AFTER database is healthy)
+
+# Verify
+docker compose ps  # both show "(healthy)" or "Up"
+docker compose down</code></pre>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>Interactive Quizzes</h2>
+
+  <div class="quiz" id="quiz1" data-answer="1">
+    <h3>Quiz 1: Health Check States</h3>
+    <p>A container has <code>--retries=3</code>. The health check fails twice, then passes on the third attempt. What is the container's health status?</p>
+    <div class="quiz-options">
+      <label><input type="radio" name="q1" value="0"> unhealthy (2 failures triggered it)</label>
+      <label><input type="radio" name="q1" value="1"> healthy (retries counter resets on success)</label>
+      <label><input type="radio" name="q1" value="2"> starting (still in grace period)</label>
+    </div>
+    <button class="quiz-submit" onclick="checkQuiz('quiz1')">Check Answer</button>
+    <div class="quiz-feedback"></div>
+  </div>
+
+  <div class="quiz" id="quiz2" data-answer="2">
+    <h3>Quiz 2: Restart Policy Behavior</h3>
+    <p>A container has <code>restart: always</code> and a HEALTHCHECK. The health check reports "unhealthy" but the process is still running. What does Docker do?</p>
+    <div class="quiz-options">
+      <label><input type="radio" name="q2" value="0"> Immediately restarts the container</label>
+      <label><input type="radio" name="q2" value="1"> Restarts after retries are exhausted</label>
+      <label><input type="radio" name="q2" value="2"> Nothing — restart policies only trigger on process exit, not health status</label>
+    </div>
+    <button class="quiz-submit" onclick="checkQuiz('quiz2')">Check Answer</button>
+    <div class="quiz-feedback"></div>
+  </div>
+
+  <div class="quiz" id="quiz3" data-answer="1">
+    <h3>Quiz 3: Liveness vs Readiness</h3>
+    <p>Your Kubernetes pod's database connection drops temporarily. Which probe type should detect this and what should happen?</p>
+    <div class="quiz-options">
+      <label><input type="radio" name="q3" value="0"> Liveness probe — restart the pod to reconnect</label>
+      <label><input type="radio" name="q3" value="1"> Readiness probe — remove from traffic but don't restart (it may recover)</label>
+      <label><input type="radio" name="q3" value="2"> Startup probe — the app hasn't fully started</label>
+    </div>
+    <button class="quiz-submit" onclick="checkQuiz('quiz3')">Check Answer</button>
+    <div class="quiz-feedback"></div>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>Key Takeaways</h2>
+
+  <ul class="takeaways">
+    <li><strong>Process alive ≠ app healthy</strong> — always define health checks for production containers</li>
+    <li><strong>HEALTHCHECK</strong> gives Docker three states: starting → healthy ↔ unhealthy</li>
+    <li><strong>Keep checks fast</strong> — under 100ms, testing only critical-path readiness</li>
+    <li><strong>Restart policies</strong> react to process exit, NOT health status — don't confuse the two</li>
+    <li><strong>Orchestrators close the gap</strong> — Swarm/K8s kill and replace unhealthy containers</li>
+    <li><strong>Compose ordering</strong> — use <code>depends_on: condition: service_healthy</code> for true startup sequencing</li>
+    <li><strong>Kubernetes three-probe pattern</strong> — startup, liveness, readiness each serve a different purpose</li>
+    <li><strong>Self-healing is layered</strong> — app resilience + restart policies + orchestrator recovery</li>
+  </ul>
+
+  <!-- ============================================================ -->
+  <nav class="prev-next">
+    <a href="0015-docker-compose.html">← Prev: Docker Compose</a>
+    <a href="0017-containers-in-ci-cd.html">Next: Containers in CI/CD →</a>
+  </nav>
+
+  <script src="../assets/quiz.js"></script>
+</body>
+</html>

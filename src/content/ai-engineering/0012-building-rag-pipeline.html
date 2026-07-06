@@ -1,0 +1,596 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lesson 12: Building a RAG Pipeline | AI Engineering</title>
+    <link rel="stylesheet" href="../assets/lesson.css">
+    <link rel="stylesheet" href="../assets/prism-theme.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-python.min.js"></script>
+    <script src="../assets/diagrams.js"></script>
+</head>
+<body>
+    <div class="lesson-header">
+        <div class="module-badge">Module 3: RAG Pipeline</div>
+        <h1>Building a RAG Pipeline</h1>
+        <p class="lesson-subtitle">Combine document loading, chunking, embedding, vector storage, retrieval, and generation into a complete Retrieval-Augmented Generation system.</p>
+    </div>
+
+    <div class="lesson-meta">
+        <span class="pill">Lesson 12</span>
+        <span class="pill">~30 min</span>
+        <span class="pill">Intermediate</span>
+    </div>
+
+    <main class="lesson-content">
+        <!-- Section 1: RAG Architecture Overview -->
+        <section>
+            <h2>RAG Architecture: Two Paths</h2>
+            <div class="concept-box">
+                <h3>What is RAG?</h3>
+                <p><strong>Retrieval-Augmented Generation (RAG)</strong> grounds LLM responses in external knowledge by retrieving relevant documents before generation. This eliminates hallucination on factual questions, enables up-to-date answers, and provides source attribution. Every production AI assistant uses some form of RAG.</p>
+            </div>
+
+            <p>A RAG system has two distinct execution paths:</p>
+
+            <h3>Path 1: Ingestion (Offline)</h3>
+            <div class="diagram-container" id="ingest-flow"></div>
+
+            <h3>Path 2: Query (Online)</h3>
+            <div class="diagram-container" id="query-flow"></div>
+        </section>
+
+        <!-- Section 2: Full RAG Stack -->
+        <section>
+            <h2>The Full RAG Stack</h2>
+            <div class="diagram-container" id="rag-stack"></div>
+
+            <div class="callout">
+                <strong>🎯 Key Insight:</strong> Each layer is independently swappable. You can change your embedding model without touching the document loader, or swap ChromaDB for Pinecone without changing your prompt template. Design for modularity.
+            </div>
+        </section>
+
+        <!-- Section 3: Document Loaders -->
+        <section>
+            <h2>Step 1: Document Loading</h2>
+            <p>RAG starts with getting data into your system. LangChain provides loaders for dozens of formats:</p>
+
+            <div class="code-block">
+                <pre><code class="language-python">from langchain_community.document_loaders import (
+    PyPDFLoader,
+    WebBaseLoader,
+    TextLoader,
+    DirectoryLoader,
+    UnstructuredMarkdownLoader
+)
+
+# --- Load a PDF ---
+pdf_loader = PyPDFLoader("docs/architecture_guide.pdf")
+pdf_pages = pdf_loader.load()  # One Document per page
+print(f"PDF: {len(pdf_pages)} pages")
+print(f"Page 1 content: {pdf_pages[0].page_content[:200]}")
+print(f"Page 1 metadata: {pdf_pages[0].metadata}")
+# {'source': 'docs/architecture_guide.pdf', 'page': 0}
+
+# --- Load a web page ---
+web_loader = WebBaseLoader("https://docs.python.org/3/tutorial/classes.html")
+web_docs = web_loader.load()
+print(f"Web page: {len(web_docs[0].page_content)} chars")
+
+# --- Load all markdown files from a directory ---
+dir_loader = DirectoryLoader(
+    "docs/",
+    glob="**/*.md",
+    loader_cls=UnstructuredMarkdownLoader,
+    show_progress=True
+)
+all_docs = dir_loader.load()
+print(f"Directory: {len(all_docs)} documents loaded")
+
+# --- Custom loader for any source ---
+class NotionLoader:
+    """Example: load from Notion API."""
+    def __init__(self, database_id: str, token: str):
+        self.database_id = database_id
+        self.token = token
+    
+    def load(self):
+        # Fetch pages from Notion API
+        # Convert blocks to text
+        # Return list of Document objects
+        pass
+</code></pre>
+            </div>
+        </section>
+
+        <!-- Section 4: Chunking + Embedding -->
+        <section>
+            <h2>Step 2: Chunk & Embed</h2>
+            <div class="code-block">
+                <pre><code class="language-python">from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_openai import OpenAIEmbeddings
+import chromadb
+
+# --- Chunking ---
+splitter = RecursiveCharacterTextSplitter(
+    chunk_size=500,
+    chunk_overlap=50,
+    separators=["\n\n", "\n", ". ", " ", ""]
+)
+
+# Split all documents, preserving metadata
+all_chunks = []
+for doc in all_docs:
+    chunks = splitter.split_text(doc.page_content)
+    for i, chunk in enumerate(chunks):
+        all_chunks.append({
+            "content": chunk,
+            "metadata": {
+                **doc.metadata,
+                "chunk_index": i,
+                "char_count": len(chunk)
+            }
+        })
+
+print(f"Total chunks: {len(all_chunks)}")
+
+# --- Embedding + Storage ---
+client = chromadb.PersistentClient(path="./rag_db")
+collection = client.get_or_create_collection(
+    name="documentation",
+    metadata={"hnsw:space": "cosine"}
+)
+
+# Batch insert (ChromaDB handles embedding internally if configured)
+# Or embed manually for more control:
+from openai import OpenAI
+openai_client = OpenAI()
+
+BATCH_SIZE = 100
+for i in range(0, len(all_chunks), BATCH_SIZE):
+    batch = all_chunks[i:i + BATCH_SIZE]
+    
+    # Embed batch
+    response = openai_client.embeddings.create(
+        input=[c["content"] for c in batch],
+        model="text-embedding-3-small"
+    )
+    embeddings = [d.embedding for d in response.data]
+    
+    # Insert into ChromaDB
+    collection.add(
+        ids=[f"chunk_{i+j}" for j in range(len(batch))],
+        documents=[c["content"] for c in batch],
+        embeddings=embeddings,
+        metadatas=[c["metadata"] for c in batch]
+    )
+    
+    print(f"Ingested {min(i + BATCH_SIZE, len(all_chunks))}/{len(all_chunks)}")
+
+print(f"✅ Ingestion complete: {collection.count()} chunks indexed")
+</code></pre>
+            </div>
+        </section>
+
+        <!-- Section 5: Retrieval -->
+        <section>
+            <h2>Step 3: Retrieval</h2>
+            <p>At query time, embed the user's question and find the most relevant chunks:</p>
+
+            <div class="code-block">
+                <pre><code class="language-python">def retrieve(query: str, top_k: int = 5, filter_metadata: dict = None):
+    """Retrieve relevant chunks for a query."""
+    # Build query parameters
+    query_params = {
+        "query_texts": [query],
+        "n_results": top_k,
+    }
+    if filter_metadata:
+        query_params["where"] = filter_metadata
+    
+    results = collection.query(**query_params)
+    
+    # Format results
+    retrieved = []
+    for doc, meta, dist in zip(
+        results["documents"][0],
+        results["metadatas"][0],
+        results["distances"][0]
+    ):
+        retrieved.append({
+            "content": doc,
+            "source": meta.get("source", "unknown"),
+            "score": 1 - dist,  # Convert distance to similarity
+        })
+    
+    return retrieved
+
+# Test retrieval
+results = retrieve("How do Python classes handle inheritance?")
+for r in results:
+    print(f"[{r['score']:.3f}] ({r['source']}) {r['content'][:100]}...")
+</code></pre>
+            </div>
+        </section>
+
+        <!-- Section 6: Generation with Citations -->
+        <section>
+            <h2>Step 4: Generate with Citations</h2>
+            <p>The final step: feed retrieved context to the LLM with a grounding prompt.</p>
+
+            <div class="code-block">
+                <pre><code class="language-python">from openai import OpenAI
+
+client = OpenAI()
+
+def generate_answer(query: str, retrieved_chunks: list) -> dict:
+    """Generate a grounded answer with source citations."""
+    
+    # Format context with source labels
+    context_parts = []
+    for i, chunk in enumerate(retrieved_chunks):
+        context_parts.append(
+            f"[Source {i+1}: {chunk['source']}]\n{chunk['content']}"
+        )
+    context = "\n\n---\n\n".join(context_parts)
+    
+    # System prompt enforcing grounding
+    system_prompt = """You are a helpful assistant that answers questions based ONLY on the provided context. 
+
+Rules:
+1. Only use information from the provided sources
+2. Cite sources using [Source N] notation
+3. If the context doesn't contain the answer, say "I don't have enough information to answer this"
+4. Be concise but complete
+5. If multiple sources agree, cite all of them"""
+
+    user_prompt = f"""Context:
+{context}
+
+---
+
+Question: {query}
+
+Answer (with citations):"""
+
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt}
+        ],
+        temperature=0.1,  # Low temp for factual answers
+        max_tokens=500
+    )
+    
+    answer = response.choices[0].message.content
+    
+    return {
+        "answer": answer,
+        "sources": [
+            {"source": c["source"], "score": c["score"], "excerpt": c["content"][:100]}
+            for c in retrieved_chunks
+        ],
+        "model": "gpt-4o-mini",
+        "tokens_used": response.usage.total_tokens
+    }
+</code></pre>
+            </div>
+        </section>
+
+        <!-- Section 7: Complete Pipeline -->
+        <section>
+            <h2>Complete End-to-End Pipeline</h2>
+            <p>Putting it all together into a clean, reusable class:</p>
+
+            <div class="code-block">
+                <pre><code class="language-python">"""Complete RAG Pipeline - Production-Ready Structure"""
+from dataclasses import dataclass
+from typing import Optional
+import chromadb
+from openai import OpenAI
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+
+@dataclass
+class RAGResponse:
+    answer: str
+    sources: list
+    tokens_used: int
+    retrieval_scores: list[float]
+
+class RAGPipeline:
+    def __init__(
+        self,
+        db_path: str = "./rag_db",
+        collection_name: str = "documents",
+        embedding_model: str = "text-embedding-3-small",
+        generation_model: str = "gpt-4o-mini",
+        chunk_size: int = 500,
+        chunk_overlap: int = 50,
+        top_k: int = 5
+    ):
+        self.openai = OpenAI()
+        self.chroma = chromadb.PersistentClient(path=db_path)
+        self.collection = self.chroma.get_or_create_collection(
+            name=collection_name,
+            metadata={"hnsw:space": "cosine"}
+        )
+        self.embedding_model = embedding_model
+        self.generation_model = generation_model
+        self.top_k = top_k
+        self.splitter = RecursiveCharacterTextSplitter(
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap
+        )
+    
+    def ingest(self, text: str, source: str, metadata: dict = None):
+        """Ingest a document into the vector store."""
+        chunks = self.splitter.split_text(text)
+        
+        # Embed
+        response = self.openai.embeddings.create(
+            input=chunks, model=self.embedding_model
+        )
+        embeddings = [d.embedding for d in response.data]
+        
+        # Store
+        base_id = f"{source}_{hash(text) % 10000}"
+        self.collection.add(
+            ids=[f"{base_id}_chunk{i}" for i in range(len(chunks))],
+            documents=chunks,
+            embeddings=embeddings,
+            metadatas=[
+                {**(metadata or {}), "source": source, "chunk_idx": i}
+                for i in range(len(chunks))
+            ]
+        )
+        return len(chunks)
+    
+    def query(self, question: str, filter_metadata: dict = None) -> RAGResponse:
+        """Full RAG: retrieve → generate with citations."""
+        # Retrieve
+        results = self.collection.query(
+            query_texts=[question],
+            n_results=self.top_k,
+            where=filter_metadata
+        )
+        
+        if not results["documents"][0]:
+            return RAGResponse(
+                answer="No relevant documents found.",
+                sources=[], tokens_used=0, retrieval_scores=[]
+            )
+        
+        # Build context
+        context_parts = []
+        sources = []
+        scores = []
+        for i, (doc, meta, dist) in enumerate(zip(
+            results["documents"][0],
+            results["metadatas"][0],
+            results["distances"][0]
+        )):
+            score = 1 - dist
+            context_parts.append(f"[Source {i+1}: {meta['source']}]\n{doc}")
+            sources.append(meta["source"])
+            scores.append(score)
+        
+        context = "\n\n---\n\n".join(context_parts)
+        
+        # Generate
+        response = self.openai.chat.completions.create(
+            model=self.generation_model,
+            messages=[
+                {"role": "system", "content": (
+                    "Answer based ONLY on the provided context. "
+                    "Cite sources as [Source N]. If unsure, say so."
+                )},
+                {"role": "user", "content": (
+                    f"Context:\n{context}\n\n"
+                    f"Question: {question}\n\nAnswer:"
+                )}
+            ],
+            temperature=0.1
+        )
+        
+        return RAGResponse(
+            answer=response.choices[0].message.content,
+            sources=sources,
+            tokens_used=response.usage.total_tokens,
+            retrieval_scores=scores
+        )
+
+# --- Usage ---
+rag = RAGPipeline()
+
+# Ingest documents
+rag.ingest(open("docs/api_guide.md").read(), source="api_guide.md")
+rag.ingest(open("docs/architecture.md").read(), source="architecture.md")
+rag.ingest(open("docs/deployment.md").read(), source="deployment.md")
+
+print(f"Total chunks: {rag.collection.count()}")
+
+# Query
+result = rag.query("How do I deploy the application to production?")
+print(f"\nAnswer: {result.answer}")
+print(f"\nSources: {result.sources}")
+print(f"Scores: {[f'{s:.3f}' for s in result.retrieval_scores]}")
+print(f"Tokens: {result.tokens_used}")
+</code></pre>
+            </div>
+        </section>
+
+        <!-- Section 8: Context Window Management -->
+        <section>
+            <h2>Context Window Management</h2>
+            <div class="concept-box">
+                <h3>The Stuffing Problem</h3>
+                <p>You retrieve 5 chunks × 500 tokens = 2,500 context tokens. Add the system prompt and user question, and you're at ~2,800 tokens. With GPT-4o-mini's 128K window, this is fine. But with smaller models or many chunks, you must manage context carefully.</p>
+            </div>
+
+            <div class="code-block">
+                <pre><code class="language-python">import tiktoken
+
+def fit_context(chunks: list[str], max_tokens: int = 3000) -> list[str]:
+    """Select chunks that fit within token budget."""
+    encoder = tiktoken.encoding_for_model("gpt-4o-mini")
+    
+    selected = []
+    total_tokens = 0
+    
+    for chunk in chunks:
+        chunk_tokens = len(encoder.encode(chunk))
+        if total_tokens + chunk_tokens > max_tokens:
+            break
+        selected.append(chunk)
+        total_tokens += chunk_tokens
+    
+    return selected
+
+# Strategies for large retrieval sets:
+# 1. Stuff: Include all chunks (simple, works for small sets)
+# 2. Map-Reduce: Summarize each chunk, then combine summaries
+# 3. Refine: Process chunks sequentially, refining the answer
+# 4. Rerank + Top-K: Score all, take only the best N that fit
+</code></pre>
+            </div>
+        </section>
+
+        <!-- Section 9: Source Attribution -->
+        <section>
+            <h2>Source Attribution Best Practices</h2>
+            <div class="key-points">
+                <h3>🔑 Making Citations Work</h3>
+                <ul>
+                    <li><strong>Number your sources:</strong> Label each context chunk [Source 1], [Source 2] etc. in the prompt</li>
+                    <li><strong>Include source metadata:</strong> File name, page number, URL, section title</li>
+                    <li><strong>Verify citations:</strong> Post-process the answer to check that cited source numbers actually exist</li>
+                    <li><strong>Link back:</strong> In the UI, make citations clickable links to the original document</li>
+                    <li><strong>Highlight relevant passages:</strong> Show which part of the source supports the claim</li>
+                </ul>
+            </div>
+        </section>
+
+        <!-- Mini Project -->
+        <section>
+            <div class="project-box">
+                <h2>🛠️ Mini-Project: Documentation Q&A System</h2>
+                <p>Build a complete RAG system that answers questions about a documentation set.</p>
+
+                <div class="step-list">
+                    <h4>Steps:</h4>
+                    <ol>
+                        <li>Choose a documentation source (Python docs, a library's README, your company docs)</li>
+                        <li>Implement the full RAGPipeline class from this lesson</li>
+                        <li>Ingest at least 10 documents (mix of markdown, text, or PDFs)</li>
+                        <li>Build a CLI that accepts questions and returns answers with citations</li>
+                        <li>Test with 10 questions — verify answers are grounded in sources</li>
+                        <li>Add metadata filtering (e.g., search only "deployment" docs)</li>
+                        <li><strong>Bonus:</strong> Add a "confidence" indicator based on retrieval scores</li>
+                    </ol>
+                </div>
+
+                <div class="code-block">
+                    <pre><code class="language-python">"""Documentation Q&A System - Runner"""
+from rag_pipeline import RAGPipeline
+from pathlib import Path
+
+def main():
+    rag = RAGPipeline(db_path="./docs_db", collection_name="my_docs")
+    
+    # Ingest all docs
+    docs_path = Path("./documentation")
+    for filepath in docs_path.glob("**/*.md"):
+        content = filepath.read_text()
+        chunks_added = rag.ingest(
+            text=content,
+            source=str(filepath.relative_to(docs_path)),
+            metadata={"type": "markdown"}
+        )
+        print(f"Ingested {filepath.name}: {chunks_added} chunks")
+    
+    print(f"\n📚 Total: {rag.collection.count()} chunks indexed\n")
+    
+    # Interactive loop
+    while True:
+        question = input("\n❓ Ask: ").strip()
+        if question.lower() in ("quit", "exit"):
+            break
+        
+        result = rag.query(question)
+        
+        print(f"\n💬 {result.answer}")
+        print(f"\n📎 Sources: {', '.join(set(result.sources))}")
+        
+        avg_score = sum(result.retrieval_scores) / len(result.retrieval_scores)
+        confidence = "High" if avg_score > 0.8 else "Medium" if avg_score > 0.6 else "Low"
+        print(f"🎯 Confidence: {confidence} (avg score: {avg_score:.3f})")
+
+if __name__ == "__main__":
+    main()
+</code></pre>
+                </div>
+            </div>
+        </section>
+
+        <!-- Key Takeaways -->
+        <section>
+            <div class="key-points">
+                <h3>📋 Key Takeaways</h3>
+                <ul>
+                    <li>RAG has two paths: offline ingestion (load → chunk → embed → store) and online query (embed → retrieve → generate)</li>
+                    <li>Design for modularity — each component (loader, splitter, embedder, DB, LLM) should be swappable</li>
+                    <li>Source attribution requires labeled context chunks and explicit citation instructions in the prompt</li>
+                    <li>Context window management matters — use token counting to avoid truncation</li>
+                    <li>Low temperature (0.1) and grounding prompts reduce hallucination in RAG answers</li>
+                </ul>
+            </div>
+        </section>
+    </main>
+
+    <nav class="nav-links">
+        <a href="0011-chunking-strategies.html" class="prev">← Lesson 11: Chunking Strategies</a>
+        <a href="0013-advanced-rag.html" class="next">Lesson 13: Advanced RAG →</a>
+    </nav>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            if (window.Diagrams) {
+                Diagrams.createFlowDiagram(
+                    document.getElementById('ingest-flow'),
+                    [
+                        { label: 'Document Sources', sublabel: 'PDFs, Web, Markdown, APIs', color: '#6366f1' },
+                        { label: 'Load', sublabel: 'Extract raw text + metadata', color: '#22d3ee' },
+                        { label: 'Chunk', sublabel: 'Split into 256-512 token pieces', color: '#f59e0b' },
+                        { label: 'Embed', sublabel: 'Text → 1536-d vectors', color: '#22c55e' },
+                        { label: 'Store', sublabel: 'Vector DB (ChromaDB/Pinecone)', color: '#6366f1' }
+                    ]
+                );
+
+                Diagrams.createFlowDiagram(
+                    document.getElementById('query-flow'),
+                    [
+                        { label: 'User Question', sublabel: '"How do I deploy?"', color: '#6366f1' },
+                        { label: 'Embed Query', sublabel: 'Same model as ingestion', color: '#22d3ee' },
+                        { label: 'Retrieve', sublabel: 'Top-K similar chunks', color: '#f59e0b' },
+                        { label: 'Augment Prompt', sublabel: 'Context + question → LLM', color: '#22c55e' },
+                        { label: 'Generate', sublabel: 'Grounded answer + citations', color: '#6366f1' }
+                    ]
+                );
+
+                Diagrams.createLayerDiagram(
+                    document.getElementById('rag-stack'),
+                    [
+                        { label: 'Presentation', sublabel: 'Chat UI, API endpoint, CLI', color: '#6366f1' },
+                        { label: 'Generation', sublabel: 'LLM (GPT-4o, Claude) + prompt template', color: '#22d3ee' },
+                        { label: 'Retrieval', sublabel: 'Vector search + metadata filtering + reranking', color: '#f59e0b' },
+                        { label: 'Storage', sublabel: 'Vector DB (ChromaDB, Qdrant, Pinecone)', color: '#22c55e' },
+                        { label: 'Ingestion', sublabel: 'Loaders → Chunkers → Embedders', color: '#6366f1' }
+                    ]
+                );
+            }
+        });
+    </script>
+</body>
+</html>

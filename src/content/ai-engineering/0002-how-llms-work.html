@@ -1,0 +1,366 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lesson 2: How LLMs Actually Work</title>
+  <link rel="stylesheet" href="../assets/lesson.css">
+  <link rel="stylesheet" href="../assets/prism-theme.css">
+</head>
+<body>
+  <article class="lesson-content">
+
+    <header class="lesson-header">
+      <h1>How LLMs Actually Work</h1>
+      <p>Tokenization, transformers, next-token prediction, and the sampling parameters that control output — explained for engineers, not researchers.</p>
+      <div class="lesson-meta">
+        <span>Module 1 · Lesson 2</span>
+        <span>25 min read</span>
+        <span><span class="pill">Hands-on</span></span>
+      </div>
+    </header>
+
+    <!-- ─── SECTION: Why This Matters ─── -->
+    <h2>Why Engineers Need This</h2>
+
+    <p>You don't need to implement a transformer from scratch. But understanding <em>how</em> LLMs work lets you:</p>
+    <ul>
+      <li>Predict when they'll fail (and why)</li>
+      <li>Estimate costs accurately (tokens = money)</li>
+      <li>Write better prompts (you understand what the model "sees")</li>
+      <li>Debug unexpected outputs (temperature, context truncation)</li>
+    </ul>
+
+    <!-- ─── SECTION: Tokenization ─── -->
+    <h2>Tokenization: How Text Becomes Numbers</h2>
+
+    <p>LLMs don't read characters or words — they read <strong>tokens</strong>. A token is a chunk of text, typically 3–4 characters. The model's vocabulary is a fixed set of tokens learned during training using <strong>Byte-Pair Encoding (BPE)</strong>.</p>
+
+    <div class="concept-box">
+      <h3>Tokenization Example</h3>
+      <p>The word <code>unhappiness</code> gets broken into tokens:</p>
+      <p style="font-size: 1.3rem; text-align: center; margin: 1rem 0;">
+        <span class="pill accent">un</span>
+        <span class="pill success">happ</span>
+        <span class="pill warning">iness</span>
+      </p>
+      <p>Each token maps to an integer ID in the model's vocabulary. GPT-4 has ~100,000 tokens in its vocabulary.</p>
+    </div>
+
+    <div class="concept-box">
+      <h3>BPE in 30 Seconds</h3>
+      <p><strong>Byte-Pair Encoding</strong> starts with individual bytes, then repeatedly merges the most common adjacent pairs into new tokens. This creates a vocabulary that efficiently represents common words as single tokens while still handling rare words by splitting them into sub-tokens.</p>
+      <p>Result: common words like "the" = 1 token. Rare words like "defenestration" = 3-4 tokens.</p>
+    </div>
+
+    <div class="callout note">
+      <strong>Why this matters for cost</strong>
+      <p>API pricing is per-token. A 1,000-word English paragraph is roughly 1,300 tokens. Code is typically more token-dense than English prose. Always estimate token counts before sending large payloads.</p>
+    </div>
+
+    <!-- ─── SECTION: Transformer Architecture ─── -->
+    <h2>The Transformer (Bird's-Eye View)</h2>
+
+    <p>The transformer architecture is the engine behind every modern LLM. You don't need to implement it, but understanding the flow helps you reason about capabilities and limitations.</p>
+
+    <div class="diagram-container" id="transformer-flow">
+      <div class="caption">The token prediction loop — input tokens flow through the transformer to predict the next one</div>
+    </div>
+
+    <h3>Key Components</h3>
+
+    <ol>
+      <li><strong>Token Embedding</strong> — Each token ID is converted to a high-dimensional vector (e.g., 4096 dimensions in GPT-4)</li>
+      <li><strong>Positional Encoding</strong> — Position information is added so the model knows word order</li>
+      <li><strong>Self-Attention Layers</strong> — The model decides which other tokens to "pay attention to" for each position. This is where reasoning happens.</li>
+      <li><strong>Feed-Forward Layers</strong> — Dense neural network layers that transform representations</li>
+      <li><strong>Output Projection</strong> — Final layer produces a probability distribution over all possible next tokens</li>
+    </ol>
+
+    <div class="concept-box">
+      <h3>Attention: The Key Insight</h3>
+      <p>Self-attention lets every token "look at" every other token in the context. When the model processes "The cat sat on the <strong>___</strong>", attention lets it connect "sat" with likely completions like "mat" or "floor".</p>
+      <p>This is also why context length matters — attention has O(n²) computational cost with sequence length, making long contexts expensive.</p>
+    </div>
+
+    <!-- ─── SECTION: Next-Token Prediction ─── -->
+    <h2>Next-Token Prediction</h2>
+
+    <p>The fundamental operation of an LLM is breathtakingly simple: <strong>predict the next token</strong>. That's it. Everything else — conversations, code generation, reasoning — emerges from this single objective.</p>
+
+    <div class="diagram-container" id="prediction-loop">
+      <div class="caption">The autoregressive generation loop — each predicted token becomes input for the next step</div>
+    </div>
+
+    <div class="concept-box">
+      <h3>Autoregressive Generation</h3>
+      <p>To generate a full response, the model:</p>
+      <ol class="step-list">
+        <li>Takes the full prompt as input tokens</li>
+        <li>Predicts one token (the most likely next token)</li>
+        <li>Appends that token to the input</li>
+        <li>Repeats until it produces a stop token or hits the max length</li>
+      </ol>
+      <p>This is why generation is slow — each token requires a full forward pass through the network. A 500-token response needs 500 sequential passes.</p>
+    </div>
+
+    <!-- ─── SECTION: Context Windows ─── -->
+    <h2>Context Windows</h2>
+
+    <p>The <strong>context window</strong> is the maximum number of tokens a model can process in a single call. It includes both your input (prompt) AND the model's output.</p>
+
+    <table class="comparison-table">
+      <thead>
+        <tr>
+          <th>Model</th>
+          <th>Context Window</th>
+          <th>Approximate Pages</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>GPT-3.5</td>
+          <td>16K tokens</td>
+          <td>~25 pages</td>
+        </tr>
+        <tr>
+          <td>GPT-4o</td>
+          <td>128K tokens</td>
+          <td>~200 pages</td>
+        </tr>
+        <tr>
+          <td>Claude 3.5 Sonnet</td>
+          <td>200K tokens</td>
+          <td>~300 pages</td>
+        </tr>
+        <tr>
+          <td>Gemini 1.5 Pro</td>
+          <td>1M tokens</td>
+          <td>~1,500 pages</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <div class="callout warning">
+      <strong>Context ≠ Memory</strong>
+      <p>Models don't "remember" previous conversations unless you explicitly include them in the context. Each API call is stateless. Conversation history must be sent every time, consuming tokens (and money) with each turn.</p>
+    </div>
+
+    <!-- ─── SECTION: Temperature & Sampling ─── -->
+    <h2>Temperature & Sampling Parameters</h2>
+
+    <p>After the model computes probabilities for each possible next token, <strong>sampling parameters</strong> control how the final token is chosen.</p>
+
+    <h3>Temperature</h3>
+
+    <p>Temperature scales the logits (raw scores) before converting to probabilities. It controls <strong>randomness</strong>:</p>
+
+    <ul>
+      <li><strong>Temperature = 0</strong> — Always pick the highest-probability token. Deterministic, repetitive.</li>
+      <li><strong>Temperature = 0.7</strong> — Moderate randomness. Good default for most tasks.</li>
+      <li><strong>Temperature = 1.5</strong> — High randomness. Creative but potentially incoherent.</li>
+    </ul>
+
+    <div class="diagram-container" id="temperature-diagram">
+      <div class="caption">Effect of temperature on output distribution — lower = more peaked, higher = more uniform</div>
+    </div>
+
+    <h3>Top-p (Nucleus Sampling)</h3>
+
+    <p><strong>Top-p</strong> limits sampling to the smallest set of tokens whose cumulative probability exceeds p. With top_p=0.9, the model only considers tokens covering 90% of probability mass — cutting the long tail of unlikely tokens.</p>
+
+    <h3>Top-k</h3>
+
+    <p><strong>Top-k</strong> simply limits sampling to the k most probable tokens. top_k=50 means only the top 50 tokens are considered, regardless of their probability mass.</p>
+
+    <div class="callout tip">
+      <strong>Practical defaults</strong>
+      <p>For factual/coding tasks: temperature=0, top_p=1. For creative writing: temperature=0.8, top_p=0.95. Generally, adjust either temperature OR top_p, not both — they interact in non-obvious ways.</p>
+    </div>
+
+    <!-- ─── SECTION: Mini-Project ─── -->
+    <h2>Mini-Project: Token Counter & Cost Estimator</h2>
+
+    <div class="project-box">
+      <h3>🛠️ Build a Token Counter</h3>
+      <p>Build a CLI tool that counts tokens in text using <code>tiktoken</code> (OpenAI's tokenizer) and estimates API costs across different models.</p>
+    </div>
+
+    <h3>Setup</h3>
+
+    <div class="code-block">
+      <div class="code-header">terminal</div>
+      <pre><code class="language-python">pip install tiktoken</code></pre>
+    </div>
+
+    <h3>The Code</h3>
+
+    <div class="code-block">
+      <div class="code-header">token_counter.py</div>
+      <pre><code class="language-python">"""
+Token Counter & Cost Estimator
+Counts tokens and estimates API costs for different models.
+"""
+import tiktoken
+import sys
+
+# Pricing per 1M tokens (input) as of 2024
+MODEL_PRICING = {
+    "gpt-4o": {"input": 2.50, "output": 10.00, "encoding": "o200k_base"},
+    "gpt-4o-mini": {"input": 0.15, "output": 0.60, "encoding": "o200k_base"},
+    "gpt-4-turbo": {"input": 10.00, "output": 30.00, "encoding": "cl100k_base"},
+    "gpt-3.5-turbo": {"input": 0.50, "output": 1.50, "encoding": "cl100k_base"},
+}
+
+
+def count_tokens(text: str, model: str = "gpt-4o") -> int:
+    """Count the number of tokens in a text string."""
+    encoding_name = MODEL_PRICING[model]["encoding"]
+    enc = tiktoken.get_encoding(encoding_name)
+    tokens = enc.encode(text)
+    return len(tokens)
+
+
+def show_tokenization(text: str, model: str = "gpt-4o") -> list[str]:
+    """Show how text is split into individual tokens."""
+    encoding_name = MODEL_PRICING[model]["encoding"]
+    enc = tiktoken.get_encoding(encoding_name)
+    tokens = enc.encode(text)
+    return [enc.decode([t]) for t in tokens]
+
+
+def estimate_cost(
+    input_tokens: int,
+    output_tokens: int = 0,
+    model: str = "gpt-4o"
+) -> dict:
+    """Estimate cost in USD for a given token count."""
+    pricing = MODEL_PRICING[model]
+    input_cost = (input_tokens / 1_000_000) * pricing["input"]
+    output_cost = (output_tokens / 1_000_000) * pricing["output"]
+    return {
+        "model": model,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "input_cost": f"${input_cost:.6f}",
+        "output_cost": f"${output_cost:.6f}",
+        "total_cost": f"${input_cost + output_cost:.6f}",
+    }
+
+
+def main():
+    if len(sys.argv) > 1:
+        text = " ".join(sys.argv[1:])
+    else:
+        print("Enter text (Ctrl+D to finish):")
+        text = sys.stdin.read()
+
+    print(f"\n{'='*50}")
+    print(f"Input text: {text[:100]}{'...' if len(text) > 100 else ''}")
+    print(f"Character count: {len(text)}")
+    print(f"{'='*50}\n")
+
+    # Show tokenization for first model
+    tokens = show_tokenization(text)
+    print(f"Tokens: {tokens[:20]}{'...' if len(tokens) > 20 else ''}\n")
+
+    # Compare across models
+    print(f"{'Model':<16} {'Tokens':<10} {'Input Cost':<14} {'Cost per 1K calls'}")
+    print("-" * 60)
+
+    for model in MODEL_PRICING:
+        n_tokens = count_tokens(text, model)
+        cost = estimate_cost(n_tokens, n_tokens, model)  # assume output ≈ input
+        per_1k = (n_tokens / 1_000_000) * (
+            MODEL_PRICING[model]["input"] + MODEL_PRICING[model]["output"]
+        ) * 1000
+        print(f"{model:<16} {n_tokens:<10} {cost['input_cost']:<14} ${per_1k:.4f}")
+
+
+if __name__ == "__main__":
+    main()</code></pre>
+    </div>
+
+    <h3>Example Output</h3>
+
+    <div class="code-block">
+      <div class="code-header">terminal output</div>
+      <pre><code class="language-python">$ python token_counter.py "The quick brown fox jumps over the lazy dog"
+
+==================================================
+Input text: The quick brown fox jumps over the lazy dog
+Character count: 43
+==================================================
+
+Tokens: ['The', ' quick', ' brown', ' fox', ' jumps', ' over', ' the', ' lazy', ' dog']
+
+Model            Tokens     Input Cost     Cost per 1K calls
+------------------------------------------------------------
+gpt-4o           9          $0.000023      $0.1125
+gpt-4o-mini      9          $0.000001      $0.0068
+gpt-4-turbo      9          $0.000090      $0.3600
+gpt-3.5-turbo    9          $0.000005      $0.0180</code></pre>
+    </div>
+
+    <h3>Exercises</h3>
+    <ol class="step-list">
+      <li>Try tokenizing code vs prose — which is more token-dense?</li>
+      <li>Tokenize text in different languages. How does Japanese compare to English in token count?</li>
+      <li>Add a <code>--file</code> flag to read from a file and estimate the cost of using it as context</li>
+      <li>Calculate: if you send 200K tokens of context with each API call, what's the hourly cost at 10 requests/minute?</li>
+    </ol>
+
+    <!-- ─── Key Points ─── -->
+    <div class="key-points">
+      <h3>Key Takeaways</h3>
+      <ul>
+        <li>LLMs process tokens, not words — tokenization determines cost and context usage</li>
+        <li>The transformer uses self-attention to let each token "see" all others in the context</li>
+        <li>Generation is autoregressive: one token at a time, each dependent on all previous</li>
+        <li>Context window = input + output; it's shared and finite</li>
+        <li>Temperature controls randomness; top-p/top-k trim the probability distribution</li>
+        <li>Always estimate token counts before designing your system — they directly determine cost</li>
+      </ul>
+    </div>
+
+    <!-- ─── Navigation ─── -->
+    <nav class="nav-links">
+      <a href="0001-ai-engineering-landscape.html" class="prev">The AI Engineering Landscape</a>
+      <a href="0003-calling-llm-apis.html" class="next">Calling LLM APIs</a>
+    </nav>
+
+  </article>
+
+  <script src="../assets/diagrams.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-python.min.js"></script>
+  <script>
+    // Transformer flow diagram
+    Diagrams.createFlowDiagram('#transformer-flow', [
+      { label: 'Input Tokens', sublabel: '[tok1, tok2, ...]' },
+      { label: 'Embedding', sublabel: 'Token → Vector' },
+      { label: 'Attention', sublabel: 'Self-attention × N' },
+      { label: 'Feed-Forward', sublabel: 'Transform' },
+      { label: 'Output Probs', sublabel: 'P(next token)' }
+    ]);
+
+    // Prediction loop
+    Diagrams.createAnimatedLoop('#prediction-loop', [
+      { label: 'Input Tokens' },
+      { label: 'Forward Pass' },
+      { label: 'Sample Token' },
+      { label: 'Append to Input' }
+    ], { interval: 1500 });
+
+    // Temperature effect comparison
+    Diagrams.createComparisonBar('#temperature-diagram', [
+      { label: 'temp=0 "the"', value: 95, max: 100, color: '#22c55e' },
+      { label: 'temp=0 "a"', value: 4, max: 100, color: '#22c55e' },
+      { label: 'temp=0 "one"', value: 1, max: 100, color: '#22c55e' },
+      { label: 'temp=1 "the"', value: 55, max: 100, color: '#6366f1' },
+      { label: 'temp=1 "a"', value: 28, max: 100, color: '#6366f1' },
+      { label: 'temp=1 "one"', value: 17, max: 100, color: '#6366f1' },
+    ]);
+  </script>
+</body>
+</html>

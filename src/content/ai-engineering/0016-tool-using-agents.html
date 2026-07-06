@@ -1,0 +1,499 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lesson 16: Tool-Using Agents | AI Engineering</title>
+    <link rel="stylesheet" href="../assets/lesson.css">
+    <link rel="stylesheet" href="../assets/prism-theme.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-python.min.js"></script>
+    <script src="../assets/diagrams.js"></script>
+</head>
+<body>
+    <div class="lesson-header">
+        <div class="module-badge">Module 4: AI Agents & Tools</div>
+        <h1>Tool-Using Agents</h1>
+        <p class="lesson-subtitle">Design tool registries, implement robust execution loops with error recovery, enforce sandboxing, and build agents that chain multiple tool calls to complete complex research tasks.</p>
+    </div>
+
+    <div class="lesson-meta">
+        <span class="pill">Lesson 16</span>
+        <span class="pill">~25 min</span>
+        <span class="pill">Advanced</span>
+    </div>
+
+    <main class="lesson-content">
+        <!-- Section 1: Tool Definition Patterns -->
+        <section>
+            <h2>Tool Definition Patterns</h2>
+            <div class="concept-box">
+                <h3>What Makes a Good Tool?</h3>
+                <p>A tool is any function the agent can call. Good tools have: (1) a clear, unambiguous name, (2) a precise description the LLM can reason about, (3) a well-defined schema for inputs/outputs, and (4) deterministic behavior with clear error messages. The LLM reads descriptions to decide <em>when</em> and <em>how</em> to use each tool.</p>
+            </div>
+
+            <div class="code-block">
+                <pre><code class="language-python">"""Tool Definition — The foundation of tool-using agents."""
+from dataclasses import dataclass, field
+from typing import Callable, Any
+import json
+
+@dataclass
+class ToolParameter:
+    name: str
+    type: str  # "string", "integer", "boolean", "array"
+    description: str
+    required: bool = True
+    enum: list = field(default_factory=list)
+
+@dataclass
+class Tool:
+    name: str
+    description: str
+    parameters: list[ToolParameter]
+    function: Callable[..., str]
+    requires_confirmation: bool = False  # Human-in-the-loop
+    timeout_seconds: int = 30
+    
+    def to_openai_schema(self) -> dict:
+        """Convert to OpenAI function calling format."""
+        properties = {}
+        required = []
+        for param in self.parameters:
+            properties[param.name] = {
+                "type": param.type,
+                "description": param.description,
+            }
+            if param.enum:
+                properties[param.name]["enum"] = param.enum
+            if param.required:
+                required.append(param.name)
+        
+        return {
+            "type": "function",
+            "function": {
+                "name": self.name,
+                "description": self.description,
+                "parameters": {
+                    "type": "object",
+                    "properties": properties,
+                    "required": required,
+                },
+            },
+        }
+
+# Example: Define a web search tool
+search_tool = Tool(
+    name="web_search",
+    description="Search the web for current information. Use for facts, news, or data you don't know.",
+    parameters=[
+        ToolParameter("query", "string", "The search query"),
+        ToolParameter("num_results", "integer", "Number of results (1-10)", required=False),
+    ],
+    function=lambda query, num_results=5: tavily_search(query, num_results),
+    timeout_seconds=15,
+)</code></pre>
+            </div>
+        </section>
+
+        <!-- Section 2: Tool Selection Lifecycle -->
+        <section>
+            <h2>Tool Selection Lifecycle</h2>
+            <div class="diagram-container" id="tool-lifecycle"></div>
+
+            <p>The lifecycle has distinct phases where different things can go wrong:</p>
+            <ul>
+                <li><strong>Selection:</strong> LLM picks the wrong tool → improve descriptions, add examples</li>
+                <li><strong>Argument Generation:</strong> LLM passes wrong args → tighten schemas, validate</li>
+                <li><strong>Execution:</strong> Tool fails (network, timeout, bad input) → retry with backoff</li>
+                <li><strong>Result Interpretation:</strong> LLM misreads output → structure results clearly</li>
+            </ul>
+        </section>
+
+        <!-- Section 3: Tool Registry -->
+        <section>
+            <h2>Building a Tool Registry</h2>
+            <div class="code-block">
+                <pre><code class="language-python">"""Complete Tool Registry with validation, execution, and error handling."""
+import time
+import traceback
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
+
+class ToolRegistry:
+    """Central registry for all available tools."""
+    
+    def __init__(self):
+        self.tools: dict[str, Tool] = {}
+        self.execution_log: list[dict] = []
+    
+    def register(self, tool: Tool):
+        """Register a tool, checking for name conflicts."""
+        if tool.name in self.tools:
+            raise ValueError(f"Tool '{tool.name}' already registered")
+        self.tools[tool.name] = tool
+    
+    def get_schemas(self) -> list[dict]:
+        """Get all tool schemas for the LLM."""
+        return [tool.to_openai_schema() for tool in self.tools.values()]
+    
+    def get_tool_descriptions(self) -> str:
+        """Human-readable tool list for system prompts."""
+        lines = []
+        for tool in self.tools.values():
+            params = ", ".join(f"{p.name}: {p.type}" for p in tool.parameters)
+            lines.append(f"- {tool.name}({params}): {tool.description}")
+        return "\n".join(lines)
+    
+    def validate_args(self, tool_name: str, args: dict) -> tuple[bool, str]:
+        """Validate arguments against tool schema."""
+        tool = self.tools.get(tool_name)
+        if not tool:
+            return False, f"Unknown tool: {tool_name}"
+        
+        for param in tool.parameters:
+            if param.required and param.name not in args:
+                return False, f"Missing required parameter: {param.name}"
+            if param.name in args and param.enum:
+                if args[param.name] not in param.enum:
+                    return False, f"Invalid value for {param.name}. Must be one of: {param.enum}"
+        
+        return True, "Valid"
+    
+    def execute(self, tool_name: str, args: dict, 
+                confirm_fn: Callable = None) -> dict:
+        """Execute a tool with timeout, validation, and logging."""
+        start_time = time.time()
+        
+        # Validate
+        valid, error = self.validate_args(tool_name, args)
+        if not valid:
+            return {"success": False, "error": error, "duration": 0}
+        
+        tool = self.tools[tool_name]
+        
+        # Human-in-the-loop confirmation
+        if tool.requires_confirmation and confirm_fn:
+            approved = confirm_fn(tool_name, args)
+            if not approved:
+                return {"success": False, "error": "User rejected execution", "duration": 0}
+        
+        # Execute with timeout
+        try:
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(tool.function, **args)
+                result = future.result(timeout=tool.timeout_seconds)
+            
+            duration = time.time() - start_time
+            log_entry = {
+                "tool": tool_name, "args": args, "result": result,
+                "success": True, "duration": duration,
+            }
+            self.execution_log.append(log_entry)
+            return {"success": True, "result": result, "duration": duration}
+        
+        except TimeoutError:
+            return {"success": False, "error": f"Tool timed out after {tool.timeout_seconds}s", 
+                    "duration": tool.timeout_seconds}
+        except Exception as e:
+            return {"success": False, "error": f"{type(e).__name__}: {str(e)}", 
+                    "duration": time.time() - start_time}</code></pre>
+            </div>
+        </section>
+
+        <!-- Section 4: Execution Loop with Error Recovery -->
+        <section>
+            <h2>Agent Execution Loop with Error Recovery</h2>
+            <div class="code-block">
+                <pre><code class="language-python">"""Full agent loop using OpenAI function calling + tool registry."""
+import openai
+
+client = openai.OpenAI()
+
+def run_tool_agent(query: str, registry: ToolRegistry, 
+                   max_iterations: int = 10, max_retries: int = 2) -> str:
+    """Agent loop with automatic error recovery."""
+    
+    messages = [
+        {"role": "system", "content": f"""You are a helpful research assistant with access to tools.
+Use tools to find information, then synthesize a comprehensive answer.
+If a tool fails, try a different approach or rephrase your query.
+
+Available tools:
+{registry.get_tool_descriptions()}"""},
+        {"role": "user", "content": query},
+    ]
+    
+    tool_schemas = registry.get_schemas()
+    
+    for iteration in range(max_iterations):
+        response = client.chat.completions.create(
+            model="gpt-4o",
+            messages=messages,
+            tools=tool_schemas,
+            tool_choice="auto",  # Let model decide
+        )
+        
+        msg = response.choices[0].message
+        messages.append(msg)
+        
+        # If no tool calls, we have our final answer
+        if not msg.tool_calls:
+            return msg.content
+        
+        # Process each tool call
+        for tool_call in msg.tool_calls:
+            fn_name = tool_call.function.name
+            fn_args = json.loads(tool_call.function.arguments)
+            
+            # Execute with retries
+            result = None
+            for attempt in range(max_retries + 1):
+                result = registry.execute(fn_name, fn_args)
+                if result["success"]:
+                    break
+                # On failure, wait briefly before retry
+                time.sleep(1)
+            
+            # Format result for the LLM
+            if result["success"]:
+                tool_response = result["result"]
+            else:
+                tool_response = f"ERROR: {result['error']}. Please try a different approach."
+            
+            messages.append({
+                "role": "tool",
+                "tool_call_id": tool_call.id,
+                "content": str(tool_response),
+            })
+    
+    return "Agent reached maximum iterations. Partial results may be in the conversation."</code></pre>
+            </div>
+        </section>
+
+        <!-- Section 5: Chaining Tool Calls -->
+        <section>
+            <h2>Chaining Tool Calls</h2>
+            <div class="concept-box">
+                <h3>Multi-Step Tool Chains</h3>
+                <p>Real tasks require multiple tool calls where each depends on the previous result. The agent searches for something, reads the top result, extracts data, then calculates with it. The key challenge: the context window fills up fast. Summarize intermediate results to stay within budget.</p>
+            </div>
+
+            <div class="code-block">
+                <pre><code class="language-python">"""Tools that chain: search → read → extract → synthesize."""
+
+# Tool: Read a webpage and extract content
+read_page_tool = Tool(
+    name="read_webpage",
+    description="Read the full text content of a webpage URL. Use after searching to get details.",
+    parameters=[
+        ToolParameter("url", "string", "The full URL to read"),
+    ],
+    function=lambda url: fetch_and_extract(url),
+    timeout_seconds=20,
+)
+
+# Tool: Summarize long text to save context space
+summarize_tool = Tool(
+    name="summarize_text",
+    description="Summarize a long text into key points. Use when text is too long to include directly.",
+    parameters=[
+        ToolParameter("text", "string", "The text to summarize"),
+        ToolParameter("focus", "string", "What aspect to focus the summary on", required=False),
+    ],
+    function=lambda text, focus="": llm_summarize(text, focus),
+    timeout_seconds=30,
+)
+
+# Tool: Write structured report
+write_report_tool = Tool(
+    name="write_report",
+    description="Write a structured report from gathered research. Use as your final step.",
+    parameters=[
+        ToolParameter("topic", "string", "The report topic"),
+        ToolParameter("findings", "string", "Key findings to include (as bullet points)"),
+        ToolParameter("format", "string", "Report format", enum=["brief", "detailed", "executive"]),
+    ],
+    function=lambda topic, findings, format="detailed": generate_report(topic, findings, format),
+    requires_confirmation=True,  # Confirm before generating long content
+)</code></pre>
+            </div>
+        </section>
+
+        <!-- Section 6: Security & Sandboxing -->
+        <section>
+            <h2>Security & Sandboxing</h2>
+            <div class="callout">
+                <strong>⚠️ Critical Security Warning:</strong> Tool-using agents execute code based on LLM outputs. LLMs can be manipulated via prompt injection — a malicious webpage could instruct the agent to call dangerous tools. <strong>Never</strong> give agents unsandboxed access to file systems, databases, or network calls without strict allowlists.
+            </div>
+
+            <div class="code-block">
+                <pre><code class="language-python">"""Sandboxing patterns for tool execution."""
+
+class SandboxedToolRegistry(ToolRegistry):
+    """Registry with security constraints."""
+    
+    def __init__(self, allowed_domains: list[str] = None,
+                 blocked_tools: list[str] = None,
+                 rate_limits: dict[str, int] = None):
+        super().__init__()
+        self.allowed_domains = allowed_domains or []
+        self.blocked_tools = blocked_tools or []
+        self.rate_limits = rate_limits or {}  # tool_name -> max calls per minute
+        self._call_counts: dict[str, list[float]] = {}
+    
+    def execute(self, tool_name: str, args: dict, **kwargs) -> dict:
+        # Check if tool is blocked
+        if tool_name in self.blocked_tools:
+            return {"success": False, "error": "Tool is disabled by security policy"}
+        
+        # Check rate limits
+        if tool_name in self.rate_limits:
+            now = time.time()
+            calls = self._call_counts.get(tool_name, [])
+            calls = [t for t in calls if now - t < 60]  # Last minute
+            if len(calls) >= self.rate_limits[tool_name]:
+                return {"success": False, "error": "Rate limit exceeded"}
+            calls.append(now)
+            self._call_counts[tool_name] = calls
+        
+        # URL allowlist check
+        if "url" in args and self.allowed_domains:
+            from urllib.parse import urlparse
+            domain = urlparse(args["url"]).netloc
+            if not any(domain.endswith(d) for d in self.allowed_domains):
+                return {"success": False, "error": f"Domain '{domain}' not in allowlist"}
+        
+        return super().execute(tool_name, args, **kwargs)
+
+# Usage
+registry = SandboxedToolRegistry(
+    allowed_domains=["wikipedia.org", "arxiv.org", "github.com"],
+    rate_limits={"web_search": 10, "read_webpage": 20},
+)</code></pre>
+            </div>
+
+            <div class="comparison-table">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Security Layer</th>
+                            <th>What It Prevents</th>
+                            <th>Implementation</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><strong>Input Validation</strong></td>
+                            <td>Malformed arguments, injection</td>
+                            <td>Schema validation + sanitization</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Domain Allowlist</strong></td>
+                            <td>Accessing unauthorized sites</td>
+                            <td>URL parsing + allowlist check</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Rate Limiting</strong></td>
+                            <td>Resource exhaustion, cost runaway</td>
+                            <td>Sliding window counter</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Timeout</strong></td>
+                            <td>Hanging connections, infinite loops</td>
+                            <td>ThreadPoolExecutor + timeout</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Human Confirmation</strong></td>
+                            <td>Destructive or expensive actions</td>
+                            <td>Callback before execution</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Output Sanitization</strong></td>
+                            <td>Injection via tool results</td>
+                            <td>Strip control chars, limit length</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <!-- Section 7: Mini-Project -->
+        <section>
+            <h2>Mini-Project: Research Agent</h2>
+            <div class="project-box">
+                <h3>🛠️ Build a Research Agent with Tavily + Page Reading + Reports</h3>
+                <p>Create a tool-using agent that can research any topic by searching the web, reading relevant pages, and generating a structured report.</p>
+
+                <div class="step-list">
+                    <ol>
+                        <li>Set up the tool registry with three tools:
+                            <ul>
+                                <li><code>web_search(query)</code> — using Tavily API for high-quality search</li>
+                                <li><code>read_page(url)</code> — fetch and extract text from URLs</li>
+                                <li><code>write_report(topic, findings, format)</code> — generate final output</li>
+                            </ul>
+                        </li>
+                        <li>Implement sandboxing: domain allowlist, rate limits (10 searches/minute), 20s timeouts</li>
+                        <li>Build the agent loop using OpenAI function calling (not text parsing)</li>
+                        <li>Add error recovery: if search fails, try alternative query; if page fails, skip and try next</li>
+                        <li>Implement context management: summarize long page contents before adding to messages</li>
+                        <li>Test with research queries:
+                            <ul>
+                                <li>"Research the latest developments in quantum computing in 2024"</li>
+                                <li>"Compare the top 3 Python web frameworks by performance and ease of use"</li>
+                                <li>"What are the environmental impacts of large language model training?"</li>
+                            </ul>
+                        </li>
+                        <li>Add a <code>requires_confirmation=True</code> step before the final report generation</li>
+                    </ol>
+                </div>
+
+                <h4>Stretch Goals</h4>
+                <ul>
+                    <li>Add a <code>save_to_file</code> tool that writes reports to disk (with confirmation)</li>
+                    <li>Implement a "research plan" step where the agent outlines its search strategy first</li>
+                    <li>Add citation tracking: each fact in the report links back to its source URL</li>
+                </ul>
+            </div>
+        </section>
+
+        <!-- Key Points -->
+        <section>
+            <div class="key-points">
+                <h3>Key Takeaways</h3>
+                <ul>
+                    <li>Good tools have clear names, precise descriptions, and well-defined schemas — the LLM reads these to decide usage</li>
+                    <li>A Tool Registry centralizes registration, validation, execution, timeout, and logging</li>
+                    <li>Error recovery is essential: retry on transient failures, give the LLM error context to adapt</li>
+                    <li>Security layers (allowlists, rate limits, confirmation, timeouts) are <strong>mandatory</strong> for production agents</li>
+                    <li>Chain tool calls by letting the agent observe each result and decide the next step</li>
+                    <li>Summarize long intermediate results to manage context window budget</li>
+                </ul>
+            </div>
+        </section>
+    </main>
+
+    <nav class="nav-links">
+        <a href="0015-agent-architecture.html" class="prev">← Lesson 15: Agent Architecture</a>
+        <a href="0017-multi-agent-systems.html" class="next">Lesson 17: Multi-Agent Systems →</a>
+    </nav>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            if (window.Diagrams) {
+                Diagrams.createFlowDiagram(
+                    document.getElementById('tool-lifecycle'),
+                    [
+                        { label: '🎯 Intent Recognition', sublabel: 'LLM decides tool is needed', color: '#6366f1' },
+                        { label: '🔍 Tool Selection', sublabel: 'Match intent to tool schema', color: '#22d3ee' },
+                        { label: '📝 Argument Generation', sublabel: 'LLM fills parameters', color: '#f59e0b' },
+                        { label: '✅ Validation', sublabel: 'Check types, required fields', color: '#22c55e' },
+                        { label: '⚙️ Execution', sublabel: 'Run with timeout + sandbox', color: '#6366f1' },
+                        { label: '📤 Result Return', sublabel: 'Format output for LLM context', color: '#22d3ee' }
+                    ]
+                );
+            }
+        });
+    </script>
+</body>
+</html>

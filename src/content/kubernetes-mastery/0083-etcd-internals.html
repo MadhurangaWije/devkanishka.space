@@ -1,0 +1,443 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>0083 · etcd Internals — Raft, MVCC &amp; Operations</title>
+<style>
+  :root {
+    --bg: #0d1117; --surface: #161b22; --surface2: #21262d;
+    --border: #30363d; --text: #e6edf3; --muted: #8b949e;
+    --blue: #58a6ff; --green: #3fb950; --yellow: #d29922;
+    --red: #f85149; --purple: #bc8cff; --orange: #ffa657;
+    --teal: #2dd4bf;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; line-height: 1.7; }
+  a { color: var(--blue); text-decoration: none; }
+  .wrap { max-width: 960px; margin: 0 auto; padding: 0 24px; }
+  nav { background: var(--surface); border-bottom: 1px solid var(--border); padding: 14px 0; position: sticky; top: 0; z-index: 100; }
+  nav .wrap { display: flex; justify-content: space-between; align-items: center; }
+  .nav-badge { background: var(--surface2); border: 1px solid var(--border); border-radius: 20px; padding: 4px 14px; font-size: .8rem; color: var(--muted); }
+  .nav-links { display: flex; gap: 20px; font-size: .9rem; }
+  .hero { padding: 72px 0 48px; text-align: center; }
+  .hero-chip { display: inline-block; background: linear-gradient(135deg, #0d1f1a, #0d1a1f); border: 1px solid var(--teal); border-radius: 20px; padding: 4px 16px; font-size: .8rem; color: var(--teal); margin-bottom: 20px; }
+  .hero h1 { font-size: 2.8rem; font-weight: 700; letter-spacing: -.02em; background: linear-gradient(135deg, #e6edf3, var(--teal)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; }
+  .hero .sub { font-size: 1.15rem; color: var(--muted); max-width: 680px; margin: 16px auto 0; }
+  .meta-row { display: flex; gap: 24px; justify-content: center; flex-wrap: wrap; margin-top: 32px; }
+  .meta-pill { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 8px 18px; font-size: .85rem; color: var(--muted); }
+  .meta-pill span { color: var(--text); font-weight: 600; }
+  section { padding: 56px 0; border-top: 1px solid var(--border); }
+  h2 { font-size: 1.75rem; font-weight: 700; margin-bottom: 16px; }
+  h3 { font-size: 1.2rem; font-weight: 600; margin: 28px 0 10px; color: var(--blue); }
+  p { margin-bottom: 14px; }
+  ul, ol { margin: 10px 0 14px 22px; }
+  li { margin-bottom: 6px; }
+  pre { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 20px; overflow-x: auto; font-size: .85rem; line-height: 1.6; margin: 16px 0; }
+  code { font-family: "JetBrains Mono", "Fira Code", Consolas, monospace; }
+  p code, li code { background: var(--surface2); border: 1px solid var(--border); border-radius: 4px; padding: 1px 6px; font-size: .85em; }
+  .callout { border-radius: 10px; padding: 18px 22px; margin: 20px 0; border-left: 4px solid; }
+  .callout.info   { background: #111d2c; border-color: var(--blue);   }
+  .callout.warn   { background: #1c1a11; border-color: var(--yellow); }
+  .callout.tip    { background: #0d1f0f; border-color: var(--green);  }
+  .callout.danger { background: #1f0d0d; border-color: var(--red);    }
+  .callout strong { display: block; margin-bottom: 6px; }
+  .diagram { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 28px; margin: 24px 0; overflow-x: auto; }
+  .diagram svg { display: block; margin: 0 auto; }
+  .card-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 16px; margin: 20px 0; }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 20px; }
+  .card h4 { font-size: 1rem; font-weight: 600; margin-bottom: 8px; color: var(--teal); }
+  .card p  { font-size: .9rem; color: var(--muted); margin: 0; }
+  table { width: 100%; border-collapse: collapse; margin: 16px 0; font-size: .9rem; }
+  th { background: var(--surface2); padding: 10px 14px; text-align: left; border: 1px solid var(--border); color: var(--muted); font-weight: 600; }
+  td { padding: 10px 14px; border: 1px solid var(--border); }
+  tr:nth-child(even) td { background: #111519; }
+  .quiz-block { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 28px; margin: 20px 0; }
+  .quiz-q { font-weight: 600; margin-bottom: 14px; font-size: 1rem; }
+  .quiz-options { list-style: none; margin: 0; padding: 0; }
+  .quiz-options li { background: var(--surface2); border: 1px solid var(--border); border-radius: 8px; padding: 10px 16px; margin-bottom: 8px; cursor: pointer; transition: border-color .2s; }
+  .quiz-options li:hover { border-color: var(--teal); }
+  .reveal-btn { background: var(--teal); color: #0d1117; border: none; border-radius: 8px; padding: 10px 22px; font-weight: 700; cursor: pointer; margin-top: 12px; font-size: .9rem; }
+  .answer { display: none; margin-top: 14px; background: #0d1f1a; border: 1px solid var(--teal); border-radius: 8px; padding: 14px 18px; font-size: .9rem; }
+  footer { padding: 48px 0; border-top: 1px solid var(--border); text-align: center; color: var(--muted); font-size: .9rem; }
+  .nav-btn { display: inline-flex; align-items: center; gap: 8px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 8px 18px; font-size: .9rem; color: var(--text); transition: border-color .2s; }
+  .nav-btn:hover { border-color: var(--teal); }
+  .kv-row { display: grid; grid-template-columns: 1fr 1fr; gap: 0; }
+  .kv-row > div { background: var(--surface); border: 1px solid var(--border); padding: 10px 14px; font-size: .85rem; }
+  .kv-row > div:first-child { border-right: none; border-radius: 8px 0 0 8px; }
+  .kv-row > div:last-child  { border-radius: 0 8px 8px 0; color: var(--muted); }
+  .kv-row + .kv-row > div  { border-top: none; border-radius: 0; }
+  .kv-row:last-child > div:first-child { border-radius: 0 0 0 8px; }
+  .kv-row:last-child > div:last-child  { border-radius: 0 0 8px 0; }
+</style>
+</head>
+
+<nav>
+  <div class="wrap">
+    <span class="nav-badge">Chapter 11 · Deep Internals</span>
+    <div class="nav-links">
+      <a href="0082-api-server-lifecycle.html">← Prev</a>
+      <a href="0000-overview.html">Index</a>
+      <a href="0084-scheduler-framework.html">Next →</a>
+    </div>
+  </div>
+</nav>
+
+<div class="hero">
+  <div class="wrap">
+    <div class="hero-chip">Lesson 83 · Chapter 11</div>
+    <h1>etcd Internals</h1>
+    <p class="sub">Raft consensus, MVCC storage, compaction, defragmentation, backup &amp; restore — everything you need to operate Kubernetes' critical data store reliably.</p>
+    <div class="meta-row">
+      <div class="meta-pill">⏱ Duration <span>55 min</span></div>
+      <div class="meta-pill">🎯 Level <span>Advanced</span></div>
+      <div class="meta-pill">📦 Chapter <span>11 — Deep Internals</span></div>
+      <div class="meta-pill">🔖 Tag <span>etcd · Raft · Backup · MVCC</span></div>
+    </div>
+  </div>
+</div>
+
+<section>
+  <div class="wrap">
+    <h2>⚙️ What is etcd?</h2>
+    <p>etcd is a distributed, strongly consistent key-value store that serves as Kubernetes' sole persistent backing store. Every cluster object — Pods, Deployments, Secrets, ConfigMaps, RBAC rules — lives in etcd. If etcd is lost without a backup, the cluster state is irrecoverable.</p>
+    <p>etcd uses the <strong>Raft</strong> consensus algorithm to guarantee that all members agree on every write before it is committed — even in the face of network partitions and node failures.</p>
+
+    <div class="diagram">
+      <svg width="760" height="280" viewBox="0 0 760 280" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <!-- Leader -->
+        <rect x="290" y="20" width="170" height="80" rx="12" fill="#0d1f1a" stroke="#2dd4bf" stroke-width="2"/>
+        <text x="375" y="52" text-anchor="middle" font-family="monospace" font-size="13" fill="#2dd4bf">etcd Leader</text>
+        <text x="375" y="70" text-anchor="middle" font-family="monospace" font-size="10" fill="#8b949e">Handles all writes</text>
+        <text x="375" y="86" text-anchor="middle" font-family="monospace" font-size="10" fill="#8b949e">Replicates log to followers</text>
+
+        <!-- Follower 1 -->
+        <rect x="60" y="160" width="170" height="70" rx="12" fill="#111d2c" stroke="#58a6ff" stroke-width="1.5"/>
+        <text x="145" y="192" text-anchor="middle" font-family="monospace" font-size="13" fill="#58a6ff">Follower 1</text>
+        <text x="145" y="210" text-anchor="middle" font-family="monospace" font-size="10" fill="#8b949e">Votes in elections</text>
+        <text x="145" y="224" text-anchor="middle" font-family="monospace" font-size="10" fill="#8b949e">Can serve reads (stale)</text>
+
+        <!-- Follower 2 -->
+        <rect x="520" y="160" width="170" height="70" rx="12" fill="#111d2c" stroke="#58a6ff" stroke-width="1.5"/>
+        <text x="605" y="192" text-anchor="middle" font-family="monospace" font-size="13" fill="#58a6ff">Follower 2</text>
+        <text x="605" y="210" text-anchor="middle" font-family="monospace" font-size="10" fill="#8b949e">Votes in elections</text>
+        <text x="605" y="224" text-anchor="middle" font-family="monospace" font-size="10" fill="#8b949e">Can serve reads (stale)</text>
+
+        <!-- AppendEntries arrows (Leader → Followers) -->
+        <line x1="320" y1="100" x2="210" y2="160" stroke="#2dd4bf" stroke-width="1.5" marker-end="url(#re1)"/>
+        <text x="238" y="132" font-family="monospace" font-size="9" fill="#2dd4bf">AppendEntries</text>
+        <line x1="430" y1="100" x2="540" y2="160" stroke="#2dd4bf" stroke-width="1.5" marker-end="url(#re2)"/>
+        <text x="468" y="132" font-family="monospace" font-size="9" fill="#2dd4bf">AppendEntries</text>
+
+        <!-- ACK arrows (Followers → Leader) -->
+        <line x1="220" y1="160" x2="330" y2="106" stroke="#3fb950" stroke-width="1" stroke-dasharray="4,3" marker-end="url(#re3)"/>
+        <line x1="530" y1="160" x2="420" y2="106" stroke="#3fb950" stroke-width="1" stroke-dasharray="4,3" marker-end="url(#re4)"/>
+        <text x="248" y="148" font-family="monospace" font-size="9" fill="#3fb950">ACK</text>
+        <text x="466" y="148" font-family="monospace" font-size="9" fill="#3fb950">ACK</text>
+
+        <!-- Quorum label -->
+        <rect x="270" y="240" width="210" height="30" rx="8" fill="#1c1a11" stroke="#d29922" stroke-width="1"/>
+        <text x="375" y="259" text-anchor="middle" font-family="monospace" font-size="11" fill="#d29922">Quorum = (n/2)+1 = 2 of 3</text>
+
+        <!-- kube-apiserver -->
+        <rect x="320" y="0" width="110" height="22" rx="6" fill="#13111f" stroke="#bc8cff" stroke-width="1"/>
+        <text x="375" y="14" text-anchor="middle" font-family="monospace" font-size="9" fill="#bc8cff">kube-apiserver</text>
+        <line x1="375" y1="22" x2="375" y2="20" stroke="#bc8cff" stroke-width="1" marker-end="url(#re5)"/>
+
+        <defs>
+          <marker id="re1" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L0,6 L8,3 z" fill="#2dd4bf"/></marker>
+          <marker id="re2" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L0,6 L8,3 z" fill="#2dd4bf"/></marker>
+          <marker id="re3" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L0,6 L8,3 z" fill="#3fb950"/></marker>
+          <marker id="re4" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L0,6 L8,3 z" fill="#3fb950"/></marker>
+          <marker id="re5" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L0,6 L8,3 z" fill="#bc8cff"/></marker>
+        </defs>
+      </svg>
+    </div>
+
+    <div class="card-grid">
+      <div class="card"><h4>Leader Election</h4><p>A leader is elected via Raft when the cluster starts or the current leader times out. Only the leader accepts writes.</p></div>
+      <div class="card"><h4>Log Replication</h4><p>Every write is appended to the leader's log and replicated via <code>AppendEntries</code> RPCs. Committed once a quorum ACKs.</p></div>
+      <div class="card"><h4>Quorum</h4><p>A cluster of <em>n</em> nodes tolerates <em>(n-1)/2</em> failures. 3-node = 1 failure. 5-node = 2 failures. Always use odd counts.</p></div>
+      <div class="card"><h4>Strong Consistency</h4><p>Every committed read reflects all prior writes — no stale reads from leader (linearizable). Followers serve stale reads by default.</p></div>
+    </div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>🗄️ Data Model — Keys, MVCC &amp; Revisions</h2>
+
+    <h3>Key Namespace Structure</h3>
+    <p>Kubernetes stores all objects under the <code>/registry</code> prefix. The path follows the pattern <code>/registry/{group}/{resource}/{namespace}/{name}</code> — or without namespace for cluster-scoped resources.</p>
+
+    <div style="margin:20px 0;">
+      <div class="kv-row"><div><code>/registry/apps/deployments/default/nginx</code></div><div>Deployment nginx in namespace default</div></div>
+      <div class="kv-row"><div><code>/registry/core/pods/kube-system/coredns-5d</code></div><div>Pod in kube-system</div></div>
+      <div class="kv-row"><div><code>/registry/core/secrets/my-app/db-password</code></div><div>Secret in my-app namespace</div></div>
+      <div class="kv-row"><div><code>/registry/rbac.authorization.k8s.io/clusterroles/admin</code></div><div>Cluster-scoped ClusterRole</div></div>
+      <div class="kv-row"><div><code>/registry/apiregistration.k8s.io/apiservices/v1.apps</code></div><div>APIService registration</div></div>
+      <div class="kv-row"><div><code>/registry/events/default/nginx.event-abc</code></div><div>Event (high churn — short TTL)</div></div>
+    </div>
+
+    <h3>MVCC — Multi-Version Concurrency Control</h3>
+    <p>etcd never overwrites values in place. Every write appends a new version keyed by the global <strong>revision</strong> (a monotonically increasing integer). Old versions are retained until compaction removes them. This is how the API server serves watch history without re-reading etcd.</p>
+
+    <pre><code"># Every key has:
+# - mod_revision:    etcd revision when last modified
+# - create_revision: etcd revision when first created
+# - version:         number of times this key has been modified
+
+ETCDCTL_API=3 etcdctl \
+  --endpoints=https://127.0.0.1:2379 \
+  --cacert=/etc/kubernetes/pki/etcd/ca.crt \
+  --cert=/etc/kubernetes/pki/apiserver-etcd-client.crt \
+  --key=/etc/kubernetes/pki/apiserver-etcd-client.key \
+  get /registry/apps/deployments/default/nginx \
+  --print-value-only | auger decode
+
+# List all keys under a prefix
+etcdctl get /registry/ --prefix --keys-only | head -30
+
+# Get a key at a specific historical revision
+etcdctl get /registry/apps/deployments/default/nginx \
+  --rev=12345 --print-value-only | auger decode
+
+# Watch for changes in real time
+etcdctl watch /registry/apps/deployments/ --prefix</code></pre>
+
+    <div class="callout info">
+      <strong>ℹ️ Values are Protobuf-encoded</strong>
+      etcd stores Kubernetes objects as Protobuf (not JSON). Use <a href="https://github.com/jpbetz/auger" target="_blank">auger</a> or <code>kubectl get --raw</code> to decode. Raw <code>etcdctl get</code> output will appear as binary.
+    </div>
+
+    <h3>Revision vs resourceVersion</h3>
+    <table>
+      <thead><tr><th>Concept</th><th>Where</th><th>Meaning</th></tr></thead>
+      <tbody>
+        <tr><td><code>revision</code></td><td>etcd internal</td><td>Global monotonic counter incremented on every write to any key</td></tr>
+        <tr><td><code>resourceVersion</code></td><td>Kubernetes object metadata</td><td>The etcd revision at which this object was last written — used for optimistic locking &amp; watch</td></tr>
+        <tr><td><code>generation</code></td><td>Kubernetes object metadata</td><td>Incremented only when <code>spec</code> changes (not status) — used by controllers to detect spec changes</td></tr>
+      </tbody>
+    </table>
+
+    <h3>Transactions &amp; Optimistic Locking</h3>
+    <p>The API server uses etcd transactions with a compare-and-swap on <code>mod_revision</code> to prevent lost updates. If two clients try to update the same object concurrently, one gets a <code>409 Conflict</code> — the loser must re-fetch and retry.</p>
+    <pre><code># etcd transaction: only update if revision matches (CAS)
+etcdctl txn &lt;&lt;EOF
+compares:
+  mod("my-key") = "42"
+success:
+  put my-key new-value
+failure:
+  get my-key
+EOF</code></pre>
+  get my-key
+EOF</code></pre>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>🛠️ Operations — Backup, Compaction &amp; Defrag</h2>
+
+    <h3>Snapshot Backup</h3>
+    <p>etcd snapshots capture the entire keyspace at a point in time. Take them regularly — this is your only recovery path if the cluster state is lost.</p>
+    <pre><code># Take a snapshot (run from a control-plane node)
+ETCDCTL_API=3 etcdctl snapshot save /backup/etcd-$(date +%Y%m%d-%H%M%S).db \
+  --endpoints=https://127.0.0.1:2379 \
+  --cacert=/etc/kubernetes/pki/etcd/ca.crt \
+  --cert=/etc/kubernetes/pki/apiserver-etcd-client.crt \
+  --key=/etc/kubernetes/pki/apiserver-etcd-client.key
+
+# Verify the snapshot
+etcdctl snapshot status /backup/etcd-20240101-020000.db --write-out=table
+# +----------+----------+------------+------------+
+# |   HASH   | REVISION | TOTAL KEYS | TOTAL SIZE |
+# +----------+----------+------------+------------+
+# | abc12345 |   189423 |       3847 |     6.5 MB |
+# +----------+----------+------------+------------+</code></pre>
+
+    <h3>Restore from Snapshot</h3>
+    <pre><code># Stop kube-apiserver first (remove its static pod manifest or stop kubelet)
+# Then restore on each member with a unique --name and --initial-advertise-peer-urls
+
+ETCDCTL_API=3 etcdctl snapshot restore /backup/etcd-20240101-020000.db \
+  --name=master-1 \
+  --initial-cluster="master-1=https://10.0.0.1:2380,master-2=https://10.0.0.2:2380,master-3=https://10.0.0.3:2380" \
+  --initial-cluster-token=etcd-cluster-1 \
+  --initial-advertise-peer-urls=https://10.0.0.1:2380 \
+  --data-dir=/var/lib/etcd-restore
+
+# Update etcd's --data-dir to point to the restored directory, then restart</code></pre>
+
+    <div class="callout danger">
+      <strong>🚨 Restore wipes current etcd data</strong>
+      Snapshot restore creates a brand-new etcd data directory. All changes after the snapshot are lost. Always stop the API server before restoring to prevent split-brain.
+    </div>
+
+    <h3>Compaction</h3>
+    <p>Because MVCC retains all historical revisions, etcd grows unboundedly without compaction. Compaction discards all revisions older than a given revision number, freeing storage. The API server auto-compacts by default every 5 minutes.</p>
+    <pre><code># Get current revision
+REV=$(etcdctl endpoint status --write-out=json | jq '.[0].Status.header.revision')
+
+# Compact up to current revision (removes old MVCC versions)
+etcdctl compact $REV
+
+# Check remaining size
+etcdctl endpoint status --write-out=table
+# ENDPOINT              DB SIZE   ...
+# https://127.0.0.1:2379  42 MB</code></pre>
+
+    <h3>Defragmentation</h3>
+    <p>Compaction frees logical space but leaves <em>fragmentation</em> in the bbolt database file on disk. Defragmentation rewrites the file to reclaim physical disk space. It temporarily locks etcd — do it one member at a time.</p>
+    <pre><code"># Defrag one member at a time (takes the member offline briefly)
+etcdctl defrag --endpoints=https://10.0.0.1:2379 \
+  --cacert=/etc/kubernetes/pki/etcd/ca.crt \
+  --cert=/etc/kubernetes/pki/apiserver-etcd-client.crt \
+  --key=/etc/kubernetes/pki/apiserver-etcd-client.key
+
+# Then defrag the next member
+etcdctl defrag --endpoints=https://10.0.0.2:2379 ...
+
+# Verify size reduced
+etcdctl endpoint status --write-out=table</code></pre>
+
+    <h3>Health Checks</h3>
+    <pre><code"># Check health of all cluster members
+etcdctl endpoint health --cluster \
+  --endpoints=https://10.0.0.1:2379,https://10.0.0.2:2379,https://10.0.0.3:2379 \
+  --cacert=... --cert=... --key=...
+
+# Check who is the leader
+etcdctl endpoint status --cluster --write-out=table
+# ENDPOINT              ID          IS LEADER   IS LEARNER   RAFT TERM   ...
+# https://10.0.0.1:2379 abc123      false        false        14          ...
+# https://10.0.0.2:2379 def456      true         false        14          ...
+# https://10.0.0.3:2379 ghi789      false        false        14          ...
+
+# Check member list
+etcdctl member list --write-out=table</code></pre>
+etcdctl member list --write-out=table</code></pre>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>📐 Sizing, Tuning &amp; Production Tips</h2>
+
+    <h3>Hardware Recommendations</h3>
+    <table>
+      <thead><tr><th>Cluster size</th><th>etcd members</th><th>CPU</th><th>RAM</th><th>Disk</th><th>Network</th></tr></thead>
+      <tbody>
+        <tr><td>Small (&lt;50 nodes)</td><td>3</td><td>2 cores</td><td>8 GB</td><td>50 GB SSD</td><td>1 Gbps</td></tr>
+        <tr><td>Medium (50–250)</td><td>3–5</td><td>4 cores</td><td>16 GB</td><td>100 GB SSD</td><td>1 Gbps</td></tr>
+        <tr><td>Large (250–1000)</td><td>5</td><td>8 cores</td><td>32 GB</td><td>200 GB NVMe</td><td>10 Gbps</td></tr>
+      </tbody>
+    </table>
+
+    <div class="callout danger">
+      <strong>🚨 Disk latency is the #1 etcd killer</strong>
+      etcd's Raft leader must <code>fsync</code> the write-ahead log to disk before committing. Network disk (NFS, cloud HDD) with &gt;10ms fsync latency causes leader timeouts and cluster instability. Use local NVMe or SSD. Check with <code>fio --rw=write --ioengine=sync --fdatasync=1</code>.
+    </div>
+
+    <h3>Key etcd Flags</h3>
+    <pre><code"># Election / heartbeat tuning
+--heartbeat-interval=100       # ms between leader heartbeats (default 100)
+--election-timeout=1000        # ms before follower starts election (default 1000)
+# Rule: election-timeout should be 5-10x heartbeat-interval
+# For high-latency networks (cross-region), increase both
+
+# Storage
+--quota-backend-bytes=8589934592   # 8 GB max DB size (default 2 GB)
+--auto-compaction-mode=periodic
+--auto-compaction-retention=1h     # compact revisions older than 1h
+
+# Snapshot
+--snapshot-count=10000             # entries between snapshots (default 10000)
+
+# Security
+--cert-file=/etc/etcd/etcd.crt
+--key-file=/etc/etcd/etcd.key
+--peer-cert-file=/etc/etcd/peer.crt
+--peer-trusted-ca-file=/etc/etcd/ca.crt
+--client-cert-auth=true
+--peer-client-cert-auth=true</code></pre>
+
+    <h3>Production Best Practices</h3>
+    <div class="card-grid">
+      <div class="card"><h4>Dedicated Nodes</h4><p>Run etcd on dedicated nodes or at minimum dedicated disks. Never share etcd storage with the OS or workload volumes.</p></div>
+      <div class="card"><h4>Automated Backups</h4><p>Schedule hourly snapshots via a CronJob or systemd timer. Store snapshots in object storage (S3/GCS) with versioning and cross-region replication.</p></div>
+      <div class="card"><h4>Monitor DB Size</h4><p>Alert when <code>etcd_mvcc_db_total_size_in_bytes</code> exceeds 70% of <code>--quota-backend-bytes</code>. A full etcd becomes read-only — emergency compaction required.</p></div>
+      <div class="card"><h4>Separate etcd per Cluster</h4><p>Don't share one etcd cluster across multiple Kubernetes clusters. Each cluster should have its own dedicated etcd ring.</p></div>
+    </div>
+
+    <h3>Critical etcd Metrics</h3>
+    <table>
+      <thead><tr><th>Metric</th><th>Alert threshold</th><th>Meaning</th></tr></thead>
+      <tbody>
+        <tr><td><code>etcd_server_leader_changes_seen_total</code></td><td>&gt;3/hour</td><td>Frequent leader elections — network or disk issue</td></tr>
+        <tr><td><code>etcd_disk_wal_fsync_duration_seconds</code> p99</td><td>&gt;10ms</td><td>Disk too slow for Raft WAL writes</td></tr>
+        <tr><td><code>etcd_disk_backend_commit_duration_seconds</code> p99</td><td>&gt;25ms</td><td>bbolt page commit latency — defrag needed</td></tr>
+        <tr><td><code>etcd_mvcc_db_total_size_in_bytes</code></td><td>&gt;70% quota</td><td>Growing toward quota limit — compact &amp; defrag</td></tr>
+        <tr><td><code>etcd_network_peer_round_trip_time_seconds</code></td><td>&gt;150ms</td><td>Peer latency too high — may cause election timeouts</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>📝 Knowledge Check</h2>
+
+    <div class="quiz-block">
+      <div class="quiz-q">Q1. A 3-node etcd cluster loses 2 members simultaneously. What happens?</div>
+      <ul class="quiz-options">
+        <li>A) The remaining member continues serving reads and writes normally</li>
+        <li>B) The cluster loses quorum — no writes are accepted, reads may still work</li>
+        <li>C) etcd automatically elects a new leader from the single remaining member</li>
+        <li>D) Kubernetes promotes a worker node to replace the lost etcd members</li>
+      </ul>
+      <button class="reveal-btn" onclick="this.nextElementSibling.style.display='block'">Reveal Answer</button>
+      <div class="answer">✅ <strong>B) The cluster loses quorum.</strong> A 3-node cluster requires 2 members (quorum = (3/2)+1 = 2) to commit writes. With only 1 remaining member, no writes can be committed. The API server will return 5xx errors for mutating requests. Recovery requires restoring 2 members from snapshot.</div>
+    </div>
+
+    <div class="quiz-block">
+      <div class="quiz-q">Q2. You notice the etcd database file is 7 GB after running <code>etcdctl compact</code>, but the quota is 8 GB. The file hasn't shrunk. Why?</div>
+      <ul class="quiz-options">
+        <li>A) Compact requires a cluster restart to take effect</li>
+        <li>B) Compact frees logical space — you also need to run <code>etcdctl defrag</code> to reclaim physical disk space</li>
+        <li>C) The compact revision was too low — old data was not removed</li>
+        <li>D) The bbolt engine doesn't support size reduction</li>
+      </ul>
+      <button class="reveal-btn" onclick="this.nextElementSibling.style.display='block'">Reveal Answer</button>
+      <div class="answer">✅ <strong>B) Compact + Defrag are two separate steps.</strong> <code>compact</code> marks old MVCC revisions as free in the bbolt B-tree but doesn't rewrite the file. <code>defrag</code> rewrites the bbolt database file from scratch, reclaiming the freed pages as actual disk space.</div>
+    </div>
+
+    <div class="quiz-block">
+      <div class="quiz-q">Q3. What is the primary reason etcd requires low-latency local SSD storage rather than network-attached disks?</div>
+      <ul class="quiz-options">
+        <li>A) etcd stores data as raw binary that NFS can't handle</li>
+        <li>B) Raft requires the leader to fsync the write-ahead log before committing — high fsync latency causes election timeouts</li>
+        <li>C) etcd uses memory-mapped files that only work on local disks</td></tr>
+        <li>D) Kubernetes requires POSIX filesystem features unavailable on network storage</li>
+      </ul>
+      <button class="reveal-btn" onclick="this.nextElementSibling.style.display='block'">Reveal Answer</button>
+      <div class="answer">✅ <strong>B) Raft WAL fsync latency.</strong> Before a leader can acknowledge a write to clients, it must durably persist the log entry (fsync). Network storage with high latency (NFS, cloud HDD) causes the leader to exceed its heartbeat window, triggering unnecessary elections and cluster instability.</div>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:16px;">
+      <div><a class="nav-btn" href="0082-api-server-lifecycle.html">← 0082 API Server Lifecycle</a></div>
+      <div style="color:var(--muted); font-size:.85rem;">Lesson 83 of 100 · Chapter 11: Deep Internals</div>
+      <div><a class="nav-btn" href="0084-scheduler-framework.html">0084 Scheduler Framework →</a></div>
+    </div>
+    <p style="margin-top:24px; font-size:.8rem;">Kubernetes Learning Curriculum · Built for production engineers</p>
+  </div>
+</footer>
+
+</body>
+</html>

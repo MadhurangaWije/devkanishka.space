@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lesson 08 — Artifacts & Job Outputs</title>
+  <link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+
+  <div class="lesson-meta">
+    <span class="number">LESSON 08</span> &middot; Core Concept + Hands-On &middot; ~15 minutes
+  </div>
+
+  <h1>Artifacts & Job Outputs</h1>
+  <p>Jobs are isolated VMs. When job A builds something that job B needs to deploy, you need a bridge. This lesson teaches the two mechanisms: <strong>outputs</strong> for small data and <strong>artifacts</strong> for files.</p>
+
+  <div class="progress">
+    <span>Lesson 8 of 33</span>
+    <div class="progress-bar"><div class="progress-fill" style="width: 24%"></div></div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>The Problem: Jobs Don't Share State</h2>
+
+  <div class="diagram">
+    <svg viewBox="0 0 700 160" xmlns="http://www.w3.org/2000/svg">
+      <!-- Job A -->
+      <rect x="30" y="30" width="200" height="100" rx="6" fill="#e3f2fd" stroke="#1976d2" stroke-width="2"/>
+      <text x="130" y="55" text-anchor="middle" font-size="11" font-weight="bold" fill="#1976d2">Job: build</text>
+      <text x="130" y="80" text-anchor="middle" font-size="9" fill="#555">Creates: dist/app.js</text>
+      <text x="130" y="95" text-anchor="middle" font-size="9" fill="#555">Calculates: version=1.2.3</text>
+      <text x="130" y="115" text-anchor="middle" font-size="8" fill="#c62828">VM destroyed after job ☠️</text>
+      
+      <!-- Gap -->
+      <rect x="260" y="60" width="80" height="40" rx="4" fill="#ffebee" stroke="#c62828"/>
+      <text x="300" y="75" text-anchor="middle" font-size="16">🚫</text>
+      <text x="300" y="93" text-anchor="middle" font-size="8" fill="#c62828">No shared FS</text>
+      
+      <!-- Job B -->
+      <rect x="370" y="30" width="200" height="100" rx="6" fill="#e8f5e9" stroke="#388e3c" stroke-width="2"/>
+      <text x="470" y="55" text-anchor="middle" font-size="11" font-weight="bold" fill="#388e3c">Job: deploy</text>
+      <text x="470" y="80" text-anchor="middle" font-size="9" fill="#555">Needs: dist/app.js</text>
+      <text x="470" y="95" text-anchor="middle" font-size="9" fill="#555">Needs: version number</text>
+      <text x="470" y="115" text-anchor="middle" font-size="8" fill="#c62828">How to get them? 🤔</text>
+    </svg>
+    <figcaption>The build job creates files and values that the deploy job needs — but they're on different machines.</figcaption>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>Solution 1: Job Outputs (Small Values)</h2>
+
+  <p>For passing <strong>strings</strong> between jobs — version numbers, image tags, URLs, flags.</p>
+
+  <div class="diagram">
+    <svg viewBox="0 0 700 140" xmlns="http://www.w3.org/2000/svg">
+      <!-- Step output -->
+      <rect x="20" y="20" width="280" height="50" rx="4" fill="#e3f2fd" stroke="#1976d2"/>
+      <text x="160" y="38" text-anchor="middle" font-size="9" font-weight="bold" fill="#1976d2">Step (inside build job)</text>
+      <text x="160" y="55" text-anchor="middle" font-family="monospace" font-size="8">echo "tag=sha-abc12" >> $GITHUB_OUTPUT</text>
+      
+      <!-- Arrow up to job output -->
+      <line x1="160" y1="70" x2="160" y2="85" stroke="#1976d2" stroke-width="1.5" marker-end="url(#oa)"/>
+      
+      <!-- Job output -->
+      <rect x="20" y="85" width="280" height="35" rx="4" fill="#bbdefb" stroke="#1976d2"/>
+      <text x="160" y="107" text-anchor="middle" font-size="9" font-weight="bold" fill="#1565c0">Job outputs: { image-tag: "sha-abc12" }</text>
+      
+      <!-- Arrow to consumer -->
+      <line x1="300" y1="102" x2="400" y2="102" stroke="#333" stroke-width="2" marker-end="url(#oa)"/>
+      <text x="350" y="93" text-anchor="middle" font-size="8" fill="#555">needs.build</text>
+      
+      <!-- Consumer job -->
+      <rect x="400" y="85" width="280" height="35" rx="4" fill="#c8e6c9" stroke="#388e3c"/>
+      <text x="540" y="107" text-anchor="middle" font-family="monospace" font-size="8" fill="#2e7d32">${{ needs.build.outputs.image-tag }}</text>
+      
+      <defs>
+        <marker id="oa" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto">
+          <polygon points="0 0, 7 2.5, 0 5" fill="#333"/>
+        </marker>
+      </defs>
+    </svg>
+    <figcaption>Step sets output → Job exposes it → Downstream job reads it via needs.&lt;job&gt;.outputs</figcaption>
+  </div>
+
+  <h3>Complete Pattern</h3>
+
+<pre><code><span style="color:#89b4fa">jobs:</span>
+  <span style="color:#89b4fa">build:</span>
+    <span style="color:#89b4fa">runs-on:</span> <span style="color:#a6e3a1">ubuntu-latest</span>
+    <span style="color:#6c7086"># 1. Declare which outputs this job exposes</span>
+    <span style="color:#89b4fa">outputs:</span>
+      <span style="color:#89b4fa">version:</span> <span style="color:#a6e3a1">${{ steps.ver.outputs.value }}</span>
+      <span style="color:#89b4fa">image-tag:</span> <span style="color:#a6e3a1">${{ steps.tag.outputs.value }}</span>
+    <span style="color:#89b4fa">steps:</span>
+      - <span style="color:#89b4fa">uses:</span> <span style="color:#a6e3a1">actions/checkout@v4</span>
+      
+      <span style="color:#6c7086"># 2. Set outputs from steps (must have id:)</span>
+      - <span style="color:#89b4fa">name:</span> <span style="color:#a6e3a1">Get version</span>
+        <span style="color:#89b4fa">id:</span> <span style="color:#a6e3a1">ver</span>
+        <span style="color:#89b4fa">run:</span> <span style="color:#a6e3a1">echo "value=$(node -p 'require(\"./package.json\").version')" >> $GITHUB_OUTPUT</span>
+      
+      - <span style="color:#89b4fa">name:</span> <span style="color:#a6e3a1">Set image tag</span>
+        <span style="color:#89b4fa">id:</span> <span style="color:#a6e3a1">tag</span>
+        <span style="color:#89b4fa">run:</span> <span style="color:#a6e3a1">echo "value=sha-$(echo ${{ github.sha }} | cut -c1-7)" >> $GITHUB_OUTPUT</span>
+
+  <span style="color:#89b4fa">deploy:</span>
+    <span style="color:#89b4fa">needs:</span> <span style="color:#a6e3a1">build</span>
+    <span style="color:#89b4fa">runs-on:</span> <span style="color:#a6e3a1">ubuntu-latest</span>
+    <span style="color:#89b4fa">steps:</span>
+      <span style="color:#6c7086"># 3. Read outputs from the upstream job</span>
+      - <span style="color:#89b4fa">run:</span> <span style="color:#a6e3a1">|</span>
+          <span style="color:#a6e3a1">echo "Version: ${{ needs.build.outputs.version }}"</span>
+          <span style="color:#a6e3a1">echo "Image: ${{ needs.build.outputs.image-tag }}"</span>
+</code></pre>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>Solution 2: Artifacts (Files)</h2>
+
+  <p>For passing <strong>files</strong> between jobs — build output, test reports, binaries, Docker contexts.</p>
+
+  <div class="diagram">
+    <svg viewBox="0 0 700 130" xmlns="http://www.w3.org/2000/svg">
+      <!-- Upload -->
+      <rect x="20" y="20" width="200" height="90" rx="6" fill="#e3f2fd" stroke="#1976d2"/>
+      <text x="120" y="42" text-anchor="middle" font-size="10" font-weight="bold" fill="#1976d2">Job: build</text>
+      <text x="120" y="60" text-anchor="middle" font-size="9">npm run build → dist/</text>
+      <rect x="35" y="70" width="170" height="25" rx="3" fill="#bbdefb"/>
+      <text x="120" y="87" text-anchor="middle" font-size="8" fill="#1565c0">📤 upload-artifact (dist/)</text>
+      
+      <!-- Cloud storage -->
+      <rect x="260" y="35" width="140" height="60" rx="30" fill="#f5f5f5" stroke="#bdbdbd" stroke-width="2"/>
+      <text x="330" y="60" text-anchor="middle" font-size="14">☁️</text>
+      <text x="330" y="80" text-anchor="middle" font-size="8" fill="#555">GitHub Storage</text>
+      
+      <line x1="220" y1="65" x2="260" y2="65" stroke="#1976d2" stroke-width="1.5" marker-end="url(#oa2)"/>
+      <line x1="400" y1="65" x2="440" y2="65" stroke="#388e3c" stroke-width="1.5" marker-end="url(#oa2)"/>
+      
+      <!-- Download -->
+      <rect x="440" y="20" width="220" height="90" rx="6" fill="#e8f5e9" stroke="#388e3c"/>
+      <text x="550" y="42" text-anchor="middle" font-size="10" font-weight="bold" fill="#388e3c">Job: deploy</text>
+      <rect x="455" y="55" width="190" height="25" rx="3" fill="#c8e6c9"/>
+      <text x="550" y="72" text-anchor="middle" font-size="8" fill="#2e7d32">📥 download-artifact → dist/</text>
+      <text x="550" y="98" text-anchor="middle" font-size="9">Deploy dist/ to server</text>
+      
+      <defs>
+        <marker id="oa2" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto">
+          <polygon points="0 0, 7 2.5, 0 5" fill="#333"/>
+        </marker>
+      </defs>
+    </svg>
+    <figcaption>Upload stores files in GitHub's cloud. Download retrieves them in any subsequent job.</figcaption>
+  </div>
+
+<pre><code><span style="color:#89b4fa">jobs:</span>
+  <span style="color:#89b4fa">build:</span>
+    <span style="color:#89b4fa">runs-on:</span> <span style="color:#a6e3a1">ubuntu-latest</span>
+    <span style="color:#89b4fa">steps:</span>
+      - <span style="color:#89b4fa">uses:</span> <span style="color:#a6e3a1">actions/checkout@v4</span>
+      - <span style="color:#89b4fa">run:</span> <span style="color:#a6e3a1">npm ci && npm run build</span>
+      
+      - <span style="color:#89b4fa">name:</span> <span style="color:#a6e3a1">Upload build</span>
+        <span style="color:#89b4fa">uses:</span> <span style="color:#a6e3a1">actions/upload-artifact@v4</span>
+        <span style="color:#89b4fa">with:</span>
+          <span style="color:#89b4fa">name:</span> <span style="color:#a6e3a1">app-build</span>              <span style="color:#6c7086"># artifact name</span>
+          <span style="color:#89b4fa">path:</span> <span style="color:#a6e3a1">dist/</span>                  <span style="color:#6c7086"># what to upload</span>
+          <span style="color:#89b4fa">retention-days:</span> <span style="color:#a6e3a1">5</span>            <span style="color:#6c7086"># auto-delete after 5 days</span>
+          <span style="color:#89b4fa">if-no-files-found:</span> <span style="color:#a6e3a1">error</span>    <span style="color:#6c7086"># fail if dist/ is empty</span>
+
+  <span style="color:#89b4fa">deploy:</span>
+    <span style="color:#89b4fa">needs:</span> <span style="color:#a6e3a1">build</span>
+    <span style="color:#89b4fa">runs-on:</span> <span style="color:#a6e3a1">ubuntu-latest</span>
+    <span style="color:#89b4fa">steps:</span>
+      - <span style="color:#89b4fa">name:</span> <span style="color:#a6e3a1">Download build</span>
+        <span style="color:#89b4fa">uses:</span> <span style="color:#a6e3a1">actions/download-artifact@v4</span>
+        <span style="color:#89b4fa">with:</span>
+          <span style="color:#89b4fa">name:</span> <span style="color:#a6e3a1">app-build</span>
+          <span style="color:#89b4fa">path:</span> <span style="color:#a6e3a1">dist/</span>                  <span style="color:#6c7086"># where to put it</span>
+      
+      - <span style="color:#89b4fa">run:</span> <span style="color:#a6e3a1">ls -la dist/</span>  <span style="color:#6c7086"># Your files are here!</span>
+</code></pre>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>Outputs vs Artifacts: When to Use Which</h2>
+
+  <table>
+    <thead>
+      <tr><th></th><th>Job Outputs</th><th>Artifacts</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><strong>Data type</strong></td><td>Strings (small values)</td><td>Files & directories</td></tr>
+      <tr><td><strong>Size</strong></td><td>~1 MB total</td><td>500 MB (free tier)</td></tr>
+      <tr><td><strong>Examples</strong></td><td>version, image tag, URL, boolean</td><td>dist/, test reports, binaries</td></tr>
+      <tr><td><strong>Downloadable</strong></td><td>No (only in workflow)</td><td>Yes (from Actions UI)</td></tr>
+      <tr><td><strong>Lifetime</strong></td><td>Current run only</td><td>Configurable (1-90 days)</td></tr>
+      <tr><td><strong>Speed</strong></td><td>Instant</td><td>Upload/download time</td></tr>
+    </tbody>
+  </table>
+
+  <div class="key-insight">
+    <strong>Rule of thumb:</strong> If it's a string → output. If it's a file → artifact. If in doubt, ask: "Can I fit this in a single <code>echo</code> statement?" Yes = output. No = artifact.
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>🏋️ Exercise: Build Once, Deploy Twice</h2>
+
+  <div class="exercise">
+    <p>Create a workflow that builds once and deploys the same artifact to staging and production:</p>
+
+<pre><code><span style="color:#6c7086"># .github/workflows/build-deploy.yml</span>
+<span style="color:#89b4fa">name:</span> <span style="color:#a6e3a1">Build & Deploy</span>
+<span style="color:#89b4fa">on:</span> <span style="color:#a6e3a1">workflow_dispatch</span>
+
+<span style="color:#89b4fa">jobs:</span>
+  <span style="color:#89b4fa">build:</span>
+    <span style="color:#89b4fa">runs-on:</span> <span style="color:#a6e3a1">ubuntu-latest</span>
+    <span style="color:#89b4fa">outputs:</span>
+      <span style="color:#89b4fa">version:</span> <span style="color:#a6e3a1">${{ steps.info.outputs.version }}</span>
+    <span style="color:#89b4fa">steps:</span>
+      - <span style="color:#89b4fa">uses:</span> <span style="color:#a6e3a1">actions/checkout@v4</span>
+      - <span style="color:#89b4fa">uses:</span> <span style="color:#a6e3a1">actions/setup-node@v4</span>
+        <span style="color:#89b4fa">with:</span> { <span style="color:#89b4fa">node-version:</span> <span style="color:#a6e3a1">'20'</span>, <span style="color:#89b4fa">cache:</span> <span style="color:#a6e3a1">'npm'</span> }
+      - <span style="color:#89b4fa">run:</span> <span style="color:#a6e3a1">npm ci && npm run build</span>
+      - <span style="color:#89b4fa">id:</span> <span style="color:#a6e3a1">info</span>
+        <span style="color:#89b4fa">run:</span> <span style="color:#a6e3a1">echo "version=$(node -p 'require(\"./package.json\").version')" >> $GITHUB_OUTPUT</span>
+      - <span style="color:#89b4fa">uses:</span> <span style="color:#a6e3a1">actions/upload-artifact@v4</span>
+        <span style="color:#89b4fa">with:</span> { <span style="color:#89b4fa">name:</span> <span style="color:#a6e3a1">app</span>, <span style="color:#89b4fa">path:</span> <span style="color:#a6e3a1">dist/</span> }
+
+  <span style="color:#89b4fa">deploy-staging:</span>
+    <span style="color:#89b4fa">needs:</span> <span style="color:#a6e3a1">build</span>
+    <span style="color:#89b4fa">runs-on:</span> <span style="color:#a6e3a1">ubuntu-latest</span>
+    <span style="color:#89b4fa">environment:</span> <span style="color:#a6e3a1">staging</span>
+    <span style="color:#89b4fa">steps:</span>
+      - <span style="color:#89b4fa">uses:</span> <span style="color:#a6e3a1">actions/download-artifact@v4</span>
+        <span style="color:#89b4fa">with:</span> { <span style="color:#89b4fa">name:</span> <span style="color:#a6e3a1">app</span>, <span style="color:#89b4fa">path:</span> <span style="color:#a6e3a1">dist/</span> }
+      - <span style="color:#89b4fa">run:</span> <span style="color:#a6e3a1">echo "🚀 Deploying v${{ needs.build.outputs.version }} to staging"</span>
+      - <span style="color:#89b4fa">run:</span> <span style="color:#a6e3a1">ls dist/</span>
+
+  <span style="color:#89b4fa">deploy-production:</span>
+    <span style="color:#89b4fa">needs:</span> <span style="color:#a6e3a1">[build, deploy-staging]</span>
+    <span style="color:#89b4fa">runs-on:</span> <span style="color:#a6e3a1">ubuntu-latest</span>
+    <span style="color:#89b4fa">environment:</span> <span style="color:#a6e3a1">production</span>
+    <span style="color:#89b4fa">steps:</span>
+      - <span style="color:#89b4fa">uses:</span> <span style="color:#a6e3a1">actions/download-artifact@v4</span>
+        <span style="color:#89b4fa">with:</span> { <span style="color:#89b4fa">name:</span> <span style="color:#a6e3a1">app</span>, <span style="color:#89b4fa">path:</span> <span style="color:#a6e3a1">dist/</span> }
+      - <span style="color:#89b4fa">run:</span> <span style="color:#a6e3a1">echo "🚀 Deploying v${{ needs.build.outputs.version }} to PRODUCTION"</span>
+</code></pre>
+
+    <p><strong>Key principle:</strong> Build ONCE → deploy the SAME artifact to every environment. Never rebuild for production — that can introduce inconsistency.</p>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>🧠 Recall Check</h2>
+
+  <div class="recall">
+    <ol>
+      <li>What file do you write to in order to set a step output?</li>
+      <li>What's the syntax for reading job A's output "tag" from job B?</li>
+      <li>Why should you build once and deploy the same artifact, rather than rebuilding per environment?</li>
+      <li>Can you download an artifact from the GitHub Actions UI?</li>
+    </ol>
+    <details>
+      <summary>Reveal answers</summary>
+      <ol>
+        <li><code>$GITHUB_OUTPUT</code> — e.g., <code>echo "key=value" >> $GITHUB_OUTPUT</code></li>
+        <li><code>${{ needs.A.outputs.tag }}</code></li>
+        <li><strong>Consistency.</strong> Rebuilding might pick up different dependency versions, different timestamps, or different env vars. The same binary that passed tests in CI should be exactly what goes to production.</li>
+        <li><strong>Yes.</strong> Artifacts appear at the bottom of the workflow run page as downloadable zip files.</li>
+      </ol>
+    </details>
+  </div>
+
+  <div class="key-insight">
+    You now have all the building blocks of a CI pipeline: triggers, jobs, steps, caching, secrets, environments, outputs, and artifacts. You can build production-quality CI workflows. Next: <strong>Matrix Builds</strong> — testing across multiple versions and platforms simultaneously.
+  </div>
+
+</body>
+</html>

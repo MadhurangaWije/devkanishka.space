@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lesson 18: Configuration Best Practices</title>
+    <style>
+        :root {
+            --bg: #fafafa; --text: #1a1a1a; --accent: #326ce5;
+            --accent-light: #e8f0fe; --border: #e0e0e0; --code-bg: #f5f5f5;
+            --success: #2e7d32; --warn: #f57c00;
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: 'Georgia', serif; line-height: 1.7; color: var(--text); background: var(--bg); max-width: 780px; margin: 0 auto; padding: 2rem 1.5rem; }
+        h1 { font-size: 2rem; margin-bottom: 0.5rem; color: var(--accent); }
+        h2 { font-size: 1.4rem; margin-top: 2.5rem; margin-bottom: 0.8rem; border-bottom: 2px solid var(--accent); padding-bottom: 0.3rem; }
+        h3 { font-size: 1.1rem; margin-top: 1.5rem; margin-bottom: 0.5rem; }
+        p { margin-bottom: 1rem; }
+        .meta { color: #666; font-size: 0.9rem; margin-bottom: 2rem; }
+        .key-insight { background: var(--accent-light); border-left: 4px solid var(--accent); padding: 1rem 1.2rem; margin: 1.5rem 0; border-radius: 0 4px 4px 0; }
+        .key-insight strong { color: var(--accent); }
+        .production-note { background: #fff3e0; border-left: 4px solid var(--warn); padding: 1rem 1.2rem; margin: 1.5rem 0; border-radius: 0 4px 4px 0; }
+        .production-note::before { content: "🏭 Production: "; font-weight: bold; }
+        .exam-tip { background: #e8f5e9; border-left: 4px solid var(--success); padding: 1rem 1.2rem; margin: 1.5rem 0; border-radius: 0 4px 4px 0; }
+        .exam-tip::before { content: "🎯 Exam Tip: "; font-weight: bold; color: var(--success); }
+        code { font-family: 'Menlo', 'Consolas', monospace; font-size: 0.85em; background: var(--code-bg); padding: 0.15em 0.4em; border-radius: 3px; }
+        pre { background: var(--code-bg); padding: 1rem; border-radius: 4px; overflow-x: auto; margin: 1rem 0; font-size: 0.85rem; line-height: 1.5; }
+        ul, ol { margin: 0.5rem 0 1rem 1.5rem; }
+        li { margin-bottom: 0.4rem; }
+        table { width: 100%; border-collapse: collapse; margin: 1rem 0; font-size: 0.9rem; }
+        th, td { border: 1px solid var(--border); padding: 0.6rem 0.8rem; text-align: left; }
+        th { background: var(--accent-light); font-weight: bold; }
+        .diagram { background: white; border: 1px solid var(--border); border-radius: 8px; padding: 1.5rem; margin: 1.5rem 0; text-align: center; }
+        .cert-badge { display: inline-block; background: var(--accent); color: white; font-size: 0.7rem; padding: 0.15rem 0.5rem; border-radius: 10px; margin-left: 0.5rem; }
+        .quiz { background: #f9f9f9; border: 1px solid var(--border); border-radius: 8px; padding: 1.5rem; margin-top: 2rem; }
+        .quiz h2 { border-bottom: none; margin-top: 0; }
+        .quiz-q { margin-bottom: 1.2rem; }
+        .quiz-q p { font-weight: bold; margin-bottom: 0.3rem; }
+        .quiz-answer { display: none; background: #e8f5e9; padding: 0.5rem 0.8rem; border-radius: 4px; margin-top: 0.5rem; }
+        .reveal-btn { background: var(--accent); color: white; border: none; padding: 0.3rem 0.8rem; border-radius: 4px; cursor: pointer; font-size: 0.8rem; }
+        .reveal-btn:hover { opacity: 0.85; }
+    </style>
+</head>
+<body>
+
+<h1>Lesson 18: Configuration Best Practices</h1>
+<p class="meta">Chapter 3: Configuration & Secrets · <span class="cert-badge">CKA</span> <span class="cert-badge">CKAD</span> · ~15 min</p>
+
+<p>This lesson ties together everything from Chapter 3 into a set of production-proven patterns. How should configuration flow from Git to running containers? How do you handle changes without downtime? How do you keep it maintainable across environments?</p>
+
+<h2>1. 12-Factor Config in Kubernetes</h2>
+
+<p>The <a href="https://12factor.net/config">12-Factor App</a> says: <em>"Store config in the environment."</em> Kubernetes gives you the tools to follow this rigorously:</p>
+
+<table>
+    <tr><th>12-Factor Principle</th><th>K8s Implementation</th></tr>
+    <tr><td>Config varies between deploys</td><td>ConfigMaps/Secrets per namespace (dev/staging/prod)</td></tr>
+    <tr><td>Strict separation of config from code</td><td>Config in ConfigMaps, not baked into images</td></tr>
+    <tr><td>Config injected via environment</td><td>Env vars or volume mounts at Pod start</td></tr>
+    <tr><td>No config in source code</td><td>Git stores references (ExternalSecret CRs), not values</td></tr>
+</table>
+
+<h3>The Configuration Hierarchy</h3>
+
+<pre># Priority (highest → lowest):
+1. Environment-specific overrides   (ConfigMap per namespace)
+2. Application defaults              (baked into image as fallbacks)
+3. Framework defaults                (e.g., Spring Boot defaults)
+
+# Example: same app in dev and prod
+# dev namespace:  ConfigMap with LOG_LEVEL=debug, REPLICAS_CACHE=1
+# prod namespace: ConfigMap with LOG_LEVEL=warn,  REPLICAS_CACHE=3
+# Same image, different behavior</pre>
+
+<div class="key-insight">
+    <strong>The golden rule: one image, many environments.</strong> The same container image runs in dev, staging, and production. Only configuration changes. If you're building different images per environment, you're doing it wrong — you're not testing what you ship.
+</div>
+
+<h3>What Goes Where</h3>
+
+<table>
+    <tr><th>Data Type</th><th>Store In</th><th>Inject As</th></tr>
+    <tr><td>Feature flags, log levels</td><td>ConfigMap</td><td>Env vars or volume</td></tr>
+    <tr><td>Config files (nginx.conf, app.yaml)</td><td>ConfigMap</td><td>Volume mount</td></tr>
+    <tr><td>Database passwords, API keys</td><td>Secret (or External Secret)</td><td>Volume mount (preferred)</td></tr>
+    <tr><td>TLS certificates</td><td>Secret (type: kubernetes.io/tls)</td><td>Volume mount</td></tr>
+    <tr><td>Pod identity info</td><td>Downward API</td><td>Env vars</td></tr>
+    <tr><td>Service URLs</td><td>ConfigMap or K8s DNS</td><td>Env vars</td></tr>
+</table>
+
+<h2>2. Hot-Reload Patterns</h2>
+
+<p>How do you update configuration without restarting Pods?</p>
+
+<h3>Pattern 1: Volume Mount Auto-Sync (Simplest)</h3>
+
+<pre># ConfigMap mounted as volume → files auto-update in ~60s
+# App watches file for changes (inotify, polling, or framework support)
+
+# Works for: nginx (with reload signal), Spring Boot (actuator refresh),
+#            Prometheus (config reload endpoint)</pre>
+
+<pre># nginx reload on config change:
+spec:
+  containers:
+    - name: nginx
+      image: nginx:1.25
+      volumeMounts:
+        - name: config
+          mountPath: /etc/nginx/conf.d
+    - name: reloader             # ← sidecar watches for file changes
+      image: jimmidyson/configmap-reload:v0.9.0
+      args:
+        - --volume-dir=/etc/nginx/conf.d
+        - --webhook-url=http://localhost:80/-/reload
+      volumeMounts:
+        - name: config
+          mountPath: /etc/nginx/conf.d</pre>
+
+<h3>Pattern 2: Reloader Operator (Stakater)</h3>
+
+<pre># Stakater Reloader watches ConfigMaps/Secrets and triggers
+# rolling restarts of Deployments that reference them.
+
+# Annotate the Deployment:
+metadata:
+  annotations:
+    reloader.stakater.com/auto: "true"
+# OR target specific ConfigMaps:
+    configmap.reloader.stakater.com/reload: "app-config"
+
+# When app-config ConfigMap changes → Reloader triggers rollout restart
+# No sidecar needed — cluster-level operator</pre>
+
+<h3>Pattern 3: Config Hash Annotation (CI/CD Driven)</h3>
+
+<pre># CI/CD pipeline computes hash of ConfigMap content:
+CONFIG_HASH=$(kubectl get configmap app-config -o json | sha256sum | cut -d' ' -f1)
+
+# Patches the Deployment template annotation:
+kubectl patch deployment web -p \
+  "{\"spec\":{\"template\":{\"metadata\":{\"annotations\":{\"configHash\":\"$CONFIG_HASH\"}}}}}"
+
+# Annotation change → template change → rolling update triggered
+# Fully declarative in Helm/Kustomize:
+spec:
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}</pre>
+
+<h3>Pattern 4: Immutable ConfigMaps + Name Versioning</h3>
+
+<pre># CI creates: app-config-v7 (immutable: true)
+# Deployment references: configMap.name: app-config-v7
+# On config change:
+#   1. Create app-config-v8
+#   2. Update Deployment to reference v8
+#   3. Rolling update triggered naturally
+#   4. Rollback = point back to v7
+
+# This is the safest pattern for critical systems</pre>
+
+<div class="key-insight">
+    <strong>Choose based on your tolerance for Pod restarts:</strong><br>
+    • No restart needed → Volume mount + app watches files (Pattern 1)<br>
+    • Restart OK, want automation → Reloader operator (Pattern 2)<br>
+    • Restart OK, want full control → Config hash in CI/CD (Pattern 3)<br>
+    • Maximum safety → Immutable + versioned names (Pattern 4)
+</div>
+
+<h2>3. Multi-Environment Configuration</h2>
+
+<h3>Kustomize Overlays (Built into kubectl)</h3>
+
+<pre># Directory structure:
+base/
+  deployment.yaml
+  configmap.yaml
+  kustomization.yaml
+overlays/
+  dev/
+    configmap-patch.yaml   # LOG_LEVEL=debug
+    kustomization.yaml
+  prod/
+    configmap-patch.yaml   # LOG_LEVEL=warn
+    kustomization.yaml
+
+# Apply:
+kubectl apply -k overlays/prod/</pre>
+
+<h3>Helm Values Files</h3>
+
+<pre># values-dev.yaml:
+config:
+  logLevel: debug
+  replicas: 1
+
+# values-prod.yaml:
+config:
+  logLevel: warn
+  replicas: 5
+
+# helm install myapp ./chart -f values-prod.yaml</pre>
+
+<h3>Namespace-per-Environment</h3>
+
+<pre># Simple and effective:
+# Namespace: dev    → ConfigMap "app-config" (debug settings)
+# Namespace: prod   → ConfigMap "app-config" (production settings)
+# Same Deployment manifest, different namespace = different config
+# Works because ConfigMaps are namespaced</pre>
+
+<div class="production-note">
+    In production GitOps repos, the common pattern is: <code>base/</code> contains shared manifests, <code>environments/{dev,staging,prod}/</code> contains Kustomize patches or Helm values files. ArgoCD/Flux applies the correct overlay per cluster. Configuration differences live in Git, not in someone's head.
+</div>
+
+<h2>4. Anti-Patterns to Avoid</h2>
+
+<table>
+    <tr><th>Anti-Pattern</th><th>Problem</th><th>Fix</th></tr>
+    <tr><td>Baking config into the image</td><td>Can't change without rebuild; different image per env</td><td>Externalize to ConfigMap/Secret</td></tr>
+    <tr><td>Storing Secrets in Git (even base64)</td><td>Trivially decoded; leaks on public repo</td><td>Use SealedSecrets, SOPS, or ESO</td></tr>
+    <tr><td>Env vars for large config files</td><td>Hard to read, no structure, line-length limits</td><td>Volume mount the config file</td></tr>
+    <tr><td>Single "mega-ConfigMap"</td><td>Any change triggers full resync; blast radius</td><td>Split by concern (app, logging, features)</td></tr>
+    <tr><td>No resource limits on config-heavy Pods</td><td>ConfigMap size (1MiB) can spike memory at mount</td><td>Always set resource requests/limits</td></tr>
+    <tr><td>Using <code>kubectl edit</code> to change config</td><td>No audit trail, no Git history, not reproducible</td><td>All changes through Git + CI/CD</td></tr>
+    <tr><td>Env vars for secrets</td><td>Visible in /proc, logs, child processes</td><td>Volume mount with restrictive permissions</td></tr>
+</table>
+
+<h2>5. Configuration Checklist</h2>
+
+<pre>✅ Same image across all environments (config is external)
+✅ Secrets in external store (Vault/AWS/GCP) — synced via ESO
+✅ ConfigMaps split by concern (app, logging, features)
+✅ Volume mounts for config files; env vars only for simple key-values
+✅ Secrets mounted as files (not env vars) with 0400 permissions
+✅ Immutable ConfigMaps in high-scale clusters
+✅ Config hash annotation (or Reloader) for automatic rollouts
+✅ All config changes go through Git (GitOps)
+✅ readinessProbe on Pods that depend on config (fail fast on bad config)
+✅ Encryption at rest enabled for Secrets in etcd</pre>
+
+<h2>Summary</h2>
+
+<table>
+    <tr><th>Concept</th><th>Key Point</th></tr>
+    <tr><td>12-Factor</td><td>One image, many environments. Config injected, not baked.</td></tr>
+    <tr><td>Hot-reload (no restart)</td><td>Volume mount + file watcher or sidecar reloader</td></tr>
+    <tr><td>Hot-reload (with restart)</td><td>Stakater Reloader, config hash annotation, or immutable + version</td></tr>
+    <tr><td>Multi-environment</td><td>Kustomize overlays or Helm values files per env</td></tr>
+    <tr><td>Safety</td><td>Immutable ConfigMaps + name versioning = safest pattern</td></tr>
+    <tr><td>Never</td><td>Bake config into image, store secrets in Git, use kubectl edit in prod</td></tr>
+</table>
+
+<!-- Quiz -->
+<div class="quiz">
+    <h2>📝 Quiz: Configuration Best Practices</h2>
+    
+    <div class="quiz-q">
+        <p>Q1: Your app reads a config file at startup and never re-reads it. You update the ConfigMap. How do you apply the change?</p>
+        <button class="reveal-btn" onclick="this.nextElementSibling.style.display='block'">Show Answer</button>
+        <div class="quiz-answer">You must restart the Pods. Options: <code>kubectl rollout restart deployment/app</code>, config hash annotation (triggers automatic rollout when config changes), or Stakater Reloader operator. Volume mount auto-sync won't help if the app only reads at startup.</div>
+    </div>
+    
+    <div class="quiz-q">
+        <p>Q2: You have a Helm chart used in dev, staging, and prod. How do you manage per-environment configuration?</p>
+        <button class="reveal-btn" onclick="this.nextElementSibling.style.display='block'">Show Answer</button>
+        <div class="quiz-answer">Use separate <strong>values files</strong> per environment: <code>values-dev.yaml</code>, <code>values-staging.yaml</code>, <code>values-prod.yaml</code>. Deploy with <code>helm install -f values-prod.yaml</code>. The chart template is the same; only values change. Store values files in Git alongside the chart.</div>
+    </div>
+    
+    <div class="quiz-q">
+        <p>Q3: Your ConfigMap has 50 keys. One key changes frequently (feature flag), others are stable. What's the problem with one big ConfigMap?</p>
+        <button class="reveal-btn" onclick="this.nextElementSibling.style.display='block'">Show Answer</button>
+        <div class="quiz-answer"><strong>Blast radius.</strong> Any change to the ConfigMap causes kubelet to re-sync ALL mounted files (or triggers a full rollout if using config hash/Reloader). Split into separate ConfigMaps by concern: <code>app-config</code> (stable) and <code>feature-flags</code> (volatile). Only the feature-flags change triggers re-sync.</div>
+    </div>
+    
+    <div class="quiz-q">
+        <p>Q4: What does the Helm <code>{{ sha256sum }}</code> annotation pattern do?</p>
+        <button class="reveal-btn" onclick="this.nextElementSibling.style.display='block'">Show Answer</button>
+        <div class="quiz-answer">It computes a SHA-256 hash of the ConfigMap template and puts it in the Pod template annotation. When the ConfigMap content changes, the hash changes → the Pod template changes → Kubernetes triggers a rolling update. This ensures Pods always restart when their config changes, without manual intervention.</div>
+    </div>
+    
+    <div class="quiz-q">
+        <p>Q5: Why is immutable ConfigMap + name versioning (app-config-v7) safer than mutable ConfigMaps?</p>
+        <button class="reveal-btn" onclick="this.nextElementSibling.style.display='block'">Show Answer</button>
+        <div class="quiz-answer"><strong>(1) Atomic rollout:</strong> The Deployment references a specific version — all Pods get the same config (no race between old/new during sync).<br><strong>(2) Clean rollback:</strong> Just change the reference back to v6 — no need to "undo" a ConfigMap edit.<br><strong>(3) Audit trail:</strong> Each version is a separate object with its own creation timestamp.<br><strong>(4) Performance:</strong> Immutable = no watches = less API server load.</div>
+    </div>
+    
+    <div class="quiz-q">
+        <p>Q6: An engineer uses <code>kubectl edit configmap app-config</code> to fix a production issue. Why is this an anti-pattern?</p>
+        <button class="reveal-btn" onclick="this.nextElementSibling.style.display='block'">Show Answer</button>
+        <div class="quiz-answer"><strong>(1) No Git history</strong> — change isn't tracked, can't be code-reviewed. <strong>(2) Drift</strong> — next GitOps sync may overwrite it. <strong>(3) Not reproducible</strong> — can't recreate the same state from Git. <strong>(4) No rollback path</strong> — if the fix is wrong, no easy undo. Correct approach: commit the fix to Git, let CI/CD apply it.</div>
+    </div>
+</div>
+
+</body>
+</html>

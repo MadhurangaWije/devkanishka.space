@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lesson 22 — App-of-Apps & ApplicationSet</title>
+  <link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+
+  <div class="lesson-meta">
+    <span class="number">LESSON 22</span> &middot; Architecture Pattern &middot; ~20 minutes
+  </div>
+
+  <h1>App-of-Apps & ApplicationSet</h1>
+  <p>One Application per service per environment means dozens of ArgoCD Application YAMLs. The App-of-Apps pattern and ApplicationSet generator solve this — one definition, infinite applications. This is how platform teams scale GitOps.</p>
+
+  <div class="progress">
+    <span>Lesson 22 of 33</span>
+    <div class="progress-bar"><div class="progress-fill" style="width: 66%"></div></div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>The Scaling Problem</h2>
+
+  <div class="diagram">
+    <svg viewBox="0 0 700 110" xmlns="http://www.w3.org/2000/svg">
+      <rect x="20" y="10" width="310" height="90" rx="6" fill="#ffebee" stroke="#c62828"/>
+      <text x="175" y="30" text-anchor="middle" font-size="9" font-weight="bold" fill="#c62828">Manual: 5 services × 3 envs = 15 Application YAMLs</text>
+      <text x="175" y="50" text-anchor="middle" font-size="8" fill="#555">api-staging.yaml, api-production.yaml, api-preview.yaml</text>
+      <text x="175" y="63" text-anchor="middle" font-size="8" fill="#555">web-staging.yaml, web-production.yaml, web-preview.yaml</text>
+      <text x="175" y="76" text-anchor="middle" font-size="8" fill="#c62828">... (and growing) 😫</text>
+      <text x="175" y="92" text-anchor="middle" font-size="7" fill="#555">Adding a service = create 3 more files + kubectl apply</text>
+      
+      <rect x="370" y="10" width="310" height="90" rx="6" fill="#e8f5e9" stroke="#388e3c"/>
+      <text x="525" y="30" text-anchor="middle" font-size="9" font-weight="bold" fill="#388e3c">App-of-Apps: 1 root app manages everything</text>
+      <text x="525" y="50" text-anchor="middle" font-size="8" fill="#555">Root watches apps/ directory</text>
+      <text x="525" y="63" text-anchor="middle" font-size="8" fill="#555">Add YAML to apps/ → ArgoCD auto-creates it</text>
+      <text x="525" y="76" text-anchor="middle" font-size="8" fill="#388e3c">Or: ApplicationSet generates from template ✨</text>
+      <text x="525" y="92" text-anchor="middle" font-size="7" fill="#555">Adding a service = add directory + push</text>
+    </svg>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>Pattern 1: App-of-Apps</h2>
+
+  <div class="diagram">
+    <svg viewBox="0 0 700 180" xmlns="http://www.w3.org/2000/svg">
+      <!-- Root app -->
+      <rect x="250" y="10" width="200" height="45" rx="6" fill="#fff3e0" stroke="#f57c00" stroke-width="2"/>
+      <text x="350" y="30" text-anchor="middle" font-size="10" font-weight="bold" fill="#e65100">Root Application</text>
+      <text x="350" y="47" text-anchor="middle" font-size="7" fill="#555">watches: apps/ directory</text>
+      
+      <!-- Children -->
+      <line x1="280" y1="55" x2="100" y2="85" stroke="#333" stroke-width="1.5"/>
+      <line x1="320" y1="55" x2="260" y2="85" stroke="#333" stroke-width="1.5"/>
+      <line x1="380" y1="55" x2="430" y2="85" stroke="#333" stroke-width="1.5"/>
+      <line x1="420" y1="55" x2="590" y2="85" stroke="#333" stroke-width="1.5"/>
+      
+      <rect x="30" y="85" width="140" height="35" rx="4" fill="#e3f2fd" stroke="#1976d2"/>
+      <text x="100" y="107" text-anchor="middle" font-size="8">api-staging</text>
+      
+      <rect x="190" y="85" width="140" height="35" rx="4" fill="#e3f2fd" stroke="#1976d2"/>
+      <text x="260" y="107" text-anchor="middle" font-size="8">api-production</text>
+      
+      <rect x="360" y="85" width="140" height="35" rx="4" fill="#e8f5e9" stroke="#388e3c"/>
+      <text x="430" y="107" text-anchor="middle" font-size="8">web-staging</text>
+      
+      <rect x="520" y="85" width="140" height="35" rx="4" fill="#e8f5e9" stroke="#388e3c"/>
+      <text x="590" y="107" text-anchor="middle" font-size="8">web-production</text>
+      
+      <!-- New service -->
+      <rect x="250" y="135" width="200" height="35" rx="4" fill="#fff9c4" stroke="#f57f17" stroke-dasharray="4,3"/>
+      <text x="350" y="157" text-anchor="middle" font-size="8" fill="#f57f17">+ Add YAML to apps/ → auto-created!</text>
+    </svg>
+    <figcaption>The Root app watches the <code>apps/</code> folder. Each YAML in that folder becomes a managed ArgoCD Application.</figcaption>
+  </div>
+
+  <div class="exercise">
+    <h3>Root Application</h3>
+<pre><code><span style="color:#6c7086"># apps/root.yaml (apply this manually ONCE)</span>
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: root
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/YOUR_USER/cicd-mastery-gitops.git
+    targetRevision: main
+    path: apps
+    directory:
+      recurse: false
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+  syncPolicy:
+    automated: { prune: true, selfHeal: true }
+</code></pre>
+
+    <h3>Child Application (just add files to apps/)</h3>
+<pre><code><span style="color:#6c7086"># apps/api-staging.yaml</span>
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: api-staging
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/YOUR_USER/cicd-mastery-gitops.git
+    path: environments/staging
+    targetRevision: main
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: staging
+  syncPolicy:
+    automated: { prune: true, selfHeal: true }
+    syncOptions: [CreateNamespace=true]
+</code></pre>
+    <p><strong>Adding a new service:</strong> Drop a new YAML in <code>apps/</code> → push → root app syncs → child app created → service deployed. Zero manual ArgoCD interaction.</p>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>Pattern 2: ApplicationSet (Even Better)</h2>
+
+  <p>Instead of writing one YAML per app, <strong>generate</strong> them from a template:</p>
+
+  <div class="diagram">
+    <svg viewBox="0 0 700 110" xmlns="http://www.w3.org/2000/svg">
+      <rect x="20" y="15" width="280" height="80" rx="6" fill="#e3f2fd" stroke="#1976d2"/>
+      <text x="160" y="35" text-anchor="middle" font-size="9" font-weight="bold" fill="#1976d2">Generator</text>
+      <text x="160" y="52" text-anchor="middle" font-size="8" fill="#555">Scans: services/*/staging/</text>
+      <text x="160" y="66" text-anchor="middle" font-size="8" fill="#555">Finds: api, web, worker</text>
+      <text x="160" y="80" text-anchor="middle" font-size="8" fill="#1976d2">→ Generates 3 Applications</text>
+      
+      <line x1="300" y1="55" x2="340" y2="55" stroke="#333" stroke-width="2" marker-end="url(#g22)"/>
+      
+      <rect x="340" y="15" width="340" height="80" rx="6" fill="#e8f5e9" stroke="#388e3c"/>
+      <text x="510" y="35" text-anchor="middle" font-size="9" font-weight="bold" fill="#388e3c">Auto-Generated Applications</text>
+      <rect x="355" y="45" width="90" height="22" rx="3" fill="white" stroke="#a5d6a7"/>
+      <text x="400" y="60" text-anchor="middle" font-size="7">api-staging</text>
+      <rect x="455" y="45" width="90" height="22" rx="3" fill="white" stroke="#a5d6a7"/>
+      <text x="500" y="60" text-anchor="middle" font-size="7">web-staging</text>
+      <rect x="555" y="45" width="100" height="22" rx="3" fill="white" stroke="#a5d6a7"/>
+      <text x="605" y="60" text-anchor="middle" font-size="7">worker-staging</text>
+      <text x="510" y="85" text-anchor="middle" font-size="7" fill="#388e3c">Add services/payment/staging/ → 4th app auto-created!</text>
+      
+      <defs>
+        <marker id="g22" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto"><polygon points="0 0, 7 2.5, 0 5" fill="#333"/></marker>
+      </defs>
+    </svg>
+  </div>
+
+<pre><code>apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: all-services
+  namespace: argocd
+spec:
+  generators:
+    <span style="color:#6c7086"># Auto-discover directories matching pattern</span>
+    - git:
+        repoURL: https://github.com/YOUR_USER/cicd-mastery-gitops.git
+        revision: main
+        directories:
+          - path: 'services/*/staging'
+          - path: 'services/*/production'
+
+  template:
+    metadata:
+      <span style="color:#6c7086"># {{path[1]}} = service name, {{path[2]}} = environment</span>
+      name: '{{path[1]}}-{{path[2]}}'
+      namespace: argocd
+    spec:
+      project: default
+      source:
+        repoURL: https://github.com/YOUR_USER/cicd-mastery-gitops.git
+        targetRevision: main
+        path: '{{path}}'
+      destination:
+        server: https://kubernetes.default.svc
+        namespace: '{{path[2]}}'
+      syncPolicy:
+        automated: { prune: true, selfHeal: true }
+        syncOptions: [CreateNamespace=true]
+</code></pre>
+
+  <div class="key-insight">
+    <strong>ApplicationSet is the platform engineering tool.</strong> Create a new directory (<code>services/payment/staging/</code>) with manifests → push → ApplicationSet generator auto-creates the ArgoCD Application → service deployed. Zero config, zero tickets.
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>When to Use Which</h2>
+
+  <table>
+    <thead><tr><th>Pattern</th><th>Best For</th><th>Tradeoff</th></tr></thead>
+    <tbody>
+      <tr><td><strong>Individual Apps</strong></td><td>1-3 services, simple setup</td><td>Doesn't scale past ~10 apps</td></tr>
+      <tr><td><strong>App-of-Apps</strong></td><td>5-20 services, per-app customization</td><td>Still one YAML per app, but managed automatically</td></tr>
+      <tr><td><strong>ApplicationSet</strong></td><td>20+ services, convention-driven</td><td>Less per-app control, more consistency</td></tr>
+    </tbody>
+  </table>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>🧠 Recall Check</h2>
+
+  <div class="recall">
+    <ol>
+      <li>What does the "root" application in App-of-Apps watch?</li>
+      <li>How do you add a new service with App-of-Apps?</li>
+      <li>What does an ApplicationSet generator do?</li>
+      <li>As an architect with 30 microservices, which pattern would you choose?</li>
+    </ol>
+    <details>
+      <summary>Reveal answers</summary>
+      <ol>
+        <li>The <code>apps/</code> directory in the GitOps repo. Every YAML file in there becomes a managed ArgoCD Application.</li>
+        <li>Add a new Application YAML file to <code>apps/</code> and push. The root app auto-syncs and creates it.</li>
+        <li>It <strong>auto-discovers</strong> (e.g., directories matching a pattern) and generates Application resources from a template. No per-service YAML needed.</li>
+        <li><strong>ApplicationSet.</strong> At 30 services, you want convention-over-configuration. Define the directory pattern once, and every new service that follows the convention is automatically deployed.</li>
+      </ol>
+    </details>
+  </div>
+
+  <p><strong>Next lesson:</strong> Argo Rollouts — progressive delivery (canary + blue-green) with automated analysis.</p>
+
+</body>
+</html>

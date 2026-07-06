@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lesson 15 — Helm-Based Deployments</title>
+  <link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+
+  <div class="lesson-meta">
+    <span class="number">LESSON 15</span> &middot; Deep Dive + Hands-On &middot; ~20 minutes
+  </div>
+
+  <h1>Helm-Based Deployments</h1>
+  <p>Raw manifests with <code>sed</code> replacements don't scale. Helm gives you templating, versioning, and atomic deploys with built-in rollback. This lesson wires Helm into your pipeline.</p>
+
+  <div class="progress">
+    <span>Lesson 15 of 33</span>
+    <div class="progress-bar"><div class="progress-fill" style="width: 45%"></div></div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>Why Helm > Raw Manifests in CI/CD</h2>
+
+  <div class="diagram">
+    <svg viewBox="0 0 700 130" xmlns="http://www.w3.org/2000/svg">
+      <rect x="20" y="15" width="310" height="100" rx="6" fill="#ffebee" stroke="#c62828"/>
+      <text x="175" y="35" text-anchor="middle" font-size="10" font-weight="bold" fill="#c62828">Raw Manifests + sed</text>
+      <text x="175" y="55" text-anchor="middle" font-size="8" fill="#555">• sed "s|IMAGE|acr.io/app:sha-x|" deployment.yml</text>
+      <text x="175" y="70" text-anchor="middle" font-size="8" fill="#555">• Different files per environment</text>
+      <text x="175" y="85" text-anchor="middle" font-size="8" fill="#555">• No rollback tracking</text>
+      <text x="175" y="100" text-anchor="middle" font-size="8" fill="#555">• Fails mid-apply? Broken state.</text>
+      
+      <rect x="370" y="15" width="310" height="100" rx="6" fill="#e8f5e9" stroke="#388e3c"/>
+      <text x="525" y="35" text-anchor="middle" font-size="10" font-weight="bold" fill="#388e3c">Helm</text>
+      <text x="525" y="55" text-anchor="middle" font-size="8" fill="#555">• --set image.tag=sha-x (typed values)</text>
+      <text x="525" y="70" text-anchor="middle" font-size="8" fill="#555">• values-staging.yaml / values-prod.yaml</text>
+      <text x="525" y="85" text-anchor="middle" font-size="8" fill="#555">• helm rollback (release history)</text>
+      <text x="525" y="100" text-anchor="middle" font-size="8" fill="#555">• --atomic (auto-rollback on failure!)</text>
+    </svg>
+  </div>
+
+  <div class="key-insight">
+    <strong><code>--atomic</code> is the killer feature for CI/CD.</strong> If any resource in the Helm release fails to become healthy, Helm automatically rolls back to the previous version. Your pipeline never leaves the cluster in a broken state.
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>Helm Chart Structure (Quick Recap)</h2>
+
+  <div class="diagram">
+    <svg viewBox="0 0 600 200" xmlns="http://www.w3.org/2000/svg">
+      <text x="30" y="25" font-family="monospace" font-size="11" fill="#333">📁 helm/cicd-mastery/</text>
+      <text x="50" y="48" font-family="monospace" font-size="10" fill="#555">├── Chart.yaml</text>
+      <text x="250" y="48" font-size="9" fill="#999">← name, version, description</text>
+      <text x="50" y="70" font-family="monospace" font-size="10" fill="#1976d2" font-weight="bold">├── values.yaml</text>
+      <text x="250" y="70" font-size="9" fill="#999">← default values (all params)</text>
+      <text x="50" y="92" font-family="monospace" font-size="10" fill="#388e3c">├── values-staging.yaml</text>
+      <text x="250" y="92" font-size="9" fill="#999">← overrides for staging</text>
+      <text x="50" y="114" font-family="monospace" font-size="10" fill="#c62828">├── values-production.yaml</text>
+      <text x="250" y="114" font-size="9" fill="#999">← overrides for production</text>
+      <text x="50" y="136" font-family="monospace" font-size="10" fill="#555">└── templates/</text>
+      <text x="250" y="136" font-size="9" fill="#999">← K8s manifests with {{ .Values.x }}</text>
+      <text x="75" y="158" font-family="monospace" font-size="10" fill="#555">├── deployment.yaml</text>
+      <text x="75" y="178" font-family="monospace" font-size="10" fill="#555">├── service.yaml</text>
+      <text x="75" y="198" font-family="monospace" font-size="10" fill="#555">└── hpa.yaml</text>
+    </svg>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>🏋️ Step 1: Create a Helm Chart</h2>
+
+  <div class="exercise">
+<pre><code># Generate chart scaffold
+helm create helm/cicd-mastery
+
+# Clean out the defaults we don't need
+rm -rf helm/cicd-mastery/templates/tests
+rm helm/cicd-mastery/templates/ingress.yaml
+rm helm/cicd-mastery/templates/serviceaccount.yaml
+</code></pre>
+
+    <p>Edit <code>helm/cicd-mastery/values.yaml</code>:</p>
+<pre><code>replicaCount: 2
+
+image:
+  repository: acrcicdmastery.azurecr.io/cicd-mastery-api
+  tag: "latest"    # Overridden by pipeline
+  pullPolicy: IfNotPresent
+
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 3000
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+
+health:
+  path: /health
+  port: 3000
+
+env:
+  NODE_ENV: production
+
+autoscaling:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPU: 70
+</code></pre>
+
+    <p>Create <code>helm/cicd-mastery/values-staging.yaml</code>:</p>
+<pre><code>replicaCount: 1
+env:
+  NODE_ENV: staging
+  LOG_LEVEL: debug
+resources:
+  requests: { cpu: 50m, memory: 64Mi }
+  limits:   { cpu: 200m, memory: 128Mi }
+</code></pre>
+
+    <p>Create <code>helm/cicd-mastery/values-production.yaml</code>:</p>
+<pre><code>replicaCount: 3
+autoscaling:
+  enabled: true
+  minReplicas: 3
+  maxReplicas: 20
+env:
+  NODE_ENV: production
+  LOG_LEVEL: warn
+resources:
+  requests: { cpu: 200m, memory: 256Mi }
+  limits:   { cpu: 1000m, memory: 512Mi }
+</code></pre>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>🏋️ Step 2: Helm Deploy in Pipeline</h2>
+
+  <div class="exercise">
+    <p>Replace the <code>sed</code> + <code>kubectl apply</code> approach with Helm:</p>
+<pre><code><span style="color:#89b4fa">      - name:</span> <span style="color:#a6e3a1">Deploy with Helm</span>
+        <span style="color:#89b4fa">run:</span> <span style="color:#a6e3a1">|</span>
+          <span style="color:#a6e3a1">helm upgrade --install cicd-mastery ./helm/cicd-mastery \</span>
+            <span style="color:#a6e3a1">--namespace staging \</span>
+            <span style="color:#a6e3a1">--create-namespace \</span>
+            <span style="color:#a6e3a1">--values ./helm/cicd-mastery/values-staging.yaml \</span>
+            <span style="color:#a6e3a1">--set image.tag=${{ env.IMAGE_TAG }} \</span>
+            <span style="color:#a6e3a1">--wait \</span>
+            <span style="color:#a6e3a1">--timeout 5m \</span>
+            <span style="color:#a6e3a1">--atomic</span>
+</code></pre>
+  </div>
+
+  <h3>What Each Flag Does</h3>
+  <table>
+    <thead><tr><th>Flag</th><th>Purpose</th><th>Why It Matters</th></tr></thead>
+    <tbody>
+      <tr><td><code>--install</code></td><td>Install if new, upgrade if exists</td><td>Idempotent — safe to re-run</td></tr>
+      <tr><td><code>--create-namespace</code></td><td>Create ns if missing</td><td>No manual setup needed</td></tr>
+      <tr><td><code>--values file.yaml</code></td><td>Load environment-specific values</td><td>Same chart, different config</td></tr>
+      <tr><td><code>--set image.tag=X</code></td><td>Override one value at deploy time</td><td>Inject the CI-built image tag</td></tr>
+      <tr><td><code>--wait</code></td><td>Block until pods are ready</td><td>Pipeline knows if deploy succeeded</td></tr>
+      <tr><td><code>--timeout 5m</code></td><td>Fail if not ready in 5 min</td><td>Don't hang forever</td></tr>
+      <tr><td><code>--atomic</code></td><td><strong>Auto-rollback on failure</strong></td><td>Never leave broken state</td></tr>
+    </tbody>
+  </table>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>Helm Release History = Deployment Audit Trail</h2>
+
+  <div class="diagram">
+    <svg viewBox="0 0 650 110" xmlns="http://www.w3.org/2000/svg">
+      <rect x="20" y="10" width="610" height="90" rx="4" fill="#1e1e2e"/>
+      <text x="30" y="30" font-family="monospace" font-size="9" fill="#a6e3a1">$ helm history cicd-mastery -n staging</text>
+      <text x="30" y="48" font-family="monospace" font-size="8" fill="#6c7086">REVISION  UPDATED                   STATUS      DESCRIPTION</text>
+      <text x="30" y="62" font-family="monospace" font-size="8" fill="#cdd6f4">1         2024-01-15 10:30:00       superseded  Install complete</text>
+      <text x="30" y="76" font-family="monospace" font-size="8" fill="#cdd6f4">2         2024-01-15 14:22:00       superseded  Upgrade complete</text>
+      <text x="30" y="90" font-family="monospace" font-size="8" fill="#a6e3a1">3         2024-01-16 09:15:00       deployed    Upgrade complete</text>
+    </svg>
+    <figcaption>Every <code>helm upgrade</code> creates a revision. Rollback to any previous revision instantly.</figcaption>
+  </div>
+
+<pre><code># Rollback in pipeline on verification failure:
+helm rollback cicd-mastery -n staging    # Goes to revision 2
+
+# Or rollback to specific revision:
+helm rollback cicd-mastery 1 -n staging  # Goes to revision 1
+</code></pre>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>Pattern: Deploy + Verify + Rollback</h2>
+
+<pre><code><span style="color:#89b4fa">      - name:</span> <span style="color:#a6e3a1">Deploy</span>
+        <span style="color:#89b4fa">id:</span> <span style="color:#a6e3a1">deploy</span>
+        <span style="color:#89b4fa">run:</span> <span style="color:#a6e3a1">|</span>
+          <span style="color:#a6e3a1">helm upgrade --install cicd-mastery ./helm/cicd-mastery \</span>
+            <span style="color:#a6e3a1">--namespace production \</span>
+            <span style="color:#a6e3a1">--values ./helm/cicd-mastery/values-production.yaml \</span>
+            <span style="color:#a6e3a1">--set image.tag=${{ env.IMAGE_TAG }} \</span>
+            <span style="color:#a6e3a1">--wait --timeout 5m --atomic</span>
+
+      <span style="color:#89b4fa">- name:</span> <span style="color:#a6e3a1">Integration test</span>
+        <span style="color:#89b4fa">id:</span> <span style="color:#a6e3a1">verify</span>
+        <span style="color:#89b4fa">run:</span> <span style="color:#a6e3a1">|</span>
+          <span style="color:#6c7086"># Test critical paths</span>
+          <span style="color:#a6e3a1">curl -f "$APP_URL/health" || exit 1</span>
+          <span style="color:#a6e3a1">curl -f "$APP_URL/" | jq .version || exit 1</span>
+
+      <span style="color:#89b4fa">- name:</span> <span style="color:#a6e3a1">Rollback on failure</span>
+        <span style="color:#89b4fa">if:</span> <span style="color:#a6e3a1">failure() && steps.deploy.outcome == 'success'</span>
+        <span style="color:#89b4fa">run:</span> <span style="color:#a6e3a1">|</span>
+          <span style="color:#a6e3a1">echo "::error::Verification failed! Rolling back..."</span>
+          <span style="color:#a6e3a1">helm rollback cicd-mastery -n production</span>
+          <span style="color:#a6e3a1">echo "## ⚠️ ROLLBACK EXECUTED" >> $GITHUB_STEP_SUMMARY</span>
+</code></pre>
+
+  <div class="key-insight">
+    This pattern gives you <strong>two layers of protection</strong>:
+    <ol style="margin-top:0.3rem;">
+      <li><code>--atomic</code> rolls back if pods don't start (infrastructure failure)</li>
+      <li>The verify step rolls back if the app starts but behaves incorrectly (logic failure)</li>
+    </ol>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>🧠 Recall Check</h2>
+
+  <div class="recall">
+    <ol>
+      <li>What does <code>--atomic</code> do when a Helm upgrade fails?</li>
+      <li>How do you use different configuration for staging vs production with the same chart?</li>
+      <li>What's the command to see deployment history in Helm?</li>
+      <li>Why is <code>--wait</code> important in a pipeline (vs without it)?</li>
+    </ol>
+    <details>
+      <summary>Reveal answers</summary>
+      <ol>
+        <li>Automatically rolls back to the previous revision. The cluster is never left in a broken state.</li>
+        <li>Separate values files: <code>--values values-staging.yaml</code> vs <code>--values values-production.yaml</code>. Same templates, different configuration.</li>
+        <li><code>helm history &lt;release-name&gt; -n &lt;namespace&gt;</code></li>
+        <li>Without <code>--wait</code>, Helm returns immediately after submitting resources (doesn't verify they're healthy). With it, Helm blocks until all pods pass readiness checks — so the pipeline knows the deployment actually worked.</li>
+      </ol>
+    </details>
+  </div>
+
+  <p><strong>Next lesson:</strong> Reusable Workflows — creating pipeline templates that multiple services can share.</p>
+
+</body>
+</html>

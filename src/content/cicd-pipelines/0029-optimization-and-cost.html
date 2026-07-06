@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lesson 29 — Pipeline Optimization & Cost</title>
+  <link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+
+  <div class="lesson-meta">
+    <span class="number">LESSON 29</span> &middot; Architecture &middot; ~15 minutes
+  </div>
+
+  <h1>Pipeline Optimization & Cost</h1>
+  <p>A fast pipeline = happy developers. A cheap pipeline = happy finance. This lesson teaches the optimization techniques that compound: shave 30 seconds here, skip a run there — across 50 devs it's thousands of dollars/year.</p>
+
+  <div class="progress">
+    <span>Lesson 29 of 33</span>
+    <div class="progress-bar"><div class="progress-fill" style="width: 87%"></div></div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>Optimization Techniques (Ranked by Impact)</h2>
+
+  <div class="diagram">
+    <svg viewBox="0 0 700 220" xmlns="http://www.w3.org/2000/svg">
+      <!-- Impact bars -->
+      <text x="180" y="20" text-anchor="end" font-size="9" font-weight="bold">Technique</text>
+      <text x="550" y="20" text-anchor="middle" font-size="9" font-weight="bold">Savings</text>
+      
+      <text x="180" y="45" text-anchor="end" font-size="8">Dependency caching</text>
+      <rect x="190" y="35" width="350" height="16" rx="3" fill="#c8e6c9" stroke="#388e3c"/>
+      <text x="550" y="47" font-size="8" fill="#2e7d32">30-60s per job</text>
+      
+      <text x="180" y="70" text-anchor="end" font-size="8">Concurrency cancel</text>
+      <rect x="190" y="60" width="300" height="16" rx="3" fill="#c8e6c9" stroke="#388e3c"/>
+      <text x="500" y="72" font-size="8" fill="#2e7d32">Entire wasted runs</text>
+      
+      <text x="180" y="95" text-anchor="end" font-size="8">Docker layer caching</text>
+      <rect x="190" y="85" width="280" height="16" rx="3" fill="#bbdefb" stroke="#1976d2"/>
+      <text x="480" y="97" font-size="8" fill="#1565c0">60-90s per build</text>
+      
+      <text x="180" y="120" text-anchor="end" font-size="8">Job parallelism</text>
+      <rect x="190" y="110" width="250" height="16" rx="3" fill="#bbdefb" stroke="#1976d2"/>
+      <text x="450" y="122" font-size="8" fill="#1565c0">Total time ÷ N</text>
+      
+      <text x="180" y="145" text-anchor="end" font-size="8">Path filtering</text>
+      <rect x="190" y="135" width="220" height="16" rx="3" fill="#e1bee7" stroke="#7b1fa2"/>
+      <text x="420" y="147" font-size="8" fill="#6a1b9a">Skip entire pipelines</text>
+      
+      <text x="180" y="170" text-anchor="end" font-size="8">Test splitting (shards)</text>
+      <rect x="190" y="160" width="200" height="16" rx="3" fill="#e1bee7" stroke="#7b1fa2"/>
+      <text x="400" y="172" font-size="8" fill="#6a1b9a">Test time ÷ N</text>
+      
+      <text x="180" y="195" text-anchor="end" font-size="8">Build once, deploy N</text>
+      <rect x="190" y="185" width="180" height="16" rx="3" fill="#fff3e0" stroke="#f57c00"/>
+      <text x="380" y="197" font-size="8" fill="#e65100">Avoid N rebuilds</text>
+    </svg>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>Cost Model: GitHub Actions Billing</h2>
+
+  <table>
+    <thead><tr><th>Runner OS</th><th>Cost/min</th><th>Multiplier</th><th>Guidance</th></tr></thead>
+    <tbody>
+      <tr><td>Linux</td><td>$0.008</td><td>1×</td><td>Use for everything unless you need Windows/macOS</td></tr>
+      <tr><td>Windows</td><td>$0.016</td><td>2×</td><td>.NET only, avoid if possible</td></tr>
+      <tr><td>macOS</td><td>$0.08</td><td>10×</td><td>iOS builds only, never for backend</td></tr>
+    </tbody>
+  </table>
+
+  <div class="key-insight">
+    <strong>Quick math:</strong> A 5-minute Linux CI job costs $0.04. Running 100 times/day = $4/day = ~$120/month. Saving 2 minutes per run = $48/month saved. At scale (many repos, many devs), optimization pays for itself quickly.
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>Cost Reduction Strategies</h2>
+
+  <h3>1. Don't run when unnecessary</h3>
+<pre><code><span style="color:#6c7086"># Skip CI for docs-only changes</span>
+<span style="color:#89b4fa">paths-ignore:</span> <span style="color:#a6e3a1">['**.md', 'docs/**', 'LICENSE']</span>
+
+<span style="color:#6c7086"># Cancel redundant runs</span>
+<span style="color:#89b4fa">concurrency:</span>
+  <span style="color:#89b4fa">group:</span> <span style="color:#a6e3a1">${{ github.workflow }}-${{ github.ref }}</span>
+  <span style="color:#89b4fa">cancel-in-progress:</span> <span style="color:#a6e3a1">true</span>
+</code></pre>
+
+  <h3>2. Clean up storage</h3>
+<pre><code><span style="color:#6c7086"># Artifacts: short retention</span>
+<span style="color:#89b4fa">retention-days:</span> <span style="color:#a6e3a1">3</span>   <span style="color:#6c7086"># Not the default 90!</span>
+
+<span style="color:#6c7086"># Registry: purge old images weekly</span>
+az acr run --cmd "acr purge --filter 'api:sha-.*' --ago 30d --keep 10" ...
+</code></pre>
+
+  <h3>3. Right-size infrastructure</h3>
+<pre><code><span style="color:#6c7086"># AKS: spot nodes for non-prod (up to 90% cheaper)</span>
+az aks nodepool add --priority Spot --name spotnodes ...
+
+<span style="color:#6c7086"># Scale to zero at night (non-prod)</span>
+az aks nodepool update --min-count 0 --enable-cluster-autoscaler ...
+</code></pre>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>Speed Targets</h2>
+
+  <table>
+    <thead><tr><th>Pipeline Type</th><th>Target</th><th>Why</th></tr></thead>
+    <tbody>
+      <tr><td>PR CI (lint + test)</td><td>&lt; 5 min</td><td>Developer stays in context</td></tr>
+      <tr><td>Container build + push</td><td>&lt; 3 min</td><td>Fast iteration on deploys</td></tr>
+      <tr><td>Full CD (CI → prod)</td><td>&lt; 15 min</td><td>Acceptable time-to-production</td></tr>
+    </tbody>
+  </table>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>🧠 Recall Check</h2>
+
+  <div class="recall">
+    <ol>
+      <li>What's the single highest-impact optimization for most pipelines?</li>
+      <li>A macOS runner costs how many times more than Linux?</li>
+      <li>You push 5 commits in 2 minutes to the same branch. With concurrency cancel, how many runs complete?</li>
+      <li>Your CI takes 8 minutes. What two techniques would you try first to get it under 5?</li>
+    </ol>
+    <details>
+      <summary>Reveal answers</summary>
+      <ol>
+        <li><strong>Dependency caching.</strong> Saves 30-60 seconds per job, applies to every single run, zero downside.</li>
+        <li><strong>10×.</strong> $0.08/min vs $0.008/min. Never use macOS for backend CI.</li>
+        <li><strong>One.</strong> The first 4 are cancelled. Only the last (most recent) run completes.</li>
+        <li><strong>Caching</strong> (if not already) and <strong>parallelism</strong> (split lint/test/scan into parallel jobs). If tests are the bottleneck, add test sharding.</li>
+      </ol>
+    </details>
+  </div>
+
+  <p><strong>Next lesson:</strong> Observability for Pipelines — measuring what matters.</p>
+
+</body>
+</html>

@@ -1,0 +1,982 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>L47 · The Import System: importlib, Finders &amp; Loaders — Python A→Z</title>
+<link rel="stylesheet" href="../assets/style.css" />
+</head>
+<body>
+<div id="sidebar-placeholder"></div>
+<div id="main">
+  <div id="lesson-header">
+    <div class="lesson-track track-internals">🟠 Python Internals</div>
+    <h1>The Import System: importlib, Finders &amp; Loaders</h1>
+    <div class="lesson-meta">
+      <span>📖 Lesson 47</span>
+      <span>⏱ 60 min</span>
+      <span>🧪 5 questions</span>
+      <span>💻 3 exercises</span>
+    </div>
+  </div>
+  <div id="content">
+
+    <div class="objectives">
+      <h4>🎯 Learning Objectives</h4>
+      <ul>
+        <li>Trace the full import machinery: <code>import</code> statement → <code>__import__</code> → <code>importlib._bootstrap</code></li>
+        <li>Understand <code>sys.modules</code> as the module cache and how to exploit it</li>
+        <li>Explain the Finder/Loader protocol: <code>sys.meta_path</code>, <code>sys.path_hooks</code>, <code>sys.path</code></li>
+        <li>Write a custom <code>MetaPathFinder</code> and <code>Loader</code> to import from non-standard sources</li>
+        <li>Understand namespace packages (PEP 420) and implicit namespace packages</li>
+        <li>Use <code>importlib.import_module</code>, <code>importlib.reload</code>, and <code>importlib.util</code></li>
+        <li>Implement import-time transformations (source transpiling, code injection)</li>
+      </ul>
+    </div>
+
+    <!-- ═══════════════════════════════════════════════════════════════ -->
+    <h2 id="import-pipeline">1 — What Happens When You Write <code>import foo</code></h2>
+
+    <p>
+      Every <code>import</code> statement eventually calls one function:
+      <code>builtins.__import__</code>. From there, control passes into
+      <code>importlib._bootstrap</code>, a pure-Python module that is frozen
+      into the interpreter at build time. Understanding this pipeline lets you
+      intercept, redirect, or replace any part of it.
+    </p>
+
+    <pre style="background:#1a1a2e;padding:16px;border-radius:8px;overflow-x:auto;font-size:0.82rem;color:#e0e0f0;">import foo
+  ↓
+builtins.__import__("foo", globals, locals, fromlist=[], level=0)
+  ↓
+importlib._bootstrap._find_and_load("foo", __import__)
+  ↓
+1. Check sys.modules["foo"] — if present, return cached module immediately
+   (This is why circular imports can work — partial modules are cached)
+
+2. Find the module using sys.meta_path finders (in order):
+   a. BuiltinImporter   — checks if "foo" is a built-in C module (e.g. sys, builtins)
+   b. FrozenImporter    — checks if "foo" is a frozen module
+   c. PathFinder        — searches sys.path entries using sys.path_hooks
+
+3. Load the module using the finder's associated Loader:
+   a. Create a ModuleSpec (name, origin, submodule_search_locations)
+   b. Create an empty module object and ADD IT TO sys.modules IMMEDIATELY
+      (allows circular imports to see a partial module)
+   c. Execute the module's source/bytecode in the module's __dict__
+   d. Return the fully-populated module
+
+4. Handle ImportError if no finder claims the module</pre>
+
+    <div style="position:relative"><pre><code class="language-python">import sys
+
+# sys.modules is the cache
+import os
+print("os" in sys.modules)        # True — already loaded
+print(sys.modules["os"] is os)    # True — same object
+
+# Import resolves to the cached module — zero I/O on repeat imports
+import os as os2
+print(os is os2)    # True — same module object
+
+# sys.meta_path — the list of finders Python tries in order
+for finder in sys.meta_path:
+    print(type(finder).__name__)
+# BuiltinImporter
+# FrozenImporter
+# PathFinder
+
+# sys.path — where PathFinder looks for packages/modules
+import pprint
+pprint.pprint(sys.path)
+</code></pre><span class="code-label">import_pipeline.py</span></div>
+
+    <div class="callout callout-concept">
+      <strong>Circular imports and <code>sys.modules</code>:</strong>
+      Adding a module to <code>sys.modules</code> <em>before</em> fully loading it is
+      the key mechanism that allows circular imports to work at all. If module A imports
+      module B, and B imports A, Python finds A's partial module in <code>sys.modules</code>
+      and uses it rather than re-entering A's loading code. This is why the order of
+      definitions in a module matters when circular imports exist.
+    </div>
+
+    <!-- ═══════════════════════════════════════════════════════════════ -->
+    <h2 id="sys-modules">2 — <code>sys.modules</code> Manipulation</h2>
+
+    <p>
+      <code>sys.modules</code> is an ordinary dictionary. You can read it, add
+      to it, replace entries, and delete from it. This is the foundation of lazy
+      loading libraries, mock patching, and plugin systems that need to override
+      a module's public API.
+    </p>
+
+    <div style="position:relative"><pre><code class="language-python">import sys
+
+# ── Inspect ──
+print(len(sys.modules))   # hundreds of modules already loaded at startup
+
+# Find all packages (modules with __path__)
+packages = {k for k, v in sys.modules.items()
+            if hasattr(v, "__path__")}
+print(sorted(packages)[:10])
+
+# ── Force reload ──
+import importlib
+import mymodule   # noqa (hypothetical)
+importlib.reload(mymodule)   # re-executes the module; existing refs still point to old objects
+
+# ── Module substitution (advanced) ──
+# Replace a module in sys.modules with a custom object
+# Used by mock libraries, lazy import systems
+
+class LazyModule:
+    """A placeholder that loads the real module on first attribute access."""
+    def __init__(self, name: str):
+        object.__setattr__(self, "_name", name)
+        object.__setattr__(self, "_module", None)
+
+    def _load(self):
+        if object.__getattribute__(self, "_module") is None:
+            name = object.__getattribute__(self, "_name")
+            import importlib
+            module = importlib.import_module(name)
+            object.__setattr__(self, "_module", module)
+            sys.modules[name] = module   # replace ourselves in the cache
+        return object.__getattribute__(self, "_module")
+
+    def __getattr__(self, attr):
+        return getattr(self._load(), attr)
+
+# Register a lazy placeholder
+sys.modules["json"] = LazyModule("json")
+import json                  # returns the LazyModule (no real load yet)
+data = json.loads('{"x":1}') # NOW loads — _load() called on first attribute access
+print(data)                  # {'x': 1}
+</code></pre><span class="code-label">sys_modules_manipulation.py</span></div>
+
+    <div class="callout callout-warn">
+      <strong>Warning — <code>sys.modules</code> surgery:</strong>
+      Manipulating <code>sys.modules</code> directly is powerful but fragile.
+      Removing or replacing entries can confuse <code>isinstance</code> checks
+      and identity comparisons —
+      <code>isinstance(obj, sys.modules["mymodule"].MyClass)</code> may fail if
+      the module was reloaded and created a new class object. Always prefer
+      <code>importlib.reload()</code> over manual removal.
+    </div>
+
+    <!-- ═══════════════════════════════════════════════════════════════ -->
+    <h2 id="finder-loader-protocol">3 — The Finder / Loader Protocol</h2>
+
+    <p>
+      The import system uses two cooperating objects:
+    </p>
+    <ul>
+      <li><strong>Finder</strong> — implements <code>find_spec(fullname, path, target=None) -&gt; ModuleSpec | None</code></li>
+      <li><strong>Loader</strong> — implements <code>create_module(spec)</code> and <code>exec_module(module)</code></li>
+    </ul>
+    <p>
+      A <strong>ModuleSpec</strong> is the bridge between them: the finder creates
+      it and attaches the loader to it. The bootstrap machinery then drives the
+      loader through the two-phase creation protocol.
+    </p>
+
+    <div style="position:relative"><pre><code class="language-python">import importlib.util, importlib.machinery
+
+# Inspect a real module's spec
+spec = importlib.util.find_spec("json")
+print(spec.name)          # "json"
+print(spec.origin)        # ".../json/__init__.py"
+print(spec.submodule_search_locations)  # [".../json"]
+
+# Loader attached to the spec
+print(type(spec.loader))  # &lt;class 'importlib.machinery.SourceFileLoader'&gt;
+print(spec.loader.path)   # ".../json/__init__.py"
+
+# Manual load via spec
+import sys
+spec2 = importlib.util.spec_from_file_location("mymod", "/path/to/mymod.py")
+module = importlib.util.module_from_spec(spec2)
+sys.modules["mymod"] = module
+spec2.loader.exec_module(module)
+print(module)
+</code></pre><span class="code-label">inspect_spec.py</span></div>
+
+    <p>Python ships with several built-in loader types for different file kinds:</p>
+
+    <table>
+      <thead>
+        <tr>
+          <th>Loader</th>
+          <th>Handles</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td><code>SourceFileLoader</code></td><td><code>.py</code> files</td></tr>
+        <tr><td><code>SourcelessFileLoader</code></td><td><code>.pyc</code> files (no source)</td></tr>
+        <tr><td><code>ExtensionFileLoader</code></td><td><code>.so</code> / <code>.pyd</code> C extension modules</td></tr>
+        <tr><td><code>NamespaceLoader</code></td><td>Namespace packages (no <code>__init__.py</code>)</td></tr>
+        <tr><td><code>BuiltinImporter</code></td><td>Built-in C modules (<code>sys</code>, <code>builtins</code>)</td></tr>
+        <tr><td><code>FrozenImporter</code></td><td>Modules compiled into the interpreter</td></tr>
+      </tbody>
+    </table>
+
+    <!-- ═══════════════════════════════════════════════════════════════ -->
+    <h2 id="custom-finder-loader">4 — Writing a Custom <code>MetaPathFinder</code> and <code>Loader</code></h2>
+
+    <p>
+      The most direct extension point is <code>sys.meta_path</code>. Insert an
+      object whose <code>find_spec</code> method claims certain module names and
+      returns a spec with your own loader. The example below imports modules
+      whose source lives entirely in a Python dictionary — no files needed.
+    </p>
+
+    <div style="position:relative"><pre><code class="language-python">import sys
+import importlib.abc
+import importlib.machinery
+import importlib.util
+import types
+
+# In-memory "package": name → source code
+_VIRTUAL_MODULES = {
+    "virtual.greet": """
+def hello(name: str) -> str:
+    return f"Hello, {name}! (from virtual module)"
+""",
+    "virtual.math_utils": """
+def add(a, b): return a + b
+def mul(a, b): return a * b
+PI = 3.14159265358979
+""",
+}
+
+
+class VirtualFinder(importlib.abc.MetaPathFinder):
+    """Finds modules whose source is stored in _VIRTUAL_MODULES."""
+
+    def find_spec(self, fullname, path, target=None):
+        if fullname in _VIRTUAL_MODULES:
+            source = _VIRTUAL_MODULES[fullname]
+            loader = VirtualLoader(fullname, source)
+            return importlib.machinery.ModuleSpec(
+                name=fullname,
+                loader=loader,
+                origin=f"&lt;virtual:{fullname}&gt;",
+            )
+        return None   # not ours — let other finders try
+
+
+class VirtualLoader(importlib.abc.Loader):
+    """Loads a module from an in-memory source string."""
+
+    def __init__(self, fullname: str, source: str):
+        self.fullname = fullname
+        self.source   = source
+
+    def create_module(self, spec):
+        return None   # use default module creation
+
+    def exec_module(self, module):
+        code = compile(self.source, f"&lt;virtual:{self.fullname}&gt;", "exec")
+        exec(code, module.__dict__)
+
+
+# Install our finder at the FRONT of sys.meta_path
+sys.meta_path.insert(0, VirtualFinder())
+
+# Now import as normal
+import virtual.greet as greet
+print(greet.hello("World"))      # Hello, World! (from virtual module)
+
+import virtual.math_utils as mu
+print(mu.add(3, 4))              # 7
+print(mu.PI)                     # 3.14159265358979
+
+# Cleanup
+sys.meta_path.pop(0)
+</code></pre><span class="code-label">virtual_finder.py</span></div>
+
+    <p>
+      The two-phase loader protocol separates <em>object creation</em>
+      (<code>create_module</code>) from <em>population</em>
+      (<code>exec_module</code>). Returning <code>None</code> from
+      <code>create_module</code> tells the bootstrap to create a standard
+      <code>types.ModuleType</code> object. This lets you focus
+      <code>exec_module</code> solely on running the code.
+    </p>
+
+    <!-- ═══════════════════════════════════════════════════════════════ -->
+    <h2 id="path-hooks">5 — <code>sys.path_hooks</code> and <code>PathEntryFinder</code></h2>
+
+    <p>
+      <code>sys.meta_path</code>'s <code>PathFinder</code> delegates to a second
+      hook layer. For each entry in <code>sys.path</code> it calls every callable
+      in <code>sys.path_hooks</code>, passing the path entry string. The first
+      hook that returns a <code>PathEntryFinder</code> wins; hooks signal
+      "not mine" by raising <code>ImportError</code>. Results are cached in
+      <code>sys.path_importer_cache</code>.
+    </p>
+
+    <div style="position:relative"><pre><code class="language-python">import sys
+import importlib.abc
+import importlib.machinery
+import zipfile
+import io
+
+class ZipStringFinder(importlib.abc.PathEntryFinder):
+    """
+    A PathEntryFinder that imports modules from an in-memory zip archive.
+    Installed via a sys.path_hooks entry.
+    """
+    _archives: dict[str, bytes] = {}    # path_entry → zip bytes
+
+    def __init__(self, path_entry: str):
+        if path_entry not in self._archives:
+            raise ImportError(f"Not a virtual zip: {path_entry}")
+        self._zip = zipfile.ZipFile(io.BytesIO(self._archives[path_entry]))
+
+    def find_spec(self, fullname, target=None):
+        module_path = fullname.replace(".", "/") + ".py"
+        try:
+            source = self._zip.read(module_path).decode()
+        except KeyError:
+            return None
+        loader = _ZipStringLoader(fullname, source)
+        return importlib.machinery.ModuleSpec(fullname, loader)
+
+
+class _ZipStringLoader(importlib.abc.Loader):
+    def __init__(self, fullname, source):
+        self.fullname = fullname
+        self.source   = source
+
+    def create_module(self, spec): return None
+
+    def exec_module(self, module):
+        exec(compile(self.source, f"&lt;zip:{self.fullname}&gt;", "exec"), module.__dict__)
+
+
+def zip_path_hook(path_entry: str):
+    """Called for each entry in sys.path; raises ImportError if we don't handle it."""
+    return ZipStringFinder(path_entry)
+
+
+# Install the hook
+sys.path_hooks.insert(0, zip_path_hook)
+
+# Create a fake in-memory zip archive with a module inside
+buf = io.BytesIO()
+with zipfile.ZipFile(buf, "w") as zf:
+    zf.writestr("zipped_utils.py", "def double(x): return x * 2\n")
+ZipStringFinder._archives["virtual_zip://myarchive"] = buf.getvalue()
+
+# Add our virtual path entry
+sys.path.insert(0, "virtual_zip://myarchive")
+sys.path_importer_cache.clear()   # clear cached PathFinder decisions
+
+import zipped_utils
+print(zipped_utils.double(21))   # 42
+</code></pre><span class="code-label">zip_path_hook.py</span></div>
+
+    <div class="callout callout-concept">
+      <strong>How <code>zipimport</code> works:</strong>
+      This is exactly how Python's built-in <code>zipimport</code> operates —
+      a <code>zipimporter</code> hook handles real <code>.zip</code> files and
+      <code>.egg</code> files found on <code>sys.path</code>.
+      <code>sys.path_importer_cache</code> caches the <code>PathEntryFinder</code>
+      for each path entry so the hooks are not re-evaluated on every import.
+    </div>
+
+    <!-- ═══════════════════════════════════════════════════════════════ -->
+    <h2 id="namespace-packages">6 — Namespace Packages (PEP 420)</h2>
+
+    <p>
+      A <strong>namespace package</strong> is a package spread across multiple
+      directories — each contributing sub-modules — with no <code>__init__.py</code>
+      in any of them. Python 3.3+ (PEP 420) supports this natively. When
+      <code>PathFinder</code> walks <code>sys.path</code> and finds a directory
+      matching the package name but lacking <code>__init__.py</code>, it does
+      not stop; instead it collects all such directories into a
+      <code>_NamespacePath</code> and returns a namespace package whose
+      <code>__path__</code> spans all of them.
+    </p>
+
+    <pre style="background:#1a1a2e;padding:16px;border-radius:8px;overflow-x:auto;font-size:0.82rem;color:#e0e0f0;"># Directory structure (two separate directories on sys.path):
+/path/A/mypkg/module_a.py
+/path/B/mypkg/module_b.py
+
+# Both contribute to the same 'mypkg' namespace package
+# sys.path = ["/path/A", "/path/B"]
+
+import mypkg.module_a   # found in /path/A
+import mypkg.module_b   # found in /path/B</pre>
+
+    <div style="position:relative"><pre><code class="language-python">import sys, types, importlib.util
+
+# Inspect a namespace package
+spec = importlib.util.find_spec("mypkg")   # assuming it exists
+if spec and spec.submodule_search_locations:
+    print(f"Namespace package paths: {list(spec.submodule_search_locations)}")
+    # ['/path/A/mypkg', '/path/B/mypkg']
+
+# Create a synthetic namespace package programmatically
+ns_pkg = types.ModuleType("synthetic_ns")
+ns_pkg.__path__ = ["/some/path/a", "/some/path/b"]   # no __file__
+ns_pkg.__package__ = "synthetic_ns"
+ns_pkg.__spec__ = None
+sys.modules["synthetic_ns"] = ns_pkg
+print(ns_pkg)   # &lt;module 'synthetic_ns' (namespace)&gt;
+</code></pre><span class="code-label">namespace_packages.py</span></div>
+
+    <p>
+      The key difference between a regular package and a namespace package:
+    </p>
+    <ul>
+      <li>
+        <strong>Regular package</strong> — has <code>__init__.py</code>; a single
+        directory is its <code>__path__</code>; loading stops as soon as one
+        matching directory with <code>__init__.py</code> is found.
+      </li>
+      <li>
+        <strong>Namespace package</strong> — no <code>__init__.py</code>;
+        <code>__path__</code> is a <code>_NamespacePath</code> that can span
+        multiple directories; Python scans <em>all</em> of <code>sys.path</code>
+        before deciding.
+      </li>
+    </ul>
+
+    <div class="callout callout-tip">
+      <strong>Real-world use:</strong>
+      Namespace packages are the standard way to split a large library across
+      multiple distribution packages that all install into the same logical
+      namespace. For example, <code>google-cloud-storage</code> and
+      <code>google-cloud-bigquery</code> both install into the
+      <code>google.cloud</code> namespace package without conflicting.
+    </div>
+
+    <!-- ═══════════════════════════════════════════════════════════════ -->
+    <h2 id="import-transformations">7 — Import-Time Code Transformation</h2>
+
+    <p>
+      Because <code>exec_module</code> receives control before any code runs,
+      you can intercept the source text, parse it into an AST, rewrite the AST,
+      and compile the modified tree. This enables source transpilation, automatic
+      instrumentation, and custom language extensions — all triggered by a plain
+      <code>import</code> statement.
+    </p>
+
+    <div style="position:relative"><pre><code class="language-python">import sys
+import importlib.abc
+import importlib.machinery
+import importlib.util
+import ast
+import textwrap
+
+
+class LoggingTransformer(ast.NodeTransformer):
+    """
+    AST transformer: inject a print statement at the start of every function.
+    Demonstrates import-time code transformation.
+    """
+    def visit_FunctionDef(self, node):
+        self.generic_visit(node)   # recurse into nested functions
+        log_stmt = ast.parse(
+            f'print(f"CALL: {node.name}()")',
+            mode="single",
+        ).body[0]
+        ast.copy_location(log_stmt, node)
+        node.body.insert(0, log_stmt)
+        return node
+
+    visit_AsyncFunctionDef = visit_FunctionDef
+
+
+class TransformingLoader(importlib.abc.SourceLoader):
+    """Applies LoggingTransformer to any module we load."""
+
+    def __init__(self, fullname: str, path: str):
+        self.fullname = fullname
+        self.path     = path
+
+    def get_data(self, path: bytes | str) -> bytes:
+        with open(path, "rb") as f:
+            return f.read()
+
+    def get_filename(self, fullname: str) -> str:
+        return self.path
+
+    def source_to_code(self, data, path, *, _optimize=-1):
+        source = data.decode("utf-8") if isinstance(data, bytes) else data
+        tree   = ast.parse(source, path)
+        tree   = LoggingTransformer().visit(tree)
+        ast.fix_missing_locations(tree)
+        return compile(tree, path, "exec", optimize=_optimize)
+
+
+class TransformingFinder(importlib.abc.MetaPathFinder):
+    """Intercepts imports of modules whose names end with '_debug'."""
+
+    def find_spec(self, fullname, path, target=None):
+        if not fullname.endswith("_debug"):
+            return None
+        # Strip the _debug suffix to find the real file
+        real_name = fullname[:-6]   # e.g. "utils_debug" → "utils"
+        real_spec = importlib.util.find_spec(real_name)
+        if real_spec is None or real_spec.origin is None:
+            return None
+        loader = TransformingLoader(fullname, real_spec.origin)
+        return importlib.machinery.ModuleSpec(fullname, loader, origin=real_spec.origin)
+
+
+# Install the finder
+sys.meta_path.insert(0, TransformingFinder())
+
+# Now: import utils_debug loads utils.py with logging injected
+# import utils_debug   # every function will print its name when called
+</code></pre><span class="code-label">transforming_loader.py</span></div>
+
+    <p>
+      <code>importlib.abc.SourceLoader</code> is a convenient base class: it
+      handles <code>.pyc</code> cache reading/writing automatically, and exposes
+      <code>source_to_code</code> as the single override point for changing how
+      source is compiled. The bootstrap calls
+      <code>get_data(get_filename(fullname))</code> to fetch bytes, then
+      <code>source_to_code</code> to compile them.
+    </p>
+
+    <div class="callout callout-warn">
+      <strong>Production caveats for AST transforms:</strong>
+      Import-time AST transformations come with serious trade-offs:
+      they can break source-line numbers in tracebacks unless you call
+      <code>ast.fix_missing_locations</code>; they do not automatically
+      invalidate <code>.pyc</code> caches (you need a custom cache key or
+      must disable bytecode caching); and they make debugging significantly
+      harder. Documented production uses include coverage instrumentation
+      (coverage.py), contract checking (PyContracts), and dialect extensions
+      (macropy). Always document transformations prominently.
+    </div>
+
+    <!-- ── 8. Relative Imports & Package `__init__` ── -->
+    <h2 id="relative-imports">Relative Imports &amp; Package <code>__init__</code></h2>
+    <p>
+      Relative imports use dot notation to navigate the package hierarchy.
+      Understanding exactly how Python resolves them demystifies many import errors.
+    </p>
+    <div style="position:relative">
+      <pre><code class="language-python"># Package structure:
+# myapp/
+#   __init__.py
+#   utils.py
+#   api/
+#     __init__.py
+#     routes.py
+#     auth.py
+
+# Inside myapp/api/routes.py:
+from .auth import verify_token        # sibling: myapp.api.auth
+from ..utils import format_response   # parent: myapp.utils
+from . import auth                    # import sibling module object
+
+# NEVER use relative imports in scripts run directly (not as packages)
+# python myapp/api/routes.py   → ImportError: attempted relative import with no known parent package
+# python -m myapp.api.routes   → works, because -m sets __package__ correctly
+
+# __package__ and __name__ control relative import resolution
+import myapp.api.routes as r
+print(r.__name__)     # "myapp.api.routes"
+print(r.__package__)  # "myapp.api"  ← used to resolve relative dots</code></pre>
+      <span class="code-label">relative_imports.py</span>
+    </div>
+
+    <h3>What <code>__init__.py</code> Controls</h3>
+    <div style="position:relative">
+      <pre><code class="language-python"># myapp/__init__.py — controls what `import myapp` exposes
+
+# 1. Eager re-export: make sub-module symbols available at package level
+from .utils import format_response, parse_config   # now: from myapp import format_response
+
+# 2. Lazy sub-package loading: only import when needed
+def get_api():
+    from .api import routes   # imported on first call, not at package load time
+    return routes
+
+# 3. __all__: controls `from myapp import *`
+__all__ = ["format_response", "parse_config"]
+
+# 4. Version
+__version__ = "2.1.0"
+
+# 5. Prevent direct sub-module access before __init__ runs
+# (sub-modules are NOT automatically accessible as attributes of the package
+#  unless they are imported in __init__.py or accessed with dot notation first)
+
+import myapp
+# myapp.utils is None / AttributeError  ← unless explicitly imported in __init__.py
+import myapp.utils
+# NOW myapp.utils is accessible — importing a sub-module always sets it as an attribute</code></pre>
+      <span class="code-label">package_init.py</span>
+    </div>
+    <div class="callout callout-warn">
+      A common misconception: <code>import myapp</code> does NOT automatically make
+      <code>myapp.utils</code> accessible. You must either <code>import myapp.utils</code>
+      explicitly, or import it inside <code>myapp/__init__.py</code>. Many packages
+      import their public API in <code>__init__.py</code> so users can write
+      <code>from myapp import MyClass</code> instead of
+      <code>from myapp.internals.impl import MyClass</code>.
+    </div>
+
+    <!-- ── 9. Circular Imports: Causes, Detection & Fixes ── -->
+    <h2 id="circular-imports">Circular Imports: Causes, Detection &amp; Fixes</h2>
+    <p>
+      Circular imports are one of the most confusing Python runtime errors.
+      Understanding how <code>sys.modules</code> handles partial modules
+      explains both why they sometimes work and why they sometimes fail.
+    </p>
+    <div style="position:relative">
+      <pre><code class="language-python"># ── Why circular imports fail ──
+# a.py: from b import B
+# b.py: from a import A   ← A not yet defined when b is executing
+
+# The sequence:
+# 1. import a
+# 2. a.py starts executing: "from b import B"
+# 3. b.py starts executing: "from a import A"
+# 4. sys.modules["a"] exists (partial!) but A is not yet defined in it
+# 5. ImportError: cannot import name 'A' from partially initialized module 'a'
+
+# ── Fix 1: Import at function level (deferred import) ──
+# a.py
+class A:
+    def get_b(self):
+        from b import B    # imported when the method is called, not at module load
+        return B()
+
+# ── Fix 2: Import the module, not the name ──
+# a.py
+import b   # just the module — works because sys.modules["b"] is added immediately
+class A:
+    def get_b(self): return b.B()   # b.B is resolved at call time
+
+# ── Fix 3: Restructure — extract shared code to a third module ──
+# common.py: shared types / interfaces
+# a.py: import from common
+# b.py: import from common
+# → no cycle
+
+# ── Detecting circular imports ──
+import sys
+
+def find_import_chain(target: str) -> list:
+    """Return the import chain leading to target (very simplified)."""
+    return [name for name in sys.modules if target in name]
+
+# importlib.util.find_spec raises ImportError on circular deps
+# Use modulefinder for static analysis:
+from modulefinder import ModuleFinder
+finder = ModuleFinder()
+finder.run_script("main.py")   # analyses all imports
+for name, mod in finder.modules.items():
+    if mod.__file__:
+        print(f"  {name}: {mod.__file__}")</code></pre>
+      <span class="code-label">circular.py</span>
+    </div>
+
+    <!-- ── 10. `importlib.util` Recipes ── -->
+    <h2 id="importlib-util">Useful <code>importlib.util</code> Recipes</h2>
+    <div style="position:relative">
+      <pre><code class="language-python">import importlib.util
+import sys
+
+# ── 1. Import a module from an arbitrary file path ──
+def import_from_path(module_name: str, file_path: str):
+    spec   = importlib.util.spec_from_file_location(module_name, file_path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module    # register before exec so circular imports work
+    spec.loader.exec_module(module)
+    return module
+
+plugin = import_from_path("my_plugin", "/path/to/plugin.py")
+
+# ── 2. Check if a module is importable without importing it ──
+def is_importable(name: str) -> bool:
+    return importlib.util.find_spec(name) is not None
+
+print(is_importable("json"))      # True
+print(is_importable("nonexist"))  # False
+
+# ── 3. Get the file path of an installed module ──
+spec = importlib.util.find_spec("numpy")
+if spec:
+    print(spec.origin)   # /path/to/numpy/__init__.py
+
+# ── 4. Conditional import with a fallback ──
+try:
+    import ujson as json_lib
+except ImportError:
+    import json as json_lib
+
+# Or using importlib:
+def import_first_available(*names: str):
+    for name in names:
+        if importlib.util.find_spec(name):
+            return importlib.import_module(name)
+    raise ImportError(f"None of {names} could be imported")
+
+json_lib = import_first_available("ujson", "orjson", "json")
+
+# ── 5. Reload with dependency tracking ──
+import importlib, sys
+
+def deep_reload(module_name: str, prefix: str) -> None:
+    """Reload a module and all sub-modules sharing the given prefix."""
+    to_reload = [
+        name for name in list(sys.modules)
+        if name == module_name or name.startswith(prefix + ".")
+    ]
+    for name in sorted(to_reload, reverse=True):  # children before parents
+        mod = sys.modules.pop(name, None)
+        if mod:
+            importlib.import_module(name)   # re-import into fresh sys.modules entry</code></pre>
+      <span class="code-label">importlib_recipes.py</span>
+    </div>
+
+    <!-- ── Best Practices ── -->
+    <h2 id="best-practices">Best Practices</h2>
+    <ul>
+      <li><strong>Never mutate <code>sys.modules</code> in production application code</strong> — it is a global mutable cache shared across all threads. Reserve manipulation for test infrastructure, hot-reload systems, and import hooks.</li>
+      <li><strong>Install custom finders at the end of <code>sys.meta_path</code></strong> unless you need to override built-in behaviour — inserting at position 0 means your finder is tried before the standard finders, which can slow down every import.</li>
+      <li><strong>Fix circular imports at the architecture level</strong> — deferred imports (import inside a function) are a valid workaround, but they signal a design problem. The real fix is extracting shared code into a third module or restructuring the dependency graph.</li>
+      <li><strong>Use <code>importlib.util.find_spec()</code> to check availability</strong> without side effects — it does not execute the module and does not add it to <code>sys.modules</code>.</li>
+      <li><strong>Always register the module in <code>sys.modules</code> before calling <code>exec_module()</code></strong> when writing custom loaders — this prevents infinite recursion when the loaded module imports itself or a sibling.</li>
+      <li><strong>Prefer namespace packages over <code>pkgutil</code>-style packages</strong> for split distributions — PEP 420 namespace packages require no <code>__init__.py</code> and work transparently with pip install.</li>
+      <li><strong>Use <code>importlib.reload()</code> cautiously</strong> — it re-executes the module but does NOT update existing references to old class/function objects. Use it only in development REPLs and hot-reload frameworks that know how to update all references.</li>
+      <li><strong>Clear <code>sys.path_importer_cache</code> after adding new <code>sys.path</code> entries</strong> — <code>PathFinder</code> caches decisions per path entry, so new entries are not automatically scanned until the cache is cleared.</li>
+    </ul>
+
+    <!-- ── Exercises ── -->
+    <h2 id="exercises">Exercises</h2>
+    <div class="exercise-section">
+
+      <div class="exercise">
+        <h3>Exercise 1 — Database-Backed Module Finder</h3>
+        <p>
+          Build a <code>MetaPathFinder</code> that loads Python source code stored
+          in a SQLite database:
+        </p>
+        <ul>
+          <li>Create a SQLite table <code>modules(name TEXT PRIMARY KEY, source TEXT)</code> and insert two modules: <code>db.greet</code> and <code>db.math_ops</code>.</li>
+          <li>Implement <code>DBFinder</code> and <code>DBLoader</code> — the loader queries the database for the source and compiles/executes it.</li>
+          <li>Register the finder and verify that <code>import db.greet</code> works.</li>
+          <li>Add a caching layer: after first load, store the compiled bytecode in a separate <code>module_cache(name, bytecode)</code> table and skip re-compilation on subsequent imports.</li>
+        </ul>
+        <details>
+          <summary>💡 Hint</summary>
+          <pre><code class="language-python">import sqlite3, sys, types, importlib.abc, importlib.machinery
+
+DB_PATH = "modules.db"
+
+def init_db():
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("CREATE TABLE IF NOT EXISTS modules(name TEXT PRIMARY KEY, source TEXT)")
+    conn.execute("INSERT OR REPLACE INTO modules VALUES ('db.greet', 'def hello(n): return f\"Hi {n}\"')")
+    conn.execute("INSERT OR REPLACE INTO modules VALUES ('db.math_ops', 'add = lambda a,b: a+b')")
+    conn.commit(); conn.close()
+
+class DBLoader(importlib.abc.Loader):
+    def __init__(self, name, source):
+        self.name, self.source = name, source
+    def create_module(self, spec): return None
+    def exec_module(self, module):
+        exec(compile(self.source, f"<db:{self.name}>", "exec"), module.__dict__)
+
+class DBFinder(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path, target=None):
+        conn = sqlite3.connect(DB_PATH)
+        row = conn.execute("SELECT source FROM modules WHERE name=?", (fullname,)).fetchone()
+        conn.close()
+        if row:
+            return importlib.machinery.ModuleSpec(fullname, DBLoader(fullname, row[0]))
+
+init_db()
+sys.meta_path.append(DBFinder())
+import db.greet
+print(db.greet.hello("World"))   # Hi World</code></pre>
+        </details>
+      </div>
+
+      <div class="exercise">
+        <h3>Exercise 2 — Import Hook for Type-Annotated Config Files</h3>
+        <p>
+          Build an import hook that allows importing <code>.cfg</code> (INI-style)
+          files as Python modules, automatically converting sections into dataclasses:
+        </p>
+        <ul>
+          <li>A <code>.cfg</code> file like <code>app.cfg</code> with sections <code>[database]</code> and <code>[server]</code> should be importable as <code>import app_cfg</code>.</li>
+          <li>Each section becomes a <code>SimpleNamespace</code> attribute on the module.</li>
+          <li>The finder recognises modules ending in <code>_cfg</code> and maps them to a <code>.cfg</code> file on <code>sys.path</code>.</li>
+          <li>Write a test: create a real <code>test_app.cfg</code> file, import it as <code>test_app_cfg</code>, and access <code>test_app_cfg.database.host</code>.</li>
+        </ul>
+        <details>
+          <summary>💡 Hint</summary>
+          <pre><code class="language-python">import sys, configparser, importlib.abc, importlib.machinery
+from types import SimpleNamespace, ModuleType
+
+class CfgLoader(importlib.abc.Loader):
+    def __init__(self, path): self.path = path
+    def create_module(self, spec): return None
+    def exec_module(self, module):
+        cfg = configparser.ConfigParser()
+        cfg.read(self.path)
+        for section in cfg.sections():
+            setattr(module, section, SimpleNamespace(**dict(cfg[section])))
+
+class CfgFinder(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path, target=None):
+        if not fullname.endswith("_cfg"): return None
+        filename = fullname[:-4] + ".cfg"   # strip _cfg, add .cfg
+        for directory in sys.path:
+            import os
+            candidate = os.path.join(directory, filename)
+            if os.path.exists(candidate):
+                return importlib.machinery.ModuleSpec(fullname, CfgLoader(candidate))
+
+sys.meta_path.append(CfgFinder())
+# With test_app.cfg containing [database] host=localhost
+# import test_app_cfg; print(test_app_cfg.database.host)   # localhost</code></pre>
+        </details>
+      </div>
+
+      <div class="exercise">
+        <h3>Exercise 3 — Import Auditor</h3>
+        <p>
+          Build an import auditor that records every module import with timing
+          and dependency information during an application's startup:
+        </p>
+        <ul>
+          <li>Implement an <code>AuditFinder</code> that intercepts every <code>find_spec</code> call, records <code>(timestamp, module_name, importer_module)</code>, and then delegates to the real finders.</li>
+          <li>After startup, print a report: top 10 slowest modules to import (by time from first <code>find_spec</code> to completion), total module count, and the full import chain for a specified module.</li>
+          <li>Install and uninstall cleanly using a context manager.</li>
+          <li>Test by wrapping <code>import flask</code> (or any available package) inside the context manager.</li>
+        </ul>
+        <details>
+          <summary>💡 Hint</summary>
+          <pre><code class="language-python">import sys, time, importlib.abc
+from contextlib import contextmanager
+from collections import defaultdict
+
+class ImportAuditor(importlib.abc.MetaPathFinder):
+    def __init__(self):
+        self.log: list[tuple] = []        # (t, name, caller)
+        self.timings: dict[str, float] = {}
+        self._start: dict[str, float] = {}
+
+    def find_spec(self, fullname, path, target=None):
+        t = time.perf_counter()
+        caller = sys._getframe(1).f_globals.get("__name__", "<unknown>")
+        self.log.append((t, fullname, caller))
+        self._start.setdefault(fullname, t)
+        # Delegate to real finders
+        for finder in sys.meta_path:
+            if finder is self: continue
+            spec = finder.find_spec(fullname, path, target)
+            if spec:
+                self.timings[fullname] = time.perf_counter() - self._start[fullname]
+                return spec
+        return None
+
+    def report(self, top_n=10):
+        print(f"\n=== Import Audit: {len(self.log)} imports ===")
+        slowest = sorted(self.timings.items(), key=lambda x: -x[1])[:top_n]
+        for name, t in slowest:
+            print(f"  {t*1000:6.1f}ms  {name}")
+
+@contextmanager
+def audit_imports():
+    auditor = ImportAuditor()
+    sys.meta_path.insert(0, auditor)
+    try:
+        yield auditor
+    finally:
+        sys.meta_path.remove(auditor)
+
+with audit_imports() as a:
+    import json, pathlib, dataclasses
+a.report()</code></pre>
+        </details>
+      </div>
+
+    </div><!-- /exercise-section -->
+
+    <div id="quiz-section"></div>
+
+    <div id="lesson-nav-footer"></div>
+  </div><!-- /content -->
+</div><!-- /main -->
+
+<script src="../assets/nav-data.js"></script>
+<script src="../assets/nav.js"></script>
+<script src="../assets/quiz.js"></script>
+<script src="../assets/highlight.js"></script>
+
+<script>
+buildLessonFooter();
+
+QuizWidget.render("quiz-section", [
+  {
+    question: "Why does Python add a module to `sys.modules` BEFORE fully executing its source code during import?",
+    options: [
+      "For performance — adding it early allows subsequent imports to use the cached entry before the source is fully parsed",
+      "To handle circular imports: if module A imports module B which imports module A, the second import of A finds the partial module in sys.modules and uses it rather than re-entering A's loading code and causing infinite recursion",
+      "To reserve the module name so no other thread can import the same module simultaneously",
+      "Because exec_module requires the module to already be registered or it raises ImportError"
+    ],
+    correct: 1,
+    explanation: "Python inserts the module into sys.modules as soon as the module object is created, before exec_module() runs. This breaks the circular import cycle: when A imports B, and B tries to import A, the second import statement finds sys.modules['A'] (a partial module object) and returns it immediately. A's code that B references may not be defined yet, which is why the order of definitions matters in circular imports. This is also why deferred imports (import inside a function, called after all modules finish loading) reliably fix circular import errors."
+  },
+  {
+    question: "What is the difference between `sys.meta_path` finders and `sys.path_hooks`?",
+    options: [
+      "sys.meta_path finders handle package imports; sys.path_hooks handle module imports",
+      "sys.meta_path finders are tried for every import regardless of sys.path; sys.path_hooks are callables that are tried for each entry in sys.path to create a PathEntryFinder for that specific directory or archive",
+      "sys.meta_path finders are written in C; sys.path_hooks are pure Python",
+      "sys.path_hooks override sys.meta_path — if a path hook claims a module, meta_path finders are skipped"
+    ],
+    correct: 1,
+    explanation: "sys.meta_path is a list of high-level finders tried for every import — BuiltinImporter, FrozenImporter, and PathFinder are the defaults. PathFinder is a meta_path finder that itself uses sys.path_hooks: for each entry in sys.path, it tries each callable in sys.path_hooks until one accepts the path entry and returns a PathEntryFinder. That PathEntryFinder then searches the specific path entry (a directory, zip file, etc.) for the requested module. sys.path_importer_cache caches the PathEntryFinder per path entry to avoid re-invoking hooks on every import."
+  },
+  {
+    question: "What is a namespace package and how does it differ from a regular package?",
+    options: [
+      "A namespace package is a package that exports its symbols into the global namespace; a regular package keeps them private",
+      "A namespace package has no __init__.py and its __path__ can span multiple directories — Python merges all directories named the same across sys.path into a single logical package; a regular package has __init__.py in a single directory",
+      "A namespace package is a C-level package without Python source; a regular package has Python source files",
+      "Namespace packages are only used for built-in modules; regular packages are for third-party code"
+    ],
+    correct: 1,
+    explanation: "A regular package has __init__.py in a single directory; its __path__ has one entry. A namespace package (PEP 420) has NO __init__.py, and Python allows multiple directories across sys.path to contribute to the same package namespace. For example, google-cloud-storage and google-cloud-bigquery both install files into site-packages/google/cloud/, which is a namespace package — neither has an __init__.py so both can coexist. Python merges their paths into a single google.cloud.__path__ that spans both directories."
+  },
+  {
+    question: "When writing a custom Loader, why must you call `sys.modules[fullname] = module` before calling `spec.loader.exec_module(module)`?",
+    options: [
+      "exec_module raises AttributeError if the module is not in sys.modules first",
+      "If the module's source imports itself or a sibling that imports it back, the import system must find a (partial) module in sys.modules to break the cycle — without pre-registration, the circular import causes infinite recursion or ImportError",
+      "Python's GC will collect the module object between create_module and exec_module unless it is referenced by sys.modules",
+      "The module's __name__ attribute is not set until it is added to sys.modules"
+    ],
+    correct: 1,
+    explanation: "This mirrors what the standard import system does: register the module in sys.modules before executing its code. When exec_module runs the module's source, any import statements in that source (including self-imports or circular dependencies) check sys.modules first. Finding the partially-initialised module there breaks the potential cycle. If you omit this step, a circular import will cause your loader to be called again for the same module, leading to infinite recursion or a partially wrong module state."
+  },
+  {
+    question: "Why do relative imports fail when you run a module directly as a script (`python myapp/api/routes.py`)?",
+    options: [
+      "Python disables relative imports for security reasons when a script is run directly",
+      "When run as a script, __name__ is '__main__' and __package__ is None or empty — relative imports use __package__ to resolve the dot-prefix, so with no package context Python cannot determine which directory '.' refers to",
+      "The Python interpreter strips relative import syntax from scripts before executing them",
+      "Relative imports require the module to be listed in sys.modules before it runs, which does not happen for directly-executed scripts"
+    ],
+    correct: 1,
+    explanation: "Relative imports like 'from .auth import verify_token' resolve using __package__. When a file is executed as a script (python myapp/api/routes.py), Python sets __name__ = '__main__' and __package__ = None. With no package context, Python cannot resolve what '.' means and raises: ImportError: attempted relative import with no known parent package. The fix is to run with python -m myapp.api.routes — the -m flag sets __package__ = 'myapp.api' correctly, making relative imports work. Alternatively, restructure so the script only uses absolute imports."
+  }
+]);
+</script>
+</body>
+</html>

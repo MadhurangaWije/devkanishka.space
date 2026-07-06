@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lesson 11 — Azure OIDC: Zero-Secret Authentication</title>
+  <link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+
+  <div class="lesson-meta">
+    <span class="number">LESSON 11</span> &middot; Deep Dive + Hands-On &middot; ~25 minutes
+  </div>
+
+  <h1>Azure OIDC: Zero-Secret Authentication</h1>
+  <p>Your pipeline needs to deploy to Azure. The naive way: store Azure credentials as a GitHub secret. The correct way: <strong>OIDC federated identity</strong> — no credentials stored anywhere. This lesson teaches you why and how.</p>
+
+  <div class="progress">
+    <span>Lesson 11 of 33</span>
+    <div class="progress-bar"><div class="progress-fill" style="width: 33%"></div></div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>The Problem with Stored Credentials</h2>
+
+  <div class="diagram">
+    <svg viewBox="0 0 700 180" xmlns="http://www.w3.org/2000/svg">
+      <!-- Old way -->
+      <rect x="20" y="20" width="310" height="140" rx="6" fill="#ffebee" stroke="#c62828"/>
+      <text x="175" y="42" text-anchor="middle" font-size="11" font-weight="bold" fill="#c62828">❌ Old Way: Client Secret in GitHub</text>
+      
+      <rect x="35" y="55" width="280" height="22" rx="3" fill="white" stroke="#ef9a9a"/>
+      <text x="175" y="70" text-anchor="middle" font-size="9">GitHub Secret: AZURE_CLIENT_SECRET = "abc...xyz"</text>
+      
+      <text x="175" y="100" text-anchor="middle" font-size="9" fill="#c62828">Problems:</text>
+      <text x="175" y="116" text-anchor="middle" font-size="8" fill="#555">• Secret can leak (logs, forks, compromised action)</text>
+      <text x="175" y="130" text-anchor="middle" font-size="8" fill="#555">• Expires → pipeline breaks → manual rotation</text>
+      <text x="175" y="144" text-anchor="middle" font-size="8" fill="#555">• Anyone with repo access has Azure access</text>
+      
+      <!-- New way -->
+      <rect x="360" y="20" width="310" height="140" rx="6" fill="#e8f5e9" stroke="#388e3c"/>
+      <text x="515" y="42" text-anchor="middle" font-size="11" font-weight="bold" fill="#388e3c">✅ OIDC: No Secret Stored</text>
+      
+      <rect x="375" y="55" width="280" height="22" rx="3" fill="white" stroke="#a5d6a7"/>
+      <text x="515" y="70" text-anchor="middle" font-size="9">GitHub proves identity → Azure grants short-lived token</text>
+      
+      <text x="515" y="100" text-anchor="middle" font-size="9" fill="#388e3c">Benefits:</text>
+      <text x="515" y="116" text-anchor="middle" font-size="8" fill="#555">• No secret to leak (nothing stored)</text>
+      <text x="515" y="130" text-anchor="middle" font-size="8" fill="#555">• Tokens are short-lived (minutes, not years)</text>
+      <text x="515" y="144" text-anchor="middle" font-size="8" fill="#555">• Scoped per repo/branch/environment</text>
+    </svg>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>How OIDC Works (The Flow)</h2>
+
+  <div class="diagram">
+    <svg viewBox="0 0 720 300" xmlns="http://www.w3.org/2000/svg">
+      <!-- Actors -->
+      <rect x="50" y="20" width="120" height="35" rx="4" fill="#e3f2fd" stroke="#1976d2" stroke-width="2"/>
+      <text x="110" y="42" text-anchor="middle" font-size="10" font-weight="bold">GitHub Actions</text>
+      
+      <rect x="300" y="20" width="120" height="35" rx="4" fill="#fff3e0" stroke="#f57c00" stroke-width="2"/>
+      <text x="360" y="42" text-anchor="middle" font-size="10" font-weight="bold">Azure AD</text>
+      
+      <rect x="550" y="20" width="120" height="35" rx="4" fill="#e8f5e9" stroke="#388e3c" stroke-width="2"/>
+      <text x="610" y="42" text-anchor="middle" font-size="10" font-weight="bold">Azure Resource</text>
+      
+      <!-- Lifelines -->
+      <line x1="110" y1="55" x2="110" y2="280" stroke="#1976d2" stroke-dasharray="4,4"/>
+      <line x1="360" y1="55" x2="360" y2="280" stroke="#f57c00" stroke-dasharray="4,4"/>
+      <line x1="610" y1="55" x2="610" y2="280" stroke="#388e3c" stroke-dasharray="4,4"/>
+      
+      <!-- Step 1 -->
+      <rect x="70" y="75" width="80" height="25" rx="3" fill="#e3f2fd"/>
+      <text x="110" y="92" text-anchor="middle" font-size="8">Generate JWT</text>
+      <text x="20" y="88" font-size="8" fill="#1976d2" font-weight="bold">①</text>
+      
+      <!-- Step 2 -->
+      <line x1="110" y1="110" x2="360" y2="110" stroke="#333" stroke-width="1.5" marker-end="url(#oidc-a)"/>
+      <text x="235" y="105" text-anchor="middle" font-size="8">"I am repo:user/cicd-mastery:ref:refs/heads/main"</text>
+      <text x="20" y="113" font-size="8" fill="#1976d2" font-weight="bold">②</text>
+      
+      <!-- Step 3 -->
+      <rect x="300" y="125" width="120" height="40" rx="3" fill="#fff3e0"/>
+      <text x="360" y="142" text-anchor="middle" font-size="8">Verify JWT signature</text>
+      <text x="360" y="155" text-anchor="middle" font-size="8">Check federated cred</text>
+      <text x="20" y="143" font-size="8" fill="#1976d2" font-weight="bold">③</text>
+      
+      <!-- Step 4 -->
+      <line x1="360" y1="175" x2="110" y2="175" stroke="#388e3c" stroke-width="1.5" stroke-dasharray="3,3" marker-end="url(#oidc-a)"/>
+      <text x="235" y="170" text-anchor="middle" font-size="8" fill="#388e3c">Access token (short-lived, ~1 hour)</text>
+      <text x="20" y="178" font-size="8" fill="#1976d2" font-weight="bold">④</text>
+      
+      <!-- Step 5 -->
+      <line x1="110" y1="205" x2="610" y2="205" stroke="#333" stroke-width="1.5" marker-end="url(#oidc-a)"/>
+      <text x="360" y="200" text-anchor="middle" font-size="8">Deploy (using access token)</text>
+      <text x="20" y="208" font-size="8" fill="#1976d2" font-weight="bold">⑤</text>
+      
+      <!-- Step 6 -->
+      <line x1="610" y1="225" x2="110" y2="225" stroke="#388e3c" stroke-width="1.5" stroke-dasharray="3,3" marker-end="url(#oidc-a)"/>
+      <text x="360" y="240" text-anchor="middle" font-size="8" fill="#388e3c">✅ Deployed!</text>
+      
+      <!-- Key point -->
+      <rect x="100" y="255" width="500" height="30" rx="4" fill="#e8f5e9" stroke="#388e3c"/>
+      <text x="350" y="274" text-anchor="middle" font-size="9" font-weight="bold" fill="#2e7d32">🔑 No secret was stored or transmitted. GitHub proved its identity; Azure trusted it.</text>
+      
+      <defs>
+        <marker id="oidc-a" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto">
+          <polygon points="0 0, 7 2.5, 0 5" fill="#333"/>
+        </marker>
+      </defs>
+    </svg>
+    <figcaption>OIDC: GitHub says "I am this workflow." Azure verifies the claim and issues a short-lived token. Zero stored secrets.</figcaption>
+  </div>
+
+  <div class="key-insight">
+    <strong>The federated credential</strong> is the trust relationship. It says: "Azure, trust JWTs from GitHub Actions that claim to be repo <code>user/cicd-mastery</code> on branch <code>main</code>." This is scoped — a different repo or branch can't impersonate your pipeline.
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>🏋️ Hands-On: Set Up Azure OIDC</h2>
+
+  <div class="exercise">
+    <h3>Step 1: Create an Azure AD App Registration</h3>
+<pre><code># Login to Azure
+az login
+
+# Create app registration
+az ad app create --display-name "github-actions-cicd-mastery"
+
+# Get the App (Client) ID
+APP_ID=$(az ad app list --display-name "github-actions-cicd-mastery" \
+  --query "[0].appId" -o tsv)
+
+# Create service principal
+az ad sp create --id $APP_ID
+
+# Get IDs you'll need
+SUBSCRIPTION_ID=$(az account show --query id -o tsv)
+TENANT_ID=$(az account show --query tenantId -o tsv)
+
+echo "Client ID: $APP_ID"
+echo "Tenant ID: $TENANT_ID"
+echo "Subscription ID: $SUBSCRIPTION_ID"
+</code></pre>
+
+    <h3>Step 2: Add Federated Credentials</h3>
+<pre><code># Trust GitHub Actions from your repo's main branch
+az ad app federated-credential create --id $APP_ID --parameters '{
+  "name": "github-main-branch",
+  "issuer": "https://token.actions.githubusercontent.com",
+  "subject": "repo:YOUR_USERNAME/cicd-mastery:ref:refs/heads/main",
+  "audiences": ["api://AzureADTokenExchange"]
+}'
+
+# Trust your "production" environment
+az ad app federated-credential create --id $APP_ID --parameters '{
+  "name": "github-env-production",
+  "issuer": "https://token.actions.githubusercontent.com",
+  "subject": "repo:YOUR_USERNAME/cicd-mastery:environment:production",
+  "audiences": ["api://AzureADTokenExchange"]
+}'
+</code></pre>
+
+    <h3>Step 3: Grant Azure Permissions</h3>
+<pre><code># Contributor on a resource group (scope it tight!)
+az group create --name rg-cicd-mastery --location eastus
+
+RG_ID=$(az group show --name rg-cicd-mastery --query id -o tsv)
+
+az role assignment create \
+  --assignee $APP_ID \
+  --role "Contributor" \
+  --scope $RG_ID
+</code></pre>
+
+    <h3>Step 4: Add to GitHub (NOT secrets — just IDs)</h3>
+    <p>Go to repo → Settings → Secrets and Variables → Actions → Variables:</p>
+    <table>
+      <tr><th>Name</th><th>Value</th><th>Type</th></tr>
+      <tr><td><code>AZURE_CLIENT_ID</code></td><td>Your App ID</td><td>Secret*</td></tr>
+      <tr><td><code>AZURE_TENANT_ID</code></td><td>Your Tenant ID</td><td>Secret*</td></tr>
+      <tr><td><code>AZURE_SUBSCRIPTION_ID</code></td><td>Your Subscription ID</td><td>Secret*</td></tr>
+    </table>
+    <p class="sidenote">*These aren't truly secret (they're in every Azure portal URL), but storing as secrets is conventional and prevents accidental exposure in logs.</p>
+
+    <h3>Step 5: Use in Workflow</h3>
+<pre><code><span style="color:#89b4fa">permissions:</span>
+  <span style="color:#89b4fa">id-token:</span> <span style="color:#a6e3a1">write</span>    <span style="color:#6c7086"># REQUIRED for OIDC!</span>
+  <span style="color:#89b4fa">contents:</span> <span style="color:#a6e3a1">read</span>
+
+<span style="color:#89b4fa">jobs:</span>
+  <span style="color:#89b4fa">deploy:</span>
+    <span style="color:#89b4fa">runs-on:</span> <span style="color:#a6e3a1">ubuntu-latest</span>
+    <span style="color:#89b4fa">steps:</span>
+      - <span style="color:#89b4fa">name:</span> <span style="color:#a6e3a1">Azure Login (OIDC)</span>
+        <span style="color:#89b4fa">uses:</span> <span style="color:#a6e3a1">azure/login@v2</span>
+        <span style="color:#89b4fa">with:</span>
+          <span style="color:#89b4fa">client-id:</span> <span style="color:#a6e3a1">${{ secrets.AZURE_CLIENT_ID }}</span>
+          <span style="color:#89b4fa">tenant-id:</span> <span style="color:#a6e3a1">${{ secrets.AZURE_TENANT_ID }}</span>
+          <span style="color:#89b4fa">subscription-id:</span> <span style="color:#a6e3a1">${{ secrets.AZURE_SUBSCRIPTION_ID }}</span>
+      
+      - <span style="color:#89b4fa">name:</span> <span style="color:#a6e3a1">Verify access</span>
+        <span style="color:#89b4fa">run:</span> <span style="color:#a6e3a1">az account show</span>
+</code></pre>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>Scoping: Why Federated Credentials Are Precise</h2>
+
+  <div class="diagram">
+    <svg viewBox="0 0 700 140" xmlns="http://www.w3.org/2000/svg">
+      <!-- Subject claims -->
+      <text x="350" y="18" text-anchor="middle" font-size="10" font-weight="bold">Federated Credential Subjects (who can authenticate)</text>
+      
+      <rect x="20" y="30" width="200" height="45" rx="4" fill="#e3f2fd" stroke="#1976d2"/>
+      <text x="120" y="48" text-anchor="middle" font-size="8" font-weight="bold" fill="#1976d2">Branch-scoped</text>
+      <text x="120" y="65" text-anchor="middle" font-family="monospace" font-size="7">repo:user/repo:ref:refs/heads/main</text>
+      
+      <rect x="240" y="30" width="200" height="45" rx="4" fill="#e8f5e9" stroke="#388e3c"/>
+      <text x="340" y="48" text-anchor="middle" font-size="8" font-weight="bold" fill="#388e3c">Environment-scoped</text>
+      <text x="340" y="65" text-anchor="middle" font-family="monospace" font-size="7">repo:user/repo:environment:production</text>
+      
+      <rect x="460" y="30" width="220" height="45" rx="4" fill="#fff3e0" stroke="#f57c00"/>
+      <text x="570" y="48" text-anchor="middle" font-size="8" font-weight="bold" fill="#e65100">Tag-scoped</text>
+      <text x="570" y="65" text-anchor="middle" font-family="monospace" font-size="7">repo:user/repo:ref:refs/tags/v*</text>
+      
+      <!-- Explanation -->
+      <rect x="20" y="90" width="660" height="40" rx="4" fill="#f5f5f5" stroke="#bdbdbd"/>
+      <text x="350" y="108" text-anchor="middle" font-size="9" fill="#333">A workflow on branch <tspan font-family="monospace">feature-x</tspan> CANNOT authenticate if the credential is scoped to <tspan font-family="monospace">main</tspan>.</text>
+      <text x="350" y="123" text-anchor="middle" font-size="9" fill="#333">This means: only YOUR pipeline, on YOUR branch, can access YOUR Azure resources.</text>
+    </svg>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>Common Pitfall: Missing <code>permissions</code></h2>
+
+  <div class="warning">
+    If you forget <code>permissions: id-token: write</code>, the OIDC token request will silently fail and <code>azure/login</code> will error with "AADSTS700024" or "Failed to get federated token." This is the #1 debugging issue with OIDC.
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>🧠 Recall Check</h2>
+
+  <div class="recall">
+    <ol>
+      <li>What is stored in GitHub Secrets when using OIDC? (Hint: it's NOT a password)</li>
+      <li>What permission must be set at the workflow level for OIDC to work?</li>
+      <li>What does the "subject" field in a federated credential control?</li>
+      <li>Why is OIDC more secure than a client secret?</li>
+    </ol>
+    <details>
+      <summary>Reveal answers</summary>
+      <ol>
+        <li>Only <strong>IDs</strong> — Client ID, Tenant ID, Subscription ID. These are identifiers (like a username), not passwords. No credential is stored.</li>
+        <li><code>permissions: id-token: write</code> — this allows the workflow to request a JWT from GitHub's OIDC provider.</li>
+        <li><strong>Who can authenticate.</strong> E.g., <code>repo:user/repo:ref:refs/heads/main</code> means only workflows running on the <code>main</code> branch of that specific repo can get a token.</li>
+        <li>No secret exists to leak, expire, or rotate. Tokens are short-lived (~1 hour) and scoped. Even if intercepted, they expire quickly and only work for the specific resource scope granted.</li>
+      </ol>
+    </details>
+  </div>
+
+  <div class="key-insight">
+    You now have credential-free Azure authentication. <strong>Every future deployment lesson will use OIDC.</strong> This is the foundation of secure CI/CD — no long-lived secrets, ever. Next: deploying a real application to Azure App Service.
+  </div>
+
+</body>
+</html>

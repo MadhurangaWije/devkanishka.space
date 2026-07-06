@@ -1,0 +1,422 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lesson 7: ReplicaSets & the Label Selection Contract</title>
+    <style>
+        :root {
+            --bg: #fafafa; --text: #1a1a1a; --accent: #326ce5;
+            --accent-light: #e8f0fe; --border: #e0e0e0; --code-bg: #f5f5f5;
+            --success: #2e7d32; --warn: #f57c00;
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: 'Georgia', serif; line-height: 1.7; color: var(--text); background: var(--bg); max-width: 780px; margin: 0 auto; padding: 2rem 1.5rem; }
+        h1 { font-size: 2rem; margin-bottom: 0.5rem; color: var(--accent); }
+        h2 { font-size: 1.4rem; margin-top: 2.5rem; margin-bottom: 0.8rem; border-bottom: 2px solid var(--accent); padding-bottom: 0.3rem; }
+        h3 { font-size: 1.1rem; margin-top: 1.5rem; margin-bottom: 0.5rem; }
+        p { margin-bottom: 1rem; }
+        .meta { color: #666; font-size: 0.9rem; margin-bottom: 2rem; }
+        .key-insight { background: var(--accent-light); border-left: 4px solid var(--accent); padding: 1rem 1.2rem; margin: 1.5rem 0; border-radius: 0 4px 4px 0; }
+        .key-insight strong { color: var(--accent); }
+        .production-note { background: #fff3e0; border-left: 4px solid var(--warn); padding: 1rem 1.2rem; margin: 1.5rem 0; border-radius: 0 4px 4px 0; }
+        .production-note::before { content: "🏭 Production: "; font-weight: bold; }
+        .exam-tip { background: #e8f5e9; border-left: 4px solid var(--success); padding: 1rem 1.2rem; margin: 1.5rem 0; border-radius: 0 4px 4px 0; }
+        .exam-tip::before { content: "🎯 Exam Tip: "; font-weight: bold; color: var(--success); }
+        code { font-family: 'Menlo', 'Consolas', monospace; font-size: 0.85em; background: var(--code-bg); padding: 0.15em 0.4em; border-radius: 3px; }
+        pre { background: var(--code-bg); padding: 1rem; border-radius: 4px; overflow-x: auto; margin: 1rem 0; font-size: 0.85rem; line-height: 1.5; }
+        ul, ol { margin: 0.5rem 0 1rem 1.5rem; }
+        li { margin-bottom: 0.4rem; }
+        table { width: 100%; border-collapse: collapse; margin: 1rem 0; font-size: 0.9rem; }
+        th, td { border: 1px solid var(--border); padding: 0.6rem 0.8rem; text-align: left; }
+        th { background: var(--accent-light); font-weight: bold; }
+        .diagram { background: white; border: 1px solid var(--border); border-radius: 8px; padding: 1.5rem; margin: 1.5rem 0; text-align: center; }
+        .cert-badge { display: inline-block; background: var(--accent); color: white; font-size: 0.7rem; padding: 0.15rem 0.5rem; border-radius: 10px; margin-left: 0.5rem; }
+        .quiz { background: #f9f9f9; border: 1px solid var(--border); border-radius: 8px; padding: 1.5rem; margin-top: 2rem; }
+        .quiz h2 { border-bottom: none; margin-top: 0; }
+        .quiz-q { margin-bottom: 1.2rem; }
+        .quiz-q p { font-weight: bold; margin-bottom: 0.3rem; }
+        .quiz-answer { display: none; background: #e8f5e9; padding: 0.5rem 0.8rem; border-radius: 4px; margin-top: 0.5rem; }
+        .reveal-btn { background: var(--accent); color: white; border: none; padding: 0.3rem 0.8rem; border-radius: 4px; cursor: pointer; font-size: 0.8rem; }
+        .reveal-btn:hover { opacity: 0.85; }
+    </style>
+</head>
+<body>
+
+<h1>Lesson 7: ReplicaSets & the Label Selection Contract</h1>
+<p class="meta">Chapter 2: Core Workloads · <span class="cert-badge">CKA</span> <span class="cert-badge">CKAD</span> · ~18 min</p>
+
+<p>A bare Pod dies and stays dead. A <strong>ReplicaSet</strong> ensures that a specified number of Pod replicas are running at all times. It's the first layer of self-healing — and understanding how it <em>finds</em> its Pods (label selection) is critical for debugging ownership issues.</p>
+
+<h2>1. What a ReplicaSet Does</h2>
+
+<p>A ReplicaSet has one job: <strong>maintain exactly N Pods matching a label selector</strong>. Its reconciliation loop:</p>
+
+<ol>
+    <li>Count Pods in the namespace matching its selector</li>
+    <li>Compare to desired replica count</li>
+    <li>If too few → create Pods from its template</li>
+    <li>If too many → delete excess Pods</li>
+</ol>
+
+<pre>apiVersion: apps/v1
+kind: ReplicaSet
+metadata:
+  name: web
+spec:
+  replicas: 3                    # ← desired count
+  selector:                      # ← how it finds its Pods
+    matchLabels:
+      app: web
+      version: v1
+  template:                      # ← Pod template (used to create new Pods)
+    metadata:
+      labels:
+        app: web
+        version: v1              # ← MUST match selector
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:1.25</pre>
+
+<h3>The Three Parts</h3>
+
+<table>
+    <tr><th>Part</th><th>Purpose</th><th>Mutable?</th></tr>
+    <tr><td><code>spec.replicas</code></td><td>How many Pods to maintain</td><td>✅ Yes</td></tr>
+    <tr><td><code>spec.selector</code></td><td>Which Pods belong to this RS</td><td>❌ Immutable after creation</td></tr>
+    <tr><td><code>spec.template</code></td><td>Blueprint for new Pods</td><td>✅ Yes (but won't affect existing Pods)</td></tr>
+</table>
+
+<div class="key-insight">
+    <strong>Critical:</strong> Changing the Pod template does NOT update existing Pods. The RS only uses the template when creating <em>new</em> Pods. Existing Pods keep running with their original spec. This is why you don't use ReplicaSets directly — Deployments handle rolling updates by creating new ReplicaSets.
+</div>
+
+<h2>2. The Label Selection Contract</h2>
+
+<p>This is the most important concept: ReplicaSets don't track Pods by internal state or a list of IDs. They find their Pods purely by <strong>label matching</strong>.</p>
+
+<div class="diagram">
+<svg viewBox="0 0 600 200" xmlns="http://www.w3.org/2000/svg" font-family="Menlo, monospace" font-size="10">
+    <!-- RS -->
+    <rect x="20" y="20" width="200" height="70" rx="6" fill="#e8f0fe" stroke="#326ce5" stroke-width="2"/>
+    <text x="120" y="42" text-anchor="middle" font-weight="bold" font-size="11">ReplicaSet: web</text>
+    <text x="120" y="60" text-anchor="middle" font-size="9">selector: app=web</text>
+    <text x="120" y="75" text-anchor="middle" font-size="9">replicas: 3</text>
+    
+    <!-- Pods matching -->
+    <rect x="300" y="10" width="110" height="40" rx="4" fill="#c8e6c9" stroke="#2e7d32" stroke-width="1.5"/>
+    <text x="355" y="28" text-anchor="middle" font-size="9" font-weight="bold">Pod A</text>
+    <text x="355" y="42" text-anchor="middle" font-size="8" fill="#2e7d32">app=web ✓</text>
+    
+    <rect x="300" y="60" width="110" height="40" rx="4" fill="#c8e6c9" stroke="#2e7d32" stroke-width="1.5"/>
+    <text x="355" y="78" text-anchor="middle" font-size="9" font-weight="bold">Pod B</text>
+    <text x="355" y="92" text-anchor="middle" font-size="8" fill="#2e7d32">app=web ✓</text>
+    
+    <rect x="300" y="110" width="110" height="40" rx="4" fill="#c8e6c9" stroke="#2e7d32" stroke-width="1.5"/>
+    <text x="355" y="128" text-anchor="middle" font-size="9" font-weight="bold">Pod C</text>
+    <text x="355" y="142" text-anchor="middle" font-size="8" fill="#2e7d32">app=web ✓</text>
+    
+    <!-- Non-matching Pod -->
+    <rect x="300" y="160" width="110" height="40" rx="4" fill="#ffcdd2" stroke="#c62828" stroke-width="1"/>
+    <text x="355" y="178" text-anchor="middle" font-size="9">Pod D</text>
+    <text x="355" y="192" text-anchor="middle" font-size="8" fill="#c62828">app=api ✗</text>
+    
+    <!-- Arrows -->
+    <line x1="220" y1="55" x2="300" y2="30" stroke="#326ce5" stroke-width="1" stroke-dasharray="4"/>
+    <line x1="220" y1="55" x2="300" y2="80" stroke="#326ce5" stroke-width="1" stroke-dasharray="4"/>
+    <line x1="220" y1="55" x2="300" y2="130" stroke="#326ce5" stroke-width="1" stroke-dasharray="4"/>
+    
+    <!-- Count annotation -->
+    <text x="450" y="90" font-size="10" fill="#2e7d32" font-weight="bold">3 matching → ✓ desired</text>
+</svg>
+</div>
+
+<h3>Rules of the Contract</h3>
+
+<ol>
+    <li><strong>Template labels must include selector labels</strong> — otherwise the RS creates Pods it immediately disowns (API server rejects this)</li>
+    <li><strong>Template labels can be a superset</strong> — extra labels beyond the selector are fine</li>
+    <li><strong>Any Pod matching the selector can be adopted</strong> — even Pods the RS didn't create</li>
+    <li><strong>Removing a label from a Pod releases it</strong> — the RS no longer counts it</li>
+</ol>
+
+<h3>What "Matching" Means</h3>
+
+<pre># ReplicaSet selector:
+selector:
+  matchLabels:
+    app: web
+    version: v1
+
+# This Pod matches (has both labels):
+labels:
+  app: web
+  version: v1
+  team: platform    # extra labels are fine
+
+# This Pod does NOT match (missing version):
+labels:
+  app: web
+  team: platform</pre>
+
+<div class="key-insight">
+    <strong>Selector matching is AND logic:</strong> ALL labels in the selector must be present on the Pod. The Pod can have additional labels — those are ignored for matching. Think of it as "selector is a subset of Pod labels."
+</div>
+
+<h2>3. Ownership & ownerReferences</h2>
+
+<p>When a ReplicaSet creates a Pod, it stamps an <code>ownerReference</code> on the Pod's metadata:</p>
+
+<pre>kubectl get pod web-abc12 -o yaml | grep -A8 ownerReferences
+# ownerReferences:
+# - apiVersion: apps/v1
+#   kind: ReplicaSet
+#   name: web-5d4f6b7c8
+#   uid: a1b2c3d4-...
+#   controller: true        # ← this is the managing controller
+#   blockOwnerDeletion: true</pre>
+
+<h3>What ownerReferences Enable</h3>
+
+<table>
+    <tr><th>Feature</th><th>How It Works</th></tr>
+    <tr><td><strong>Garbage collection</strong></td><td>Delete the RS → its Pods are automatically deleted (cascading)</td></tr>
+    <tr><td><strong>Ownership claim</strong></td><td>Prevents two ReplicaSets from fighting over the same Pod</td></tr>
+    <tr><td><strong>Controller identity</strong></td><td><code>controller: true</code> marks the primary manager — only one controller can be the "owner"</td></tr>
+</table>
+
+<h3>Orphan & Adopt Mechanics</h3>
+
+<div class="diagram">
+<svg viewBox="0 0 600 170" xmlns="http://www.w3.org/2000/svg" font-family="Menlo, monospace" font-size="10">
+    <!-- Scenario 1: Orphan -->
+    <rect x="10" y="10" width="270" height="70" rx="5" fill="#fff3e0" stroke="#f57c00" stroke-width="1.5"/>
+    <text x="145" y="30" text-anchor="middle" font-weight="bold" font-size="10">Orphaning a Pod</text>
+    <text x="145" y="48" text-anchor="middle" font-size="9">Remove label "app=web" from Pod</text>
+    <text x="145" y="63" text-anchor="middle" font-size="9">→ RS no longer matches → counts 2 → creates new Pod</text>
+    
+    <!-- Scenario 2: Adopt -->
+    <rect x="310" y="10" width="270" height="70" rx="5" fill="#e8f5e9" stroke="#2e7d32" stroke-width="1.5"/>
+    <text x="445" y="30" text-anchor="middle" font-weight="bold" font-size="10">Adopting a Pod</text>
+    <text x="445" y="48" text-anchor="middle" font-size="9">Stray Pod has app=web label, no owner</text>
+    <text x="445" y="63" text-anchor="middle" font-size="9">→ RS adopts it → counts 4 → deletes one</text>
+    
+    <!-- Scenario 3: Delete cascade -->
+    <rect x="10" y="100" width="270" height="60" rx="5" fill="#ffcdd2" stroke="#c62828" stroke-width="1.5"/>
+    <text x="145" y="120" text-anchor="middle" font-weight="bold" font-size="10">Cascading Delete (default)</text>
+    <text x="145" y="138" text-anchor="middle" font-size="9">kubectl delete rs web</text>
+    <text x="145" y="152" text-anchor="middle" font-size="9">→ RS deleted → all owned Pods deleted</text>
+    
+    <!-- Scenario 4: Orphan delete -->
+    <rect x="310" y="100" width="270" height="60" rx="5" fill="#e8f0fe" stroke="#326ce5" stroke-width="1.5"/>
+    <text x="445" y="120" text-anchor="middle" font-weight="bold" font-size="10">Orphan Delete</text>
+    <text x="445" y="138" text-anchor="middle" font-size="9">kubectl delete rs web --cascade=orphan</text>
+    <text x="445" y="152" text-anchor="middle" font-size="9">→ RS deleted → Pods keep running (orphaned)</text>
+</svg>
+</div>
+
+<h3>Practical: Isolating a Bad Pod for Debugging</h3>
+
+<pre># Pod "web-abc12" is misbehaving. Want to debug it without 
+# it being deleted by the RS, and without losing a replica:
+
+# 1. Remove the RS selector label → orphans it
+kubectl label pod web-abc12 app-      # removes "app" label
+
+# RS immediately creates a replacement Pod (maintains count).
+# The old Pod keeps running — you can now debug it at leisure.
+# When done:
+kubectl delete pod web-abc12</pre>
+
+<div class="production-note">
+    This "orphan for debugging" technique is invaluable in production. When a Pod is behaving strangely (intermittent errors, memory leak), you can isolate it from the ReplicaSet without causing downtime. The RS self-heals by creating a new healthy Pod, while you have the problematic Pod to inspect with <code>kubectl exec</code> and <code>kubectl logs</code>.
+</div>
+
+<h2>4. Scaling</h2>
+
+<p>Scaling a ReplicaSet just changes the desired count — the controller handles the rest:</p>
+
+<pre># Scale up:
+kubectl scale rs web --replicas=5
+# RS counts 3 Pods → needs 5 → creates 2 more from template
+
+# Scale down:
+kubectl scale rs web --replicas=2
+# RS counts 5 Pods → needs 2 → deletes 3 (newest first by default)
+
+# Scale to zero (stop all Pods, keep RS for later):
+kubectl scale rs web --replicas=0</pre>
+
+<h3>Which Pods Get Deleted on Scale-Down?</h3>
+
+<p>The ReplicaSet controller uses a ranking algorithm:</p>
+
+<ol>
+    <li>Unassigned Pods (Pending) deleted first</li>
+    <li>Pods on nodes with more replicas (spread Pods across nodes)</li>
+    <li>Newer Pods deleted before older ones (by creation timestamp)</li>
+    <li>Pods with more container restarts deleted first</li>
+</ol>
+
+<div class="key-insight">
+    <strong>Scale-down is not random.</strong> The controller prefers to delete Pods that are less healthy, more numerous on a single node, or younger. This preserves stability.
+</div>
+
+<h2>5. ReplicaSet vs Deployment — When to Use Which</h2>
+
+<p><strong>Almost never use a ReplicaSet directly.</strong> In practice, you always use a Deployment, which manages ReplicaSets for you.</p>
+
+<table>
+    <tr><th></th><th>ReplicaSet</th><th>Deployment</th></tr>
+    <tr><td>Rolling updates</td><td>❌ No (manual)</td><td>✅ Automatic</td></tr>
+    <tr><td>Rollback</td><td>❌ No</td><td>✅ Built-in revision history</td></tr>
+    <tr><td>Template change</td><td>No effect on existing Pods</td><td>Creates new RS, scales down old</td></tr>
+    <tr><td>Use case</td><td>Understanding internals, rare custom controllers</td><td>All production workloads</td></tr>
+</table>
+
+<p>The ownership chain:</p>
+
+<pre>Deployment
+  └── ReplicaSet (revision 1)  ← scaled to 0 after rollout
+  └── ReplicaSet (revision 2)  ← current, owns the running Pods
+        └── Pod A
+        └── Pod B
+        └── Pod C</pre>
+
+<div class="diagram">
+<svg viewBox="0 0 550 140" xmlns="http://www.w3.org/2000/svg" font-family="Menlo, monospace" font-size="10">
+    <!-- Deployment -->
+    <rect x="180" y="5" width="190" height="35" rx="5" fill="#f3e5f5" stroke="#7b1fa2" stroke-width="2"/>
+    <text x="275" y="26" text-anchor="middle" font-weight="bold" font-size="11">Deployment: web</text>
+    
+    <!-- RS old -->
+    <rect x="30" y="60" width="160" height="30" rx="4" fill="#ffcdd2" stroke="#c62828" stroke-width="1"/>
+    <text x="110" y="79" text-anchor="middle" font-size="9">RS web-6f4a (rev 1) — 0 replicas</text>
+    
+    <!-- RS new -->
+    <rect x="230" y="60" width="160" height="30" rx="4" fill="#c8e6c9" stroke="#2e7d32" stroke-width="1.5"/>
+    <text x="310" y="79" text-anchor="middle" font-size="9">RS web-8b2c (rev 2) — 3 replicas</text>
+    
+    <!-- Pods -->
+    <rect x="230" y="105" width="45" height="25" rx="3" fill="#e8f5e9" stroke="#2e7d32" stroke-width="1"/>
+    <text x="252" y="121" text-anchor="middle" font-size="8">Pod</text>
+    <rect x="285" y="105" width="45" height="25" rx="3" fill="#e8f5e9" stroke="#2e7d32" stroke-width="1"/>
+    <text x="307" y="121" text-anchor="middle" font-size="8">Pod</text>
+    <rect x="340" y="105" width="45" height="25" rx="3" fill="#e8f5e9" stroke="#2e7d32" stroke-width="1"/>
+    <text x="362" y="121" text-anchor="middle" font-size="8">Pod</text>
+    
+    <!-- Lines -->
+    <line x1="275" y1="40" x2="110" y2="60" stroke="#7b1fa2" stroke-width="1"/>
+    <line x1="275" y1="40" x2="310" y2="60" stroke="#7b1fa2" stroke-width="1"/>
+    <line x1="310" y1="90" x2="252" y2="105" stroke="#2e7d32" stroke-width="1"/>
+    <line x1="310" y1="90" x2="307" y2="105" stroke="#2e7d32" stroke-width="1"/>
+    <line x1="310" y1="90" x2="362" y2="105" stroke="#2e7d32" stroke-width="1"/>
+</svg>
+</div>
+
+<div class="exam-tip">
+    On the CKA/CKAD exam, you'll never create a ReplicaSet directly. But understanding them is essential because Deployments are built on top of them. When you see multiple ReplicaSets for one Deployment (<code>kubectl get rs</code>), you're seeing the rollout history.
+</div>
+
+<h2>6. Inspecting ReplicaSets</h2>
+
+<pre># List ReplicaSets:
+kubectl get rs
+# NAME          DESIRED   CURRENT   READY   AGE
+# web-6f4a8b2   0         0         0       5d    ← old revision
+# web-8b2c3d4   3         3         3       1d    ← current
+
+# See which Pods a RS owns:
+kubectl get pods -l app=web --show-labels
+
+# Describe for events (scaling events, failures):
+kubectl describe rs web-8b2c3d4
+
+# Check ownerReferences on a Pod:
+kubectl get pod web-8b2c3d4-xk2j9 -o jsonpath='{.metadata.ownerReferences[0].name}'
+# web-8b2c3d4</pre>
+
+<h3>Common Issues</h3>
+
+<table>
+    <tr><th>Symptom</th><th>Cause</th><th>Fix</th></tr>
+    <tr><td>RS shows DESIRED=3 but READY=0</td><td>Pods stuck Pending or crashing</td><td>Check Pod events: <code>kubectl describe pod ...</code></td></tr>
+    <tr><td>Two RSs fighting over Pods</td><td>Overlapping selectors</td><td>Ensure selectors are unique (use <code>pod-template-hash</code>)</td></tr>
+    <tr><td>RS creates Pods but they immediately disappear</td><td>Another controller (Deployment) scaling it down</td><td>Check if RS is owned by a Deployment — modify the Deployment instead</td></tr>
+    <tr><td>Orphaned Pods (no owner)</td><td>RS was deleted with <code>--cascade=orphan</code></td><td>Delete Pods manually or create a new RS with matching selector</td></tr>
+</table>
+
+<h3>The pod-template-hash Label</h3>
+
+<p>Deployments add a <code>pod-template-hash</code> label to both the RS and its Pods. This guarantees selector uniqueness across revisions:</p>
+
+<pre>kubectl get rs -o custom-columns=NAME:.metadata.name,HASH:.metadata.labels.pod-template-hash
+# NAME          HASH
+# web-6f4a8b2   6f4a8b2
+# web-8b2c3d4   8b2c3d4
+
+# The RS name IS the deployment name + hash
+# Pods also carry this label → only the correct RS matches them</pre>
+
+<div class="key-insight">
+    <strong><code>pod-template-hash</code> prevents cross-adoption.</strong> Without it, a new RS with the same selector as an old RS would adopt its Pods (since labels match). The hash makes each RS's selector unique, even across Deployment revisions.
+</div>
+
+<h2>Summary</h2>
+
+<table>
+    <tr><th>Concept</th><th>Key Takeaway</th></tr>
+    <tr><td>ReplicaSet</td><td>Maintains N Pods matching a label selector</td></tr>
+    <tr><td>Label contract</td><td>RS finds Pods purely by labels — no internal list</td></tr>
+    <tr><td>Selector immutability</td><td>Cannot change after creation</td></tr>
+    <tr><td>Template changes</td><td>Only affect <em>new</em> Pods (existing Pods unchanged)</td></tr>
+    <tr><td>ownerReferences</td><td>Stamp on Pods enabling garbage collection & ownership claim</td></tr>
+    <tr><td>Orphaning</td><td>Remove selector label → Pod escapes RS → RS creates replacement</td></tr>
+    <tr><td>Adoption</td><td>Matching unowned Pod → RS claims it → may delete excess</td></tr>
+    <tr><td>pod-template-hash</td><td>Prevents cross-adoption between Deployment revisions</td></tr>
+</table>
+
+<!-- Quiz -->
+<div class="quiz">
+    <h2>📝 Quiz: ReplicaSets & Label Selection</h2>
+    
+    <div class="quiz-q">
+        <p>Q1: A ReplicaSet has selector <code>app=web, tier=frontend</code>. A Pod has labels <code>app=web, tier=frontend, version=v2</code>. Does the RS match this Pod?</p>
+        <button class="reveal-btn" onclick="this.nextElementSibling.style.display='block'">Show Answer</button>
+        <div class="quiz-answer"><strong>Yes.</strong> Selector matching requires the Pod to have ALL selector labels. The Pod has both <code>app=web</code> and <code>tier=frontend</code>. The extra <code>version=v2</code> label is irrelevant — the selector is a subset of the Pod's labels.</div>
+    </div>
+    
+    <div class="quiz-q">
+        <p>Q2: You change a ReplicaSet's Pod template to use <code>nginx:1.26</code> instead of <code>nginx:1.25</code>. What happens to the 3 running Pods?</p>
+        <button class="reveal-btn" onclick="this.nextElementSibling.style.display='block'">Show Answer</button>
+        <div class="quiz-answer"><strong>Nothing.</strong> Existing Pods continue running <code>nginx:1.25</code>. The RS only uses the template to create <em>new</em> Pods. Only if a Pod is deleted (or you scale up) will new Pods get <code>nginx:1.26</code>. This is exactly why Deployments exist — they automate the old-RS → new-RS transition.</div>
+    </div>
+    
+    <div class="quiz-q">
+        <p>Q3: A production Pod is misbehaving. How do you isolate it for debugging without causing downtime?</p>
+        <button class="reveal-btn" onclick="this.nextElementSibling.style.display='block'">Show Answer</button>
+        <div class="quiz-answer">Remove one of the RS selector labels from the Pod: <code>kubectl label pod web-abc12 app-</code>. This orphans the Pod (RS no longer matches it). The RS creates a replacement immediately (maintaining desired count). You now have the bad Pod isolated for inspection.</div>
+    </div>
+    
+    <div class="quiz-q">
+        <p>Q4: You delete a ReplicaSet with <code>kubectl delete rs web</code>. What happens to its Pods?</p>
+        <button class="reveal-btn" onclick="this.nextElementSibling.style.display='block'">Show Answer</button>
+        <div class="quiz-answer"><strong>They're deleted too</strong> (cascading delete is the default). The garbage collector sees the Pods' ownerReferences pointing to the deleted RS and removes them. To keep Pods alive, use <code>--cascade=orphan</code>.</div>
+    </div>
+    
+    <div class="quiz-q">
+        <p>Q5: You manually create a Pod with labels matching an existing ReplicaSet's selector. The RS has replicas=3 and currently has 3 Pods. What happens?</p>
+        <button class="reveal-btn" onclick="this.nextElementSibling.style.display='block'">Show Answer</button>
+        <div class="quiz-answer">The RS <strong>adopts</strong> the new Pod (sets ownerReference on it). Now it counts 4 Pods but wants 3, so it <strong>deletes one</strong> — likely the manually-created one (it's newest and has no prior run history). Net result: still 3 Pods.</div>
+    </div>
+    
+    <div class="quiz-q">
+        <p>Q6: Why does a Deployment-managed RS include <code>pod-template-hash</code> in its selector?</p>
+        <button class="reveal-btn" onclick="this.nextElementSibling.style.display='block'">Show Answer</button>
+        <div class="quiz-answer">To <strong>prevent cross-adoption</strong>. During a rolling update, both old and new ReplicaSets exist with similar selectors (e.g., <code>app=web</code>). Without the hash, the new RS might adopt old Pods (or vice versa). The hash makes each RS's full selector unique: <code>app=web, pod-template-hash=8b2c3d4</code>.</div>
+    </div>
+</div>
+
+</body>
+</html>

@@ -1,0 +1,420 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lesson 003 – RBAC: Custom Roles, Scope Inheritance & Policy Trade-offs | AZ-305 Curriculum</title>
+    <link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<div class="lesson-wrap">
+
+    <!-- Header -->
+    <header class="lesson-header fade-in">
+        <span class="lesson-number">Lesson 003 · 🟡 REVIEW</span>
+        <h1>RBAC — Custom Roles, Scope Inheritance &amp; Policy Trade-offs</h1>
+        <p>You know how to assign built-in roles. Now design access at scale: custom roles, deny assignments, PIM, ABAC, and when to reach for Policy instead.</p>
+    </header>
+
+    <!-- Table of Contents -->
+    <nav class="toc fade-in">
+        <h2>In This Lesson</h2>
+        <ol>
+            <li><a href="#scope-inheritance">Scope Inheritance at Scale</a></li>
+            <li><a href="#custom-roles">Custom Role Design Patterns</a></li>
+            <li><a href="#deny-assignments">Deny Assignments</a></li>
+            <li><a href="#rbac-vs-policy">RBAC vs Azure Policy</a></li>
+            <li><a href="#pim">PIM &amp; Just-in-Time Access</a></li>
+            <li><a href="#abac">ABAC for Storage</a></li>
+            <li><a href="#real-world">Real-World: 500-Person Org Design</a></li>
+            <li><a href="#quiz">Knowledge Check</a></li>
+        </ol>
+    </nav>
+
+    <!-- Section 1: Scope Inheritance -->
+    <section id="scope-inheritance" class="fade-in">
+        <h2>Scope Inheritance at Scale</h2>
+        <p>RBAC assignments flow <strong>Management Group → Subscription → Resource Group → Resource</strong>. An assignment at any level grants that permission to everything below — with no way to "revoke" it at a child scope (only deny assignments can block).</p>
+
+        <div class="key-concept">
+            <h3>🔑 Inheritance Trade-offs</h3>
+            <ul>
+                <li><strong>Broad scope (MG level):</strong> Low maintenance, but over-grants if you're not careful. One Reader at root = Reader on every resource in the tenant.</li>
+                <li><strong>Narrow scope (RG/Resource):</strong> Precise least-privilege, but assignment sprawl creates management burden — hard to audit thousands of role assignments.</li>
+                <li><strong>Sweet spot:</strong> Assign at Subscription level for environment-wide roles; use RG for team-specific isolation; reserve resource-level only for break-glass or service principals with single-resource access.</li>
+            </ul>
+        </div>
+
+        <div class="diagram slide-in-left" id="diagram-inheritance"></div>
+
+        <div class="callout-warning">
+            <strong>⚠️ Gotcha:</strong> Azure has a limit of <strong>4,000 role assignments per subscription</strong> (and 500 per management group). At scale, prefer group-based assignments over per-user to stay under limits.
+        </div>
+    </section>
+
+    <!-- Section 2: Custom Role Design -->
+    <section id="custom-roles" class="fade-in">
+        <h2>Custom Role Design Patterns</h2>
+        <p>Built-in roles are coarse. When Contributor is too broad and a built-in doesn't fit, design a custom role.</p>
+
+        <div class="key-concept">
+            <h3>🔑 When to Create a Custom Role</h3>
+            <ul>
+                <li>You need a subset of Contributor (e.g., can manage VMs but not delete VNets)</li>
+                <li>You need cross-service permissions not in any single built-in role</li>
+                <li>Compliance requires explicit action-level documentation of what a persona can do</li>
+            </ul>
+        </div>
+
+        <div class="collapsible">
+            <div class="collapsible-header">Example: "App Team Deployer" Custom Role</div>
+            <div class="collapsible-body">
+<pre><code>{
+  "Name": "App Team Deployer",
+  "Description": "Deploy and manage App Services and Functions, read networking",
+  "Actions": [
+    "Microsoft.Web/*",
+    "Microsoft.Network/virtualNetworks/read",
+    "Microsoft.Network/virtualNetworks/subnets/join/action",
+    "Microsoft.Resources/deployments/*"
+  ],
+  "NotActions": [
+    "Microsoft.Web/sites/config/list/action"  // block reading connection strings
+  ],
+  "DataActions": [],
+  "AssignableScopes": [
+    "/subscriptions/{sub-id}/resourceGroups/rg-app-prod",
+    "/subscriptions/{sub-id}/resourceGroups/rg-app-dev"
+  ]
+}</code></pre>
+            </div>
+        </div>
+
+        <div class="key-concept">
+            <h3>🔑 Scoping Custom Roles</h3>
+            <ul>
+                <li><strong>AssignableScopes</strong> controls where the role <em>can be assigned</em> — not what resources the permissions act on (that's the assignment scope).</li>
+                <li>Set AssignableScopes to the Management Group if multiple subscriptions need it; narrow to subscription/RG if it's team-specific.</li>
+                <li>You can update AssignableScopes later without recreating the role.</li>
+            </ul>
+        </div>
+
+        <div class="callout-warning">
+            <strong>⚠️ Limit:</strong> 5,000 custom roles per tenant. Plan role reuse across teams rather than one-off roles per project.
+        </div>
+    </section>
+
+    <!-- Section 3: Deny Assignments -->
+    <section id="deny-assignments" class="fade-in">
+        <h2>Deny Assignments</h2>
+        <p>Deny assignments block specific actions <em>even if another role assignment grants them</em>. They override allow-based RBAC.</p>
+
+        <div class="key-concept">
+            <h3>🔑 How Deny Assignments Work</h3>
+            <ul>
+                <li>Evaluated <strong>after</strong> role assignments — deny always wins.</li>
+                <li>Cannot be created directly by customers (today). They're applied by <strong>Azure Blueprints</strong> and <strong>Managed Applications</strong> to protect resources from modification.</li>
+                <li>Use case: Blueprint locks down a networking RG so even Subscription Owner can't delete the hub VNet.</li>
+            </ul>
+        </div>
+
+        <div class="exam-tip">
+            <h3>📝 Exam Tip</h3>
+            <p>If the exam asks "how to prevent an Owner from modifying a resource," the answer is <strong>deny assignment via Blueprint</strong> — not removing their role (you can't remove inherited Owner). Resource locks prevent deletion/modification but Owners can remove locks; deny assignments cannot be overridden.</p>
+        </div>
+    </section>
+
+    <!-- Section 4: RBAC vs Azure Policy -->
+    <section id="rbac-vs-policy" class="fade-in">
+        <h2>RBAC vs Azure Policy</h2>
+        <p>Both enforce governance, but they solve different problems. Getting this distinction wrong leads to architectures that fight themselves.</p>
+
+        <div class="compare-grid fade-in">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Dimension</th>
+                        <th>RBAC</th>
+                        <th>Azure Policy</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td><strong>Controls</strong></td>
+                        <td>Who can do what (identity → action)</td>
+                        <td>What can exist / how it must be configured (resource state)</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Enforcement point</strong></td>
+                        <td>ARM authorization layer (before action executes)</td>
+                        <td>ARM resource provider (during/after deployment)</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Default posture</strong></td>
+                        <td>Deny-all (no access until role assigned)</td>
+                        <td>Allow-all (everything is allowed until policy restricts)</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Scope</strong></td>
+                        <td>MG / Sub / RG / Resource</td>
+                        <td>MG / Sub / RG (not individual resource)</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Targets identity?</strong></td>
+                        <td>Yes — specific user, group, SP, MI</td>
+                        <td>No — applies to all requests regardless of who</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Can remediate?</strong></td>
+                        <td>No</td>
+                        <td>Yes — DeployIfNotExists, Modify effects</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Example</strong></td>
+                        <td>"Devs can create VMs in rg-dev"</td>
+                        <td>"All VMs must use managed disks, everywhere"</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+
+        <div class="diagram slide-in-right" id="diagram-rbac-vs-policy"></div>
+
+        <div class="key-concept">
+            <h3>🔑 Decision Rule</h3>
+            <p><strong>RBAC</strong> when the question is "should this <em>person</em> be allowed?" → identity-centric.<br>
+            <strong>Policy</strong> when the question is "should this <em>configuration</em> be allowed?" → resource-centric.<br>
+            Use <strong>both together</strong>: RBAC gates who can deploy; Policy gates what they can deploy.</p>
+        </div>
+    </section>
+
+    <!-- Section 5: PIM -->
+    <section id="pim" class="fade-in">
+        <h2>PIM &amp; Just-in-Time Access</h2>
+        <p>Privileged Identity Management (PIM) converts standing access into <strong>eligible</strong> assignments that must be activated — with approval, MFA, time limits, and audit trails.</p>
+
+        <div class="key-concept">
+            <h3>🔑 Architect Design Decisions for PIM</h3>
+            <ul>
+                <li><strong>Eligible vs Active:</strong> Make high-privilege roles (Owner, User Access Admin, Key Vault Admin) eligible-only. Keep Reader/operational roles active.</li>
+                <li><strong>Activation duration:</strong> Default 8 hours. For break-glass, allow up to 24h. For routine ops, 1-4h reduces blast radius.</li>
+                <li><strong>Approval workflow:</strong> Require approval for production Owner; self-approve for dev Contributor.</li>
+                <li><strong>Access reviews:</strong> Schedule quarterly reviews for all eligible assignments. PIM auto-removes stale access.</li>
+            </ul>
+        </div>
+
+        <div class="callout-warning">
+            <strong>⚠️ License requirement:</strong> PIM requires <strong>Entra ID P2</strong> (or Entra ID Governance). Factor this into cost discussions with stakeholders.
+        </div>
+    </section>
+
+    <!-- Section 6: ABAC -->
+    <section id="abac" class="fade-in">
+        <h2>ABAC for Storage</h2>
+        <p>Attribute-Based Access Control adds <strong>conditions</strong> to role assignments. Instead of creating dozens of custom roles, add conditions like "only blobs tagged <code>project=alpha</code>."</p>
+
+        <div class="key-concept">
+            <h3>🔑 When to Use ABAC</h3>
+            <ul>
+                <li>Multi-tenant storage accounts where teams share a container but own different blobs</li>
+                <li>Restricting access based on blob index tags, container name, or encryption scope</li>
+                <li>Avoiding one-storage-account-per-team sprawl</li>
+            </ul>
+        </div>
+
+        <div class="collapsible">
+            <div class="collapsible-header">Example Condition Expression</div>
+            <div class="collapsible-body">
+<pre><code>// Role: Storage Blob Data Contributor
+// Condition: only act on blobs where tag "department" = assignee's department
+(
+  @Resource[Microsoft.Storage/storageAccounts/blobServices/containers/blobs/tags:department]
+  StringEquals
+  @Principal[Microsoft.Directory/CustomSecurityAttributes/department]
+)</code></pre>
+                <p>This means a user in department "Engineering" can only read/write blobs tagged <code>department=Engineering</code> — even though they have Data Contributor on the whole account.</p>
+            </div>
+        </div>
+    </section>
+
+    <!-- Section 7: Real-World Scenario -->
+    <section id="real-world" class="real-world-example fade-in">
+        <h2>🏢 Real-World: Designing Access for a 500-Person Org</h2>
+        <p><strong>Scenario:</strong> Contoso (500 people) has 4 personas — Developers (200), Ops/SRE (30), Contractors (50 rotating), Auditors (20) — across 3 environments (Dev, Staging, Prod) with 6 subscriptions and a hub-spoke network.</p>
+
+        <div class="collapsible">
+            <div class="collapsible-header">Access Design Solution</div>
+            <div class="collapsible-body">
+                <h4>Structure</h4>
+                <ul>
+                    <li>Management Group: <code>mg-contoso</code> → child MGs: <code>mg-nonprod</code>, <code>mg-prod</code></li>
+                    <li>Subscriptions: <code>sub-dev</code>, <code>sub-staging</code> under mg-nonprod; <code>sub-prod-app</code>, <code>sub-prod-data</code> under mg-prod; <code>sub-connectivity</code>, <code>sub-management</code> at mg-contoso level</li>
+                </ul>
+
+                <h4>Role Assignments</h4>
+                <table>
+                    <thead><tr><th>Persona</th><th>Scope</th><th>Role</th><th>Method</th></tr></thead>
+                    <tbody>
+                        <tr><td>Developers</td><td>mg-nonprod</td><td>Contributor</td><td>Active (Entra group)</td></tr>
+                        <tr><td>Developers</td><td>sub-prod-app</td><td>Reader</td><td>Active</td></tr>
+                        <tr><td>Developers</td><td>sub-prod-app</td><td>Custom "Deployer" (deploy only, no infra delete)</td><td>Eligible via PIM, 2h, approval required</td></tr>
+                        <tr><td>Ops/SRE</td><td>mg-contoso</td><td>Reader</td><td>Active</td></tr>
+                        <tr><td>Ops/SRE</td><td>mg-prod</td><td>Contributor</td><td>Eligible via PIM, 4h, self-approve</td></tr>
+                        <tr><td>Ops/SRE</td><td>sub-connectivity</td><td>Network Contributor</td><td>Active</td></tr>
+                        <tr><td>Contractors</td><td>specific RGs in sub-dev</td><td>Custom "Scoped Dev" (no secrets, no networking)</td><td>Active, time-bound (contract end date)</td></tr>
+                        <tr><td>Auditors</td><td>mg-contoso</td><td>Reader</td><td>Active</td></tr>
+                        <tr><td>Auditors</td><td>mg-contoso</td><td>Security Reader</td><td>Active</td></tr>
+                    </tbody>
+                </table>
+
+                <h4>Guardrails (Policy, not RBAC)</h4>
+                <ul>
+                    <li>Policy at mg-contoso: "Allowed locations = West Europe, North Europe"</li>
+                    <li>Policy at mg-prod: "VMs must use managed disks," "Storage must have private endpoint"</li>
+                    <li>Policy at mg-contoso: "Inherit tag: CostCenter from RG" (Modify effect)</li>
+                </ul>
+
+                <h4>Deny Assignment</h4>
+                <ul>
+                    <li>Blueprint on sub-connectivity locks hub VNet, Firewall, and ExpressRoute circuit — even Ops Owner can't delete them without removing the Blueprint assignment (which requires elevated access + approval).</li>
+                </ul>
+
+                <h4>ABAC</h4>
+                <ul>
+                    <li>Shared data lake in sub-prod-data: contractors get Storage Blob Data Reader with condition <code>tags:project = their-assigned-project</code>.</li>
+                </ul>
+            </div>
+        </div>
+    </section>
+
+    <!-- Lesson Summary -->
+    <div class="lesson-summary fade-in">
+        <h2>Key Takeaways</h2>
+        <ul>
+            <li>Assign at the right scope — broad enough for manageability, narrow enough for least-privilege.</li>
+            <li>Custom roles fill the gap between built-in roles; scope AssignableScopes to where they're needed.</li>
+            <li>Deny assignments (via Blueprints) are the only way to override inherited allow permissions.</li>
+            <li>RBAC = who can act. Policy = what's allowed to exist. Use both.</li>
+            <li>PIM eliminates standing privileged access — eligible + time-bound + auditable.</li>
+            <li>ABAC conditions on storage roles replace per-team storage account sprawl.</li>
+        </ul>
+    </div>
+
+    <!-- Quiz -->
+    <section id="quiz" class="quiz fade-in">
+        <h2>Knowledge Check</h2>
+        <div id="quiz-container"></div>
+    </section>
+
+    <!-- Navigation -->
+    <nav class="lesson-nav fade-in">
+        <a href="0002-azure-resource-hierarchy-governance.html">&larr; Lesson 002: Resource Hierarchy &amp; Governance</a>
+        <a href="0004-identity-entra-id-authentication.html">Lesson 004: Authentication &amp; Conditional Access &rarr;</a>
+    </nav>
+
+</div>
+
+<script src="../assets/diagrams.js"></script>
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+
+    // Diagram 1: RBAC Inheritance with Deny Assignment
+    AzureLessons.BoxDiagram('diagram-inheritance', {
+        nodes: [
+            { id: 'mg', label: 'Management Group\n(Owner: Platform Team)', x: 250, y: 30, w: 220, h: 60, shape: 'box', icon: 'management-group', tooltip: 'Highest custom scope — inherits to all children' },
+            { id: 'sub-prod', label: 'Sub: Production\n(Contributor: Ops — via PIM)', x: 120, y: 150, w: 220, h: 60, shape: 'box', icon: 'subscription', tooltip: 'Subscription-level eligible assignment' },
+            { id: 'sub-dev', label: 'Sub: Development\n(Contributor: Devs)', x: 380, y: 150, w: 220, h: 60, shape: 'box', icon: 'subscription', tooltip: 'Active assignment for developers' },
+            { id: 'rg-net', label: 'RG: Networking\n🛑 Deny Assignment (Blueprint)', x: 60, y: 280, w: 240, h: 60, shape: 'box', icon: 'resource-group', tooltip: 'Deny assignment blocks delete actions even for Owner' },
+            { id: 'rg-app', label: 'RG: App Workloads', x: 320, y: 280, w: 180, h: 60, shape: 'box', icon: 'resource-group', tooltip: 'Normal inheritance — Ops Contributor flows here' },
+            { id: 'vnet', label: 'Hub VNet\n(Protected)', x: 100, y: 390, w: 160, h: 50, shape: 'box', icon: 'vnet', tooltip: 'Cannot be deleted or modified due to deny assignment' },
+            { id: 'vm', label: 'App VM', x: 350, y: 390, w: 120, h: 50, shape: 'box', icon: 'vm', tooltip: 'Ops can manage via activated PIM role' }
+        ],
+        edges: [
+            { from: 'mg', to: 'sub-prod', label: 'inherits', style: 'solid' },
+            { from: 'mg', to: 'sub-dev', label: 'inherits', style: 'solid' },
+            { from: 'sub-prod', to: 'rg-net', label: 'inherits', style: 'solid' },
+            { from: 'sub-prod', to: 'rg-app', label: 'inherits', style: 'solid' },
+            { from: 'rg-net', to: 'vnet', label: 'BLOCKED', style: 'dashed' },
+            { from: 'rg-app', to: 'vm', label: 'allowed', style: 'solid' }
+        ],
+        groups: [
+            { label: 'Deny Assignment Blocks Inheritance', x: 40, y: 260, w: 280, h: 200 }
+        ]
+    });
+
+    // Diagram 2: RBAC vs Policy Decision Flow
+    AzureLessons.BoxDiagram('diagram-rbac-vs-policy', {
+        nodes: [
+            { id: 'start', label: 'Governance\nRequirement', x: 250, y: 20, w: 160, h: 50, shape: 'box', icon: 'decision', tooltip: 'Start here with your requirement' },
+            { id: 'q1', label: 'Is it about WHO\ncan perform actions?', x: 250, y: 110, w: 200, h: 55, shape: 'diamond', icon: 'question', tooltip: 'Identity-centric question' },
+            { id: 'rbac', label: 'Use RBAC\n(role assignment)', x: 80, y: 220, w: 160, h: 50, shape: 'box', icon: 'rbac', tooltip: 'Assign/remove roles, PIM for JIT' },
+            { id: 'q2', label: 'Is it about WHAT config\nis allowed to exist?', x: 420, y: 220, w: 200, h: 55, shape: 'diamond', icon: 'question', tooltip: 'Resource-state question' },
+            { id: 'policy', label: 'Use Azure Policy\n(deny/audit/modify)', x: 420, y: 330, w: 180, h: 50, shape: 'box', icon: 'policy', tooltip: 'Policy effects: deny, audit, deployIfNotExists, modify' },
+            { id: 'both', label: 'Use Both Together', x: 250, y: 420, w: 160, h: 50, shape: 'box', icon: 'combined', tooltip: 'RBAC gates who deploys; Policy gates what they deploy' }
+        ],
+        edges: [
+            { from: 'start', to: 'q1', label: '', style: 'solid' },
+            { from: 'q1', to: 'rbac', label: 'Yes', style: 'solid' },
+            { from: 'q1', to: 'q2', label: 'No', style: 'solid' },
+            { from: 'q2', to: 'policy', label: 'Yes', style: 'solid' },
+            { from: 'rbac', to: 'both', label: '', style: 'dashed' },
+            { from: 'policy', to: 'both', label: '', style: 'dashed' }
+        ],
+        groups: []
+    });
+
+    // Quiz
+    AzureLessons.Quiz('quiz-container', [
+        {
+            question: "Your organization wants to prevent anyone — including subscription Owners — from deleting the hub VNet. What's the correct approach?",
+            options: [
+                "Remove Owner role from all users on that resource group",
+                "Apply a ReadOnly resource lock",
+                "Use a deny assignment via Azure Blueprints",
+                "Create a Policy with deny effect on delete actions"
+            ],
+            correct: 2,
+            explanation: "Deny assignments (applied via Blueprints) override all RBAC allow permissions, including Owner. Resource locks can be removed by Owners. Policy deny blocks resource creation/modification but doesn't override RBAC permissions."
+        },
+        {
+            question: "Contractors need blob access scoped to only their project's data in a shared storage account. What's the most scalable approach?",
+            options: [
+                "Create a separate storage account per contractor project",
+                "Use ABAC conditions on Storage Blob Data Reader tied to blob index tags",
+                "Create a custom role per project with hardcoded container paths",
+                "Use Azure Policy to restrict which containers contractors can access"
+            ],
+            correct: 1,
+            explanation: "ABAC conditions let you scope a single role assignment to specific blobs based on tags or attributes — no account sprawl, no custom role proliferation. Policy doesn't control data-plane access."
+        },
+        {
+            question: "You need Ops to have Contributor on production but only when actively responding to incidents (max 4 hours). Which design achieves this?",
+            options: [
+                "Assign Contributor with a time-bound end date",
+                "Make Contributor an eligible assignment in PIM with 4-hour activation window",
+                "Use a custom role that auto-expires after 4 hours",
+                "Use Conditional Access to block Contributor actions after 4 hours"
+            ],
+            correct: 1,
+            explanation: "PIM eligible assignments require explicit activation, support time limits (max activation duration), approval workflows, and full audit logging — purpose-built for just-in-time access."
+        },
+        {
+            question: "You want to ensure all VMs in production use managed disks, regardless of who deploys them. RBAC or Policy?",
+            options: [
+                "RBAC — create a custom role that excludes unmanaged disk actions",
+                "Azure Policy — deny effect on VMs without managed disks",
+                "RBAC — remove VM Contributor from users who might use unmanaged disks",
+                "Azure Policy — audit effect only, then remediate manually"
+            ],
+            correct: 1,
+            explanation: "This is a resource configuration requirement (what can exist), not an identity question (who). Policy with deny effect blocks non-compliant deployments regardless of the deployer's role."
+        }
+    ]);
+
+    // Initialize interactions
+    AzureLessons.ScrollReveal();
+    AzureLessons.Collapsible();
+});
+</script>
+</body>
+</html>

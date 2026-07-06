@@ -1,0 +1,531 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lesson 11: Container Lifecycle</title>
+  <link rel="stylesheet" href="../assets/lesson-style.css">
+</head>
+<body>
+
+  <div class="lesson-meta">
+    <span>🔄 Lesson 11 of 12</span>
+    <span>⏱️ 14–18 minutes</span>
+    <span>🧬 Lifecycle &amp; State</span>
+  </div>
+
+  <h1>Container Lifecycle</h1>
+  <p class="subtitle">A container isn't just "running" or "stopped." It's a state machine with discrete states, well-defined transitions, and kernel-level mechanisms behind each one. Understanding this machine is essential to designing reliable architectures that handle crashes, restarts, and graceful shutdowns.</p>
+
+  <!-- ============================================================ -->
+  <h2>1. The State Machine</h2>
+
+  <p>Every Docker container passes through a set of discrete states. Each transition is triggered by a specific command or system event:</p>
+
+  <!-- SVG: Container State Machine Diagram -->
+  <svg viewBox="0 0 700 340" xmlns="http://www.w3.org/2000/svg" style="max-width:700px; width:100%; height:auto; display:block; margin:1.5rem auto;">
+    <defs>
+      <marker id="arrow" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+        <path d="M0,0 L8,3 L0,6 Z" fill="#0ea5e9"/>
+      </marker>
+    </defs>
+    <!-- States -->
+    <circle cx="100" cy="170" r="40" fill="#1e293b" stroke="#0ea5e9" stroke-width="2"/>
+    <text x="100" y="175" text-anchor="middle" fill="#e2e8f0" font-size="12" font-weight="bold">Created</text>
+
+    <circle cx="280" cy="170" r="40" fill="#1e293b" stroke="#22c55e" stroke-width="2"/>
+    <text x="280" y="175" text-anchor="middle" fill="#e2e8f0" font-size="12" font-weight="bold">Running</text>
+
+    <circle cx="460" cy="80" r="40" fill="#1e293b" stroke="#f59e0b" stroke-width="2"/>
+    <text x="460" y="85" text-anchor="middle" fill="#e2e8f0" font-size="12" font-weight="bold">Paused</text>
+
+    <circle cx="460" cy="260" r="40" fill="#1e293b" stroke="#ef4444" stroke-width="2"/>
+    <text x="460" y="255" text-anchor="middle" fill="#e2e8f0" font-size="11" font-weight="bold">Stopped</text>
+    <text x="460" y="272" text-anchor="middle" fill="#94a3b8" font-size="10">(Exited)</text>
+
+    <circle cx="620" cy="260" r="40" fill="#1e293b" stroke="#6b7280" stroke-width="2"/>
+    <text x="620" y="265" text-anchor="middle" fill="#e2e8f0" font-size="12" font-weight="bold">Dead</text>
+
+    <!-- Transitions -->
+    <!-- Created → Running -->
+    <line x1="140" y1="170" x2="232" y2="170" stroke="#0ea5e9" stroke-width="2" marker-end="url(#arrow)"/>
+    <text x="186" y="160" text-anchor="middle" fill="#94a3b8" font-size="10">start</text>
+
+    <!-- Running → Paused -->
+    <line x1="305" y1="135" x2="425" y2="95" stroke="#0ea5e9" stroke-width="2" marker-end="url(#arrow)"/>
+    <text x="360" y="100" text-anchor="middle" fill="#94a3b8" font-size="10">pause</text>
+
+    <!-- Paused → Running -->
+    <line x1="420" y1="95" x2="308" y2="140" stroke="#0ea5e9" stroke-width="2" marker-end="url(#arrow)"/>
+    <text x="370" y="132" text-anchor="middle" fill="#94a3b8" font-size="10">unpause</text>
+
+    <!-- Running → Stopped -->
+    <line x1="305" y1="205" x2="425" y2="248" stroke="#0ea5e9" stroke-width="2" marker-end="url(#arrow)"/>
+    <text x="355" y="242" text-anchor="middle" fill="#94a3b8" font-size="10">stop / kill / exit</text>
+
+    <!-- Stopped → Running -->
+    <line x1="425" y1="238" x2="310" y2="198" stroke="#0ea5e9" stroke-width="2" marker-end="url(#arrow)"/>
+    <text x="380" y="205" text-anchor="middle" fill="#94a3b8" font-size="10">start</text>
+
+    <!-- Stopped → Dead -->
+    <line x1="500" y1="260" x2="572" y2="260" stroke="#0ea5e9" stroke-width="2" marker-end="url(#arrow)"/>
+    <text x="536" y="250" text-anchor="middle" fill="#94a3b8" font-size="10">error</text>
+  </svg>
+
+  <ul>
+    <li><strong>Created</strong> — Container exists (writable layer + config allocated) but no process running</li>
+    <li><strong>Running</strong> — PID 1 process is active inside the container's namespaces</li>
+    <li><strong>Paused</strong> — Process frozen via cgroup freezer; still in memory, consuming no CPU</li>
+    <li><strong>Stopped (Exited)</strong> — PID 1 has terminated; writable layer and metadata still on disk</li>
+    <li><strong>Dead</strong> — Partially removed container in a broken state (resource cleanup failed)</li>
+  </ul>
+
+  <!-- ============================================================ -->
+  <h2>2. Create vs Run</h2>
+
+  <p><code>docker run</code> is actually two operations combined: <code>docker create</code> + <code>docker start</code>.</p>
+
+  <h3>What <code>docker create</code> does</h3>
+  <ol>
+    <li>Pulls the image (if not cached)</li>
+    <li>Allocates a writable container layer (copy-on-write filesystem)</li>
+    <li>Stores the container configuration (env vars, mounts, network, entrypoint)</li>
+    <li>Assigns a container ID — returns it without starting any process</li>
+  </ol>
+
+  <h3>When to use <code>create</code> separately</h3>
+  <ul>
+    <li><strong>Init containers</strong> — pre-create containers that run setup tasks before the main app</li>
+    <li><strong>Pre-warming</strong> — create containers ahead of time so startup latency is just the process fork, not image pull + layer allocation</li>
+    <li><strong>Batch scheduling</strong> — create a pool of containers, then start them in a controlled sequence</li>
+    <li><strong>Configuration injection</strong> — inspect/modify the config between create and start</li>
+  </ul>
+
+  <pre><code># Create without starting
+docker create --name my-app -p 8080:80 nginx:alpine
+# Container is now in "Created" state
+docker inspect --format '{{.State.Status}}' my-app
+# → "created"
+
+# Start when ready
+docker start my-app
+# → "running"</code></pre>
+
+  <!-- ============================================================ -->
+  <h2>3. Starting &amp; Stopping</h2>
+
+  <h3>Starting a container</h3>
+  <p>When you issue <code>docker start</code>, the Docker daemon:</p>
+  <ol>
+    <li>Sets up namespaces (PID, NET, MNT, UTS, IPC, USER)</li>
+    <li>Configures cgroups for resource limits</li>
+    <li>Prepares the overlay filesystem mount</li>
+    <li>Forks the container's PID 1 process (the entrypoint)</li>
+    <li>If the container was previously stopped, sends SIGCONT to resume</li>
+  </ol>
+
+  <h3>Stopping a container</h3>
+  <p><code>docker stop</code> follows a two-phase shutdown:</p>
+
+  <!-- SVG: Signal Flow During Stop -->
+  <svg viewBox="0 0 650 120" xmlns="http://www.w3.org/2000/svg" style="max-width:650px; width:100%; height:auto; display:block; margin:1.5rem auto;">
+    <defs>
+      <marker id="arrow2" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+        <path d="M0,0 L8,3 L0,6 Z" fill="#f59e0b"/>
+      </marker>
+    </defs>
+    <!-- Timeline -->
+    <line x1="40" y1="60" x2="610" y2="60" stroke="#475569" stroke-width="2"/>
+
+    <!-- SIGTERM -->
+    <circle cx="80" cy="60" r="6" fill="#22c55e"/>
+    <text x="80" y="40" text-anchor="middle" fill="#22c55e" font-size="11" font-weight="bold">SIGTERM</text>
+    <text x="80" y="85" text-anchor="middle" fill="#94a3b8" font-size="10">t=0s</text>
+
+    <!-- Grace period -->
+    <rect x="120" y="50" width="300" height="20" fill="#f59e0b" opacity="0.2" rx="4"/>
+    <text x="270" y="65" text-anchor="middle" fill="#f59e0b" font-size="11">Grace Period (default 10s)</text>
+    <text x="270" y="100" text-anchor="middle" fill="#94a3b8" font-size="10">App should clean up: close DB conns, finish requests, flush buffers</text>
+
+    <!-- Arrow -->
+    <line x1="430" y1="60" x2="490" y2="60" stroke="#f59e0b" stroke-width="2" marker-end="url(#arrow2)"/>
+    <text x="460" y="45" text-anchor="middle" fill="#94a3b8" font-size="10">still alive?</text>
+
+    <!-- SIGKILL -->
+    <circle cx="530" cy="60" r="6" fill="#ef4444"/>
+    <text x="530" y="40" text-anchor="middle" fill="#ef4444" font-size="11" font-weight="bold">SIGKILL</text>
+    <text x="530" y="85" text-anchor="middle" fill="#94a3b8" font-size="10">t=10s</text>
+
+    <!-- Dead -->
+    <text x="590" y="65" text-anchor="middle" fill="#6b7280" font-size="11">Exited</text>
+  </svg>
+
+  <pre><code># Stop with default 10s grace period
+docker stop my-app
+
+# Stop with custom grace period (30 seconds for DB to drain)
+docker stop --time 30 my-app
+
+# Immediate kill (no grace period)
+docker kill my-app</code></pre>
+
+  <div class="callout warning">
+    <div class="callout-title">Why Graceful Shutdown Matters</div>
+    <p>If your application doesn't handle SIGTERM, Docker will SIGKILL it after the grace period. This means:</p>
+    <ul>
+      <li>Database connections are severed mid-transaction — potential data corruption</li>
+      <li>In-flight HTTP requests get dropped — clients see errors</li>
+      <li>Write buffers aren't flushed — log data or queued events are lost</li>
+      <li>File locks aren't released — next container start may fail</li>
+    </ul>
+    <p>Always trap SIGTERM in your application and shut down cleanly.</p>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>4. Pause &amp; Unpause</h2>
+
+  <p><code>docker pause</code> uses the <strong>cgroup freezer</strong> subsystem to suspend all processes in the container. Unlike stop, the processes remain in memory — they're just not scheduled by the CPU.</p>
+
+  <table>
+    <thead>
+      <tr>
+        <th>Aspect</th>
+        <th>Pause</th>
+        <th>Stop</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>Mechanism</td>
+        <td>cgroup freezer (SIGSTOP-like)</td>
+        <td>SIGTERM → SIGKILL</td>
+      </tr>
+      <tr>
+        <td>Process state</td>
+        <td>Frozen in memory</td>
+        <td>Terminated</td>
+      </tr>
+      <tr>
+        <td>Memory usage</td>
+        <td>Retained</td>
+        <td>Released</td>
+      </tr>
+      <tr>
+        <td>Resume speed</td>
+        <td>Instant</td>
+        <td>Full process startup</td>
+      </tr>
+      <tr>
+        <td>Network</td>
+        <td>Connections preserved (may timeout)</td>
+        <td>Connections closed</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>Use cases for pause</h3>
+  <ul>
+    <li><strong>Filesystem snapshots</strong> — freeze the container to get a consistent snapshot of the writable layer (<code>docker commit</code>)</li>
+    <li><strong>Temporary resource relief</strong> — free CPU without the cost of full restart</li>
+    <li><strong>Debugging</strong> — freeze a misbehaving container to inspect its state without it continuing to cause damage</li>
+  </ul>
+
+  <pre><code># Pause a running container
+docker pause my-app
+docker inspect --format '{{.State.Status}}' my-app
+# → "paused"
+
+# Resume it
+docker unpause my-app</code></pre>
+
+  <!-- ============================================================ -->
+  <h2>5. Restart Policies</h2>
+
+  <p>Restart policies tell the Docker daemon what to do when a container exits. They are set at container creation time with <code>--restart</code>:</p>
+
+  <table>
+    <thead>
+      <tr>
+        <th>Policy</th>
+        <th>Behavior</th>
+        <th>Use Case</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>no</code></td>
+        <td>Never restart (default)</td>
+        <td>One-off tasks, batch jobs, debugging</td>
+      </tr>
+      <tr>
+        <td><code>on-failure[:max]</code></td>
+        <td>Restart only if exit code ≠ 0, up to <em>max</em> times</td>
+        <td>Workers that should retry but not loop forever</td>
+      </tr>
+      <tr>
+        <td><code>always</code></td>
+        <td>Restart regardless of exit code; also restarts on daemon startup</td>
+        <td>Long-running services that must always be up</td>
+      </tr>
+      <tr>
+        <td><code>unless-stopped</code></td>
+        <td>Like <code>always</code>, but doesn't restart if explicitly stopped before daemon restart</td>
+        <td>Services you want auto-recovery but manual control over</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="callout info">
+    <div class="callout-title">Crashes vs Explicit Stops</div>
+    <p>The Docker daemon distinguishes between a container that <strong>crashes</strong> (exit code ≠ 0) and one that was <strong>explicitly stopped</strong> (<code>docker stop</code>). With <code>unless-stopped</code>, an explicit stop is respected — the daemon won't restart it. With <code>always</code>, even an explicitly stopped container restarts when the daemon itself restarts.</p>
+  </div>
+
+  <pre><code># Restart on failure, max 5 attempts
+docker run -d --restart=on-failure:5 --name worker my-worker-image
+
+# Always restart (survives daemon restarts)
+docker run -d --restart=always --name api my-api-image
+
+# Check restart count
+docker inspect --format '{{.RestartCount}}' worker</code></pre>
+
+  <!-- ============================================================ -->
+  <h2>6. Removing Containers</h2>
+
+  <p>Stopped containers still consume disk space (writable layer + metadata). You must explicitly remove them:</p>
+
+  <pre><code># Remove a stopped container
+docker rm my-app
+
+# Force-remove a running container (sends SIGKILL first)
+docker rm -f my-app
+
+# Remove all stopped containers
+docker container prune
+
+# Auto-remove when container exits (great for one-off tasks)
+docker run --rm alpine echo "I clean up after myself"</code></pre>
+
+  <h3>Orphaned containers and disk space</h3>
+  <p>Every stopped container retains its writable layer. On a busy CI server running hundreds of builds, this accumulates fast:</p>
+
+  <pre><code># See how much space stopped containers use
+docker system df
+
+# Typical output on an unmanaged host:
+# Containers: 847   Size: 12.4GB (reclaimable: 11.8GB)</code></pre>
+
+  <div class="callout tip">
+    <div class="callout-title">Use <code>--rm</code> for One-Off Tasks</div>
+    <p>Any container you run for a quick test, build step, or data migration should use <code>--rm</code>. This automatically removes the container (and its writable layer) the moment it exits. You avoid accumulating ghost containers and wasting disk.</p>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>7. Exit Codes</h2>
+
+  <p>When a container stops, its exit code tells you <em>why</em>. Learn to read them:</p>
+
+  <table>
+    <thead>
+      <tr>
+        <th>Exit Code</th>
+        <th>Meaning</th>
+        <th>Common Cause</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>0</code></td>
+        <td>Success</td>
+        <td>Process completed normally</td>
+      </tr>
+      <tr>
+        <td><code>1</code></td>
+        <td>Application error</td>
+        <td>Unhandled exception, config error, missing dependency</td>
+      </tr>
+      <tr>
+        <td><code>137</code></td>
+        <td>SIGKILL (128 + 9)</td>
+        <td>OOM killer, <code>docker kill</code>, exceeded memory limit</td>
+      </tr>
+      <tr>
+        <td><code>143</code></td>
+        <td>SIGTERM (128 + 15)</td>
+        <td><code>docker stop</code> (app handled SIGTERM and exited)</td>
+      </tr>
+      <tr>
+        <td><code>126</code></td>
+        <td>Command not executable</td>
+        <td>Permission denied on entrypoint</td>
+      </tr>
+      <tr>
+        <td><code>127</code></td>
+        <td>Command not found</td>
+        <td>Entrypoint binary doesn't exist in the image</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <pre><code># Check exit code of a stopped container
+docker inspect --format '{{.State.ExitCode}}' my-app
+
+# Debugging workflow
+docker ps -a --filter "exited=137"  # Find OOM-killed containers
+docker logs my-app                   # Check app logs before death
+docker inspect my-app | jq '.[0].State'  # Full state details</code></pre>
+
+  <div class="callout warning">
+    <div class="callout-title">Exit Code 137: The OOM Killer</div>
+    <p>If you see exit code 137 and you didn't manually <code>docker kill</code>, your container hit its memory limit. The kernel's OOM killer terminated it. Fix: increase the memory limit (<code>--memory</code>) or fix the memory leak in your application. Check <code>docker inspect</code> for <code>OOMKilled: true</code>.</p>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>Interactive Quizzes</h2>
+
+  <!-- Quiz 1: State Transitions -->
+  <div class="quiz" data-quiz="state-transitions">
+    <h3>Quiz 1: State Transitions</h3>
+    <p class="quiz-question">A container is in the "Running" state. You issue <code>docker pause</code> followed by <code>docker unpause</code> then <code>docker stop</code>. What is the final state?</p>
+    <div class="quiz-options">
+      <button data-correct>Stopped (Exited)</button>
+      <button>Paused</button>
+      <button>Dead</button>
+      <button>Created</button>
+    </div>
+    <div class="quiz-explanation">Running → pause → Paused → unpause → Running → stop → Stopped (Exited). The container passes through Paused transiently and ends in Stopped.</div>
+  </div>
+
+  <!-- Quiz 2: Exit Codes -->
+  <div class="quiz" data-quiz="exit-codes">
+    <h3>Quiz 2: Exit Codes</h3>
+    <p class="quiz-question">Your container exited with code 137. You did NOT manually run <code>docker kill</code>. What most likely happened?</p>
+    <div class="quiz-options">
+      <button>The app crashed with an unhandled exception</button>
+      <button data-correct>The container was killed by the OOM killer (exceeded memory limit)</button>
+      <button>The entrypoint binary was not found</button>
+      <button>The app received SIGTERM and shut down gracefully</button>
+    </div>
+    <div class="quiz-explanation">Exit code 137 = 128 + 9 (SIGKILL). If you didn't issue <code>docker kill</code> manually, the most common cause is the kernel OOM killer terminating the process for exceeding its memory limit.</div>
+  </div>
+
+  <!-- Quiz 3: Restart Policies -->
+  <div class="quiz" data-quiz="restart-policies">
+    <h3>Quiz 3: Restart Policies</h3>
+    <p class="quiz-question">A container is running with <code>--restart=unless-stopped</code>. You run <code>docker stop</code> on it, then restart the Docker daemon. What happens to the container?</p>
+    <div class="quiz-options">
+      <button>It restarts automatically when the daemon comes back up</button>
+      <button data-correct>It stays stopped — the explicit stop is remembered</button>
+      <button>It enters the Dead state</button>
+      <button>It is automatically removed</button>
+    </div>
+    <div class="quiz-explanation">With <code>unless-stopped</code>, if you explicitly stop a container, the daemon remembers that decision and won't restart it on daemon restart. This is the key difference from <code>always</code>, which restarts the container regardless.</div>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>Hands-On Tasks</h2>
+
+  <div class="hands-on">
+    <h3>🛠️ Task 1: Walk the State Machine</h3>
+    <p>Create a container, inspect each state, and observe the exit code:</p>
+    <pre><code># Step 1: Create (don't start)
+docker create --name lifecycle-test alpine sleep 30
+docker inspect --format '{{.State.Status}}' lifecycle-test
+# Expected: "created"
+
+# Step 2: Start it
+docker start lifecycle-test
+docker inspect --format '{{.State.Status}}' lifecycle-test
+# Expected: "running"
+
+# Step 3: Pause and inspect
+docker pause lifecycle-test
+docker inspect --format '{{.State.Status}}' lifecycle-test
+# Expected: "paused"
+
+# Step 4: Unpause, then stop
+docker unpause lifecycle-test
+docker stop --time 5 lifecycle-test
+docker inspect --format '{{.State.Status}}' lifecycle-test
+# Expected: "exited"
+
+# Step 5: Check exit code
+docker inspect --format '{{.State.ExitCode}}' lifecycle-test
+# Expected: 137 (SIGKILL after grace period, since sleep doesn't handle SIGTERM)
+
+# Clean up
+docker rm lifecycle-test</code></pre>
+  </div>
+
+  <div class="hands-on">
+    <h3>🛠️ Task 2: Test Restart Policies</h3>
+    <p>Run a container that crashes, and observe Docker's restart behavior:</p>
+    <pre><code># Run a container that exits with error code 1 after 2 seconds
+docker run -d --name restart-test \
+  --restart=on-failure:3 \
+  alpine sh -c "echo 'Starting...'; sleep 2; echo 'Crashing!'; exit 1"
+
+# Watch the restart count increase (check every 5 seconds)
+watch -n 5 'docker inspect --format "Restarts: {{.RestartCount}} | Status: {{.State.Status}}" restart-test'
+
+# After 3 restarts, the container stays stopped
+# You should eventually see: Restarts: 3 | Status: exited
+
+# Inspect the full restart history
+docker inspect --format '{{json .RestartCount}}' restart-test
+
+# Compare with a successful exit (no restart triggered)
+docker run -d --name success-test \
+  --restart=on-failure:3 \
+  alpine sh -c "echo 'Done'; exit 0"
+
+docker inspect --format '{{.RestartCount}}' success-test
+# Expected: 0
+
+# Clean up
+docker rm -f restart-test success-test</code></pre>
+  </div>
+
+  <!-- ============================================================ -->
+  <div class="callout industry">
+    <div class="callout-title">🏭 Industry: Kubernetes and Container Lifecycle</div>
+    <p>Kubernetes builds heavily on container lifecycle primitives but adds orchestration-level hooks:</p>
+    <ul>
+      <li><strong>preStop hook</strong> — a command or HTTP call executed <em>before</em> SIGTERM is sent. Use it to deregister from service discovery, drain connections, or finish processing.</li>
+      <li><strong>terminationGracePeriodSeconds</strong> — Kubernetes' equivalent of <code>docker stop --time</code>. Defaults to 30s. After this, the kubelet sends SIGKILL. Set it high enough for your app's drain logic.</li>
+      <li><strong>restartPolicy</strong> — Kubernetes Pods have <code>Always</code> (default for Deployments), <code>OnFailure</code> (Jobs), and <code>Never</code>. The kubelet handles restarts with exponential backoff (10s, 20s, 40s… up to 5 minutes).</li>
+      <li><strong>Container states in Pods</strong> — Kubernetes tracks Waiting, Running, and Terminated for each container, with reason codes like <code>OOMKilled</code>, <code>Error</code>, <code>Completed</code>.</li>
+    </ul>
+    <pre><code># Kubernetes pod spec with lifecycle hooks
+spec:
+  terminationGracePeriodSeconds: 60
+  containers:
+  - name: api
+    lifecycle:
+      preStop:
+        exec:
+          command: ["/bin/sh", "-c", "sleep 5 && kill -TERM 1"]</code></pre>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>Key Takeaways</h2>
+
+  <ul>
+    <li><strong>Containers are state machines</strong> — Created → Running → Paused/Stopped → Dead. Know what triggers each transition.</li>
+    <li><strong><code>docker run</code> = create + start</strong> — separate them when you need pre-warming or staged orchestration.</li>
+    <li><strong>Always handle SIGTERM</strong> — your app gets 10 seconds by default to shut down gracefully. Use them to close connections, flush writes, and deregister from load balancers.</li>
+    <li><strong>Pause ≠ Stop</strong> — pause freezes the process in place (cgroup freezer); stop terminates it. Choose based on whether you need the memory back.</li>
+    <li><strong>Restart policies are your first line of resilience</strong> — use <code>on-failure</code> for workers, <code>unless-stopped</code> for services, never <code>always</code> for one-off tasks.</li>
+    <li><strong>Exit codes tell the story</strong> — 137 means OOM/kill, 143 means graceful SIGTERM, 127 means missing binary. Read them before reading logs.</li>
+    <li><strong>Clean up after yourself</strong> — use <code>--rm</code> for ephemeral containers, <code>docker container prune</code> regularly, and monitor <code>docker system df</code>.</li>
+  </ul>
+
+  <!-- ============================================================ -->
+  <nav class="lesson-nav">
+    <a href="0010-building-for-production.html">← Prev: Building for Production</a>
+    <a href="0012-environment-config-and-secrets.html">Next: Environment, Config &amp; Secrets →</a>
+  </nav>
+
+  <script src="../assets/quiz.js"></script>
+</body>
+</html>

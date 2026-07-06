@@ -1,0 +1,1003 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>L48 · Abstract Syntax Trees: Parsing, Walking &amp; Code Generation — Python A→Z</title>
+<link rel="stylesheet" href="../assets/style.css" />
+</head>
+<body>
+<div id="sidebar-placeholder"></div>
+<div id="main">
+  <div id="lesson-header">
+    <div class="lesson-track track-internals">🟠 Python Internals</div>
+    <h1>Abstract Syntax Trees: Parsing, Walking &amp; Code Generation</h1>
+    <div class="lesson-meta">
+      <span>📖 Lesson 48</span>
+      <span>⏱ 60 min</span>
+      <span>🧪 5 questions</span>
+      <span>💻 3 exercises</span>
+    </div>
+  </div>
+  <div id="content">
+
+    <div class="objectives"><h4>🎯 Learning Objectives</h4><ul>
+      <li>Parse Python source into an AST with <code>ast.parse()</code> and understand the node hierarchy</li>
+      <li>Walk the AST with <code>ast.walk()</code> and <code>ast.NodeVisitor</code> to extract information</li>
+      <li>Transform the AST with <code>ast.NodeTransformer</code> to rewrite code</li>
+      <li>Generate Python source from an AST with <code>ast.unparse()</code></li>
+      <li>Build a linter / static analyser using AST visitors</li>
+      <li>Understand the key AST node types: <code>Module</code>, <code>FunctionDef</code>, <code>ClassDef</code>, <code>Call</code>, <code>Name</code>, <code>Assign</code>, <code>If</code>, <code>For</code>, expressions vs statements</li>
+      <li>Compile a modified AST back to bytecode and execute it</li>
+    </ul></div>
+
+    <h2 id="what-is-an-ast">1 · What is an AST?</h2>
+
+    <p>After tokenisation, Python's PEG parser builds an <strong>Abstract Syntax Tree</strong> — a tree of Python objects representing the syntactic structure of code, with all insignificant whitespace and comments stripped away. The AST is the canonical, structured representation that the compiler uses to emit bytecode, and it is the foundation of every tool that needs to reason about Python source programmatically.</p>
+
+    <p>The <code>ast</code> module in the standard library gives you full read/write access to the tree. Parsing source into an AST is a single function call:</p>
+
+<div style="position:relative"><pre><code class="language-python">import ast
+
+source = """
+def add(x, y):
+    return x + y
+
+result = add(3, 4)
+print(result)
+"""
+
+tree = ast.parse(source)
+
+# The root is always ast.Module
+print(type(tree))                    # &lt;class 'ast.Module'&gt;
+print(ast.dump(tree, indent=2))      # full tree dump
+
+# Every node has line/column info (after parse)
+for node in ast.walk(tree):
+    if hasattr(node, "lineno"):
+        print(f"{type(node).__name__:20s} line={node.lineno} col={node.col_offset}")</code></pre><span class="code-label">ast_basics.py</span></div>
+
+    <p>The AST organises nodes into distinct categories:</p>
+
+    <table>
+      <thead><tr><th>Category</th><th>Key Node Types</th></tr></thead>
+      <tbody>
+        <tr><td><strong>Statements</strong></td><td><code>FunctionDef</code>, <code>AsyncFunctionDef</code>, <code>ClassDef</code>, <code>Return</code>, <code>Assign</code>, <code>AugAssign</code>, <code>AnnAssign</code>, <code>For</code>, <code>While</code>, <code>If</code>, <code>With</code>, <code>Try</code>, <code>Import</code>, <code>ImportFrom</code>, <code>Expr</code>, <code>Delete</code></td></tr>
+        <tr><td><strong>Expressions</strong></td><td><code>BinOp</code>, <code>UnaryOp</code>, <code>BoolOp</code>, <code>Compare</code>, <code>Call</code>, <code>Constant</code>, <code>Name</code>, <code>Attribute</code>, <code>Subscript</code>, <code>List</code>, <code>Tuple</code>, <code>Dict</code>, <code>Set</code>, <code>Lambda</code>, <code>IfExp</code>, <code>ListComp</code>, <code>GeneratorExp</code>, <code>DictComp</code></td></tr>
+        <tr><td><strong>Context nodes</strong></td><td><code>Load</code>, <code>Store</code>, <code>Del</code> — appears in <code>Name</code>, <code>Attribute</code>, <code>Subscript</code> to indicate read vs write</td></tr>
+        <tr><td><strong>Helper nodes</strong></td><td><code>arguments</code>, <code>arg</code>, <code>keyword</code>, <code>alias</code>, <code>withitem</code>, <code>ExceptHandler</code></td></tr>
+      </tbody>
+    </table>
+
+    <p>A mini tree visualiser makes the hierarchy tangible:</p>
+
+<div style="position:relative"><pre><code class="language-python">import ast
+
+def print_tree(node, indent=0):
+    prefix = "  " * indent
+    name   = type(node).__name__
+    extras = []
+    for field, value in ast.iter_fields(node):
+        if isinstance(value, (str, int, float, bool, type(None))):
+            extras.append(f"{field}={value!r}")
+    print(f"{prefix}{name}({', '.join(extras)})")
+    for field, value in ast.iter_fields(node):
+        if isinstance(value, ast.AST):
+            print_tree(value, indent + 1)
+        elif isinstance(value, list):
+            for item in value:
+                if isinstance(item, ast.AST):
+                    print_tree(item, indent + 1)
+
+print_tree(ast.parse("x = 1 + 2"))</code></pre><span class="code-label">tree_visualiser.py</span></div>
+
+    <div class="callout callout-concept"><strong>Concept:</strong> The AST is the interface between the parser and the compiler. Every Python tool that needs to understand code structure — linters (flake8, pylint), type checkers (mypy, pyright), formatters (black), refactoring tools (rope) — works with the AST.</div>
+
+    <h2 id="key-node-types">2 · Key Node Types in Depth</h2>
+
+    <p>Understanding the fields of each node type is essential for writing correct visitors and transformers. Let's examine the most important ones field by field:</p>
+
+<div style="position:relative"><pre><code class="language-python">import ast
+
+# ── FunctionDef ──
+src = '''
+def greet(name: str, greeting: str = "Hello") -&gt; str:
+    """Return a greeting string."""
+    return f"{greeting}, {name}!"
+'''
+tree = ast.parse(src)
+fn = tree.body[0]          # FunctionDef node
+print(fn.name)             # "greet"
+print(fn.args.args)        # [arg(arg='name', annotation=...), arg(arg='greeting', ...)]
+print(fn.args.defaults)    # [Constant(value='Hello')]
+print(fn.returns)          # Name(id='str')
+print(fn.decorator_list)   # []
+print(fn.body[0])          # Expr(value=Constant(value='Return a greeting...'))
+
+# ── Call ──
+src2 = "result = func(a, b, key=value)"
+call = ast.parse(src2).body[0].value   # Call node
+print(type(call))          # &lt;class 'ast.Call'&gt;
+print(ast.dump(call.func)) # Name(id='func', ctx=Load())
+print([ast.dump(a) for a in call.args])    # [Name(id='a'), Name(id='b')]
+print([ast.dump(k) for k in call.keywords])  # [keyword(arg='key', value=Name(id='value'))]
+
+# ── Assign vs AnnAssign vs AugAssign ──
+assigns = ast.parse("""
+x = 1           # Assign
+y: int = 2      # AnnAssign
+z += 3          # AugAssign
+""").body
+print(type(assigns[0]))    # Assign   — targets list + value
+print(type(assigns[1]))    # AnnAssign — target + annotation + value
+print(type(assigns[2]))    # AugAssign — target + op + value
+
+# ── BinOp ──
+binop = ast.parse("a + b * c").body[0].value   # outer +
+print(ast.dump(binop, indent=2))
+# BinOp(left=Name(id='a'), op=Add(), right=BinOp(left=Name(id='b'), op=Mult(), right=Name(id='c')))</code></pre><span class="code-label">node_types.py</span></div>
+
+    <p><code>FunctionDef</code> carries <code>name</code>, <code>args</code> (an <code>arguments</code> node with sub-fields for positional, keyword-only, *args, **kwargs), <code>body</code> (list of statements), <code>decorator_list</code>, <code>returns</code> (return annotation), and <code>type_comment</code>. The <code>arguments</code> node further splits into <code>posonlyargs</code>, <code>args</code>, <code>vararg</code>, <code>kwonlyargs</code>, <code>kw_defaults</code>, <code>kwarg</code>, and <code>defaults</code>.</p>
+
+    <p><code>Call</code> nodes have three fields: <code>func</code> (the expression being called), <code>args</code> (positional arguments), and <code>keywords</code> (keyword arguments as <code>keyword</code> nodes). Star-unpacking appears as <code>Starred</code> nodes inside <code>args</code>.</p>
+
+    <p>The three assignment forms serve different syntactic patterns: <code>Assign</code> for plain binding (note: <code>targets</code> is a <em>list</em> to support <code>a = b = value</code>), <code>AnnAssign</code> for annotated assignment, and <code>AugAssign</code> for in-place operators.</p>
+
+    <h2 id="walking-with-nodevisitor">3 · Walking with <code>ast.NodeVisitor</code></h2>
+
+    <p><code>ast.NodeVisitor</code> is the standard visitor pattern implementation for read-only traversal. You subclass it and define <code>visit_&lt;NodeType&gt;</code> methods — the dispatcher calls the right method based on the node's class name:</p>
+
+<div style="position:relative"><pre><code class="language-python">import ast
+from collections import defaultdict
+
+class FunctionAnalyser(ast.NodeVisitor):
+    """Analyses all function definitions in a module."""
+
+    def __init__(self):
+        self.functions: list[dict] = []
+        self._scope_stack: list[str] = []
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -&gt; None:
+        qualname = ".".join(self._scope_stack + [node.name])
+        info = {
+            "qualname":   qualname,
+            "line":       node.lineno,
+            "args":       [a.arg for a in node.args.args],
+            "has_return_annotation": node.returns is not None,
+            "is_async":   False,
+            "docstring":  ast.get_docstring(node),
+            "decorators": [ast.unparse(d) for d in node.decorator_list],
+        }
+        self.functions.append(info)
+        self._scope_stack.append(node.name)
+        self.generic_visit(node)   # recurse into nested functions
+        self._scope_stack.pop()
+
+    visit_AsyncFunctionDef = visit_FunctionDef   # same logic for async
+
+    def visit_ClassDef(self, node: ast.ClassDef) -&gt; None:
+        self._scope_stack.append(node.name)
+        self.generic_visit(node)
+        self._scope_stack.pop()
+
+
+class ImportCollector(ast.NodeVisitor):
+    """Collects all imported names from a module."""
+
+    def __init__(self):
+        self.imports: list[str] = []
+
+    def visit_Import(self, node: ast.Import) -&gt; None:
+        for alias in node.names:
+            self.imports.append(alias.asname or alias.name)
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -&gt; None:
+        for alias in node.names:
+            self.imports.append(alias.asname or alias.name)
+
+
+source = open(__file__).read()   # analyse this very script
+tree   = ast.parse(source)
+
+analyser = FunctionAnalyser()
+analyser.visit(tree)
+for fn in analyser.functions[:3]:
+    print(fn)</code></pre><span class="code-label">node_visitor.py</span></div>
+
+    <p><strong><code>generic_visit(node)</code></strong> calls <code>visit_*</code> on all child nodes. If you override a <code>visit_*</code> method without calling <code>generic_visit</code>, the subtree below that node is <em>not</em> visited. Always call <code>self.generic_visit(node)</code> at the end of visitor methods unless you intentionally want to stop recursion into child nodes.</p>
+
+    <div class="callout callout-tip"><strong>Tip:</strong> You can also use <code>ast.walk(tree)</code> for a flat, breadth-first iteration over all nodes when you don't need visitor dispatch or scope tracking. It's simpler but gives you no control over traversal order or early termination.</div>
+
+    <h2 id="transforming-with-nodetransformer">4 · Transforming with <code>ast.NodeTransformer</code></h2>
+
+    <p><code>ast.NodeTransformer</code> extends <code>NodeVisitor</code> to allow in-place rewriting. Each <code>visit_*</code> method returns a node — return the original to keep it, return a new node to replace it, or return <code>None</code> to delete it from the tree:</p>
+
+<div style="position:relative"><pre><code class="language-python">import ast
+
+class ConstantFolder(ast.NodeTransformer):
+    """
+    Simple constant folding: evaluate BinOp nodes with two Constant children
+    at compile time.
+    e.g. 2 + 3 → 5, "hello" + " world" → "hello world"
+    """
+    _OPS = {
+        ast.Add:  lambda a, b: a + b,
+        ast.Sub:  lambda a, b: a - b,
+        ast.Mult: lambda a, b: a * b,
+        ast.Div:  lambda a, b: a / b,
+    }
+
+    def visit_BinOp(self, node: ast.BinOp) -&gt; ast.AST:
+        self.generic_visit(node)   # fold children first (bottom-up)
+        op_type = type(node.op)
+        if (op_type in self._OPS
+                and isinstance(node.left,  ast.Constant)
+                and isinstance(node.right, ast.Constant)):
+            try:
+                result = self._OPS[op_type](node.left.value, node.right.value)
+                new_node = ast.Constant(value=result)
+                return ast.copy_location(new_node, node)
+            except Exception:
+                pass
+        return node
+
+
+source = "x = 2 + 3 * 4 + 1"
+tree   = ast.parse(source)
+print("Before:", ast.unparse(tree))   # x = 2 + 3 * 4 + 1
+
+folded = ConstantFolder().visit(tree)
+ast.fix_missing_locations(folded)
+print("After: ", ast.unparse(folded))  # x = 15  (all constants folded)
+
+# Compile and execute the transformed tree
+code = compile(folded, "&lt;string&gt;", "exec")
+ns   = {}
+exec(code, ns)
+print(ns["x"])   # 15</code></pre><span class="code-label">constant_folder.py</span></div>
+
+    <p>Two helper functions are critical when building new or replacement nodes:</p>
+
+    <ul>
+      <li><code>ast.copy_location(new_node, old_node)</code> — copies <code>lineno</code>, <code>col_offset</code>, <code>end_lineno</code>, <code>end_col_offset</code> from old to new. Use this whenever you create a replacement node so error messages reference the correct source location.</li>
+      <li><code>ast.fix_missing_locations(tree)</code> — fills in missing location info by copying from parent nodes. Call this on the entire tree after transformation, before compiling.</li>
+    </ul>
+
+    <div class="callout callout-warn"><strong>Warning:</strong> If you forget to call <code>ast.fix_missing_locations</code> before <code>compile()</code>, you'll get a <code>TypeError: required field "lineno" missing from stmt</code>. Always call it as the last step before compilation.</div>
+
+    <h2 id="building-a-linter">5 · Building a Linter</h2>
+
+    <p>Combining <code>NodeVisitor</code> with structured violation reporting gives you a working static analyser in under 100 lines. Here's a minimal linter that checks several common style rules:</p>
+
+<div style="position:relative"><pre><code class="language-python">import ast
+import sys
+from dataclasses import dataclass, field
+from pathlib import Path
+
+@dataclass
+class Violation:
+    file:    str
+    line:    int
+    col:     int
+    code:    str
+    message: str
+
+    def __str__(self):
+        return f"{self.file}:{self.line}:{self.col}: {self.code} {self.message}"
+
+
+class SimpleLinter(ast.NodeVisitor):
+    """A minimal linter checking a handful of style rules."""
+
+    def __init__(self, filename: str):
+        self.filename   = filename
+        self.violations: list[Violation] = []
+
+    def _add(self, node: ast.AST, code: str, msg: str) -&gt; None:
+        self.violations.append(Violation(
+            self.filename, node.lineno, node.col_offset, code, msg
+        ))
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -&gt; None:
+        # E001: missing docstring
+        if not ast.get_docstring(node):
+            self._add(node, "E001", f"function '{node.name}' missing docstring")
+
+        # E002: too many arguments (&gt; 7)
+        total_args = len(node.args.args) + len(node.args.posonlyargs) + len(node.args.kwonlyargs)
+        if total_args &gt; 7:
+            self._add(node, "E002", f"function '{node.name}' has {total_args} args (max 7)")
+
+        # E003: function name not snake_case
+        import re
+        if not re.match(r'^[a-z_][a-z0-9_]*$', node.name) and not node.name.startswith('_'):
+            self._add(node, "E003", f"function '{node.name}' is not snake_case")
+
+        self.generic_visit(node)
+
+    def visit_Import(self, node: ast.Import) -&gt; None:
+        # E004: bare star import is not allowed here (just a demo rule)
+        pass
+
+    def visit_Compare(self, node: ast.Compare) -&gt; None:
+        # E005: `x == None` should be `x is None`
+        for op, comp in zip(node.ops, node.comparators):
+            if isinstance(op, ast.Eq) and isinstance(comp, ast.Constant) and comp.value is None:
+                self._add(node, "E005", "use `is None` instead of `== None`")
+        self.generic_visit(node)
+
+    def visit_Assert(self, node: ast.Assert) -&gt; None:
+        # E006: assert with a tuple is always True
+        if isinstance(node.test, ast.Tuple):
+            self._add(node, "E006", "assert with a tuple is always True — did you mean assert a, b?")
+        self.generic_visit(node)
+
+
+def lint_file(path: str) -&gt; list[Violation]:
+    source = Path(path).read_text()
+    tree   = ast.parse(source, filename=path)
+    linter = SimpleLinter(path)
+    linter.visit(tree)
+    return linter.violations
+
+
+# Demo
+demo_source = '''
+def badName(x, y, z, a, b, c, d, e):
+    if x == None:
+        return 0
+    assert (x &gt; 0, "x must be positive")
+    return x + y
+'''
+Path("/tmp/demo.py").write_text(demo_source)
+for v in lint_file("/tmp/demo.py"):
+    print(v)</code></pre><span class="code-label">simple_linter.py</span></div>
+
+    <p>This linter detects: missing docstrings (E001), excessive arguments (E002), non-snake_case names (E003), equality comparisons with <code>None</code> (E005), and tuple assertions (E006). Real-world linters like flake8 and pylint use exactly the same visitor pattern — they simply have hundreds more rules, plugin architectures, and configuration systems layered on top.</p>
+
+    <h2 id="code-generation">6 · Code Generation with <code>ast.unparse</code></h2>
+
+    <p><code>ast.unparse()</code> (Python 3.9+) converts an AST back to valid Python source code. Combined with programmatic AST construction and transformation, this enables powerful code generation workflows:</p>
+
+<div style="position:relative"><pre><code class="language-python">import ast, textwrap
+
+def generate_dataclass(name: str, fields: list[tuple[str, str]]) -&gt; str:
+    """Generate a @dataclass definition from a list of (field_name, type_hint) pairs."""
+
+    # Build the AST programmatically
+    field_nodes = [
+        ast.AnnAssign(
+            target      = ast.Name(id=fname, ctx=ast.Store()),
+            annotation  = ast.Name(id=ftype, ctx=ast.Load()),
+            value       = None,
+            simple      = 1,
+        )
+        for fname, ftype in fields
+    ]
+
+    class_node = ast.ClassDef(
+        name            = name,
+        bases           = [],
+        keywords        = [],
+        body            = field_nodes or [ast.Pass()],
+        decorator_list  = [
+            ast.Attribute(
+                value = ast.Name(id="dataclasses", ctx=ast.Load()),
+                attr  = "dataclass",
+                ctx   = ast.Load(),
+            )
+        ],
+    )
+
+    module = ast.Module(body=[class_node], type_ignores=[])
+    ast.fix_missing_locations(module)
+
+    import_line = "import dataclasses\n\n"
+    return import_line + ast.unparse(module)
+
+
+print(generate_dataclass("Point", [("x", "float"), ("y", "float"), ("label", "str")]))
+# import dataclasses
+# @dataclasses.dataclass
+# class Point:
+#     x: float
+#     y: float
+#     label: str</code></pre><span class="code-label">codegen.py</span></div>
+
+    <p><code>ast.unparse</code> round-trip fidelity and limitations:</p>
+
+    <ul>
+      <li><strong>Whitespace and comments are LOST</strong> — they are not stored in the AST. If you need to preserve formatting, use <code>libcst</code> (a Concrete Syntax Tree library) instead.</li>
+      <li><strong>Operator precedence is faithfully reproduced</strong> with explicit parentheses where necessary to preserve semantics.</li>
+      <li><strong>String quoting may change</strong> — double quotes may become single quotes or vice versa, since the AST only stores the string value, not the original quoting style.</li>
+    </ul>
+
+    <div class="callout callout-tip"><strong>Tip:</strong> For production code generation, consider using <code>ast.unparse</code> as the final step in a pipeline: define templates as source strings, parse them into ASTs, splice in generated nodes, then unparse. This gives you the flexibility of AST manipulation with readable output.</div>
+
+    <h2 id="compiling-and-executing">7 · Compiling &amp; Executing Modified ASTs</h2>
+
+    <p>The full pipeline — <strong>parse → transform → compile → exec</strong> — lets you treat Python source as data, modify it programmatically, and run the result. The <code>compile()</code> builtin accepts AST nodes directly:</p>
+
+<div style="position:relative"><pre><code class="language-python">import ast
+
+# ── Pattern: parse → transform → compile → exec ──
+source = """
+import math
+
+def circle_area(r):
+    return math.pi * r ** 2
+
+def circle_perimeter(r):
+    return 2 * math.pi * r
+"""
+
+tree = ast.parse(source)
+
+# Add a __version__ = "generated" assignment at the top of the module
+version_node = ast.Assign(
+    targets = [ast.Name(id="__version__", ctx=ast.Store())],
+    value   = ast.Constant(value="generated"),
+    lineno  = 0, col_offset = 0,
+)
+tree.body.insert(0, version_node)
+ast.fix_missing_locations(tree)
+
+# Compile
+code = compile(tree, "&lt;generated&gt;", "exec")
+
+# Execute in a fresh namespace
+ns = {}
+exec(code, ns)
+
+print(ns["__version__"])                  # "generated"
+print(ns["circle_area"](5))               # 78.539...
+print(ns["circle_perimeter"](5))          # 31.415...
+
+# ── Pattern: eval mode for expressions ──
+expr_tree = ast.parse("x**2 + y**2", mode="eval")
+# Inject specific values by rewriting Name nodes
+class VarReplacer(ast.NodeTransformer):
+    def __init__(self, values: dict):
+        self.values = values
+    def visit_Name(self, node):
+        if node.id in self.values:
+            return ast.copy_location(ast.Constant(value=self.values[node.id]), node)
+        return node
+
+replaced = VarReplacer({"x": 3, "y": 4}).visit(expr_tree)
+ast.fix_missing_locations(replaced)
+result = eval(compile(replaced, "&lt;expr&gt;", "eval"))
+print(result)   # 25  (3² + 4²)
+
+# ── ast.literal_eval: safe evaluation of literals ──
+import ast
+safe_data = ast.literal_eval('{"key": [1, 2, 3], "flag": True}')
+print(safe_data)   # {'key': [1, 2, 3], 'flag': True}
+# Never use eval() for untrusted input — use ast.literal_eval for data structures</code></pre><span class="code-label">compile_exec.py</span></div>
+
+    <p>The <code>compile()</code> function accepts three modes:</p>
+
+    <table>
+      <thead><tr><th>Mode</th><th>AST Root Type</th><th>Use Case</th></tr></thead>
+      <tbody>
+        <tr><td><code>"exec"</code></td><td><code>ast.Module</code></td><td>Statements (module-level code)</td></tr>
+        <tr><td><code>"eval"</code></td><td><code>ast.Expression</code></td><td>Single expression → returns a value</td></tr>
+        <tr><td><code>"single"</code></td><td><code>ast.Interactive</code></td><td>Single interactive statement (REPL-like)</td></tr>
+      </tbody>
+    </table>
+
+    <div class="callout callout-warn"><strong>Warning:</strong> <code>ast.literal_eval</code> is the ONLY safe way to evaluate untrusted Python-like data structures. It only accepts literals (<code>str</code>, <code>bytes</code>, <code>int</code>, <code>float</code>, <code>complex</code>, <code>bool</code>, <code>None</code>, <code>list</code>, <code>tuple</code>, <code>dict</code>, <code>set</code>). Any other expression raises <code>ValueError</code>. Never use <code>eval()</code> on untrusted input — it executes arbitrary code.</div>
+
+    <!-- ── 8. Real-World AST Applications ── -->
+    <h2 id="real-world">Real-World AST Applications</h2>
+    <p>
+      The AST is the foundation of Python's entire tooling ecosystem.
+      Here is how major tools use it.
+    </p>
+
+    <table>
+      <thead>
+        <tr><th>Tool</th><th>AST technique</th><th>What it does</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><strong>pytest</strong></td><td><code>NodeTransformer</code></td><td>Rewrites <code>assert</code> statements to produce rich failure messages showing sub-expression values</td></tr>
+        <tr><td><strong>black</strong></td><td>Parse → normalise → <code>ast.unparse</code></td><td>Re-formats code to a canonical style by round-tripping through the AST</td></tr>
+        <tr><td><strong>mypy / pyright</strong></td><td><code>NodeVisitor</code> + type inference</td><td>Walks the AST resolving types of every expression via a constraint solver</td></tr>
+        <tr><td><strong>coverage.py</strong></td><td><code>NodeVisitor</code> + <code>sys.settrace</code></td><td>Finds all executable lines by walking the AST, then instruments them via trace hooks</td></tr>
+        <tr><td><strong>flake8 / pylint</strong></td><td><code>NodeVisitor</code> plugins</td><td>Each check is a visitor that fires on specific node types</td></tr>
+        <tr><td><strong>numba</strong></td><td>Parse → custom IR → LLVM</td><td>Compiles numeric Python functions to native code via its own AST-to-IR pipeline</td></tr>
+        <tr><td><strong>jinja2 / mako</strong></td><td>Custom parser + code generation</td><td>Parses template language, generates Python AST, compiles to bytecode</td></tr>
+        <tr><td><strong>SQLAlchemy ORM</strong></td><td>Expression objects (AST-like)</td><td>Builds a query expression tree in Python, then "compiles" it to SQL</td></tr>
+      </tbody>
+    </table>
+
+    <h3>pytest's assert rewriting — a mini reproduction</h3>
+    <div style="position:relative">
+      <pre><code class="language-python">import ast
+
+class AssertRewriter(ast.NodeTransformer):
+    """
+    Rewrites `assert expr` into code that prints sub-expression values on failure.
+    Simplified version of what pytest does.
+    """
+    def visit_Assert(self, node: ast.Assert) -> ast.AST:
+        self.generic_visit(node)
+
+        if not isinstance(node.test, ast.Compare):
+            return node   # only rewrite comparisons for this demo
+
+        # Build: if not (left op right): raise AssertionError(f"left={left!r} right={right!r}")
+        left  = node.test.left
+        right = node.test.comparators[0]
+
+        fmt_msg = ast.JoinedStr(values=[
+            ast.Constant(value="assert failed: left="),
+            ast.FormattedValue(value=ast.copy_location(ast.parse(ast.unparse(left), mode="eval").body, left),
+                               conversion=ord("r"), format_spec=None),
+            ast.Constant(value=", right="),
+            ast.FormattedValue(value=ast.copy_location(ast.parse(ast.unparse(right), mode="eval").body, right),
+                               conversion=ord("r"), format_spec=None),
+        ])
+
+        raise_node = ast.Raise(
+            exc=ast.Call(
+                func=ast.Name(id="AssertionError", ctx=ast.Load()),
+                args=[fmt_msg], keywords=[],
+            ),
+            cause=None,
+        )
+
+        if_node = ast.If(
+            test=ast.UnaryOp(op=ast.Not(), operand=node.test),
+            body=[raise_node],
+            orelse=[],
+        )
+        return ast.copy_location(if_node, node)
+
+
+src = """
+x = 10
+y = 20
+assert x == y
+"""
+tree = ast.parse(src)
+rewritten = AssertRewriter().visit(tree)
+ast.fix_missing_locations(rewritten)
+try:
+    exec(compile(rewritten, "<test>", "exec"))
+except AssertionError as e:
+    print(e)   # assert failed: left=10, right=20</code></pre>
+      <span class="code-label">assert_rewriter.py</span>
+    </div>
+
+    <!-- ── 9. Type-Annotated AST Inspection ── -->
+    <h2 id="annotation-inspector">Type Annotation Inspector</h2>
+    <p>
+      A practical visitor that extracts every type annotation from a codebase —
+      the technique used by documentation generators and type stub generators.
+    </p>
+    <div style="position:relative">
+      <pre><code class="language-python">import ast
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Optional
+
+@dataclass
+class AnnotationRecord:
+    kind:       str         # "function_arg", "return", "variable", "attribute"
+    name:       str
+    annotation: str
+    qualname:   str
+    line:       int
+
+class AnnotationExtractor(ast.NodeVisitor):
+    def __init__(self, filename: str):
+        self.filename  = filename
+        self.records:  list[AnnotationRecord] = []
+        self._scope:   list[str] = []
+
+    def _qualname(self, name: str) -> str:
+        return ".".join(self._scope + [name])
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        qualname = self._qualname(node.name)
+
+        # Argument annotations
+        for arg in node.args.args + node.args.posonlyargs + node.args.kwonlyargs:
+            if arg.annotation:
+                self.records.append(AnnotationRecord(
+                    kind="function_arg", name=arg.arg,
+                    annotation=ast.unparse(arg.annotation),
+                    qualname=qualname, line=arg.col_offset,
+                ))
+
+        # Return annotation
+        if node.returns:
+            self.records.append(AnnotationRecord(
+                kind="return", name=node.name,
+                annotation=ast.unparse(node.returns),
+                qualname=qualname, line=node.lineno,
+            ))
+
+        self._scope.append(node.name)
+        self.generic_visit(node)
+        self._scope.pop()
+
+    visit_AsyncFunctionDef = visit_FunctionDef
+
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+        name = ast.unparse(node.target)
+        self.records.append(AnnotationRecord(
+            kind="variable", name=name,
+            annotation=ast.unparse(node.annotation),
+            qualname=self._qualname(name),
+            line=node.lineno,
+        ))
+        self.generic_visit(node)
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        self._scope.append(node.name)
+        self.generic_visit(node)
+        self._scope.pop()
+
+
+def extract_annotations(source: str, filename: str = "<string>") -> list[AnnotationRecord]:
+    tree      = ast.parse(source, filename)
+    extractor = AnnotationExtractor(filename)
+    extractor.visit(tree)
+    return extractor.records
+
+
+sample = '''
+class Config:
+    debug: bool = False
+    host: str = "localhost"
+
+    def connect(self, port: int, timeout: float = 5.0) -> bool: ...
+'''
+for rec in extract_annotations(sample):
+    print(f"  {rec.kind:12s}  {rec.qualname:30s}  {rec.annotation}")</code></pre>
+      <span class="code-label">annotation_extractor.py</span>
+    </div>
+
+    <!-- ── 10. Building a Code Complexity Metric ── -->
+    <h2 id="cyclomatic-complexity">Cyclomatic Complexity Metric</h2>
+    <p>
+      Cyclomatic complexity counts the number of linearly independent paths through
+      a function. It is a proxy for how hard a function is to test and understand.
+      Each <code>if</code>, <code>elif</code>, <code>for</code>, <code>while</code>,
+      <code>except</code>, <code>with</code>, and boolean operator adds 1 to the count.
+    </p>
+    <div style="position:relative">
+      <pre><code class="language-python">import ast
+from dataclasses import dataclass
+
+@dataclass
+class ComplexityResult:
+    name:       str
+    qualname:   str
+    line:       int
+    complexity: int
+
+    def rating(self) -> str:
+        if self.complexity <= 5:   return "A (simple)"
+        if self.complexity <= 10:  return "B (moderate)"
+        if self.complexity <= 20:  return "C (complex)"
+        return "D (unmaintainable)"
+
+    def __str__(self):
+        return (f"  {self.qualname:40s} CC={self.complexity:3d}  "
+                f"{self.rating()}")
+
+
+class CyclomaticComplexityVisitor(ast.NodeVisitor):
+    """Compute McCabe cyclomatic complexity for every function."""
+
+    # These node types each add 1 to the complexity count
+    BRANCH_NODES = (
+        ast.If, ast.For, ast.AsyncFor, ast.While,
+        ast.ExceptHandler, ast.With, ast.AsyncWith,
+    )
+
+    def __init__(self):
+        self.results: list[ComplexityResult] = []
+        self._scope:  list[str] = []
+
+    def _count_complexity(self, node: ast.AST) -> int:
+        count = 1   # base complexity
+        for child in ast.walk(node):
+            if isinstance(child, self.BRANCH_NODES):
+                count += 1
+            elif isinstance(child, ast.BoolOp):
+                count += len(child.values) - 1   # and/or adds branches
+        return count
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        qualname = ".".join(self._scope + [node.name])
+        cc = self._count_complexity(node)
+        self.results.append(ComplexityResult(
+            name=node.name, qualname=qualname,
+            line=node.lineno, complexity=cc,
+        ))
+        self._scope.append(node.name)
+        # Do NOT call generic_visit here — walk() inside _count_complexity
+        # already handles nested functions; we visit them manually to get
+        # their own entries in results
+        for child in ast.iter_child_nodes(node):
+            self.visit(child)
+        self._scope.pop()
+
+    visit_AsyncFunctionDef = visit_FunctionDef
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        self._scope.append(node.name)
+        self.generic_visit(node)
+        self._scope.pop()
+
+
+def analyse_complexity(source: str, threshold: int = 10) -> None:
+    tree    = ast.parse(source)
+    visitor = CyclomaticComplexityVisitor()
+    visitor.visit(tree)
+
+    print(f"\nCyclomatic Complexity Report  (threshold={threshold})")
+    print("=" * 60)
+    over = [r for r in visitor.results if r.complexity > threshold]
+    for r in sorted(visitor.results, key=lambda x: -x.complexity):
+        marker = " ← REFACTOR" if r.complexity > threshold else ""
+        print(str(r) + marker)
+    if over:
+        print(f"\n{len(over)} function(s) exceed threshold {threshold}")
+
+
+# Test
+analyse_complexity(open(__file__).read())</code></pre>
+      <span class="code-label">complexity.py</span>
+    </div>
+
+    <!-- ── Best Practices ── -->
+    <h2 id="best-practices">Best Practices</h2>
+    <ul>
+      <li><strong>Always call <code>ast.fix_missing_locations(tree)</code></strong> after building or modifying AST nodes — every node needs <code>lineno</code>, <code>col_offset</code>, <code>end_lineno</code>, <code>end_col_offset</code> before <code>compile()</code> will accept it.</li>
+      <li><strong>Use <code>ast.copy_location(new_node, old_node)</code></strong> when replacing one node with another — this preserves line number information so tracebacks point to the right line.</li>
+      <li><strong>Call <code>self.generic_visit(node)</code> in <code>NodeTransformer</code> methods</strong> before or after your transformation to recurse into children — omitting it stops traversal at that node.</li>
+      <li><strong>Use <code>ast.unparse()</code> for readable debug output and code generation</strong> — it is available from Python 3.9+. For older versions use the <code>astunparse</code> third-party package.</li>
+      <li><strong>Prefer <code>ast.literal_eval()</code> over <code>eval()</code> for parsing data literals</strong> — it is safe for untrusted input; <code>eval()</code> is never safe for untrusted input.</li>
+      <li><strong>Bottom-up transforms in <code>NodeTransformer</code></strong>: call <code>self.generic_visit(node)</code> BEFORE applying your transformation so child nodes are already transformed when you inspect them.</li>
+      <li><strong>Cache parsed trees when analysing many files</strong> — <code>ast.parse()</code> is fast but not free; if you need multiple passes over the same file (lint + type-check + complexity), parse once and share the tree.</li>
+      <li><strong>Test transformers with <code>ast.unparse(before)</code> vs <code>ast.unparse(after)</code></strong> — comparing unparsed strings is the clearest way to assert that a transformation does exactly what you expect.</li>
+    </ul>
+
+    <!-- ── Exercises ── -->
+    <h2 id="exercises">Exercises</h2>
+    <div class="exercise-section">
+
+      <div class="exercise">
+        <h3>Exercise 1 — Dead Code Detector</h3>
+        <p>
+          Write an AST visitor that detects unreachable statements — code that
+          follows a <code>return</code>, <code>raise</code>, <code>break</code>,
+          or <code>continue</code> at the same indentation level:
+        </p>
+        <ul>
+          <li>Visit every function body; for each list of statements, scan for a terminating statement followed by more statements.</li>
+          <li>Report: file, line, and the type of the dead code.</li>
+          <li>Test on a file with intentional dead code (assignment after return, code after raise).</li>
+          <li>Handle nested blocks: dead code inside an <code>if</code> branch is fine if there is an else branch that continues.</li>
+        </ul>
+        <details>
+          <summary>💡 Hint</summary>
+          <pre><code class="language-python">import ast
+
+TERMINATORS = (ast.Return, ast.Raise, ast.Break, ast.Continue)
+
+def find_dead_code(stmts: list[ast.stmt], filename: str) -> list[str]:
+    issues = []
+    for i, stmt in enumerate(stmts):
+        if isinstance(stmt, TERMINATORS) and i + 1 < len(stmts):
+            next_stmt = stmts[i + 1]
+            issues.append(
+                f"{filename}:{next_stmt.lineno}: unreachable code after "
+                f"{type(stmt).__name__}"
+            )
+    return issues
+
+class DeadCodeVisitor(ast.NodeVisitor):
+    def __init__(self, filename):
+        self.filename = filename
+        self.issues: list[str] = []
+
+    def visit_FunctionDef(self, node):
+        self.issues.extend(find_dead_code(node.body, self.filename))
+        self.generic_visit(node)
+
+    visit_AsyncFunctionDef = visit_FunctionDef
+
+    def visit_If(self, node):
+        self.issues.extend(find_dead_code(node.body, self.filename))
+        self.issues.extend(find_dead_code(node.orelse, self.filename))
+        self.generic_visit(node)</code></pre>
+        </details>
+      </div>
+
+      <div class="exercise">
+        <h3>Exercise 2 — Auto-Timing Decorator Injector</h3>
+        <p>
+          Write a <code>NodeTransformer</code> that automatically wraps every
+          function in a timing decorator — without modifying the original source:
+        </p>
+        <ul>
+          <li>Transform every <code>FunctionDef</code> (that isn't already decorated with <code>@timed</code>) to add <code>@timed</code> as the first decorator.</li>
+          <li>The <code>timed</code> decorator should be injected as an import at the top of the module.</li>
+          <li>Use <code>ast.parse</code> + transform + <code>compile</code> + <code>exec</code> to run the transformed module.</li>
+          <li>Verify that calling any function in the transformed module prints its execution time.</li>
+        </ul>
+        <details>
+          <summary>💡 Hint</summary>
+          <pre><code class="language-python">import ast, time, functools
+
+def timed(fn):
+    @functools.wraps(fn)
+    def wrapper(*a, **kw):
+        t0 = time.perf_counter()
+        result = fn(*a, **kw)
+        print(f"  {fn.__name__}() took {(time.perf_counter()-t0)*1000:.2f}ms")
+        return result
+    return wrapper
+
+class TimingInjector(ast.NodeTransformer):
+    def visit_FunctionDef(self, node):
+        self.generic_visit(node)
+        already = any(
+            (isinstance(d, ast.Name) and d.id == "timed") or
+            (isinstance(d, ast.Attribute) and d.attr == "timed")
+            for d in node.decorator_list
+        )
+        if not already:
+            node.decorator_list.insert(0, ast.Name(id="timed", ctx=ast.Load()))
+        return node
+    visit_AsyncFunctionDef = visit_FunctionDef
+
+src = """
+def add(a, b): return a + b
+def fib(n): return n if n < 2 else fib(n-1) + fib(n-2)
+"""
+tree = ast.parse(src)
+new_tree = TimingInjector().visit(tree)
+ast.fix_missing_locations(new_tree)
+ns = {"timed": timed}
+exec(compile(new_tree, "<timed>", "exec"), ns)
+print(ns["add"](3, 4))
+print(ns["fib"](10))</code></pre>
+        </details>
+      </div>
+
+      <div class="exercise">
+        <h3>Exercise 3 — SQL Query Builder via AST</h3>
+        <p>
+          Build a simple expression compiler that converts Python comparison
+          expressions into SQL WHERE clauses using the AST:
+        </p>
+        <ul>
+          <li>Accept a Python expression string like <code>"age > 18 and name == 'Alice'"</code>.</li>
+          <li>Parse it with <code>ast.parse(expr, mode="eval")</code>.</li>
+          <li>Walk the expression AST, converting: <code>BoolOp(And)</code> → <code>AND</code>, <code>BoolOp(Or)</code> → <code>OR</code>, <code>Compare</code> nodes → SQL comparisons, <code>Name</code> → column name, <code>Constant</code> → literal value.</li>
+          <li>Return the SQL WHERE clause string.</li>
+          <li>Test: <code>"age &gt; 18 and (status == 'active' or role == 'admin')"</code> → <code>age &gt; 18 AND (status = 'active' OR role = 'admin')</code>.</li>
+        </ul>
+        <details>
+          <summary>💡 Hint</summary>
+          <pre><code class="language-python">import ast
+
+OP_MAP = {
+    ast.Eq:    "=",  ast.NotEq: "!=",
+    ast.Lt:    "<",  ast.LtE:   "<=",
+    ast.Gt:    ">",  ast.GtE:   ">=",
+    ast.In:    "IN", ast.NotIn: "NOT IN",
+    ast.Is:    "IS", ast.IsNot: "IS NOT",
+}
+
+def to_sql(node: ast.expr) -> str:
+    if isinstance(node, ast.BoolOp):
+        op = "AND" if isinstance(node.op, ast.And) else "OR"
+        parts = [f"({to_sql(v)})" if isinstance(v, ast.BoolOp) else to_sql(v)
+                 for v in node.values]
+        return f" {op} ".join(parts)
+    elif isinstance(node, ast.Compare):
+        left = to_sql(node.left)
+        parts = []
+        for op, comp in zip(node.ops, node.comparators):
+            parts.append(f"{left} {OP_MAP[type(op)]} {to_sql(comp)}")
+        return " AND ".join(parts)
+    elif isinstance(node, ast.Name):
+        return node.id
+    elif isinstance(node, ast.Constant):
+        return f"'{node.value}'" if isinstance(node.value, str) else str(node.value)
+    else:
+        raise ValueError(f"Unsupported node: {type(node).__name__}")
+
+def expr_to_sql(expr: str) -> str:
+    tree = ast.parse(expr, mode="eval")
+    return to_sql(tree.body)
+
+print(expr_to_sql("age > 18 and status == 'active'"))
+# age > 18 AND status = 'active'</code></pre>
+        </details>
+      </div>
+
+    </div><!-- /exercise-section -->
+
+    <div id="quiz-section"></div>
+    <div id="lesson-nav-footer"></div>
+  </div><!-- /content -->
+</div><!-- /main -->
+
+<script src="../assets/nav-data.js"></script>
+<script src="../assets/nav.js"></script>
+<script src="../assets/quiz.js"></script>
+<script src="../assets/highlight.js"></script>
+
+<script>
+buildLessonFooter();
+
+QuizWidget.render("quiz-section", [
+  {
+    question: "What is the difference between `ast.NodeVisitor` and `ast.NodeTransformer`?",
+    options: [
+      "NodeVisitor reads the AST; NodeTransformer writes a new AST from scratch",
+      "NodeVisitor traverses the tree for inspection without modifying it; NodeTransformer traverses and can replace nodes by returning a new node from visit_* methods — returning the original node leaves it unchanged, returning a different node replaces it, returning None removes it",
+      "NodeVisitor is for expression nodes; NodeTransformer is for statement nodes",
+      "They are identical; NodeTransformer just adds a convenience compile() method"
+    ],
+    correct: 1,
+    explanation: "NodeVisitor is read-only — visit_* methods return None and the tree is unchanged after traversal. NodeTransformer subclasses NodeVisitor but intercepts the return value of each visit_* method: if you return the node unchanged it stays, if you return a different AST node it replaces the original, if you return None the node is removed from its parent's list. This enables surgical in-place tree rewriting, which is how pytest rewrites assert statements, black normalises code, and macro systems inject new code."
+  },
+  {
+    question: "Why must you call `ast.fix_missing_locations(tree)` after building or modifying AST nodes?",
+    options: [
+      "It validates that all node types are correct and raises SyntaxError for invalid trees",
+      "Every AST node must have lineno, col_offset, end_lineno, and end_col_offset attributes before compile() will accept it; fix_missing_locations propagates location info from parent nodes to any child nodes that are missing it",
+      "It recalculates the col_offset after column-shifting transformations to keep source maps accurate",
+      "It is only needed when using ast.unparse(); compile() does not require location info"
+    ],
+    correct: 1,
+    explanation: "Python's compile() function requires every statement and expression node to have lineno, col_offset, end_lineno, and end_col_offset set. When you create new AST nodes programmatically or modify existing ones, these attributes may be missing. ast.fix_missing_locations walks the entire tree and, for any node missing location attributes, copies them from the nearest ancestor that has them. Without this call, compile() raises TypeError: required field lineno missing from stmt."
+  },
+  {
+    question: "What does `ast.literal_eval()` do, and why should you use it instead of `eval()` for parsing data?",
+    options: [
+      "ast.literal_eval() evaluates any Python expression; eval() is restricted to literals only",
+      "ast.literal_eval() safely parses only Python literal structures (str, int, float, bool, None, list, tuple, dict, set) and raises ValueError for anything else; eval() executes arbitrary Python code and is unsafe for untrusted input",
+      "ast.literal_eval() uses the AST to parse, making it 10x faster than eval() for data structures",
+      "They are equivalent for literal data; ast.literal_eval() just adds type validation afterward"
+    ],
+    correct: 1,
+    explanation: "eval() compiles and executes any Python expression in the current scope — eval('__import__(\"os\").system(\"rm -rf /\")') would execute a shell command. ast.literal_eval() parses the input into an AST and only evaluates if the entire tree consists of literal nodes (Constant, List, Tuple, Dict, Set, and UnaryOp with a numeric operand for negative numbers). Any Name, Call, Attribute, or other non-literal node raises ValueError immediately. Use ast.literal_eval() whenever you need to parse JSON-like data from untrusted sources."
+  },
+  {
+    question: "Why does `ast.NodeTransformer` process nodes bottom-up (calling `self.generic_visit(node)` before the transformation)?",
+    options: [
+      "Bottom-up processing is required by Python's tree structure — parent nodes cannot be visited before child nodes",
+      "Calling generic_visit first recursively transforms all children; when your visit_* method then inspects or replaces the node, child sub-trees are already in their final transformed state — enabling correct composition of multiple transformations",
+      "Top-down processing would cause infinite recursion because transformed nodes are re-visited",
+      "It is a performance optimisation; bottom-up allows early termination if a parent node is removed"
+    ],
+    correct: 1,
+    explanation: "Consider constant folding: to fold `2 + (3 * 4)`, you must first fold `3 * 4` → 12, giving `2 + 12`, then fold that → 14. If you processed top-down, `2 + (3 * 4)` would be inspected before `3 * 4` is simplified, so the left and right children would not both be Constant nodes yet. By calling generic_visit(node) first (which recursively visits all children), all sub-expressions are in their final transformed state when the current node's visit method runs. This enables correct composition and is the standard pattern."
+  },
+  {
+    question: "What information is preserved in an AST, and what is discarded?",
+    options: [
+      "The AST preserves all information including comments, whitespace, and string quoting style",
+      "The AST preserves syntactic structure, operator precedence, line/column numbers, and string/number values; it discards comments, blank lines, whitespace formatting, and string quoting style (single vs double quotes)",
+      "The AST discards line numbers for performance; they must be reconstructed by ast.fix_missing_locations",
+      "The AST preserves everything except the original source encoding (UTF-8 vs ASCII)"
+    ],
+    correct: 1,
+    explanation: "The AST is an abstract representation of code structure — it intentionally discards non-semantic information. What IS preserved: every statement and expression node, operator types, constant values, variable names, line and column numbers (for error reporting), and docstrings (as the first Constant in a function/class body). What IS NOT preserved: comments (no AST node type for comments), blank lines, indentation, whitespace around operators, and the choice between single/double quotes for strings. This is why ast.unparse() produces syntactically correct but differently formatted output than the original source."
+  }
+]);
+</script>
+</body>
+</html>

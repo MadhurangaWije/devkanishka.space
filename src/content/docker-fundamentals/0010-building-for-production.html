@@ -1,0 +1,431 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lesson 10: Building for Production</title>
+  <link rel="stylesheet" href="../assets/lesson-style.css">
+</head>
+<body>
+
+  <div class="lesson-meta">
+    <span>📦 Lesson 10 of 12</span>
+    <span>⏱️ 14–18 minutes</span>
+    <span>🔒 Production Hardening</span>
+  </div>
+
+  <h1>Building for Production</h1>
+  <p class="subtitle">Development images are bloated, root-running, unscanned playgrounds. Production images must be minimal, locked-down, signed, and reproducible. This lesson shows you how to build images that belong in production.</p>
+
+  <!-- ============================================================ -->
+  <h2>1. The Production Mindset</h2>
+
+  <p>A development image optimises for <em>convenience</em>: editors, debuggers, build tools, running as root. A production image optimises for <em>security and reliability</em>. The rules are different:</p>
+
+  <ul>
+    <li><strong>Minimal surface area</strong> — every binary you ship is a potential exploit vector</li>
+    <li><strong>No build tools</strong> — compilers, package managers, and headers stay in the build stage</li>
+    <li><strong>No secrets</strong> — API keys, credentials, and tokens never baked into the image</li>
+    <li><strong>Non-root user</strong> — the container process runs with least privilege</li>
+    <li><strong>Deterministic builds</strong> — the same commit always produces the same image</li>
+  </ul>
+
+  <div class="callout warning">
+    <div class="callout-title">Dev ≠ Prod</div>
+    <p>If your production Dockerfile starts with <code>FROM node:latest</code> and runs as root with no health checks, you don't have a production image — you have a development image deployed to production. That distinction matters when an attacker gets in.</p>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>2. Base Image Selection</h2>
+
+  <p>Your base image choice determines 80% of your image's size, vulnerability count, and attack surface. Here are your options:</p>
+
+  <table>
+    <thead>
+      <tr>
+        <th>Base Image</th>
+        <th>Size</th>
+        <th>Shell</th>
+        <th>Pkg Manager</th>
+        <th>Use Case</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>Full</strong> (debian, ubuntu)</td>
+        <td>~120 MB</td>
+        <td>✅ bash</td>
+        <td>✅ apt</td>
+        <td>Debugging, legacy apps needing many system libs</td>
+      </tr>
+      <tr>
+        <td><strong>Slim</strong> (debian-slim)</td>
+        <td>~80 MB</td>
+        <td>✅ bash</td>
+        <td>✅ apt</td>
+        <td>Good default when you need some system packages</td>
+      </tr>
+      <tr>
+        <td><strong>Alpine</strong></td>
+        <td>~5 MB</td>
+        <td>✅ sh</td>
+        <td>✅ apk</td>
+        <td>Small images; watch for musl libc compatibility</td>
+      </tr>
+      <tr>
+        <td><strong>Distroless</strong> (Google)</td>
+        <td>~15–25 MB</td>
+        <td>❌</td>
+        <td>❌</td>
+        <td>Production apps (Java, Python, Node, Go, Rust)</td>
+      </tr>
+      <tr>
+        <td><strong>Scratch</strong></td>
+        <td>0 MB</td>
+        <td>❌</td>
+        <td>❌</td>
+        <td>Statically-compiled binaries (Go, Rust)</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="callout">
+    <div class="callout-title">Alpine Gotcha: musl vs glibc</div>
+    <p>Alpine uses <code>musl libc</code> instead of glibc. Most software works fine, but some compiled binaries or Python packages with C extensions may segfault or fail to load. Always test thoroughly when switching to Alpine.</p>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>3. Running as Non-Root</h2>
+
+  <p>By default, the process inside a container runs as <code>root</code> (UID 0). "But it's in a container!" you say. Here's why that still matters:</p>
+
+  <ul>
+    <li><strong>Kernel exploits</strong> — a container escape exploit plus root access = full host compromise</li>
+    <li><strong>Volume mounts</strong> — files written to bind mounts are owned by root on the host</li>
+    <li><strong>Principle of least privilege</strong> — your web server doesn't need to install packages</li>
+  </ul>
+
+  <p>The fix is simple — add a <code>USER</code> instruction:</p>
+
+  <pre><code># Create a non-root user
+RUN addgroup --system --gid 1001 appgroup && \
+    adduser --system --uid 1001 --ingroup appgroup appuser
+
+# Set ownership of app files
+COPY --chown=1001:1001 ./app /app
+
+# Switch to non-root
+USER 1001
+
+CMD ["/app/server"]</code></pre>
+
+  <div class="callout">
+    <div class="callout-title">Use Numeric UIDs</div>
+    <p>Always use numeric UIDs (<code>USER 1001</code>) rather than names (<code>USER appuser</code>). Numeric UIDs work even in distroless/scratch images where <code>/etc/passwd</code> doesn't exist, and they're unambiguous across environments.</p>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>4. Security Scanning</h2>
+
+  <p>Your image contains an OS distribution and application dependencies — both can have known vulnerabilities (CVEs). Scanning tools check every installed package against vulnerability databases.</p>
+
+  <p><strong>Popular scanners:</strong></p>
+  <ul>
+    <li><strong>Trivy</strong> (Aqua Security) — fast, open-source, broad coverage</li>
+    <li><strong>Grype</strong> (Anchore) — fast, open-source, good SBOM integration</li>
+    <li><strong>Docker Scout</strong> — built into Docker Desktop, policy-based</li>
+    <li><strong>Snyk</strong> — SaaS, great IDE integration, auto-fix suggestions</li>
+  </ul>
+
+  <pre><code># Scan with Trivy
+$ trivy image myapp:latest
+
+myapp:latest (debian 12.4)
+============================
+Total: 23 (UNKNOWN: 0, LOW: 12, MEDIUM: 8, HIGH: 2, CRITICAL: 1)
+
+┌──────────────┬──────────────────┬──────────┬─────────────────────┐
+│   Library    │  Vulnerability   │ Severity │   Fixed Version     │
+├──────────────┼──────────────────┼──────────┼─────────────────────┤
+│ libssl3      │ CVE-2024-0727    │ CRITICAL │ 3.0.13-1~deb12u1    │
+│ libcurl4     │ CVE-2024-2398    │ HIGH     │ 7.88.1-10+deb12u5   │
+│ zlib1g       │ CVE-2023-45853   │ HIGH     │ 1:1.2.13.dfsg-1+d.. │
+└──────────────┴──────────────────┴──────────┴─────────────────────┘</code></pre>
+
+  <p><strong>CI integration</strong> — fail the pipeline if critical vulnerabilities are found:</p>
+
+  <pre><code># In GitHub Actions:
+- name: Scan image
+  run: trivy image --exit-code 1 --severity CRITICAL myapp:${{ github.sha }}</code></pre>
+
+  <!-- ============================================================ -->
+  <h2>5. Reducing Attack Surface</h2>
+
+  <p>Every component you remove from your image is one less thing an attacker can exploit if they gain access:</p>
+
+  <ul>
+    <li><strong>No shell</strong> — use distroless; an attacker can't <code>exec</code> into a shell that doesn't exist</li>
+    <li><strong>Read-only filesystem</strong> — <code>docker run --read-only</code> prevents writing to the container filesystem</li>
+    <li><strong>Drop capabilities</strong> — <code>--cap-drop=ALL --cap-add=NET_BIND_SERVICE</code> removes unneeded kernel capabilities</li>
+    <li><strong>Minimal packages</strong> — no curl, no wget, no package manager in the final image</li>
+  </ul>
+
+  <pre><code># Runtime hardening flags
+docker run \
+  --read-only \
+  --tmpfs /tmp \
+  --cap-drop=ALL \
+  --cap-add=NET_BIND_SERVICE \
+  --security-opt=no-new-privileges \
+  myapp:prod</code></pre>
+
+  <div class="callout">
+    <div class="callout-title">Each Removal = One Less Exploit</div>
+    <p>No <code>curl</code> in the image? The attacker can't download additional tools. No shell? They can't run arbitrary commands. No package manager? They can't install anything. Stack these restrictions.</p>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>6. Reproducible Builds</h2>
+
+  <p>If you can't reproduce your build, you can't audit it, roll it back, or trust it. Reproducibility means the same inputs always yield the same image.</p>
+
+  <ul>
+    <li><strong>Pin base image by digest</strong> — tags are mutable; digests are not</li>
+    <li><strong>Pin package versions</strong> — <code>apt-get install curl=7.88.1-10</code></li>
+    <li><strong>Use lockfiles</strong> — <code>package-lock.json</code>, <code>Gemfile.lock</code>, <code>go.sum</code></li>
+    <li><strong>Never use <code>latest</code></strong> — it means something different tomorrow</li>
+  </ul>
+
+  <pre><code># ❌ Non-reproducible
+FROM node:20
+RUN apt-get update && apt-get install -y curl
+
+# ✅ Reproducible
+FROM node:20.11.1-bookworm-slim@sha256:abc123...
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl=7.88.1-10+deb12u5 \
+ && rm -rf /var/lib/apt/lists/*</code></pre>
+
+  <div class="callout warning">
+    <div class="callout-title">Why Digests Matter</div>
+    <p>The tag <code>node:20</code> pointed to one image yesterday and a different one today (after a security patch was published). Your build broke and you don't know why. A digest (<code>@sha256:...</code>) is immutable — it always refers to the exact same image layers.</p>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>7. Image Signing &amp; Verification</h2>
+
+  <p>Scanning tells you an image is safe <em>now</em>. Signing tells you it hasn't been tampered with <em>since</em>. You need both.</p>
+
+  <ul>
+    <li><strong>Cosign</strong> (Sigstore) — keyless signing via OIDC, stored in transparency log</li>
+    <li><strong>Docker Content Trust</strong> (Notary) — built into Docker, uses TUF framework</li>
+  </ul>
+
+  <pre><code># Sign with Cosign (keyless, uses GitHub OIDC in CI)
+$ cosign sign --yes ghcr.io/myorg/myapp@sha256:abc123...
+
+# Verify before deployment
+$ cosign verify \
+    --certificate-identity=https://github.com/myorg/myapp/.github/workflows/build.yml@refs/heads/main \
+    --certificate-oidc-issuer=https://token.actions.githubusercontent.com \
+    ghcr.io/myorg/myapp@sha256:abc123...</code></pre>
+
+  <p>In your Kubernetes cluster, use an admission controller (e.g., Kyverno, OPA Gatekeeper) to reject unsigned images at deploy time.</p>
+
+  <!-- ============================================================ -->
+  <h2>Production Image Checklist</h2>
+
+  <div class="diagram">
+    <svg viewBox="0 0 500 340" width="500" height="340" xmlns="http://www.w3.org/2000/svg" font-family="system-ui, sans-serif" font-size="12">
+      <!-- Background layers (bottom to top = build order) -->
+      <rect x="40" y="270" width="420" height="50" rx="6" fill="#dbeafe" stroke="#3b82f6" stroke-width="1.5"/>
+      <text x="250" y="298" text-anchor="middle" font-weight="bold" fill="#1e40af">1. Base Image Selection</text>
+      <text x="250" y="312" text-anchor="middle" fill="#1e40af" font-size="10">Minimal base · Pinned digest · No unnecessary packages</text>
+
+      <rect x="55" y="215" width="390" height="50" rx="6" fill="#dcfce7" stroke="#22c55e" stroke-width="1.5"/>
+      <text x="250" y="243" text-anchor="middle" font-weight="bold" fill="#166534">2. Non-Root User</text>
+      <text x="250" y="257" text-anchor="middle" fill="#166534" font-size="10">USER 1001 · Correct file ownership · No privilege escalation</text>
+
+      <rect x="70" y="160" width="360" height="50" rx="6" fill="#fef3c7" stroke="#f59e0b" stroke-width="1.5"/>
+      <text x="250" y="188" text-anchor="middle" font-weight="bold" fill="#92400e">3. Security Scanning</text>
+      <text x="250" y="202" text-anchor="middle" fill="#92400e" font-size="10">Trivy/Grype in CI · Fail on CRITICAL · Generate SBOM</text>
+
+      <rect x="85" y="105" width="330" height="50" rx="6" fill="#fce7f3" stroke="#ec4899" stroke-width="1.5"/>
+      <text x="250" y="133" text-anchor="middle" font-weight="bold" fill="#9d174d">4. Image Signing</text>
+      <text x="250" y="147" text-anchor="middle" fill="#9d174d" font-size="10">Cosign · Keyless OIDC · Verify at admission</text>
+
+      <rect x="100" y="50" width="300" height="50" rx="6" fill="#ede9fe" stroke="#8b5cf6" stroke-width="1.5"/>
+      <text x="250" y="78" text-anchor="middle" font-weight="bold" fill="#5b21b6">5. Runtime Hardening</text>
+      <text x="250" y="92" text-anchor="middle" fill="#5b21b6" font-size="10">Read-only FS · Drop caps · No shell · no-new-privileges</text>
+
+      <!-- Arrow on left side -->
+      <line x1="25" y1="300" x2="25" y2="65" stroke="#64748b" stroke-width="2" marker-end="url(#arrowhead)"/>
+      <text x="18" y="180" text-anchor="middle" fill="#64748b" font-size="10" transform="rotate(-90,18,180)">Layered Security</text>
+
+      <defs>
+        <marker id="arrowhead" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+          <polygon points="0 0, 8 3, 0 6" fill="#64748b"/>
+        </marker>
+      </defs>
+    </svg>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>Example Production Dockerfile</h2>
+
+  <pre><code># syntax=docker/dockerfile:1
+
+# ── Build Stage ──────────────────────────────────────────────────
+FROM node:20.11.1-bookworm-slim@sha256:a1b2c3d4... AS build
+
+WORKDIR /build
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev
+COPY src/ ./src/
+RUN npm run build
+
+# ── Production Stage ─────────────────────────────────────────────
+FROM gcr.io/distroless/nodejs20-debian12@sha256:e5f6a7b8...
+
+LABEL org.opencontainers.image.source="https://github.com/myorg/myapp"
+LABEL org.opencontainers.image.version="1.4.2"
+
+WORKDIR /app
+COPY --from=build --chown=1001:1001 /build/dist ./dist
+COPY --from=build --chown=1001:1001 /build/node_modules ./node_modules
+
+USER 1001
+
+EXPOSE 8080
+HEALTHCHECK --interval=30s --timeout=3s \
+  CMD ["/nodejs/bin/node", "-e", "require('http').get('http://localhost:8080/health')"]
+
+ENTRYPOINT ["/nodejs/bin/node", "dist/server.js"]</code></pre>
+
+  <p>Key features: multi-stage (build tools never reach production), pinned by digest, distroless base (no shell), non-root user, health check, OCI labels.</p>
+
+  <!-- ============================================================ -->
+  <h2>Interactive Quizzes</h2>
+
+  <div class="quiz" data-quiz="base-image">
+    <h3>Quiz 1: Base Image Selection</h3>
+    <p>You're deploying a statically-compiled Go binary with no external dependencies. Which base image gives the smallest attack surface?</p>
+    <ul class="quiz-options">
+      <li data-correct="false">Alpine — it's only 5 MB</li>
+      <li data-correct="false">Distroless — no shell or package manager</li>
+      <li data-correct="true">Scratch — literally nothing except your binary</li>
+      <li data-correct="false">Debian Slim — good balance of size and compatibility</li>
+    </ul>
+    <div class="quiz-feedback" data-correct="Correct! A statically-compiled Go binary has zero runtime dependencies — it doesn't even need libc. Scratch (0 bytes) is the ideal base: nothing to exploit, nothing to scan." data-incorrect="Not quite. Since the Go binary is statically compiled and has no dependencies, scratch (an empty image) gives the absolute minimum attack surface — zero additional files."></div>
+  </div>
+
+  <div class="quiz" data-quiz="non-root">
+    <h3>Quiz 2: Non-Root Reasoning</h3>
+    <p>Why is running as root inside a container still a security risk, even with namespace isolation?</p>
+    <ul class="quiz-options">
+      <li data-correct="false">Root in a container can directly access the host filesystem</li>
+      <li data-correct="true">A kernel vulnerability could allow a container escape, and root makes that escape more powerful</li>
+      <li data-correct="false">Containers don't actually provide any isolation from root</li>
+      <li data-correct="false">Running as root makes the container use more memory</li>
+    </ul>
+    <div class="quiz-feedback" data-correct="Correct! Namespaces provide isolation, but they're enforced by the kernel. A kernel exploit combined with root access inside the container gives an attacker root on the host. Non-root limits the blast radius." data-incorrect="Not quite. The key risk is that namespace isolation depends on the kernel being bug-free. If a kernel vulnerability is exploited, being root inside the container means being root on the host. Non-root limits what an attacker can do even after an escape."></div>
+  </div>
+
+  <div class="quiz" data-quiz="scanning">
+    <h3>Quiz 3: Scanning Tools</h3>
+    <p>You want to fail your CI pipeline when a container image has CRITICAL vulnerabilities. Which command achieves this with Trivy?</p>
+    <ul class="quiz-options">
+      <li data-correct="false"><code>trivy image --severity CRITICAL myapp:v1</code></li>
+      <li data-correct="true"><code>trivy image --exit-code 1 --severity CRITICAL myapp:v1</code></li>
+      <li data-correct="false"><code>trivy image --fail-on-vuln myapp:v1</code></li>
+      <li data-correct="false"><code>trivy scan --block CRITICAL myapp:v1</code></li>
+    </ul>
+    <div class="quiz-feedback" data-correct="Correct! The --exit-code 1 flag makes Trivy return a non-zero exit code when vulnerabilities of the specified severity are found, which causes CI to fail." data-incorrect="Not quite. Trivy uses --exit-code 1 to return a non-zero status (failing CI) and --severity to filter which levels trigger that exit code."></div>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>Hands-On Tasks</h2>
+
+  <div class="callout">
+    <div class="callout-title">🛠️ Task 1: Compare Base Images</div>
+    <p>Build the same simple Go application with different base images and compare size + vulnerability count:</p>
+    <pre><code># Create a simple Go app (main.go):
+# package main
+# import "fmt"
+# func main() { fmt.Println("Hello, production!") }
+
+# Build with different bases:
+docker build -t myapp:full    --target full .
+docker build -t myapp:alpine  --target alpine .
+docker build -t myapp:scratch --target scratch .
+
+# Compare sizes:
+docker images myapp
+
+# Scan each:
+trivy image myapp:full
+trivy image myapp:alpine
+trivy image myapp:scratch</code></pre>
+    <p><strong>Expected result:</strong> scratch has 0 vulnerabilities (there's nothing to be vulnerable). Full debian may have 50+. Alpine will be somewhere in between.</p>
+  </div>
+
+  <div class="callout">
+    <div class="callout-title">🛠️ Task 2: Scan and Fix</div>
+    <p>Run Trivy on a vulnerable image and fix the top vulnerability:</p>
+    <pre><code># Pull an intentionally outdated image:
+docker pull node:18.0.0
+
+# Scan it:
+trivy image node:18.0.0
+
+# Find the most critical vulnerability.
+# Check the "Fixed Version" column.
+# Create a Dockerfile that uses the fixed base:
+FROM node:18.19.1-slim
+# ... rest of your app
+
+# Rebuild and re-scan to confirm the fix:
+trivy image myapp:fixed</code></pre>
+    <p><strong>Goal:</strong> Reduce CRITICAL count to zero by updating the base image version.</p>
+  </div>
+
+  <!-- ============================================================ -->
+  <div class="callout">
+    <div class="callout-title">🌍 Not Just Docker: Chainguard Images</div>
+    <p><strong>Chainguard</strong> provides hardened container images similar to Google's distroless, but with a key advantage: they're rebuilt daily with the latest security patches. While distroless images may lag behind on updates, Chainguard images aim for zero known CVEs at all times. They offer drop-in replacements for common bases: <code>cgr.dev/chainguard/node</code>, <code>cgr.dev/chainguard/python</code>, <code>cgr.dev/chainguard/go</code>.</p>
+  </div>
+
+  <div class="callout warning">
+    <div class="callout-title">🏢 Industry Practice: Image Policies</div>
+    <p>Large organisations enforce production image standards at scale:</p>
+    <ul>
+      <li><strong>Approved base images only</strong> — a curated registry of vetted bases; all others rejected at admission</li>
+      <li><strong>Signature required</strong> — only images signed in CI can be deployed (unsigned = blocked)</li>
+      <li><strong>Vulnerability threshold</strong> — images with CRITICAL or HIGH CVEs cannot deploy until fixed</li>
+      <li><strong>Max age policy</strong> — images older than 30 days must be rebuilt (forces security patches)</li>
+    </ul>
+    <p>Tools like Kyverno, OPA Gatekeeper, and Docker Scout Policies enforce these rules automatically at deploy time.</p>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>Key Takeaways</h2>
+
+  <ul>
+    <li><strong>Choose the smallest viable base</strong> — distroless for most apps, scratch for static binaries</li>
+    <li><strong>Never run as root</strong> — use <code>USER 1001</code> with numeric UIDs</li>
+    <li><strong>Scan in CI</strong> — Trivy/Grype with <code>--exit-code 1</code> to block vulnerable images</li>
+    <li><strong>Pin everything</strong> — base images by digest, packages by version, dependencies by lockfile</li>
+    <li><strong>Sign your images</strong> — Cosign + admission controllers = supply chain integrity</li>
+    <li><strong>Harden at runtime</strong> — read-only FS, dropped capabilities, no-new-privileges</li>
+    <li><strong>Every removal is a security gain</strong> — no shell, no curl, no package manager in prod</li>
+  </ul>
+
+  <!-- ============================================================ -->
+  <nav class="lesson-nav">
+    <a href="0009-tags-registries-and-distribution.html">← Prev: Tags, Registries &amp; Distribution</a>
+    <a href="0011-container-lifecycle.html">Next: Container Lifecycle →</a>
+  </nav>
+
+  <script src="../assets/quiz.js"></script>
+</body>
+</html>

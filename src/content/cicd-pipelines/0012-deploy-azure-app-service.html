@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lesson 12 — Deploy to Azure App Service</title>
+  <link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+
+  <div class="lesson-meta">
+    <span class="number">LESSON 12</span> &middot; Hands-On &middot; ~25 minutes
+  </div>
+
+  <h1>Deploy to Azure App Service</h1>
+  <p>Your first real deployment. In this lesson you'll create an Azure App Service, wire up a CD pipeline, and see your code go live — with staging → production promotion and a smoke test gate.</p>
+
+  <div class="progress">
+    <span>Lesson 12 of 33</span>
+    <div class="progress-bar"><div class="progress-fill" style="width: 36%"></div></div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>What We're Building</h2>
+
+  <div class="diagram">
+    <svg viewBox="0 0 720 160" xmlns="http://www.w3.org/2000/svg">
+      <!-- Pipeline flow -->
+      <rect x="20" y="40" width="120" height="60" rx="6" fill="#e3f2fd" stroke="#1976d2" stroke-width="2"/>
+      <text x="80" y="63" text-anchor="middle" font-size="9" font-weight="bold" fill="#1976d2">CI</text>
+      <text x="80" y="78" text-anchor="middle" font-size="8" fill="#555">lint + test</text>
+      <text x="80" y="90" text-anchor="middle" font-size="8" fill="#555">(auto)</text>
+      
+      <line x1="140" y1="70" x2="170" y2="70" stroke="#333" stroke-width="1.5" marker-end="url(#d12)"/>
+      
+      <rect x="170" y="40" width="140" height="60" rx="6" fill="#e8f5e9" stroke="#388e3c" stroke-width="2"/>
+      <text x="240" y="63" text-anchor="middle" font-size="9" font-weight="bold" fill="#388e3c">Deploy Staging</text>
+      <text x="240" y="78" text-anchor="middle" font-size="8" fill="#555">App Service slot</text>
+      <text x="240" y="90" text-anchor="middle" font-size="8" fill="#555">(auto)</text>
+      
+      <line x1="310" y1="70" x2="340" y2="70" stroke="#333" stroke-width="1.5" marker-end="url(#d12)"/>
+      
+      <rect x="340" y="40" width="120" height="60" rx="6" fill="#fff3e0" stroke="#f57c00" stroke-width="2"/>
+      <text x="400" y="63" text-anchor="middle" font-size="9" font-weight="bold" fill="#e65100">Smoke Test</text>
+      <text x="400" y="78" text-anchor="middle" font-size="8" fill="#555">curl /health</text>
+      <text x="400" y="90" text-anchor="middle" font-size="8" fill="#555">(auto)</text>
+      
+      <line x1="460" y1="70" x2="490" y2="70" stroke="#333" stroke-width="1.5" marker-end="url(#d12)"/>
+      
+      <!-- Approval gate -->
+      <circle cx="510" cy="70" r="18" fill="#ff9800" stroke="#e65100" stroke-width="2"/>
+      <text x="510" y="75" text-anchor="middle" font-size="14">👤</text>
+      
+      <line x1="528" y1="70" x2="558" y2="70" stroke="#333" stroke-width="1.5" marker-end="url(#d12)"/>
+      
+      <rect x="558" y="40" width="140" height="60" rx="6" fill="#ffebee" stroke="#c62828" stroke-width="2"/>
+      <text x="628" y="63" text-anchor="middle" font-size="9" font-weight="bold" fill="#c62828">Deploy Production</text>
+      <text x="628" y="78" text-anchor="middle" font-size="8" fill="#555">Slot swap</text>
+      <text x="628" y="90" text-anchor="middle" font-size="8" fill="#555">(approval)</text>
+      
+      <!-- Legend -->
+      <text x="360" y="130" text-anchor="middle" font-size="9" fill="#555">Push to main → CI → Staging (auto) → Smoke test → Approval → Production</text>
+      <text x="360" y="148" text-anchor="middle" font-size="8" fill="#999">Total: ~3 minutes from push to live (excluding approval wait)</text>
+      
+      <defs>
+        <marker id="d12" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto">
+          <polygon points="0 0, 7 2.5, 0 5" fill="#333"/>
+        </marker>
+      </defs>
+    </svg>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>🏋️ Step 1: Create the App</h2>
+
+  <div class="exercise">
+    <p>Create a simple Express API to deploy:</p>
+
+<pre><code># In your cicd-mastery repo
+npm install express
+
+cat > src/server.js << 'EOF'
+const express = require('express');
+const app = express();
+const port = process.env.PORT || 3000;
+
+app.get('/', (req, res) => {
+  res.json({
+    service: 'cicd-mastery-api',
+    version: process.env.npm_package_version || '1.0.0',
+    environment: process.env.NODE_ENV || 'development',
+    deployed: new Date().toISOString()
+  });
+});
+
+app.get('/health', (req, res) => {
+  res.status(200).json({ status: 'healthy' });
+});
+
+app.listen(port, () => {
+  console.log(`Server listening on port ${port}`);
+});
+EOF
+</code></pre>
+
+    <p>Add <code>"start": "node src/server.js"</code> to your package.json scripts. Test locally:</p>
+<pre><code>npm start
+# Visit http://localhost:3000 and http://localhost:3000/health
+</code></pre>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>🏋️ Step 2: Create Azure Resources</h2>
+
+  <div class="exercise">
+<pre><code># Variables (customize APP_NAME — must be globally unique)
+RESOURCE_GROUP="rg-cicd-mastery"
+APP_NAME="app-cicd-mastery-$(openssl rand -hex 3)"
+PLAN_NAME="plan-cicd-mastery"
+
+# Create App Service Plan (Free tier for learning)
+az appservice plan create \
+  --name $PLAN_NAME \
+  --resource-group $RESOURCE_GROUP \
+  --sku F1 \
+  --is-linux
+
+# Create the Web App
+az webapp create \
+  --name $APP_NAME \
+  --resource-group $RESOURCE_GROUP \
+  --plan $PLAN_NAME \
+  --runtime "NODE:20-lts"
+
+# Create a staging deployment slot (requires Standard+ tier)
+# For Free tier, we'll simulate with a separate app:
+az webapp create \
+  --name "${APP_NAME}-staging" \
+  --resource-group $RESOURCE_GROUP \
+  --plan $PLAN_NAME \
+  --runtime "NODE:20-lts"
+
+echo "Production: https://${APP_NAME}.azurewebsites.net"
+echo "Staging: https://${APP_NAME}-staging.azurewebsites.net"
+
+# Add APP_NAME as a GitHub variable
+# Settings → Variables → AZURE_APP_NAME = your app name
+</code></pre>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>🏋️ Step 3: The CD Workflow</h2>
+
+  <div class="exercise">
+<pre><code><span style="color:#6c7086"># .github/workflows/cd.yml</span>
+<span style="color:#89b4fa">name:</span> <span style="color:#a6e3a1">CD</span>
+
+<span style="color:#89b4fa">on:</span>
+  <span style="color:#89b4fa">push:</span>
+    <span style="color:#89b4fa">branches:</span> <span style="color:#a6e3a1">[main]</span>
+    <span style="color:#89b4fa">paths-ignore:</span> <span style="color:#a6e3a1">['**.md']</span>
+  <span style="color:#89b4fa">workflow_dispatch:</span>
+
+<span style="color:#89b4fa">permissions:</span>
+  <span style="color:#89b4fa">id-token:</span> <span style="color:#a6e3a1">write</span>
+  <span style="color:#89b4fa">contents:</span> <span style="color:#a6e3a1">read</span>
+
+<span style="color:#89b4fa">concurrency:</span>
+  <span style="color:#89b4fa">group:</span> <span style="color:#a6e3a1">cd-${{ github.ref }}</span>
+  <span style="color:#89b4fa">cancel-in-progress:</span> <span style="color:#a6e3a1">false</span>  <span style="color:#6c7086"># Don't cancel deployments!</span>
+
+<span style="color:#89b4fa">jobs:</span>
+  <span style="color:#6c7086"># ─── CI Gate ───</span>
+  <span style="color:#89b4fa">ci:</span>
+    <span style="color:#89b4fa">name:</span> <span style="color:#a6e3a1">🧪 CI Gate</span>
+    <span style="color:#89b4fa">runs-on:</span> <span style="color:#a6e3a1">ubuntu-latest</span>
+    <span style="color:#89b4fa">steps:</span>
+      - <span style="color:#89b4fa">uses:</span> <span style="color:#a6e3a1">actions/checkout@v4</span>
+      - <span style="color:#89b4fa">uses:</span> <span style="color:#a6e3a1">actions/setup-node@v4</span>
+        <span style="color:#89b4fa">with:</span> { <span style="color:#89b4fa">node-version:</span> <span style="color:#a6e3a1">'20'</span>, <span style="color:#89b4fa">cache:</span> <span style="color:#a6e3a1">'npm'</span> }
+      - <span style="color:#89b4fa">run:</span> <span style="color:#a6e3a1">npm ci</span>
+      - <span style="color:#89b4fa">run:</span> <span style="color:#a6e3a1">npm test</span>
+
+  <span style="color:#6c7086"># ─── Deploy to Staging ───</span>
+  <span style="color:#89b4fa">deploy-staging:</span>
+    <span style="color:#89b4fa">name:</span> <span style="color:#a6e3a1">🚀 Staging</span>
+    <span style="color:#89b4fa">needs:</span> <span style="color:#a6e3a1">ci</span>
+    <span style="color:#89b4fa">runs-on:</span> <span style="color:#a6e3a1">ubuntu-latest</span>
+    <span style="color:#89b4fa">environment:</span>
+      <span style="color:#89b4fa">name:</span> <span style="color:#a6e3a1">staging</span>
+      <span style="color:#89b4fa">url:</span> <span style="color:#a6e3a1">https://${{ vars.AZURE_APP_NAME }}-staging.azurewebsites.net</span>
+    <span style="color:#89b4fa">steps:</span>
+      - <span style="color:#89b4fa">uses:</span> <span style="color:#a6e3a1">actions/checkout@v4</span>
+
+      - <span style="color:#89b4fa">uses:</span> <span style="color:#a6e3a1">actions/setup-node@v4</span>
+        <span style="color:#89b4fa">with:</span> { <span style="color:#89b4fa">node-version:</span> <span style="color:#a6e3a1">'20'</span>, <span style="color:#89b4fa">cache:</span> <span style="color:#a6e3a1">'npm'</span> }
+
+      - <span style="color:#89b4fa">run:</span> <span style="color:#a6e3a1">npm ci --omit=dev</span>  <span style="color:#6c7086"># Production deps only</span>
+
+      - <span style="color:#89b4fa">name:</span> <span style="color:#a6e3a1">Azure Login</span>
+        <span style="color:#89b4fa">uses:</span> <span style="color:#a6e3a1">azure/login@v2</span>
+        <span style="color:#89b4fa">with:</span>
+          <span style="color:#89b4fa">client-id:</span> <span style="color:#a6e3a1">${{ secrets.AZURE_CLIENT_ID }}</span>
+          <span style="color:#89b4fa">tenant-id:</span> <span style="color:#a6e3a1">${{ secrets.AZURE_TENANT_ID }}</span>
+          <span style="color:#89b4fa">subscription-id:</span> <span style="color:#a6e3a1">${{ secrets.AZURE_SUBSCRIPTION_ID }}</span>
+
+      - <span style="color:#89b4fa">name:</span> <span style="color:#a6e3a1">Deploy to Staging</span>
+        <span style="color:#89b4fa">uses:</span> <span style="color:#a6e3a1">azure/webapps-deploy@v3</span>
+        <span style="color:#89b4fa">with:</span>
+          <span style="color:#89b4fa">app-name:</span> <span style="color:#a6e3a1">${{ vars.AZURE_APP_NAME }}-staging</span>
+          <span style="color:#89b4fa">package:</span> <span style="color:#a6e3a1">.</span>
+
+  <span style="color:#6c7086"># ─── Smoke Test ───</span>
+  <span style="color:#89b4fa">smoke-test:</span>
+    <span style="color:#89b4fa">name:</span> <span style="color:#a6e3a1">🔍 Smoke Test</span>
+    <span style="color:#89b4fa">needs:</span> <span style="color:#a6e3a1">deploy-staging</span>
+    <span style="color:#89b4fa">runs-on:</span> <span style="color:#a6e3a1">ubuntu-latest</span>
+    <span style="color:#89b4fa">steps:</span>
+      - <span style="color:#89b4fa">name:</span> <span style="color:#a6e3a1">Wait for deployment to stabilize</span>
+        <span style="color:#89b4fa">run:</span> <span style="color:#a6e3a1">sleep 30</span>
+
+      - <span style="color:#89b4fa">name:</span> <span style="color:#a6e3a1">Health check</span>
+        <span style="color:#89b4fa">run:</span> <span style="color:#a6e3a1">|</span>
+          <span style="color:#a6e3a1">URL="https://${{ vars.AZURE_APP_NAME }}-staging.azurewebsites.net"</span>
+          <span style="color:#a6e3a1">STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$URL/health")</span>
+          <span style="color:#a6e3a1">if [ "$STATUS" != "200" ]; then</span>
+            <span style="color:#a6e3a1">  echo "::error::Smoke test FAILED! Got HTTP $STATUS"</span>
+            <span style="color:#a6e3a1">  exit 1</span>
+          <span style="color:#a6e3a1">fi</span>
+          <span style="color:#a6e3a1">echo "✅ Staging healthy (HTTP $STATUS)"</span>
+          
+          <span style="color:#6c7086"># Verify response content</span>
+          <span style="color:#a6e3a1">BODY=$(curl -s "$URL/")</span>
+          <span style="color:#a6e3a1">echo "$BODY" | jq .</span>
+          <span style="color:#a6e3a1">echo "## 🔍 Smoke Test Passed" >> $GITHUB_STEP_SUMMARY</span>
+          <span style="color:#a6e3a1">echo '```json' >> $GITHUB_STEP_SUMMARY</span>
+          <span style="color:#a6e3a1">echo "$BODY" | jq . >> $GITHUB_STEP_SUMMARY</span>
+          <span style="color:#a6e3a1">echo '```' >> $GITHUB_STEP_SUMMARY</span>
+
+  <span style="color:#6c7086"># ─── Deploy to Production (requires approval) ───</span>
+  <span style="color:#89b4fa">deploy-production:</span>
+    <span style="color:#89b4fa">name:</span> <span style="color:#a6e3a1">🚀 Production</span>
+    <span style="color:#89b4fa">needs:</span> <span style="color:#a6e3a1">smoke-test</span>
+    <span style="color:#89b4fa">runs-on:</span> <span style="color:#a6e3a1">ubuntu-latest</span>
+    <span style="color:#89b4fa">environment:</span>
+      <span style="color:#89b4fa">name:</span> <span style="color:#a6e3a1">production</span>
+      <span style="color:#89b4fa">url:</span> <span style="color:#a6e3a1">https://${{ vars.AZURE_APP_NAME }}.azurewebsites.net</span>
+    <span style="color:#89b4fa">steps:</span>
+      - <span style="color:#89b4fa">uses:</span> <span style="color:#a6e3a1">actions/checkout@v4</span>
+      - <span style="color:#89b4fa">uses:</span> <span style="color:#a6e3a1">actions/setup-node@v4</span>
+        <span style="color:#89b4fa">with:</span> { <span style="color:#89b4fa">node-version:</span> <span style="color:#a6e3a1">'20'</span>, <span style="color:#89b4fa">cache:</span> <span style="color:#a6e3a1">'npm'</span> }
+      - <span style="color:#89b4fa">run:</span> <span style="color:#a6e3a1">npm ci --omit=dev</span>
+
+      - <span style="color:#89b4fa">name:</span> <span style="color:#a6e3a1">Azure Login</span>
+        <span style="color:#89b4fa">uses:</span> <span style="color:#a6e3a1">azure/login@v2</span>
+        <span style="color:#89b4fa">with:</span>
+          <span style="color:#89b4fa">client-id:</span> <span style="color:#a6e3a1">${{ secrets.AZURE_CLIENT_ID }}</span>
+          <span style="color:#89b4fa">tenant-id:</span> <span style="color:#a6e3a1">${{ secrets.AZURE_TENANT_ID }}</span>
+          <span style="color:#89b4fa">subscription-id:</span> <span style="color:#a6e3a1">${{ secrets.AZURE_SUBSCRIPTION_ID }}</span>
+
+      - <span style="color:#89b4fa">name:</span> <span style="color:#a6e3a1">Deploy to Production</span>
+        <span style="color:#89b4fa">uses:</span> <span style="color:#a6e3a1">azure/webapps-deploy@v3</span>
+        <span style="color:#89b4fa">with:</span>
+          <span style="color:#89b4fa">app-name:</span> <span style="color:#a6e3a1">${{ vars.AZURE_APP_NAME }}</span>
+          <span style="color:#89b4fa">package:</span> <span style="color:#a6e3a1">.</span>
+
+      - <span style="color:#89b4fa">name:</span> <span style="color:#a6e3a1">Verify production</span>
+        <span style="color:#89b4fa">run:</span> <span style="color:#a6e3a1">|</span>
+          <span style="color:#a6e3a1">sleep 30</span>
+          <span style="color:#a6e3a1">curl -f "https://${{ vars.AZURE_APP_NAME }}.azurewebsites.net/health"</span>
+          <span style="color:#a6e3a1">echo "## 🎉 Production Deployed!" >> $GITHUB_STEP_SUMMARY</span>
+</code></pre>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>What's Happening at Each Stage</h2>
+
+  <div class="diagram">
+    <svg viewBox="0 0 700 200" xmlns="http://www.w3.org/2000/svg">
+      <!-- Sequence -->
+      <rect x="20" y="30" width="150" height="70" rx="4" fill="#e3f2fd" stroke="#1976d2"/>
+      <text x="95" y="50" text-anchor="middle" font-size="9" font-weight="bold" fill="#1976d2">CI Gate</text>
+      <text x="95" y="67" text-anchor="middle" font-size="8" fill="#555">• npm test</text>
+      <text x="95" y="80" text-anchor="middle" font-size="8" fill="#555">• Catch bugs HERE</text>
+      <text x="95" y="93" text-anchor="middle" font-size="8" fill="#555">• Fail fast, no deploy</text>
+      
+      <rect x="190" y="30" width="150" height="70" rx="4" fill="#e8f5e9" stroke="#388e3c"/>
+      <text x="265" y="50" text-anchor="middle" font-size="9" font-weight="bold" fill="#388e3c">Deploy Staging</text>
+      <text x="265" y="67" text-anchor="middle" font-size="8" fill="#555">• OIDC login to Azure</text>
+      <text x="265" y="80" text-anchor="middle" font-size="8" fill="#555">• Push code to App Service</text>
+      <text x="265" y="93" text-anchor="middle" font-size="8" fill="#555">• Real deployment</text>
+      
+      <rect x="360" y="30" width="150" height="70" rx="4" fill="#fff3e0" stroke="#f57c00"/>
+      <text x="435" y="50" text-anchor="middle" font-size="9" font-weight="bold" fill="#e65100">Smoke Test</text>
+      <text x="435" y="67" text-anchor="middle" font-size="8" fill="#555">• HTTP health check</text>
+      <text x="435" y="80" text-anchor="middle" font-size="8" fill="#555">• Verify app responds</text>
+      <text x="435" y="93" text-anchor="middle" font-size="8" fill="#555">• Block if unhealthy</text>
+      
+      <rect x="530" y="30" width="150" height="70" rx="4" fill="#f3e5f5" stroke="#7b1fa2"/>
+      <text x="605" y="50" text-anchor="middle" font-size="9" font-weight="bold" fill="#6a1b9a">Production</text>
+      <text x="605" y="67" text-anchor="middle" font-size="8" fill="#555">• Approval required</text>
+      <text x="605" y="80" text-anchor="middle" font-size="8" fill="#555">• Same deploy process</text>
+      <text x="605" y="93" text-anchor="middle" font-size="8" fill="#555">• Verify again</text>
+      
+      <!-- Pattern label -->
+      <rect x="20" y="120" width="660" height="60" rx="6" fill="#f5f5f5" stroke="#bdbdbd"/>
+      <text x="350" y="142" text-anchor="middle" font-size="10" font-weight="bold">🏗️ Pattern: Gate → Deploy → Verify → Promote</text>
+      <text x="350" y="162" text-anchor="middle" font-size="9" fill="#555">This pattern appears in EVERY production pipeline you'll ever build. The tools change; the shape doesn't.</text>
+    </svg>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>Why Smoke Tests Matter</h2>
+
+  <div class="compare">
+    <div class="compare-bad">
+      <p>Deploy without verification:</p>
+      <p style="font-size:0.85rem;">App crashes on startup due to missing env var. Nobody notices for 20 minutes. Users see 500 errors. You deploy to production anyway because "staging succeeded" (it didn't — you just didn't check).</p>
+    </div>
+    <div class="compare-good">
+      <p>Deploy with smoke test:</p>
+      <p style="font-size:0.85rem;">App crashes on startup. Smoke test gets HTTP 502. Pipeline STOPS. Production never touched. You get a clear error: "Smoke test FAILED! Got HTTP 502." Fix and re-push.</p>
+    </div>
+  </div>
+
+  <div class="key-insight">
+    <strong>A deployment without verification is not a deployment — it's a hope.</strong> Always verify after deploy, even if it's just a health check. In later lessons we'll add integration tests and progressive traffic shifting as verification.
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>🧠 Recall Check</h2>
+
+  <div class="recall">
+    <ol>
+      <li>What action handles deploying to Azure App Service?</li>
+      <li>Why do we use <code>npm ci --omit=dev</code> for deployment instead of <code>npm ci</code>?</li>
+      <li>What's the purpose of the 30-second sleep before the smoke test?</li>
+      <li>Why is <code>cancel-in-progress: false</code> important for deployment workflows?</li>
+    </ol>
+    <details>
+      <summary>Reveal answers</summary>
+      <ol>
+        <li><code>azure/webapps-deploy@v3</code> — it packages your app and pushes it to App Service.</li>
+        <li><code>--omit=dev</code> skips devDependencies (jest, eslint, etc.) since they're not needed at runtime. This makes the deployment package smaller and faster.</li>
+        <li>App Service takes time to restart and stabilize after a new deployment. The sleep ensures the new version is actually serving before we test it.</li>
+        <li>You never want to cancel a deployment mid-way — that could leave your app in a broken half-deployed state. Queue deployments, don't cancel them.</li>
+      </ol>
+    </details>
+  </div>
+
+  <p><strong>Next lesson:</strong> Container Pipelines — building Docker images and pushing to Azure Container Registry. This is the path toward Kubernetes deployment.</p>
+
+</body>
+</html>

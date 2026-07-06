@@ -1,0 +1,627 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lesson 8: Prompt Management &amp; Evaluation | AI Engineering</title>
+    <link rel="stylesheet" href="../assets/lesson.css">
+    <link rel="stylesheet" href="../assets/prism-theme.css">
+</head>
+<body>
+    <div class="lesson-header">
+        <div class="module-badge">Module 2: Prompt Engineering</div>
+        <h1>Prompt Management &amp; Evaluation</h1>
+        <p class="lesson-subtitle">Version, test, and measure your prompts like production software</p>
+    </div>
+
+    <div class="lesson-meta">
+        <span class="pill">Lesson 8 of 20</span>
+        <span class="pill">⏱ 25 minutes</span>
+        <span class="pill">🎯 Intermediate-Advanced</span>
+    </div>
+
+    <main class="lesson-content">
+        <section>
+            <h2>Why Prompt Management Matters</h2>
+            <p>In production, prompts are code. They change behavior, introduce bugs, and need the same rigor as any other deployment artifact. Without systematic management, you'll face "prompt drift" — subtle regressions that erode quality over weeks.</p>
+            <div class="concept-box">
+                <h3>The Prompt Lifecycle</h3>
+                <ul>
+                    <li><strong>Author</strong> — Write and iterate on prompts locally</li>
+                    <li><strong>Version</strong> — Track changes with meaningful diffs</li>
+                    <li><strong>Test</strong> — Run against evaluation suites before deploy</li>
+                    <li><strong>Deploy</strong> — Ship to production with rollback capability</li>
+                    <li><strong>Monitor</strong> — Track quality metrics in real-time</li>
+                    <li><strong>Iterate</strong> — A/B test improvements against baseline</li>
+                </ul>
+            </div>
+        </section>
+
+        <section>
+            <h2>The Prompt Evaluation Pipeline</h2>
+            <div class="diagram-container" id="eval-pipeline"></div>
+            <p>Every prompt change should flow through this pipeline before reaching production. Automated evaluation catches regressions that manual testing misses.</p>
+        </section>
+
+        <section>
+            <h2>Prompt Versioning</h2>
+            <p>Store prompts as versioned artifacts with metadata:</p>
+            <div class="code-block">
+                <pre><code class="language-python">import hashlib
+import json
+from datetime import datetime
+from dataclasses import dataclass, asdict
+from pathlib import Path
+
+@dataclass
+class PromptVersion:
+    name: str
+    version: str
+    template: str
+    model: str
+    temperature: float
+    description: str
+    author: str
+    created_at: str = None
+    content_hash: str = None
+
+    def __post_init__(self):
+        self.created_at = self.created_at or datetime.now().isoformat()
+        self.content_hash = hashlib.sha256(self.template.encode()).hexdigest()[:12]
+
+class PromptRegistry:
+    """File-based prompt registry with versioning."""
+
+    def __init__(self, base_dir: str = "./prompts"):
+        self.base_dir = Path(base_dir)
+        self.base_dir.mkdir(parents=True, exist_ok=True)
+
+    def register(self, prompt: PromptVersion) -> str:
+        prompt_dir = self.base_dir / prompt.name
+        prompt_dir.mkdir(exist_ok=True)
+
+        version_file = prompt_dir / f"v{prompt.version}.json"
+        version_file.write_text(json.dumps(asdict(prompt), indent=2))
+
+        # Update latest pointer
+        latest_file = prompt_dir / "latest.json"
+        latest_file.write_text(json.dumps({"version": prompt.version, "hash": prompt.content_hash}))
+
+        return prompt.content_hash
+
+    def get(self, name: str, version: str = None) -> PromptVersion:
+        prompt_dir = self.base_dir / name
+        if version is None:
+            latest = json.loads((prompt_dir / "latest.json").read_text())
+            version = latest["version"]
+        data = json.loads((prompt_dir / f"v{version}.json").read_text())
+        return PromptVersion(**data)
+
+    def list_versions(self, name: str) -> list[str]:
+        prompt_dir = self.base_dir / name
+        return sorted([f.stem for f in prompt_dir.glob("v*.json")])
+
+# Usage
+registry = PromptRegistry()
+registry.register(PromptVersion(
+    name="sentiment_classifier",
+    version="1.0",
+    template="Classify the sentiment: {text}\nRespond: POSITIVE, NEGATIVE, or NEUTRAL",
+    model="gpt-4o",
+    temperature=0.0,
+    description="Basic sentiment classification v1",
+    author="alice"
+))
+registry.register(PromptVersion(
+    name="sentiment_classifier",
+    version="1.1",
+    template="You are a sentiment analysis expert.\n\nClassify this text into exactly one category: POSITIVE, NEGATIVE, or NEUTRAL.\nConsider sarcasm and context.\n\nText: {text}\nSentiment:",
+    model="gpt-4o",
+    temperature=0.0,
+    description="Added expert role and sarcasm handling",
+    author="alice"
+))</code></pre>
+            </div>
+        </section>
+
+        <section>
+            <h2>Evaluation Metrics</h2>
+            <p>Different tasks need different metrics. Here's when to use each:</p>
+            <div class="diagram-container" id="metrics-bar"></div>
+
+            <div class="comparison-table">
+                <table>
+                    <thead>
+                        <tr><th>Metric</th><th>Best For</th><th>How It Works</th><th>Limitation</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><strong>Exact Match</strong></td>
+                            <td>Classification, extraction</td>
+                            <td>Output == expected (case-insensitive)</td>
+                            <td>Too strict for free-text</td>
+                        </tr>
+                        <tr>
+                            <td><strong>BLEU</strong></td>
+                            <td>Translation, short generation</td>
+                            <td>N-gram overlap with reference</td>
+                            <td>Ignores semantics</td>
+                        </tr>
+                        <tr>
+                            <td><strong>ROUGE</strong></td>
+                            <td>Summarization</td>
+                            <td>Recall-oriented n-gram overlap</td>
+                            <td>Doesn't measure factuality</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Semantic Similarity</strong></td>
+                            <td>Open-ended generation</td>
+                            <td>Embedding cosine similarity</td>
+                            <td>High scores for vague matches</td>
+                        </tr>
+                        <tr>
+                            <td><strong>LLM-as-Judge</strong></td>
+                            <td>Complex, subjective quality</td>
+                            <td>Another LLM rates the output</td>
+                            <td>Expensive, potential bias</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Human Eval</strong></td>
+                            <td>Final validation, ambiguous tasks</td>
+                            <td>Human raters score outputs</td>
+                            <td>Slow, expensive, inconsistent</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <section>
+            <h2>LLM-as-Judge Pattern</h2>
+            <p>Use a powerful model to evaluate outputs from your production model. This is the most flexible evaluation method for complex tasks:</p>
+            <div class="code-block">
+                <pre><code class="language-python">import openai
+import json
+
+client = openai.OpenAI()
+
+JUDGE_PROMPT = """You are an expert evaluator. Score the following AI response on these criteria:
+
+CRITERIA:
+1. Accuracy (1-5): Are the facts correct? Is the information grounded in the provided context?
+2. Completeness (1-5): Does it address all parts of the question?
+3. Clarity (1-5): Is it well-organized and easy to understand?
+4. Conciseness (1-5): Is it appropriately brief without being incomplete?
+
+CONTEXT PROVIDED TO THE AI:
+{context}
+
+USER QUESTION:
+{question}
+
+AI RESPONSE TO EVALUATE:
+{response}
+
+REFERENCE ANSWER (gold standard):
+{reference}
+
+Score each criterion and provide a brief justification.
+Respond in JSON:
+{{
+    "accuracy": {{"score": int, "reason": "..."}},
+    "completeness": {{"score": int, "reason": "..."}},
+    "clarity": {{"score": int, "reason": "..."}},
+    "conciseness": {{"score": int, "reason": "..."}},
+    "overall_score": float,
+    "critical_issues": ["issue1", ...] or []
+}}"""
+
+
+def llm_judge(context: str, question: str, response: str, reference: str) -> dict:
+    """Use GPT-4o as a judge to evaluate a response."""
+    prompt = JUDGE_PROMPT.format(
+        context=context,
+        question=question,
+        response=response,
+        reference=reference
+    )
+
+    result = client.chat.completions.create(
+        model="gpt-4o",
+        messages=[
+            {"role": "system", "content": "You are a fair, consistent evaluator. Be strict but reasonable."},
+            {"role": "user", "content": prompt}
+        ],
+        response_format={"type": "json_object"},
+        temperature=0.0
+    )
+
+    return json.loads(result.choices[0].message.content)
+
+
+def evaluate_prompt_version(prompt_template: str, test_cases: list[dict], model: str = "gpt-4o") -> dict:
+    """Evaluate a prompt version against a test suite using LLM-as-judge."""
+    scores = []
+
+    for case in test_cases:
+        # Generate response using the prompt under test
+        formatted_prompt = prompt_template.format(**case["input"])
+        response = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": formatted_prompt}],
+            temperature=0.0
+        )
+        ai_response = response.choices[0].message.content
+
+        # Judge the response
+        judgment = llm_judge(
+            context=case.get("context", ""),
+            question=case["input"].get("question", formatted_prompt),
+            response=ai_response,
+            reference=case["expected"]
+        )
+        judgment["test_id"] = case.get("id", "unknown")
+        judgment["ai_response"] = ai_response
+        scores.append(judgment)
+
+    # Aggregate
+    avg_score = sum(s["overall_score"] for s in scores) / len(scores)
+    return {
+        "avg_overall_score": round(avg_score, 2),
+        "pass_rate": sum(1 for s in scores if s["overall_score"] >= 3.5) / len(scores),
+        "individual_scores": scores,
+        "critical_failures": [s for s in scores if s["overall_score"] < 2.5]
+    }</code></pre>
+            </div>
+
+            <div class="callout">
+                <strong>Reducing judge bias:</strong> Run the judge multiple times with shuffled order, use different judge models, and calibrate with human-scored examples. Never use the same model as both generator and judge.
+            </div>
+        </section>
+
+        <section>
+            <h2>A/B Testing Prompts</h2>
+            <div class="code-block">
+                <pre><code class="language-python">import random
+import hashlib
+from dataclasses import dataclass, field
+from collections import defaultdict
+
+@dataclass
+class ABTest:
+    name: str
+    variant_a: str  # prompt template A (control)
+    variant_b: str  # prompt template B (challenger)
+    traffic_split: float = 0.5  # fraction going to B
+    results: dict = field(default_factory=lambda: {"a": [], "b": []})
+
+    def assign_variant(self, user_id: str) -> str:
+        """Deterministic assignment based on user_id for consistency."""
+        hash_val = int(hashlib.md5(f"{self.name}:{user_id}".encode()).hexdigest(), 16)
+        return "b" if (hash_val % 100) < (self.traffic_split * 100) else "a"
+
+    def get_prompt(self, user_id: str) -> tuple[str, str]:
+        """Returns (variant_name, prompt_template)."""
+        variant = self.assign_variant(user_id)
+        template = self.variant_b if variant == "b" else self.variant_a
+        return variant, template
+
+    def record_result(self, variant: str, score: float):
+        self.results[variant].append(score)
+
+    def get_stats(self) -> dict:
+        stats = {}
+        for v in ["a", "b"]:
+            scores = self.results[v]
+            if scores:
+                stats[v] = {
+                    "n": len(scores),
+                    "mean": sum(scores) / len(scores),
+                    "min": min(scores),
+                    "max": max(scores),
+                }
+        # Statistical significance (simplified)
+        if stats.get("a") and stats.get("b"):
+            diff = stats["b"]["mean"] - stats["a"]["mean"]
+            stats["improvement"] = f"{diff:+.2f}"
+            stats["winner"] = "b" if diff > 0.1 else "a" if diff < -0.1 else "tie"
+        return stats
+
+# Usage
+test = ABTest(
+    name="summarizer_v2_test",
+    variant_a="Summarize this article in 3 bullet points:\n{text}",
+    variant_b="You are an expert editor at The Economist. Summarize in exactly 3 bullets. Each bullet: bold key term, max 20 words, focus on implications.\n\nArticle:\n{text}",
+    traffic_split=0.5
+)
+
+# In production request handler:
+variant, prompt = test.get_prompt(user_id="user_123")
+# ... get response, score it ...
+test.record_result(variant, score=4.2)
+print(test.get_stats())</code></pre>
+            </div>
+        </section>
+
+        <section>
+            <h2>Regression Testing</h2>
+            <p>Run your evaluation suite on every prompt change, just like unit tests for code:</p>
+            <div class="code-block">
+                <pre><code class="language-python">from dataclasses import dataclass
+
+@dataclass
+class RegressionResult:
+    version: str
+    total_tests: int
+    passed: int
+    failed: int
+    avg_score: float
+    regressions: list[str]  # test IDs that got worse
+
+def run_regression_suite(
+    registry: PromptRegistry,
+    prompt_name: str,
+    new_version: str,
+    test_cases: list[dict],
+    threshold: float = 0.9
+) -> RegressionResult:
+    """Compare new prompt version against the current production version."""
+
+    # Get current and new prompts
+    try:
+        current = registry.get(prompt_name)  # latest
+    except FileNotFoundError:
+        current = None
+    new = registry.get(prompt_name, version=new_version)
+
+    # Evaluate new version
+    new_results = evaluate_prompt_version(new.template, test_cases, model=new.model)
+
+    regressions = []
+    if current:
+        current_results = evaluate_prompt_version(current.template, test_cases, model=current.model)
+        # Compare per-test
+        for new_s, old_s in zip(new_results["individual_scores"], current_results["individual_scores"]):
+            if new_s["overall_score"] < old_s["overall_score"] - 0.5:
+                regressions.append(new_s["test_id"])
+
+    passed = sum(1 for s in new_results["individual_scores"] if s["overall_score"] >= 3.5)
+    result = RegressionResult(
+        version=new_version,
+        total_tests=len(test_cases),
+        passed=passed,
+        failed=len(test_cases) - passed,
+        avg_score=new_results["avg_overall_score"],
+        regressions=regressions
+    )
+
+    # Gate deployment
+    pass_rate = passed / len(test_cases)
+    if pass_rate < threshold:
+        print(f"❌ BLOCKED: Pass rate {pass_rate:.0%} below threshold {threshold:.0%}")
+    elif regressions:
+        print(f"⚠️  WARNING: {len(regressions)} regressions detected: {regressions}")
+    else:
+        print(f"✅ PASSED: {pass_rate:.0%} pass rate, no regressions")
+
+    return result</code></pre>
+            </div>
+        </section>
+
+        <section>
+            <div class="project-box">
+                <h2>🛠 Mini-Project: Prompt Evaluation Framework</h2>
+                <p>Build a complete evaluation framework that versions prompts, runs evaluation suites, and gates deployment.</p>
+
+                <div class="code-block">
+                    <pre><code class="language-python">"""
+Prompt Evaluation Framework
+============================
+A complete system for managing and evaluating prompts in production.
+"""
+import json
+import time
+from pathlib import Path
+from dataclasses import dataclass, asdict
+
+@dataclass
+class EvalCase:
+    id: str
+    input: dict
+    expected: str
+    context: str = ""
+    tags: list[str] = None
+
+@dataclass
+class EvalSuite:
+    name: str
+    cases: list[EvalCase]
+    pass_threshold: float = 0.9
+    metrics: list[str] = None  # ["exact_match", "llm_judge", "semantic_sim"]
+
+    def save(self, path: str):
+        Path(path).write_text(json.dumps(asdict(self), indent=2))
+
+    @classmethod
+    def load(cls, path: str) -> "EvalSuite":
+        data = json.loads(Path(path).read_text())
+        data["cases"] = [EvalCase(**c) for c in data["cases"]]
+        return cls(**data)
+
+
+class PromptEvalFramework:
+    def __init__(self, prompts_dir: str = "./prompts", results_dir: str = "./eval_results"):
+        self.registry = PromptRegistry(prompts_dir)
+        self.results_dir = Path(results_dir)
+        self.results_dir.mkdir(parents=True, exist_ok=True)
+
+    def evaluate(self, prompt_name: str, version: str, suite: EvalSuite) -> dict:
+        """Run full evaluation pipeline."""
+        prompt = self.registry.get(prompt_name, version)
+
+        print(f"Evaluating '{prompt_name}' v{version} against '{suite.name}'")
+        print(f"  Model: {prompt.model} | Temp: {prompt.temperature}")
+        print(f"  Test cases: {len(suite.cases)} | Threshold: {suite.pass_threshold:.0%}")
+        print("-" * 50)
+
+        results = []
+        start = time.time()
+
+        for case in suite.cases:
+            case_result = self._evaluate_case(prompt, case, suite.metrics or ["llm_judge"])
+            results.append(case_result)
+            status = "✅" if case_result["passed"] else "❌"
+            print(f"  {status} [{case.id}] score={case_result['score']:.2f}")
+
+        elapsed = time.time() - start
+        passed = sum(1 for r in results if r["passed"])
+        pass_rate = passed / len(results)
+
+        report = {
+            "prompt_name": prompt_name,
+            "version": version,
+            "suite": suite.name,
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "total": len(results),
+            "passed": passed,
+            "failed": len(results) - passed,
+            "pass_rate": pass_rate,
+            "avg_score": sum(r["score"] for r in results) / len(results),
+            "elapsed_seconds": round(elapsed, 1),
+            "threshold_met": pass_rate >= suite.pass_threshold,
+            "details": results
+        }
+
+        # Save report
+        report_path = self.results_dir / f"{prompt_name}_v{version}_{suite.name}.json"
+        report_path.write_text(json.dumps(report, indent=2))
+
+        print(f"\n{'='*50}")
+        print(f"Results: {passed}/{len(results)} passed ({pass_rate:.0%})")
+        print(f"{'✅ DEPLOY OK' if report['threshold_met'] else '❌ BLOCKED'}")
+        return report
+
+    def _evaluate_case(self, prompt: PromptVersion, case: EvalCase, metrics: list) -> dict:
+        """Evaluate a single test case."""
+        formatted = prompt.template.format(**case.input)
+
+        response = client.chat.completions.create(
+            model=prompt.model,
+            messages=[{"role": "user", "content": formatted}],
+            temperature=prompt.temperature
+        )
+        output = response.choices[0].message.content.strip()
+
+        scores = {}
+        if "exact_match" in metrics:
+            scores["exact_match"] = 5.0 if output.lower() == case.expected.lower() else 1.0
+        if "llm_judge" in metrics:
+            judgment = llm_judge(case.context, str(case.input), output, case.expected)
+            scores["llm_judge"] = judgment["overall_score"]
+        if "semantic_sim" in metrics:
+            scores["semantic_sim"] = self._semantic_similarity(output, case.expected)
+
+        avg_score = sum(scores.values()) / len(scores)
+        return {
+            "case_id": case.id,
+            "output": output,
+            "expected": case.expected,
+            "scores": scores,
+            "score": avg_score,
+            "passed": avg_score >= 3.5
+        }
+
+    def _semantic_similarity(self, text_a: str, text_b: str) -> float:
+        """Compute semantic similarity using embeddings."""
+        resp = client.embeddings.create(
+            model="text-embedding-3-small",
+            input=[text_a, text_b]
+        )
+        import numpy as np
+        a = np.array(resp.data[0].embedding)
+        b = np.array(resp.data[1].embedding)
+        sim = np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
+        return float(sim) * 5  # Scale to 1-5
+
+    def compare_versions(self, prompt_name: str, v1: str, v2: str, suite: EvalSuite) -> dict:
+        """Compare two prompt versions head-to-head."""
+        r1 = self.evaluate(prompt_name, v1, suite)
+        r2 = self.evaluate(prompt_name, v2, suite)
+        return {
+            "v1": {"version": v1, "score": r1["avg_score"], "pass_rate": r1["pass_rate"]},
+            "v2": {"version": v2, "score": r2["avg_score"], "pass_rate": r2["pass_rate"]},
+            "winner": v2 if r2["avg_score"] > r1["avg_score"] else v1,
+            "improvement": r2["avg_score"] - r1["avg_score"]
+        }
+
+
+# Example usage
+framework = PromptEvalFramework()
+
+suite = EvalSuite(
+    name="sentiment_basic",
+    cases=[
+        EvalCase(id="pos_1", input={"text": "Absolutely love this product!"}, expected="POSITIVE"),
+        EvalCase(id="neg_1", input={"text": "Worst experience ever. Never again."}, expected="NEGATIVE"),
+        EvalCase(id="neu_1", input={"text": "It works as described. Nothing special."}, expected="NEUTRAL"),
+        EvalCase(id="sarc_1", input={"text": "Oh great, another update that breaks everything."}, expected="NEGATIVE", tags=["sarcasm"]),
+        EvalCase(id="mixed_1", input={"text": "Good quality but terrible customer service."}, expected="NEGATIVE", tags=["mixed"]),
+    ],
+    pass_threshold=0.8,
+    metrics=["exact_match", "llm_judge"]
+)
+
+# Evaluate and compare
+report = framework.compare_versions("sentiment_classifier", "1.0", "1.1", suite)
+print(f"Winner: v{report['winner']} (improvement: {report['improvement']:+.2f})")</code></pre>
+                </div>
+
+                <div class="callout">
+                    <strong>Extension ideas:</strong> Add CI/CD integration (run evals on PR), cost tracking per evaluation run, historical dashboards showing quality trends, and Slack alerts on regressions.
+                </div>
+            </div>
+        </section>
+
+        <section>
+            <div class="key-points">
+                <h2>📌 Key Takeaways</h2>
+                <ul>
+                    <li>Treat prompts as versioned artifacts — store with metadata, track changes, enable rollback</li>
+                    <li>Use LLM-as-Judge for flexible evaluation of complex outputs (but watch for bias)</li>
+                    <li>Match metrics to task type: exact match for classification, ROUGE for summarization, semantic similarity for open-ended</li>
+                    <li>A/B test prompt changes with deterministic user assignment and statistical significance</li>
+                    <li>Gate deployments with regression tests — block if pass rate drops below threshold</li>
+                    <li>Build evaluation into CI/CD — every prompt change triggers automated evaluation</li>
+                </ul>
+            </div>
+        </section>
+    </main>
+
+    <nav class="nav-links">
+        <a href="0007-function-calling-tool-use.html" class="prev">← Previous: Function Calling &amp; Tool Use</a>
+        <a href="0009-embedding-fundamentals.html" class="next">Next: Embedding Fundamentals →</a>
+    </nav>
+
+    <script src="../assets/diagrams.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-python.min.js"></script>
+    <script>
+        Diagrams.createFlowDiagram(document.getElementById('eval-pipeline'), [
+            { label: 'Prompt Change', sublabel: 'New version authored', color: '#6366f1' },
+            { label: 'Generate', sublabel: 'Run against test cases', color: '#8b5cf6' },
+            { label: 'Score', sublabel: 'LLM-judge + metrics', color: '#f59e0b' },
+            { label: 'Compare', sublabel: 'vs. baseline version', color: '#22d3ee' },
+            { label: 'Gate', sublabel: 'Pass/fail threshold', color: '#22c55e' }
+        ]);
+
+        Diagrams.createComparisonBar(document.getElementById('metrics-bar'), [
+            { label: 'Exact Match', value: 5, max: 5, color: '#22c55e' },
+            { label: 'BLEU', value: 3, max: 5, color: '#6366f1' },
+            { label: 'ROUGE', value: 3, max: 5, color: '#8b5cf6' },
+            { label: 'Semantic Sim', value: 4, max: 5, color: '#22d3ee' },
+            { label: 'LLM-as-Judge', value: 5, max: 5, color: '#f59e0b' },
+            { label: 'Human Eval', value: 5, max: 5, color: '#ef4444' }
+        ]);
+    </script>
+</body>
+</html>

@@ -1,0 +1,377 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lesson 16: Encryption at Rest</title>
+    <style>
+        :root {
+            --bg: #fafafa; --text: #1a1a1a; --accent: #326ce5;
+            --accent-light: #e8f0fe; --border: #e0e0e0; --code-bg: #f5f5f5;
+            --success: #2e7d32; --warn: #f57c00;
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: 'Georgia', serif; line-height: 1.7; color: var(--text); background: var(--bg); max-width: 780px; margin: 0 auto; padding: 2rem 1.5rem; }
+        h1 { font-size: 2rem; margin-bottom: 0.5rem; color: var(--accent); }
+        h2 { font-size: 1.4rem; margin-top: 2.5rem; margin-bottom: 0.8rem; border-bottom: 2px solid var(--accent); padding-bottom: 0.3rem; }
+        h3 { font-size: 1.1rem; margin-top: 1.5rem; margin-bottom: 0.5rem; }
+        p { margin-bottom: 1rem; }
+        .meta { color: #666; font-size: 0.9rem; margin-bottom: 2rem; }
+        .key-insight { background: var(--accent-light); border-left: 4px solid var(--accent); padding: 1rem 1.2rem; margin: 1.5rem 0; border-radius: 0 4px 4px 0; }
+        .key-insight strong { color: var(--accent); }
+        .production-note { background: #fff3e0; border-left: 4px solid var(--warn); padding: 1rem 1.2rem; margin: 1.5rem 0; border-radius: 0 4px 4px 0; }
+        .production-note::before { content: "🏭 Production: "; font-weight: bold; }
+        .exam-tip { background: #e8f5e9; border-left: 4px solid var(--success); padding: 1rem 1.2rem; margin: 1.5rem 0; border-radius: 0 4px 4px 0; }
+        .exam-tip::before { content: "🎯 Exam Tip: "; font-weight: bold; color: var(--success); }
+        .security-warn { background: #fce4ec; border-left: 4px solid #c62828; padding: 1rem 1.2rem; margin: 1.5rem 0; border-radius: 0 4px 4px 0; }
+        .security-warn::before { content: "🔒 Security: "; font-weight: bold; color: #c62828; }
+        code { font-family: 'Menlo', 'Consolas', monospace; font-size: 0.85em; background: var(--code-bg); padding: 0.15em 0.4em; border-radius: 3px; }
+        pre { background: var(--code-bg); padding: 1rem; border-radius: 4px; overflow-x: auto; margin: 1rem 0; font-size: 0.85rem; line-height: 1.5; }
+        ul, ol { margin: 0.5rem 0 1rem 1.5rem; }
+        li { margin-bottom: 0.4rem; }
+        table { width: 100%; border-collapse: collapse; margin: 1rem 0; font-size: 0.9rem; }
+        th, td { border: 1px solid var(--border); padding: 0.6rem 0.8rem; text-align: left; }
+        th { background: var(--accent-light); font-weight: bold; }
+        .diagram { background: white; border: 1px solid var(--border); border-radius: 8px; padding: 1.5rem; margin: 1.5rem 0; text-align: center; }
+        .cert-badge { display: inline-block; background: var(--accent); color: white; font-size: 0.7rem; padding: 0.15rem 0.5rem; border-radius: 10px; margin-left: 0.5rem; }
+        .quiz { background: #f9f9f9; border: 1px solid var(--border); border-radius: 8px; padding: 1.5rem; margin-top: 2rem; }
+        .quiz h2 { border-bottom: none; margin-top: 0; }
+        .quiz-q { margin-bottom: 1.2rem; }
+        .quiz-q p { font-weight: bold; margin-bottom: 0.3rem; }
+        .quiz-answer { display: none; background: #e8f5e9; padding: 0.5rem 0.8rem; border-radius: 4px; margin-top: 0.5rem; }
+        .reveal-btn { background: var(--accent); color: white; border: none; padding: 0.3rem 0.8rem; border-radius: 4px; cursor: pointer; font-size: 0.8rem; }
+        .reveal-btn:hover { opacity: 0.85; }
+    </style>
+</head>
+<body>
+
+<h1>Lesson 16: Encryption at Rest</h1>
+<p class="meta">Chapter 3: Configuration & Secrets · <span class="cert-badge">CKA</span> <span class="cert-badge">CKS</span> · ~20 min</p>
+
+<p>By default, Kubernetes stores all data in etcd as <strong>plain text</strong> (base64 for Secrets is just encoding, not security). Encryption at rest ensures that even if an attacker gains access to etcd's data files, they cannot read sensitive information. This is a CKS exam staple and a production security requirement.</p>
+
+<h2>1. The Threat Model</h2>
+
+<p>What encryption at rest protects against:</p>
+
+<table>
+    <tr><th>Threat</th><th>Protected?</th><th>How</th></tr>
+    <tr><td>Attacker reads etcd data files on disk</td><td>✅ Yes</td><td>Data encrypted before writing to etcd</td></tr>
+    <tr><td>Attacker steals etcd backup files</td><td>✅ Yes</td><td>Backup contains encrypted data</td></tr>
+    <tr><td>Attacker compromises etcd network</td><td>✅ Partially</td><td>Data in etcd is encrypted (but etcd-to-API TLS also needed)</td></tr>
+    <tr><td>Attacker has <code>kubectl get secrets</code> RBAC</td><td>❌ No</td><td>API server decrypts before returning — RBAC is the control here</td></tr>
+    <tr><td>Attacker compromises the API server</td><td>❌ No</td><td>API server holds the decryption keys (or KMS access)</td></tr>
+</table>
+
+<div class="key-insight">
+    <strong>Encryption at rest is defense in depth.</strong> It protects the data layer (etcd) but does NOT replace RBAC, network security, or audit logging. An attacker with API access still sees plaintext Secrets. Encryption at rest specifically protects against physical access to etcd storage.
+</div>
+
+<h2>2. EncryptionConfiguration</h2>
+
+<p>The API server reads an <code>EncryptionConfiguration</code> file that defines which resources to encrypt and which encryption provider to use.</p>
+
+<pre># /etc/kubernetes/enc/encryption-config.yaml
+apiVersion: apiserver.config.k8s.io/v1
+kind: EncryptionConfiguration
+resources:
+  - resources:
+      - secrets                  # Encrypt Secrets
+      - configmaps               # Can also encrypt ConfigMaps
+    providers:                   # Tried in order for WRITES; all tried for READS
+      - aescbc:                  # ← Primary: used for all new writes
+          keys:
+            - name: key-2024-01
+              secret: dGhpcy1pcy1hLTMyLWJ5dGUta2V5LTEyMzQ1Ng==  # 32-byte base64
+      - identity: {}             # ← Fallback: can read unencrypted (old) data</pre>
+
+<h3>Provider Ordering Rules</h3>
+
+<ul>
+    <li><strong>First provider</strong> = used for <em>writing</em> (encrypting new/updated resources)</li>
+    <li><strong>All providers</strong> = tried in order for <em>reading</em> (decrypting existing resources)</li>
+    <li><code>identity: {}</code> = reads unencrypted data (needed during migration from plaintext to encrypted)</li>
+</ul>
+
+<div class="diagram">
+<svg viewBox="0 0 600 140" xmlns="http://www.w3.org/2000/svg" font-family="Menlo, monospace" font-size="9">
+    <defs><marker id="arr16" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0 L10 5 L0 10z" fill="#326ce5"/></marker></defs>
+    
+    <!-- Write path -->
+    <text x="30" y="20" font-weight="bold" font-size="10" fill="#326ce5">WRITE PATH:</text>
+    <rect x="30" y="30" width="100" height="30" rx="4" fill="#e8f0fe" stroke="#326ce5" stroke-width="1.5"/>
+    <text x="80" y="49" text-anchor="middle" font-size="9">API Server</text>
+    <line x1="130" y1="45" x2="170" y2="45" stroke="#326ce5" stroke-width="1.5" marker-end="url(#arr16)"/>
+    <rect x="170" y="30" width="120" height="30" rx="4" fill="#c8e6c9" stroke="#2e7d32" stroke-width="1.5"/>
+    <text x="230" y="49" text-anchor="middle" font-size="9">Encrypt (aescbc)</text>
+    <line x1="290" y1="45" x2="330" y2="45" stroke="#326ce5" stroke-width="1.5" marker-end="url(#arr16)"/>
+    <rect x="330" y="30" width="100" height="30" rx="4" fill="#fff3e0" stroke="#f57c00" stroke-width="1.5"/>
+    <text x="380" y="49" text-anchor="middle" font-size="9">etcd (cipher)</text>
+    
+    <!-- Read path -->
+    <text x="30" y="90" font-weight="bold" font-size="10" fill="#2e7d32">READ PATH:</text>
+    <rect x="330" y="100" width="100" height="30" rx="4" fill="#fff3e0" stroke="#f57c00" stroke-width="1.5"/>
+    <text x="380" y="119" text-anchor="middle" font-size="9">etcd (cipher)</text>
+    <line x1="330" y1="115" x2="290" y2="115" stroke="#2e7d32" stroke-width="1.5" marker-end="url(#arr16)"/>
+    <rect x="170" y="100" width="120" height="30" rx="4" fill="#c8e6c9" stroke="#2e7d32" stroke-width="1.5"/>
+    <text x="230" y="115" text-anchor="middle" font-size="8">Try each provider</text>
+    <text x="230" y="125" text-anchor="middle" font-size="8">until one decrypts</text>
+    <line x1="170" y1="115" x2="130" y2="115" stroke="#2e7d32" stroke-width="1.5" marker-end="url(#arr16)"/>
+    <rect x="30" y="100" width="100" height="30" rx="4" fill="#e8f0fe" stroke="#326ce5" stroke-width="1.5"/>
+    <text x="80" y="119" text-anchor="middle" font-size="9">Plaintext</text>
+</svg>
+</div>
+
+<h2>3. Encryption Providers</h2>
+
+<table>
+    <tr><th>Provider</th><th>Algorithm</th><th>Key Location</th><th>Strength</th><th>Notes</th></tr>
+    <tr><td><code>identity</code></td><td>None</td><td>N/A</td><td>❌ No encryption</td><td>Default; used as fallback reader</td></tr>
+    <tr><td><code>secretbox</code></td><td>XSalsa20 + Poly1305</td><td>Config file</td><td>✅ Strong</td><td>Recommended for local key</td></tr>
+    <tr><td><code>aescbc</code></td><td>AES-256-CBC + HMAC</td><td>Config file</td><td>✅ Strong</td><td>Most commonly used, well-understood</td></tr>
+    <tr><td><code>aesgcm</code></td><td>AES-256-GCM</td><td>Config file</td><td>⚠️ Key must be rotated frequently</td><td>Nonce reuse risk after ~200k writes per key</td></tr>
+    <tr><td><code>kms</code> v1</td><td>Envelope (external)</td><td>External KMS</td><td>✅✅ Best</td><td>Deprecated in 1.28</td></tr>
+    <tr><td><code>kms</code> v2</td><td>Envelope (external)</td><td>External KMS</td><td>✅✅ Best</td><td>Stable in 1.29+; uses gRPC</td></tr>
+</table>
+
+<h3>Local Key Providers (aescbc, secretbox)</h3>
+
+<pre># Generate a 32-byte key:
+head -c 32 /dev/urandom | base64
+# Output: dGhpcy1pcy1hLTMyLWJ5dGUta2V5LTEyMzQ1Ng==
+
+# Use in config:
+providers:
+  - secretbox:
+      keys:
+        - name: key-2024-01
+          secret: dGhpcy1pcy1hLTMyLWJ5dGUta2V5LTEyMzQ1Ng==</pre>
+
+<div class="security-warn">
+    Local key providers store the encryption key <strong>on the same disk as the API server</strong>. If an attacker compromises the control plane node, they get both the encrypted data (etcd) and the key to decrypt it. For true security separation, use KMS envelope encryption.
+</div>
+
+<h3>KMS v2 Envelope Encryption</h3>
+
+<p>Envelope encryption adds a layer of indirection:</p>
+
+<div class="diagram">
+<svg viewBox="0 0 650 120" xmlns="http://www.w3.org/2000/svg" font-family="Menlo, monospace" font-size="9">
+    <defs><marker id="arr16b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0 L10 5 L0 10z" fill="#326ce5"/></marker></defs>
+    
+    <rect x="10" y="20" width="90" height="40" rx="4" fill="#e8f0fe" stroke="#326ce5" stroke-width="1.5"/>
+    <text x="55" y="38" text-anchor="middle" font-size="8" font-weight="bold">Secret data</text>
+    <text x="55" y="50" text-anchor="middle" font-size="7" fill="#666">(plaintext)</text>
+    
+    <line x1="100" y1="40" x2="130" y2="40" stroke="#326ce5" stroke-width="1.5" marker-end="url(#arr16b)"/>
+    
+    <rect x="130" y="15" width="130" height="50" rx="4" fill="#c8e6c9" stroke="#2e7d32" stroke-width="1.5"/>
+    <text x="195" y="35" text-anchor="middle" font-size="8" font-weight="bold">DEK encrypts</text>
+    <text x="195" y="48" text-anchor="middle" font-size="7" fill="#666">Data Encryption Key</text>
+    <text x="195" y="58" text-anchor="middle" font-size="7" fill="#666">(generated per Secret)</text>
+    
+    <line x1="260" y1="40" x2="290" y2="40" stroke="#326ce5" stroke-width="1.5" marker-end="url(#arr16b)"/>
+    
+    <rect x="290" y="15" width="130" height="50" rx="4" fill="#fff3e0" stroke="#f57c00" stroke-width="1.5"/>
+    <text x="355" y="35" text-anchor="middle" font-size="8" font-weight="bold">KEK encrypts DEK</text>
+    <text x="355" y="48" text-anchor="middle" font-size="7" fill="#666">Key Encryption Key</text>
+    <text x="355" y="58" text-anchor="middle" font-size="7" fill="#666">(lives in KMS only)</text>
+    
+    <line x1="420" y1="40" x2="450" y2="40" stroke="#326ce5" stroke-width="1.5" marker-end="url(#arr16b)"/>
+    
+    <rect x="450" y="15" width="180" height="50" rx="4" fill="#f3e5f5" stroke="#7b1fa2" stroke-width="1.5"/>
+    <text x="540" y="35" text-anchor="middle" font-size="8" font-weight="bold">Stored in etcd:</text>
+    <text x="540" y="48" text-anchor="middle" font-size="7" fill="#666">encrypted(Secret) + encrypted(DEK)</text>
+    <text x="540" y="58" text-anchor="middle" font-size="7" fill="#666">KEK never leaves KMS ✓</text>
+    
+    <!-- Bottom note -->
+    <text x="325" y="95" text-anchor="middle" font-size="9" fill="#666">To decrypt: API server sends encrypted DEK to KMS → KMS returns plaintext DEK → decrypt Secret</text>
+    <text x="325" y="110" text-anchor="middle" font-size="9" fill="#2e7d32" font-weight="bold">KEK (master key) NEVER touches the K8s cluster</text>
+</svg>
+</div>
+
+<pre># KMS v2 provider configuration:
+providers:
+  - kms:
+      apiVersion: v2
+      name: my-kms-provider
+      endpoint: unix:///var/run/kms-plugin/socket.sock
+      timeout: 3s</pre>
+
+<table>
+    <tr><th>Cloud</th><th>KMS Plugin</th><th>KEK Location</th></tr>
+    <tr><td>AWS</td><td>aws-encryption-provider</td><td>AWS KMS key in your account</td></tr>
+    <tr><td>GCP</td><td>Built into GKE</td><td>Cloud KMS key</td></tr>
+    <tr><td>Azure</td><td>azure-kms-provider</td><td>Azure Key Vault</td></tr>
+    <tr><td>Self-managed</td><td>Hashicorp Vault plugin</td><td>Vault transit engine</td></tr>
+</table>
+
+<div class="key-insight">
+    <strong>Envelope encryption is the gold standard because:</strong> (1) The master key (KEK) never exists on the K8s node — it's in hardware-backed KMS. (2) Each Secret gets its own DEK — compromising one DEK exposes only one Secret. (3) Key rotation only needs to re-encrypt DEKs (fast), not all data.
+</div>
+
+<h2>4. Step-by-Step: Enable Encryption at Rest</h2>
+
+<h3>Step 1: Generate Key and Create Config</h3>
+
+<pre># Generate a 32-byte encryption key:
+ENCRYPTION_KEY=$(head -c 32 /dev/urandom | base64)
+
+# Create the config file:
+cat > /etc/kubernetes/enc/encryption-config.yaml &lt;&lt;EOF
+apiVersion: apiserver.config.k8s.io/v1
+kind: EncryptionConfiguration
+resources:
+  - resources:
+      - secrets
+    providers:
+      - aescbc:
+          keys:
+            - name: key-$(date +%Y%m%d)
+              secret: ${ENCRYPTION_KEY}
+      - identity: {}
+EOF
+
+# Set restrictive permissions:
+chmod 600 /etc/kubernetes/enc/encryption-config.yaml</pre>
+
+<h3>Step 2: Configure the API Server</h3>
+
+<pre># Edit /etc/kubernetes/manifests/kube-apiserver.yaml:
+spec:
+  containers:
+    - command:
+        - kube-apiserver
+        - --encryption-provider-config=/etc/kubernetes/enc/encryption-config.yaml
+        # ... other flags
+      volumeMounts:
+        - name: enc
+          mountPath: /etc/kubernetes/enc
+          readOnly: true
+  volumes:
+    - name: enc
+      hostPath:
+        path: /etc/kubernetes/enc
+        type: DirectoryOrCreate</pre>
+
+<p>The API server static Pod restarts automatically when its manifest changes.</p>
+
+<h3>Step 3: Re-encrypt Existing Secrets</h3>
+
+<pre># Wait for API server to restart, then:
+kubectl get secrets --all-namespaces -o json | kubectl replace -f -
+
+# This reads each Secret (decrypts with old provider or identity)
+# and writes it back (encrypts with new primary provider)</pre>
+
+<h3>Step 4: Verify</h3>
+
+<pre># Read directly from etcd (bypass API server):
+ETCDCTL_API=3 etcdctl get /registry/secrets/default/db-creds \
+  --endpoints=https://127.0.0.1:2379 \
+  --cacert=/etc/kubernetes/pki/etcd/ca.crt \
+  --cert=/etc/kubernetes/pki/etcd/server.crt \
+  --key=/etc/kubernetes/pki/etcd/server.key | hexdump -C
+
+# Should see: k8s:enc:aescbc:v1:key-20240115:... (encrypted bytes)
+# NOT: {"apiVersion":"v1","data":... (plaintext JSON)</pre>
+
+<div class="exam-tip">
+    CKS exam steps: (1) Create encryption config file with aescbc provider, (2) Add <code>--encryption-provider-config</code> to API server manifest, (3) Add volume/volumeMount for the config, (4) Wait for API server restart, (5) Re-encrypt existing Secrets, (6) Verify with etcdctl. Practice this flow until you can do it in under 5 minutes.
+</div>
+
+<h2>5. Key Rotation</h2>
+
+<p>Encryption keys should be rotated periodically. The process for local keys:</p>
+
+<h3>Rotation Steps</h3>
+
+<ol>
+    <li><strong>Add new key as first in the list</strong> (it becomes the write key)</li>
+    <li>Keep old key(s) below it (still used for reading old data)</li>
+    <li>Restart API server</li>
+    <li>Re-encrypt all Secrets (they get re-encrypted with new key)</li>
+    <li>Remove old key from config (no data is encrypted with it anymore)</li>
+    <li>Restart API server again</li>
+</ol>
+
+<pre># After rotation, the config looks like:
+providers:
+  - aescbc:
+      keys:
+        - name: key-2024-06    # ← NEW key (writes)
+          secret: bmV3LWtleS0yMDI0LTA2LXJvdGF0aW9u...
+        - name: key-2024-01    # ← OLD key (reads only, until re-encryption done)
+          secret: dGhpcy1pcy1hLTMyLWJ5dGUta2V5LTEyMzQ1Ng==
+  - identity: {}</pre>
+
+<div class="production-note">
+    For KMS v2 envelope encryption, key rotation is much simpler: rotate the KEK in your cloud KMS (AWS/GCP/Azure console). New DEKs are encrypted with the new KEK automatically. Old DEKs can still be decrypted because KMS retains old key versions. No need to re-encrypt all data.
+</div>
+
+<h3>Removing identity (Disabling Unencrypted Reads)</h3>
+
+<p>Once all Secrets are encrypted and verified, you can remove <code>identity: {}</code> from the providers list. This ensures the API server <em>cannot</em> read unencrypted data — any plaintext Secret left behind will cause a read error (which alerts you to the problem).</p>
+
+<div class="security-warn">
+    Only remove <code>identity: {}</code> after confirming ALL Secrets are encrypted. If any remain unencrypted, they become unreadable. Verify first: <code>etcdctl get /registry/secrets/ --prefix --keys-only</code> and spot-check several.
+</div>
+
+<h2>Summary</h2>
+
+<table>
+    <tr><th>Concept</th><th>Key Point</th></tr>
+    <tr><td>Default state</td><td>Secrets stored as plaintext (base64) in etcd — no encryption</td></tr>
+    <tr><td>EncryptionConfiguration</td><td>Defines which resources to encrypt and which provider to use</td></tr>
+    <tr><td>Provider order</td><td>First = writes; all = tried for reads</td></tr>
+    <tr><td><code>aescbc</code> / <code>secretbox</code></td><td>Local key on disk — protects against etcd compromise, not API server compromise</td></tr>
+    <tr><td>KMS v2</td><td>Envelope encryption — KEK never leaves external KMS. Gold standard.</td></tr>
+    <tr><td><code>identity: {}</code></td><td>Read-only fallback for unencrypted data — needed during migration</td></tr>
+    <tr><td>Re-encryption</td><td>Must manually re-write existing Secrets after enabling encryption</td></tr>
+    <tr><td>Key rotation</td><td>Add new key first → re-encrypt all → remove old key</td></tr>
+    <tr><td>Verification</td><td><code>etcdctl get</code> + hexdump — should show encrypted prefix, not JSON</td></tr>
+</table>
+
+<!-- Quiz -->
+<div class="quiz">
+    <h2>📝 Quiz: Encryption at Rest</h2>
+    
+    <div class="quiz-q">
+        <p>Q1: You enable encryption at rest with aescbc. An attacker with <code>kubectl get secrets</code> RBAC access tries to read a Secret. Can they see the plaintext?</p>
+        <button class="reveal-btn" onclick="this.nextElementSibling.style.display='block'">Show Answer</button>
+        <div class="quiz-answer"><strong>Yes.</strong> Encryption at rest protects data in etcd (on disk). The API server decrypts Secrets before returning them to authorized clients. RBAC controls who can read Secrets through the API — encryption at rest is a different layer of defense (protects against etcd compromise, not API access).</div>
+    </div>
+    
+    <div class="quiz-q">
+        <p>Q2: You have two providers: <code>[aescbc, identity]</code>. Which is used for writing new Secrets? Which for reading?</p>
+        <button class="reveal-btn" onclick="this.nextElementSibling.style.display='block'">Show Answer</button>
+        <div class="quiz-answer"><strong>Writing:</strong> <code>aescbc</code> (first provider). All new Secrets are encrypted with aescbc.<br><strong>Reading:</strong> Both are tried in order. If data is encrypted (aescbc prefix), the aescbc provider decrypts it. If data is plaintext (old Secrets not yet re-encrypted), the identity provider reads it as-is.</div>
+    </div>
+    
+    <div class="quiz-q">
+        <p>Q3: You enabled encryption, restarted the API server, but forgot to re-encrypt existing Secrets. Are they encrypted now?</p>
+        <button class="reveal-btn" onclick="this.nextElementSibling.style.display='block'">Show Answer</button>
+        <div class="quiz-answer"><strong>No.</strong> Existing Secrets remain unencrypted in etcd. Encryption only applies to new writes. You must force a re-write: <code>kubectl get secrets --all-namespaces -o json | kubectl replace -f -</code>. This reads each Secret (through the API) and writes it back (now encrypted with the new provider).</div>
+    </div>
+    
+    <div class="quiz-q">
+        <p>Q4: Why is KMS envelope encryption more secure than aescbc with a local key?</p>
+        <button class="reveal-btn" onclick="this.nextElementSibling.style.display='block'">Show Answer</button>
+        <div class="quiz-answer">With aescbc, the encryption key sits on the API server's filesystem — compromising that node gives you both encrypted data AND the key. With KMS envelope encryption, the master key (KEK) <strong>never leaves the external KMS</strong>. Even if the node is fully compromised, the attacker has encrypted DEKs they cannot decrypt without KMS access (which requires separate IAM credentials).</div>
+    </div>
+    
+    <div class="quiz-q">
+        <p>Q5: You need to rotate your aescbc encryption key. What's the correct order of operations?</p>
+        <button class="reveal-btn" onclick="this.nextElementSibling.style.display='block'">Show Answer</button>
+        <div class="quiz-answer"><strong>(1)</strong> Add new key as the first item in the keys list (becomes write key). Keep old key below. <strong>(2)</strong> Restart API server. <strong>(3)</strong> Re-encrypt all Secrets: <code>kubectl get secrets -A -o json | kubectl replace -f -</code>. <strong>(4)</strong> Remove old key from config. <strong>(5)</strong> Restart API server. Never remove the old key before re-encryption completes — data encrypted with it would become unreadable.</div>
+    </div>
+    
+    <div class="quiz-q">
+        <p>Q6: How do you verify that a Secret is actually encrypted in etcd (not just base64)?</p>
+        <button class="reveal-btn" onclick="this.nextElementSibling.style.display='block'">Show Answer</button>
+        <div class="quiz-answer">Read directly from etcd bypassing the API server:<br><code>etcdctl get /registry/secrets/default/my-secret --endpoints=... --cacert=... --cert=... --key=... | hexdump -C</code><br>Encrypted data starts with <code>k8s:enc:aescbc:v1:key-name:</code> followed by binary. Unencrypted data shows readable JSON with <code>{"apiVersion":"v1","data":...</code></div>
+    </div>
+</div>
+
+</body>
+</html>

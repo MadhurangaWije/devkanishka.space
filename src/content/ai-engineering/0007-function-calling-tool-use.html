@@ -1,0 +1,726 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lesson 7: Function Calling & Tool Use | AI Engineering</title>
+    <link rel="stylesheet" href="../assets/lesson.css">
+    <link rel="stylesheet" href="../assets/prism-theme.css">
+</head>
+<body>
+    <div class="lesson-header">
+        <div class="module-badge">Module 2: Prompt Engineering</div>
+        <h1>Function Calling & Tool Use</h1>
+        <p class="lesson-subtitle">Give LLMs the ability to interact with external systems through structured function calling</p>
+    </div>
+
+    <div class="lesson-meta">
+        <span class="pill">Lesson 7 of 20</span>
+        <span class="pill">⏱ 25 minutes</span>
+        <span class="pill">🎯 Intermediate-Advanced</span>
+    </div>
+
+    <main class="lesson-content">
+        <!-- Section 1: Why Function Calling -->
+        <section>
+            <h2>Why Function Calling?</h2>
+            <p>LLMs are powerful reasoners but they can't <em>do</em> anything on their own — they can't query databases, call APIs, send emails, or read files. Function calling bridges this gap: the model decides <em>which</em> function to call and <em>what arguments</em> to pass, and your code executes it.</p>
+
+            <div class="concept-box">
+                <h3>What Function Calling Enables</h3>
+                <ul>
+                    <li><strong>Real-time data</strong> — Weather, stock prices, database queries</li>
+                    <li><strong>Actions</strong> — Send emails, create tickets, update records</li>
+                    <li><strong>Computation</strong> — Math, code execution, data analysis</li>
+                    <li><strong>Multi-system orchestration</strong> — Chain multiple API calls based on context</li>
+                </ul>
+            </div>
+        </section>
+
+        <!-- Section 2: The Function Calling Lifecycle -->
+        <section>
+            <h2>The Function Calling Lifecycle</h2>
+            <p>Function calling is a multi-turn conversation between your code and the model:</p>
+
+            <div class="diagram-container" id="fc-lifecycle"></div>
+
+            <ol class="step-list">
+                <li><strong>Define tools</strong> — Provide JSON Schema descriptions of available functions</li>
+                <li><strong>User sends message</strong> — "What's the weather in Tokyo?"</li>
+                <li><strong>Model returns tool call</strong> — Instead of text, returns a structured function call request</li>
+                <li><strong>Your code executes</strong> — You run the actual function with the provided arguments</li>
+                <li><strong>Feed result back</strong> — Send the function output back to the model</li>
+                <li><strong>Model generates response</strong> — Incorporates the result into a natural language answer</li>
+            </ol>
+        </section>
+
+        <!-- Section 3: Defining Tool Schemas -->
+        <section>
+            <h2>Defining Tool Schemas</h2>
+            <p>Tools are defined using JSON Schema. The model uses the function name, description, and parameter descriptions to decide when and how to call them.</p>
+
+            <div class="code-block">
+                <pre><code class="language-python">tools = [
+    {
+        "type": "function",
+        "function": {
+            "name": "get_weather",
+            "description": "Get the current weather for a specific location. Use this when the user asks about weather conditions, temperature, or forecasts.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "location": {
+                        "type": "string",
+                        "description": "City and country, e.g. 'Tokyo, Japan' or 'London, UK'"
+                    },
+                    "units": {
+                        "type": "string",
+                        "enum": ["celsius", "fahrenheit"],
+                        "description": "Temperature units. Default to celsius for non-US locations."
+                    }
+                },
+                "required": ["location"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "query_database",
+            "description": "Execute a read-only SQL query against the company database. Use for questions about sales, customers, inventory, or orders.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "A valid SQLite SELECT query. Never use INSERT, UPDATE, DELETE, or DROP."
+                    },
+                    "explain": {
+                        "type": "boolean",
+                        "description": "If true, return the query execution plan instead of results."
+                    }
+                },
+                "required": ["query"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "send_email",
+            "description": "Send an email to a specified recipient. Only use when the user explicitly asks to send an email.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "to": {
+                        "type": "string",
+                        "description": "Recipient email address"
+                    },
+                    "subject": {
+                        "type": "string",
+                        "description": "Email subject line, max 100 characters"
+                    },
+                    "body": {
+                        "type": "string",
+                        "description": "Email body in plain text"
+                    },
+                    "priority": {
+                        "type": "string",
+                        "enum": ["low", "normal", "high"],
+                        "description": "Email priority level"
+                    }
+                },
+                "required": ["to", "subject", "body"]
+            }
+        }
+    }
+]</code></pre>
+            </div>
+
+            <div class="callout">
+                <strong>Schema design tips:</strong>
+                <ul>
+                    <li>Write descriptions as if explaining to a smart intern — be specific about <em>when</em> to use each function</li>
+                    <li>Use <code>enum</code> to constrain values wherever possible</li>
+                    <li>Mark only truly required parameters as <code>required</code></li>
+                    <li>Include examples in descriptions for ambiguous parameters</li>
+                </ul>
+            </div>
+        </section>
+
+        <!-- Section 4: The Complete Execution Loop -->
+        <section>
+            <h2>The Complete Execution Loop</h2>
+            <p>Here's a production-ready implementation that handles the full lifecycle, including multiple tool calls and error handling:</p>
+
+            <div class="code-block">
+                <pre><code class="language-python">import openai
+import json
+from typing import Callable
+
+client = openai.OpenAI()
+
+# Registry of actual function implementations
+FUNCTION_REGISTRY: dict[str, Callable] = {}
+
+def register_tool(func: Callable) -> Callable:
+    """Decorator to register a function as an available tool."""
+    FUNCTION_REGISTRY[func.__name__] = func
+    return func
+
+@register_tool
+def get_weather(location: str, units: str = "celsius") -> dict:
+    """Simulated weather API call."""
+    # In production, call a real weather API
+    return {
+        "location": location,
+        "temperature": 22 if units == "celsius" else 72,
+        "units": units,
+        "condition": "partly cloudy",
+        "humidity": 65,
+        "wind_speed": "12 km/h"
+    }
+
+@register_tool
+def query_database(query: str, explain: bool = False) -> dict:
+    """Execute a read-only database query."""
+    import sqlite3
+    
+    # Safety check
+    forbidden = ["INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "CREATE"]
+    if any(word in query.upper() for word in forbidden):
+        return {"error": "Only SELECT queries are allowed"}
+    
+    conn = sqlite3.connect("company.db")
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    
+    try:
+        if explain:
+            cursor.execute(f"EXPLAIN QUERY PLAN {query}")
+        else:
+            cursor.execute(query)
+        
+        rows = [dict(row) for row in cursor.fetchall()]
+        return {"results": rows, "row_count": len(rows)}
+    except Exception as e:
+        return {"error": str(e)}
+    finally:
+        conn.close()
+
+@register_tool
+def send_email(to: str, subject: str, body: str, priority: str = "normal") -> dict:
+    """Send an email (simulated)."""
+    # In production, use SendGrid, SES, etc.
+    return {"status": "sent", "message_id": "msg_abc123", "to": to}
+
+
+def execute_tool_call(tool_call) -> str:
+    """Execute a single tool call and return the result as a string."""
+    func_name = tool_call.function.name
+    
+    if func_name not in FUNCTION_REGISTRY:
+        return json.dumps({"error": f"Unknown function: {func_name}"})
+    
+    try:
+        args = json.loads(tool_call.function.arguments)
+        result = FUNCTION_REGISTRY[func_name](**args)
+        return json.dumps(result)
+    except json.JSONDecodeError:
+        return json.dumps({"error": "Invalid arguments JSON"})
+    except TypeError as e:
+        return json.dumps({"error": f"Invalid arguments: {str(e)}"})
+    except Exception as e:
+        return json.dumps({"error": f"Execution failed: {str(e)}"})
+
+
+def chat_with_tools(user_message: str, conversation: list = None, max_turns: int = 5) -> str:
+    """Complete chat loop with function calling support."""
+    
+    if conversation is None:
+        conversation = [
+            {
+                "role": "system",
+                "content": "You are a helpful assistant with access to tools. Use them when needed to answer questions accurately. Always prefer real data over guessing."
+            }
+        ]
+    
+    conversation.append({"role": "user", "content": user_message})
+    
+    for turn in range(max_turns):
+        response = client.chat.completions.create(
+            model="gpt-4o",
+            messages=conversation,
+            tools=tools,
+            tool_choice="auto"  # Let model decide when to use tools
+        )
+        
+        message = response.choices[0].message
+        conversation.append(message)  # Add assistant's response to history
+        
+        # If no tool calls, we have our final answer
+        if not message.tool_calls:
+            return message.content
+        
+        # Execute all tool calls (may be parallel)
+        for tool_call in message.tool_calls:
+            result = execute_tool_call(tool_call)
+            
+            # Add tool result to conversation
+            conversation.append({
+                "role": "tool",
+                "tool_call_id": tool_call.id,
+                "content": result
+            })
+        
+        # Loop back — model will process tool results
+    
+    return "Max tool call turns reached. Please try a simpler question."
+
+
+# Usage
+answer = chat_with_tools("What's the weather in Tokyo and London?")
+print(answer)
+# Model will make TWO parallel tool calls, then synthesize the results</code></pre>
+            </div>
+        </section>
+
+        <!-- Section 5: Parallel Tool Calls -->
+        <section>
+            <h2>Parallel Tool Calls</h2>
+            <p>Modern models can request multiple tool calls in a single response. This is efficient — execute them concurrently:</p>
+
+            <div class="code-block">
+                <pre><code class="language-python">import asyncio
+import aiohttp
+
+async def execute_tool_calls_parallel(tool_calls: list) -> list[dict]:
+    """Execute multiple tool calls concurrently."""
+    
+    async def execute_one(tc):
+        # For I/O-bound tools (API calls), use async
+        func_name = tc.function.name
+        args = json.loads(tc.function.arguments)
+        
+        # Route to async implementations
+        if func_name == "get_weather":
+            return await async_get_weather(**args)
+        elif func_name == "query_database":
+            # DB queries run in thread pool
+            loop = asyncio.get_event_loop()
+            return await loop.run_in_executor(None, query_database, **args)
+        else:
+            return FUNCTION_REGISTRY[func_name](**args)
+    
+    results = await asyncio.gather(
+        *[execute_one(tc) for tc in tool_calls],
+        return_exceptions=True
+    )
+    
+    return [
+        {"error": str(r)} if isinstance(r, Exception) else r
+        for r in results
+    ]
+
+# Control parallel behavior
+response = client.chat.completions.create(
+    model="gpt-4o",
+    messages=conversation,
+    tools=tools,
+    parallel_tool_calls=True  # Allow multiple tools in one response (default: True)
+)</code></pre>
+            </div>
+        </section>
+
+        <!-- Section 6: Error Handling -->
+        <section>
+            <h2>Error Handling Patterns</h2>
+            <p>Tool calls can fail in many ways. Robust error handling prevents your agent from getting stuck:</p>
+
+            <div class="code-block">
+                <pre><code class="language-python">def execute_tool_call_safe(tool_call, timeout: float = 30.0) -> str:
+    """Execute a tool call with comprehensive error handling."""
+    import signal
+    
+    func_name = tool_call.function.name
+    
+    # 1. Unknown function
+    if func_name not in FUNCTION_REGISTRY:
+        return json.dumps({
+            "error": f"Function '{func_name}' not found",
+            "available_functions": list(FUNCTION_REGISTRY.keys()),
+            "hint": "Please use one of the available functions"
+        })
+    
+    # 2. Invalid arguments
+    try:
+        args = json.loads(tool_call.function.arguments)
+    except json.JSONDecodeError as e:
+        return json.dumps({
+            "error": "Invalid JSON in arguments",
+            "details": str(e),
+            "raw_args": tool_call.function.arguments[:200]
+        })
+    
+    # 3. Execution with timeout
+    try:
+        # Simple timeout using signal (Unix only)
+        result = FUNCTION_REGISTRY[func_name](**args)
+        
+        # 4. Validate result is serializable
+        serialized = json.dumps(result)
+        
+        # 5. Truncate if too large (models have context limits)
+        if len(serialized) > 10000:
+            return json.dumps({
+                "result": result if len(serialized) < 10000 else None,
+                "truncated": True,
+                "summary": f"Result too large ({len(serialized)} chars). Showing first 100 rows.",
+                "partial_data": serialized[:5000]
+            })
+        
+        return serialized
+        
+    except TypeError as e:
+        return json.dumps({
+            "error": "Argument type mismatch",
+            "details": str(e),
+            "provided_args": args
+        })
+    except PermissionError:
+        return json.dumps({
+            "error": "Permission denied. This operation is not allowed."
+        })
+    except TimeoutError:
+        return json.dumps({
+            "error": f"Function timed out after {timeout}s"
+        })
+    except Exception as e:
+        return json.dumps({
+            "error": f"Execution error: {type(e).__name__}",
+            "details": str(e)
+        })</code></pre>
+            </div>
+
+            <div class="callout" style="border-left-color: var(--danger);">
+                <strong>🔒 Security Warning:</strong> The LLM chooses which functions to call and what arguments to pass. Never blindly execute LLM-generated SQL, shell commands, or code without validation. Always:
+                <ul>
+                    <li>Whitelist allowed functions — don't expose your entire codebase</li>
+                    <li>Validate and sanitize all arguments before execution</li>
+                    <li>Use read-only database connections for query tools</li>
+                    <li>Require human confirmation for destructive actions (delete, send, purchase)</li>
+                    <li>Log all tool calls for audit trails</li>
+                    <li>Set rate limits per tool to prevent abuse</li>
+                </ul>
+            </div>
+        </section>
+
+        <!-- Section 7: Tool Choice Control -->
+        <section>
+            <h2>Controlling Tool Selection</h2>
+            <p>You can control whether and which tools the model uses:</p>
+
+            <div class="code-block">
+                <pre><code class="language-python"># Let model decide (default)
+tool_choice = "auto"
+
+# Force the model to call a specific function
+tool_choice = {"type": "function", "function": {"name": "query_database"}}
+
+# Prevent any tool use (text response only)
+tool_choice = "none"
+
+# Force model to use at least one tool (but it picks which)
+tool_choice = "required"
+
+# Example: Force database query for data questions
+def smart_tool_choice(user_message: str) -> str | dict:
+    """Dynamically choose tool_choice based on user intent."""
+    data_keywords = ["how many", "total", "average", "list all", "show me", "count"]
+    
+    if any(kw in user_message.lower() for kw in data_keywords):
+        return {"type": "function", "function": {"name": "query_database"}}
+    
+    return "auto"</code></pre>
+            </div>
+        </section>
+
+        <!-- Mini-Project -->
+        <section>
+            <div class="project-box">
+                <h2>🛠 Mini-Project: AI Database Assistant</h2>
+                <p>Build a conversational AI that can query a SQLite database and fetch weather data, handling multi-turn conversations with tool use.</p>
+
+                <h3>Step 1: Set Up the Database</h3>
+                <div class="code-block">
+                    <pre><code class="language-python">import sqlite3
+
+def setup_demo_database():
+    """Create a demo SQLite database with sample data."""
+    conn = sqlite3.connect("company.db")
+    cursor = conn.cursor()
+    
+    cursor.executescript("""
+        CREATE TABLE IF NOT EXISTS customers (
+            id INTEGER PRIMARY KEY,
+            name TEXT NOT NULL,
+            email TEXT,
+            city TEXT,
+            country TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+        
+        CREATE TABLE IF NOT EXISTS orders (
+            id INTEGER PRIMARY KEY,
+            customer_id INTEGER REFERENCES customers(id),
+            product TEXT NOT NULL,
+            quantity INTEGER DEFAULT 1,
+            price REAL NOT NULL,
+            status TEXT DEFAULT 'pending',
+            ordered_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+        
+        CREATE TABLE IF NOT EXISTS products (
+            id INTEGER PRIMARY KEY,
+            name TEXT NOT NULL,
+            category TEXT,
+            price REAL NOT NULL,
+            stock INTEGER DEFAULT 0
+        );
+        
+        -- Sample data
+        INSERT OR IGNORE INTO customers (id, name, email, city, country) VALUES
+            (1, 'Alice Johnson', 'alice@example.com', 'New York', 'US'),
+            (2, 'Bob Smith', 'bob@example.com', 'London', 'UK'),
+            (3, 'Yuki Tanaka', 'yuki@example.com', 'Tokyo', 'Japan'),
+            (4, 'Maria Garcia', 'maria@example.com', 'Madrid', 'Spain'),
+            (5, 'Chen Wei', 'chen@example.com', 'Shanghai', 'China');
+        
+        INSERT OR IGNORE INTO products (id, name, category, price, stock) VALUES
+            (1, 'Widget Pro', 'Hardware', 49.99, 150),
+            (2, 'Data Sync License', 'Software', 199.99, 999),
+            (3, 'Cloud Storage 1TB', 'Service', 9.99, 999),
+            (4, 'Smart Sensor Kit', 'Hardware', 129.99, 45),
+            (5, 'API Access Token', 'Service', 29.99, 999);
+        
+        INSERT OR IGNORE INTO orders (id, customer_id, product, quantity, price, status) VALUES
+            (1, 1, 'Widget Pro', 2, 99.98, 'delivered'),
+            (2, 2, 'Data Sync License', 1, 199.99, 'delivered'),
+            (3, 3, 'Smart Sensor Kit', 3, 389.97, 'shipped'),
+            (4, 1, 'Cloud Storage 1TB', 1, 9.99, 'active'),
+            (5, 4, 'Widget Pro', 5, 249.95, 'pending'),
+            (6, 5, 'API Access Token', 10, 299.90, 'active'),
+            (7, 2, 'Smart Sensor Kit', 1, 129.99, 'delivered'),
+            (8, 3, 'Data Sync License', 2, 399.98, 'active');
+    """)
+    
+    conn.commit()
+    conn.close()
+    print("Demo database created successfully!")
+
+setup_demo_database()</code></pre>
+                </div>
+
+                <h3>Step 2: Build the Assistant</h3>
+                <div class="code-block">
+                    <pre><code class="language-python">class AIDBAssistant:
+    """Conversational AI assistant with database and weather tools."""
+    
+    def __init__(self):
+        self.client = openai.OpenAI()
+        self.conversation = [
+            {
+                "role": "system",
+                "content": """You are a helpful data assistant for a company. You have access to:
+1. A company database with customers, orders, and products tables
+2. A weather API for checking conditions in customer cities
+
+Database schema:
+- customers(id, name, email, city, country, created_at)
+- orders(id, customer_id, product, quantity, price, status, ordered_at)
+- products(id, name, category, price, stock)
+
+Rules:
+- Use SQL queries to answer data questions
+- Only use SELECT statements (read-only access)
+- When asked about weather in a customer's city, first query their city, then check weather
+- Format numbers nicely (currency with $, percentages with %)
+- If a query returns no results, say so clearly"""
+            }
+        ]
+        self.tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "query_database",
+                    "description": "Execute a read-only SQL SELECT query against the company database.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query": {
+                                "type": "string",
+                                "description": "SQLite SELECT query"
+                            }
+                        },
+                        "required": ["query"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "description": "Get current weather for a city.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "location": {
+                                "type": "string",
+                                "description": "City and country, e.g. 'Tokyo, Japan'"
+                            },
+                            "units": {
+                                "type": "string",
+                                "enum": ["celsius", "fahrenheit"],
+                                "description": "Temperature units"
+                            }
+                        },
+                        "required": ["location"]
+                    }
+                }
+            }
+        ]
+    
+    def chat(self, user_message: str) -> str:
+        """Send a message and get a response, handling tool calls."""
+        self.conversation.append({"role": "user", "content": user_message})
+        
+        for _ in range(5):  # Max 5 tool call rounds
+            response = self.client.chat.completions.create(
+                model="gpt-4o",
+                messages=self.conversation,
+                tools=self.tools,
+                tool_choice="auto"
+            )
+            
+            message = response.choices[0].message
+            self.conversation.append(message)
+            
+            if not message.tool_calls:
+                return message.content
+            
+            # Execute tool calls
+            for tc in message.tool_calls:
+                result = execute_tool_call(tc)
+                self.conversation.append({
+                    "role": "tool",
+                    "tool_call_id": tc.id,
+                    "content": result
+                })
+        
+        return "I needed too many steps to answer that. Could you simplify your question?"
+
+# Interactive session
+assistant = AIDBAssistant()
+
+# Example conversation
+queries = [
+    "How many customers do we have in each country?",
+    "What's our total revenue from delivered orders?",
+    "Which customer has spent the most? What's the weather like in their city?",
+    "Show me all products with stock below 100 units",
+]
+
+for q in queries:
+    print(f"\n👤 {q}")
+    answer = assistant.chat(q)
+    print(f"🤖 {answer}")</code></pre>
+                </div>
+
+                <h3>Step 3: Add Safety Layer</h3>
+                <div class="code-block">
+                    <pre><code class="language-python">class SafetyLayer:
+    """Middleware that validates and logs all tool calls."""
+    
+    BLOCKED_PATTERNS = [
+        r"DROP\s+TABLE",
+        r"DELETE\s+FROM",
+        r"INSERT\s+INTO",
+        r"UPDATE\s+\w+\s+SET",
+        r";\s*--",  # SQL injection attempts
+        r"UNION\s+SELECT",  # Union-based injection
+    ]
+    
+    def __init__(self):
+        self.call_log = []
+    
+    def validate_tool_call(self, func_name: str, args: dict) -> tuple[bool, str]:
+        """Returns (is_safe, reason)."""
+        import re
+        
+        if func_name == "query_database":
+            query = args.get("query", "")
+            for pattern in self.BLOCKED_PATTERNS:
+                if re.search(pattern, query, re.IGNORECASE):
+                    return False, f"Blocked: query matches dangerous pattern '{pattern}'"
+            
+            if not query.strip().upper().startswith("SELECT"):
+                return False, "Only SELECT queries are allowed"
+        
+        return True, "OK"
+    
+    def log_call(self, func_name: str, args: dict, result: str, safe: bool):
+        """Log every tool call for audit."""
+        self.call_log.append({
+            "timestamp": __import__('datetime').datetime.now().isoformat(),
+            "function": func_name,
+            "args": args,
+            "result_length": len(result),
+            "safe": safe
+        })
+
+safety = SafetyLayer()</code></pre>
+                </div>
+
+                <div class="callout">
+                    <strong>Extension ideas:</strong> Add support for chart generation (model calls a <code>create_chart</code> tool), email notifications when thresholds are crossed, and scheduled report generation.
+                </div>
+            </div>
+        </section>
+
+        <!-- Key Points -->
+        <section>
+            <div class="key-points">
+                <h2>📌 Key Takeaways</h2>
+                <ul>
+                    <li>Function calling lets LLMs interact with real systems — databases, APIs, services</li>
+                    <li>Define tools with clear JSON Schema — descriptions guide model's tool selection</li>
+                    <li>The execution loop: user → model → tool call → execute → result → model → response</li>
+                    <li>Handle parallel tool calls for efficiency — models can request multiple at once</li>
+                    <li>Never trust LLM-generated arguments blindly — validate, sanitize, and use read-only access</li>
+                    <li>Log all tool calls for debugging and security auditing</li>
+                    <li>Use <code>tool_choice</code> to control when the model uses tools vs. responds directly</li>
+                </ul>
+            </div>
+        </section>
+    </main>
+
+    <nav class="nav-links">
+        <a href="0006-advanced-prompting-techniques.html" class="prev">← Previous: Advanced Prompting Techniques</a>
+        <a href="0008-prompt-management-evaluation.html" class="next">Next: Prompt Management & Evaluation →</a>
+    </nav>
+
+    <script src="../assets/diagrams.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-python.min.js"></script>
+    <script>
+        Diagrams.createFlowDiagram(document.getElementById('fc-lifecycle'), [
+            { label: 'User Message', sublabel: 'Natural language request', color: '#6366f1' },
+            { label: 'LLM Reasoning', sublabel: 'Decides which tool to call', color: '#8b5cf6' },
+            { label: 'Tool Call', sublabel: 'Structured function + args', color: '#f59e0b' },
+            { label: 'Execution', sublabel: 'Your code runs the function', color: '#ef4444' },
+            { label: 'Result', sublabel: 'Function output returned', color: '#22d3ee' },
+            { label: 'Final Response', sublabel: 'LLM synthesizes answer', color: '#22c55e' }
+        ]);
+    </script>
+</body>
+</html>

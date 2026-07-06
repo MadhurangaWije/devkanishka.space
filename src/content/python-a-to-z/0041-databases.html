@@ -1,0 +1,841 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>L41 · Databases with SQLAlchemy — Python A→Z</title>
+<link rel="stylesheet" href="../assets/style.css" />
+</head>
+<body>
+
+<div id="sidebar-placeholder"></div>
+
+<div id="main">
+
+  <!-- ── Lesson Header ── -->
+  <div id="lesson-header">
+    <div class="lesson-track track-fastapi">🟩 FastAPI</div>
+    <h1>Databases with SQLAlchemy</h1>
+    <div class="lesson-meta">
+      <span>📖 Lesson 41</span>
+      <span>⏱ 55 min</span>
+      <span>🧪 5 questions</span>
+      <span>💻 3 exercises</span>
+    </div>
+  </div>
+
+  <!-- ── Content ── -->
+  <div id="content">
+
+    <!-- Objectives -->
+    <div class="objectives">
+      <h4>🎯 Learning Objectives</h4>
+      <ul>
+        <li>Understand the SQLAlchemy Core vs ORM distinction</li>
+        <li>Define mapped classes with <code>DeclarativeBase</code> and column types</li>
+        <li>Create async engines and session factories with <code>asyncpg</code></li>
+        <li>Perform CRUD operations using <code>AsyncSession</code> and <code>select()</code></li>
+        <li>Define relationships: one-to-many, many-to-many with association tables</li>
+        <li>Write and run Alembic migrations</li>
+        <li>Integrate the async session as a FastAPI <code>yield</code> dependency</li>
+      </ul>
+    </div>
+
+
+    <!-- ── 1. SQLAlchemy Overview ── -->
+    <h2 id="sqlalchemy-overview">SQLAlchemy Overview</h2>
+
+    <p>
+      SQLAlchemy ships two layers that you can use together or independently:
+    </p>
+    <ul>
+      <li><strong>Core</strong> — a SQL expression language that sits close to raw SQL but gives you Python composability and cross-database portability.</li>
+      <li><strong>ORM</strong> — maps Python classes to database tables, tracks object state, and manages relationships.</li>
+    </ul>
+    <p>
+      SQLAlchemy 2.0 unified the API — the ORM now uses the same <code>select()</code>
+      style as Core, eliminating the old <code>session.query()</code> split.
+      Async support is first-class via <code>asyncpg</code> (PostgreSQL) or
+      <code>aiosqlite</code> (SQLite for dev/testing).
+    </p>
+
+    <div style="position:relative">
+      <pre><code class="language-bash">pip install sqlalchemy asyncpg alembic
+# For dev/testing with SQLite:
+pip install aiosqlite</code></pre>
+      <span class="code-label">terminal</span>
+    </div>
+
+    <table>
+      <thead>
+        <tr>
+          <th>Approach</th>
+          <th>When to use</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Raw SQL (<code>text()</code>)</td>
+          <td>Complex queries, performance-critical, legacy schemas</td>
+        </tr>
+        <tr>
+          <td>Core (<code>select()</code>)</td>
+          <td>Fine-grained control without full ORM overhead</td>
+        </tr>
+        <tr>
+          <td>ORM (<code>Session</code> + mapped classes)</td>
+          <td>Standard CRUD, relationships, most FastAPI apps</td>
+        </tr>
+        <tr>
+          <td>Alembic</td>
+          <td>Schema migrations in all three cases</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <div class="callout callout-concept">
+      SQLAlchemy 2.0 introduced a clean <code>select(Model)</code> ORM style that works
+      identically in sync and async contexts. Avoid the legacy
+      <code>session.query(Model)</code> API in new code.
+    </div>
+
+
+    <!-- ── 2. Defining Models ── -->
+    <h2 id="defining-models">Defining Models</h2>
+
+    <p>
+      SQLAlchemy 2.0 uses <code>Mapped[T]</code> type annotations together with
+      <code>mapped_column()</code> to declare columns. This gives you full type-checker
+      support and a single source of truth for both the schema and the Python type.
+    </p>
+
+    <div style="position:relative">
+      <pre><code class="language-python"># models.py
+from sqlalchemy import String, Integer, Float, Boolean, ForeignKey, DateTime, func
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+from datetime import datetime
+
+
+class Base(DeclarativeBase):
+    pass
+
+
+class User(Base):
+    __tablename__ = "users"
+
+    id:         Mapped[int]      = mapped_column(Integer, primary_key=True, index=True)
+    username:   Mapped[str]      = mapped_column(String(50), unique=True, nullable=False, index=True)
+    email:      Mapped[str]      = mapped_column(String(255), unique=True, nullable=False)
+    hashed_pw:  Mapped[str]      = mapped_column(String(255), nullable=False)
+    is_active:  Mapped[bool]     = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+    posts: Mapped[list["Post"]] = relationship(
+        "Post", back_populates="author", cascade="all, delete-orphan"
+    )
+
+    def __repr__(self) -&gt; str:
+        return f"&lt;User id={self.id} username={self.username!r}&gt;"
+
+
+class Post(Base):
+    __tablename__ = "posts"
+
+    id:         Mapped[int]  = mapped_column(Integer, primary_key=True, index=True)
+    title:      Mapped[str]  = mapped_column(String(200), nullable=False)
+    body:       Mapped[str]  = mapped_column(String, nullable=False)
+    published:  Mapped[bool] = mapped_column(Boolean, default=False)
+    author_id:  Mapped[int]  = mapped_column(ForeignKey("users.id"), nullable=False)
+
+    author: Mapped["User"] = relationship("User", back_populates="posts")</code></pre>
+      <span class="code-label">models.py</span>
+    </div>
+
+    <p>Key points:</p>
+    <ul>
+      <li><code>Mapped[T]</code> + <code>mapped_column()</code> is the SQLAlchemy 2.0 typed style — it replaces the old <code>Column()</code> declarations.</li>
+      <li><code>server_default=func.now()</code> generates a <code>DEFAULT NOW()</code> clause in the DDL — the database sets the timestamp, not Python.</li>
+      <li><code>cascade="all, delete-orphan"</code> means deleting a <code>User</code> automatically deletes their <code>Post</code> rows.</li>
+      <li><code>relationship()</code> with <code>back_populates</code> creates a bidirectional link — <code>user.posts</code> and <code>post.author</code> stay in sync.</li>
+    </ul>
+
+
+    <!-- ── 3. Async Engine & Session Factory ── -->
+    <h2 id="async-engine-session">Async Engine &amp; Session Factory</h2>
+
+    <div style="position:relative">
+      <pre><code class="language-python"># database.py
+from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
+from models import Base
+
+# PostgreSQL in production
+DATABASE_URL = "postgresql+asyncpg://user:password@localhost:5432/mydb"
+
+# SQLite for local dev / tests
+# DATABASE_URL = "sqlite+aiosqlite:///./dev.db"
+
+engine = create_async_engine(
+    DATABASE_URL,
+    echo=True,          # log all SQL (disable in production)
+    pool_size=10,
+    max_overflow=20,
+)
+
+AsyncSessionLocal = async_sessionmaker(
+    engine,
+    expire_on_commit=False,   # keep objects usable after commit
+    class_=AsyncSession,
+)
+
+
+async def create_tables():
+    """Create all tables — dev only; use Alembic in production."""
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)</code></pre>
+      <span class="code-label">database.py</span>
+    </div>
+
+    <p>
+      <code>expire_on_commit=False</code> is essential for async sessions. Without it,
+      accessing any attribute after <code>commit()</code> triggers a lazy load — which
+      fails in an async context because SQLAlchemy cannot implicitly issue a synchronous
+      I/O call. Always set this to <code>False</code> for async sessions.
+    </p>
+
+    <div class="callout callout-tip">
+      Use <code>echo=True</code> during development to see every SQL query in the
+      console. Disable it in production to avoid log noise and potential credential
+      leakage.
+    </div>
+
+
+    <!-- ── 4. FastAPI Session Dependency ── -->
+    <h2 id="fastapi-session-dependency">FastAPI Session Dependency</h2>
+
+    <p>
+      Expose the async session via a FastAPI <code>yield</code> dependency. The
+      dependency commits on success or rolls back on exception — route handlers
+      never call <code>commit()</code> themselves.
+    </p>
+
+    <div style="position:relative">
+      <pre><code class="language-python"># dependencies.py
+from collections.abc import AsyncGenerator
+from sqlalchemy.ext.asyncio import AsyncSession
+from database import AsyncSessionLocal
+
+
+async def get_db() -&gt; AsyncGenerator[AsyncSession, None]:
+    async with AsyncSessionLocal() as session:
+        try:
+            yield session
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            raise</code></pre>
+      <span class="code-label">dependencies.py</span>
+    </div>
+
+    <p>Using the dependency in a route:</p>
+
+    <div style="position:relative">
+      <pre><code class="language-python">from fastapi import FastAPI, Depends
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
+from dependencies import get_db
+from models import User
+
+app = FastAPI()
+
+
+@app.get("/users")
+async def list_users(db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(User).where(User.is_active == True))
+    return result.scalars().all()</code></pre>
+      <span class="code-label">main.py</span>
+    </div>
+
+
+    <!-- ── 5. CRUD Operations ── -->
+    <h2 id="crud-operations">CRUD Operations</h2>
+
+    <div style="position:relative">
+      <pre><code class="language-python"># crud.py
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select, update, delete
+from models import User, Post
+
+
+# ── CREATE ──
+async def create_user(db: AsyncSession, username: str, email: str, hashed_pw: str) -&gt; User:
+    user = User(username=username, email=email, hashed_pw=hashed_pw)
+    db.add(user)
+    await db.flush()   # assign id without committing (commit handled by dependency)
+    return user
+
+
+# ── READ ──
+async def get_user_by_id(db: AsyncSession, user_id: int) -&gt; User | None:
+    return await db.get(User, user_id)   # fastest single-PK lookup
+
+
+async def get_user_by_email(db: AsyncSession, email: str) -&gt; User | None:
+    result = await db.execute(select(User).where(User.email == email))
+    return result.scalar_one_or_none()
+
+
+async def list_users(db: AsyncSession, skip: int = 0, limit: int = 10) -&gt; list[User]:
+    result = await db.execute(
+        select(User).offset(skip).limit(limit).order_by(User.id)
+    )
+    return list(result.scalars().all())
+
+
+# ── UPDATE ──
+async def update_user_email(db: AsyncSession, user_id: int, new_email: str) -&gt; User | None:
+    user = await db.get(User, user_id)
+    if not user:
+        return None
+    user.email = new_email           # modify the mapped attribute directly
+    await db.flush()
+    return user
+
+
+# ── DELETE ──
+async def delete_user(db: AsyncSession, user_id: int) -&gt; bool:
+    user = await db.get(User, user_id)
+    if not user:
+        return False
+    await db.delete(user)
+    return True</code></pre>
+      <span class="code-label">crud.py</span>
+    </div>
+
+    <p>
+      <strong><code>flush()</code> vs <code>commit()</code>:</strong>
+      <code>flush()</code> writes changes to the database within the current transaction
+      (assigning auto-generated IDs) but does <em>not</em> finalise.
+      <code>commit()</code> finalises the transaction. Since our <code>get_db</code>
+      dependency commits after <code>yield</code>, CRUD functions only need
+      <code>flush()</code> to get IDs back.
+    </p>
+
+    <table>
+      <thead>
+        <tr>
+          <th>Method</th>
+          <th>Returns</th>
+          <th>When to use</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>scalar_one_or_none()</code></td>
+          <td>One object or <code>None</code></td>
+          <td>Lookup by unique field</td>
+        </tr>
+        <tr>
+          <td><code>scalar_one()</code></td>
+          <td>One object (raises if 0 or 2+)</td>
+          <td>When exactly one row is expected</td>
+        </tr>
+        <tr>
+          <td><code>scalars().all()</code></td>
+          <td>List of objects</td>
+          <td>Multiple rows</td>
+        </tr>
+      </tbody>
+    </table>
+
+
+    <!-- ── 6. Relationships & Eager Loading ── -->
+    <h2 id="relationships-eager-loading">Relationships &amp; Eager Loading</h2>
+
+    <p>
+      In async SQLAlchemy you <strong>must</strong> explicitly load relationships using
+      eager-loading options — lazy loading is not supported in async context.
+    </p>
+
+    <div style="position:relative">
+      <pre><code class="language-python">from sqlalchemy.orm import selectinload, joinedload
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+from models import User, Post
+
+
+# ── selectinload — separate IN query (recommended for one-to-many) ──
+async def get_user_with_posts(db: AsyncSession, user_id: int) -&gt; User | None:
+    result = await db.execute(
+        select(User)
+        .where(User.id == user_id)
+        .options(selectinload(User.posts))   # loads posts in a second query
+    )
+    return result.scalar_one_or_none()
+
+
+# ── joinedload — single JOIN query (good for many-to-one / single object) ──
+async def get_post_with_author(db: AsyncSession, post_id: int) -&gt; Post | None:
+    result = await db.execute(
+        select(Post)
+        .where(Post.id == post_id)
+        .options(joinedload(Post.author))    # JOIN users ON posts.author_id = users.id
+    )
+    return result.scalar_one_or_none()</code></pre>
+      <span class="code-label">crud.py</span>
+    </div>
+
+    <p>Many-to-many relationships use an association table:</p>
+
+    <div style="position:relative">
+      <pre><code class="language-python">from sqlalchemy import Table, Column, ForeignKey, Integer, String
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+from models import Base
+
+post_tags = Table(
+    "post_tags", Base.metadata,
+    Column("post_id", ForeignKey("posts.id"), primary_key=True),
+    Column("tag_id",  ForeignKey("tags.id"),  primary_key=True),
+)
+
+
+class Tag(Base):
+    __tablename__ = "tags"
+
+    id:   Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(50), unique=True)
+
+    posts: Mapped[list["Post"]] = relationship(
+        "Post", secondary=post_tags, back_populates="tags"
+    )</code></pre>
+      <span class="code-label">models.py (addition)</span>
+    </div>
+
+    <p>
+      Add the corresponding <code>tags</code> relationship to the <code>Post</code> model:
+    </p>
+
+    <div style="position:relative">
+      <pre><code class="language-python"># Add to the Post class
+tags: Mapped[list["Tag"]] = relationship(
+    "Tag", secondary=post_tags, back_populates="posts"
+)</code></pre>
+      <span class="code-label">models.py</span>
+    </div>
+
+    <div class="callout callout-concept">
+      In async SQLAlchemy you must always explicitly load relationships using
+      <code>selectinload</code> or <code>joinedload</code> — lazy loading is not
+      supported in async context (it would silently trigger a sync DB call and raise
+      <code>MissingGreenlet</code>).
+    </div>
+
+
+    <!-- ── 7. Alembic Migrations ── -->
+    <h2 id="alembic-migrations">Alembic Migrations</h2>
+
+    <p>
+      Alembic is the official migration tool for SQLAlchemy. It tracks schema changes
+      as versioned migration scripts so you can upgrade, downgrade, and reproduce your
+      database schema deterministically.
+    </p>
+
+    <div style="position:relative">
+      <pre><code class="language-bash"># 1 — Initialise Alembic
+pip install alembic
+alembic init alembic</code></pre>
+      <span class="code-label">terminal</span>
+    </div>
+
+    <p>Modify <code>alembic/env.py</code> to support async engines:</p>
+
+    <div style="position:relative">
+      <pre><code class="language-python"># alembic/env.py — key changes
+import asyncio
+from sqlalchemy.ext.asyncio import create_async_engine
+from alembic import context
+from models import Base
+from database import DATABASE_URL
+
+target_metadata = Base.metadata  # tell Alembic what schema to compare against
+
+
+def do_run_migrations(connection):
+    context.configure(connection=connection, target_metadata=target_metadata)
+    with context.begin_transaction():
+        context.run_migrations()
+
+
+async def run_async_migrations():
+    engine = create_async_engine(DATABASE_URL)
+    async with engine.begin() as conn:
+        await conn.run_sync(do_run_migrations)
+    await engine.dispose()
+
+
+def run_migrations_online():
+    asyncio.run(run_async_migrations())</code></pre>
+      <span class="code-label">alembic/env.py</span>
+    </div>
+
+    <p>Common Alembic commands:</p>
+
+    <div style="position:relative">
+      <pre><code class="language-bash"># Auto-generate migration from model changes
+alembic revision --autogenerate -m "add users and posts tables"
+
+# Apply pending migrations
+alembic upgrade head
+
+# Roll back one step
+alembic downgrade -1
+
+# View migration history
+alembic history --verbose
+
+# Show current revision in DB
+alembic current</code></pre>
+      <span class="code-label">terminal</span>
+    </div>
+
+    <div class="callout callout-warn">
+      <code>--autogenerate</code> detects column additions/removals and index changes
+      but does <strong>NOT</strong> detect: column renames, changes to
+      <code>server_default</code>, or custom SQL types. Always review the generated
+      migration file before applying.
+    </div>
+
+
+    <!-- ── 8. N+1 Problem & Query Optimisation ── -->
+    <h2 id="n-plus-1">N+1 Problem &amp; Query Optimisation</h2>
+    <p>
+      The <strong>N+1 problem</strong> occurs when you load N rows then issue a separate
+      query for each row's related data — 1 query for users + N queries for their posts = N+1 total.
+    </p>
+
+    <h3>Bad — N+1 with a loop</h3>
+    <div style="position:relative">
+      <pre><code class="language-python"># ❌ N+1: 1 query for users + N queries for posts
+result = await db.execute(select(User))
+users = result.scalars().all()
+for user in users:
+    posts_result = await db.execute(select(Post).where(Post.author_id == user.id))
+    user_posts = posts_result.scalars().all()   # 1 extra query PER user!</code></pre>
+      <span class="code-label">bad_n_plus_1.py</span>
+    </div>
+
+    <h3>Good — eager loading in 2 queries</h3>
+    <div style="position:relative">
+      <pre><code class="language-python"># ✅ 2 queries total: one for users, one IN-query for all their posts
+from sqlalchemy.orm import selectinload
+
+result = await db.execute(
+    select(User).options(selectinload(User.posts))
+)
+users = result.scalars().all()
+# user.posts already loaded — no extra queries</code></pre>
+      <span class="code-label">good_eager_load.py</span>
+    </div>
+
+    <h3>Pagination — offset vs keyset</h3>
+    <div style="position:relative">
+      <pre><code class="language-python"># Offset pagination — simple but slow on large tables
+result = await db.execute(
+    select(Post).order_by(Post.id).offset(200).limit(20)
+)
+
+# Keyset (cursor) pagination — fast at any depth
+last_seen_id = 200
+result = await db.execute(
+    select(Post).where(Post.id > last_seen_id).order_by(Post.id).limit(20)
+)</code></pre>
+      <span class="code-label">pagination.py</span>
+    </div>
+
+    <h3>Aggregations with <code>func</code></h3>
+    <div style="position:relative">
+      <pre><code class="language-python">from sqlalchemy import func
+
+result = await db.execute(
+    select(User.id, func.count(Post.id).label("post_count"))
+    .join(Post, isouter=True)
+    .group_by(User.id)
+    .order_by(func.count(Post.id).desc())
+    .limit(10)
+)
+rows = result.all()   # list of Row(id, post_count)</code></pre>
+      <span class="code-label">aggregations.py</span>
+    </div>
+
+    <div class="callout callout-tip">
+      Use <code>EXPLAIN ANALYZE</code> in PostgreSQL to inspect query plans.
+      SQLAlchemy's <code>echo=True</code> shows emitted SQL but not the execution plan —
+      paste the query into <code>psql</code> or pgAdmin for real optimisation.
+    </div>
+
+    <!-- ── 9. Pydantic + SQLAlchemy Integration ── -->
+    <h2 id="pydantic-integration">Pydantic + SQLAlchemy Integration</h2>
+    <p>
+      Keep <strong>Pydantic schemas</strong> (request/response shapes) separate from
+      <strong>SQLAlchemy models</strong> (DB tables). The bridge is
+      <code>from_attributes=True</code> — Pydantic reads ORM object attributes instead
+      of requiring a dict.
+    </p>
+    <div style="position:relative">
+      <pre><code class="language-python"># schemas.py
+from pydantic import BaseModel, ConfigDict, EmailStr
+from datetime import datetime
+
+class UserCreate(BaseModel):
+    username: str
+    email: EmailStr
+    password: str
+
+class UserOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)   # read from ORM object
+    id: int
+    username: str
+    email: str
+    is_active: bool
+    created_at: datetime
+
+class PostOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    title: str
+    published: bool
+    author: UserOut           # nested ORM → Pydantic conversion</code></pre>
+      <span class="code-label">schemas.py</span>
+    </div>
+    <div style="position:relative">
+      <pre><code class="language-python"># Route that returns an ORM object directly
+@app.post("/users", response_model=UserOut, status_code=201)
+async def create_user_route(
+    body: UserCreate,
+    db: AsyncSession = Depends(get_db),
+):
+    existing = await get_user_by_email(db, body.email)
+    if existing:
+        raise HTTPException(409, detail="Email already registered")
+    user = await create_user(db, body.username, body.email, hash_password(body.password))
+    return user   # FastAPI calls UserOut.model_validate(user) via from_attributes=True</code></pre>
+      <span class="code-label">routes.py</span>
+    </div>
+    <div class="callout callout-concept">
+      <code>from_attributes=True</code> (formerly <code>orm_mode = True</code> in Pydantic v1)
+      enables <code>UserOut.model_validate(orm_obj)</code> to read attributes instead of dict keys.
+      FastAPI calls this automatically when serialising a <code>response_model</code>, so you can
+      return raw ORM objects from route handlers without manual conversion.
+    </div>
+
+    <!-- ── 10. Testing with SQLite ── -->
+    <h2 id="testing">Testing with a Real SQLite DB</h2>
+    <p>
+      Use SQLite + <code>aiosqlite</code> for integration tests — it exercises the full async
+      SQLAlchemy stack without needing a running PostgreSQL instance in CI.
+    </p>
+    <div style="position:relative">
+      <pre><code class="language-python"># conftest.py
+import pytest, pytest_asyncio
+from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
+from fastapi.testclient import TestClient
+from main import app
+from database import get_db
+from models import Base
+
+TEST_DB_URL = "sqlite+aiosqlite:///./test.db"
+
+@pytest_asyncio.fixture(scope="session")
+async def engine():
+    eng = create_async_engine(TEST_DB_URL)
+    async with eng.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    yield eng
+    async with eng.begin() as conn:
+        await conn.run_sync(Base.metadata.drop_all)
+    await eng.dispose()
+
+@pytest_asyncio.fixture
+async def db_session(engine):
+    AsyncTestSession = async_sessionmaker(engine, expire_on_commit=False)
+    async with AsyncTestSession() as session:
+        yield session
+        await session.rollback()   # undo test changes — fast, no DDL
+
+@pytest.fixture
+def client(db_session):
+    async def override_get_db():
+        yield db_session
+    app.dependency_overrides[get_db] = override_get_db
+    yield TestClient(app)
+    app.dependency_overrides.clear()</code></pre>
+      <span class="code-label">conftest.py</span>
+    </div>
+    <div class="callout callout-tip">
+      Rollback after each test instead of dropping/recreating tables — much faster.
+      Use <code>scope="session"</code> for the engine (created once) and default
+      <code>scope="function"</code> for the session (fresh per test).
+    </div>
+
+    <!-- ── Best Practices ── -->
+    <h2 id="best-practices">Best Practices</h2>
+    <ul>
+      <li><strong>Use async SQLAlchemy for FastAPI</strong> — sync sessions block the event loop.</li>
+      <li><strong>Always load relationships explicitly</strong> — <code>selectinload</code> for one-to-many, <code>joinedload</code> for many-to-one. Never rely on lazy loading in async code.</li>
+      <li><strong>Use Alembic for all schema changes</strong> — never call <code>Base.metadata.create_all()</code> in production.</li>
+      <li><strong><code>flush()</code> in CRUD, <code>commit()</code> in the dependency</strong> — keeps transaction control at the boundary.</li>
+      <li><strong>Set <code>expire_on_commit=False</code></strong> on async sessions — prevents <code>DetachedInstanceError</code>.</li>
+      <li><strong>Use <code>from_attributes=True</code> on all response Pydantic models</strong> — cleanly converts ORM objects without manual <code>.model_dump()</code>.</li>
+      <li><strong>Add indexes on foreign keys and frequently queried columns</strong> — <code>mapped_column(index=True)</code> generates a B-tree index.</li>
+      <li><strong>Test with SQLite + aiosqlite in CI</strong> — fast, zero-config, schema-compatible with PostgreSQL for most queries.</li>
+    </ul>
+
+    <!-- ── Exercises ── -->
+    <h2 id="exercises">Exercises</h2>
+    <div class="exercise-section">
+
+      <div class="exercise">
+        <h3>Exercise 1 — Blog CRUD API</h3>
+        <p>Build a complete FastAPI + SQLAlchemy async blog API:</p>
+        <ul>
+          <li>Models: <code>User</code> (id, username, email, hashed_pw) and <code>Post</code> (id, title, body, published, author_id → User)</li>
+          <li>CRUD functions: <code>create_user</code>, <code>get_user</code>, <code>create_post</code>, <code>list_posts(published_only)</code>, <code>publish_post</code></li>
+          <li>Routes: <code>POST /users</code>, <code>POST /posts</code>, <code>GET /posts</code>, <code>GET /posts/{id}</code>, <code>PATCH /posts/{id}/publish</code></li>
+          <li>Response models with <code>from_attributes=True</code>; raise 404 on missing resources</li>
+        </ul>
+        <details>
+          <summary>💡 Hint — list posts with author pre-loaded</summary>
+          <pre><code class="language-python">@app.get("/posts", response_model=list[PostOut])
+async def list_posts(published_only: bool = False, db: AsyncSession = Depends(get_db)):
+    q = select(Post).options(selectinload(Post.author)).order_by(Post.id)
+    if published_only:
+        q = q.where(Post.published == True)
+    result = await db.execute(q)
+    return result.scalars().all()</code></pre>
+        </details>
+      </div>
+
+      <div class="exercise">
+        <h3>Exercise 2 — Tags (Many-to-Many)</h3>
+        <p>Extend the blog with a Tag system:</p>
+        <ul>
+          <li>Add <code>Tag</code> model and <code>post_tags</code> association table</li>
+          <li><code>POST /tags</code> — create a tag</li>
+          <li><code>POST /posts/{id}/tags</code> — attach a list of tag names (create missing tags)</li>
+          <li><code>GET /posts/{id}</code> — include tags in the response</li>
+        </ul>
+        <details>
+          <summary>💡 Hint — attach tags</summary>
+          <pre><code class="language-python">async def add_tags_to_post(db: AsyncSession, post_id: int, tag_names: list[str]):
+    result = await db.execute(
+        select(Post).where(Post.id == post_id).options(selectinload(Post.tags))
+    )
+    post = result.scalar_one_or_none()
+    if not post:
+        return None
+    for name in tag_names:
+        tag_r = await db.execute(select(Tag).where(Tag.name == name))
+        tag = tag_r.scalar_one_or_none()
+        if not tag:
+            tag = Tag(name=name)
+            db.add(tag)
+            await db.flush()
+        if tag not in post.tags:
+            post.tags.append(tag)
+    return post</code></pre>
+        </details>
+      </div>
+
+      <div class="exercise">
+        <h3>Exercise 3 — Write &amp; Run an Alembic Migration</h3>
+        <p>Practice the full Alembic workflow:</p>
+        <ol>
+          <li>Start from the Blog schema (Exercise 1)</li>
+          <li><code>alembic init alembic</code> — configure <code>env.py</code> with your models and async engine</li>
+          <li><code>alembic revision --autogenerate -m "initial schema"</code> — inspect the generated file</li>
+          <li><code>alembic upgrade head</code> — confirm tables exist</li>
+          <li>Add <code>bio: Mapped[str | None]</code> to <code>User</code></li>
+          <li><code>alembic revision --autogenerate -m "add user bio"</code> then <code>alembic upgrade head</code></li>
+          <li><code>alembic downgrade -1</code> — confirm the column is removed</li>
+        </ol>
+        <details>
+          <summary>💡 Hint</summary>
+          <pre><code class="language-bash">alembic current          # show active revision
+alembic history --verbose   # show full migration log</code></pre>
+        </details>
+      </div>
+
+    </div><!-- /exercise-section -->
+
+    <div id="quiz-section"></div>
+    <div id="lesson-nav-footer"></div>
+  </div><!-- /content -->
+</div><!-- /main -->
+
+<script src="../assets/nav-data.js"></script>
+<script src="../assets/nav.js"></script>
+<script src="../assets/quiz.js"></script>
+<script src="../assets/highlight.js"></script>
+
+<script>
+buildLessonFooter();
+
+QuizWidget.render("quiz-section", [
+  {
+    question: "Why must relationships always be explicitly loaded (selectinload / joinedload) in async SQLAlchemy?",
+    options: [
+      "Lazy loading in async context would require a synchronous database call, which blocks the event loop — SQLAlchemy raises MissingGreenlet or DetachedInstanceError instead of silently blocking",
+      "selectinload is faster in all cases so it is enforced by the framework",
+      "async SQLAlchemy does not support relationships at all",
+      "joinedload is required by the asyncpg driver specification"
+    ],
+    correct: 0,
+    explanation: "SQLAlchemy's default lazy loading fires a SQL query the moment you access a relationship attribute (e.g. user.posts). In async code that access is synchronous — there is no await — so SQLAlchemy cannot fire an async query. It raises MissingGreenlet or DetachedInstanceError rather than blocking. The fix is always explicit loading at query time: selectinload (separate IN query, best for one-to-many collections) or joinedload (single JOIN, best for many-to-one scalars)."
+  },
+  {
+    question: "What is the key difference between `db.flush()` and `db.commit()`?",
+    options: [
+      "flush writes changes to disk permanently; commit only writes to the in-memory transaction buffer",
+      "flush sends SQL to the DB within the current transaction — assigning auto-generated IDs — without finalising; commit finalises the transaction and makes changes durable and visible to other connections",
+      "flush is only used with bulk inserts; commit is used for single-row operations",
+      "There is no difference — flush and commit are aliases in SQLAlchemy 2.0"
+    ],
+    correct: 1,
+    explanation: "flush() pushes pending SQL (INSERT/UPDATE/DELETE) to the database server within the open transaction — this is what triggers auto-increment ID assignment. However the changes are not yet visible to other connections and can still be rolled back. commit() finalises: changes become durable, the transaction closes, and other connections can see the data. The recommended FastAPI pattern is: CRUD functions call flush() to get IDs back; the get_db() yield dependency calls commit() after the route handler returns successfully."
+  },
+  {
+    question: "What problem does `expire_on_commit=False` solve in async SQLAlchemy sessions?",
+    options: [
+      "It prevents the session from auto-committing so all changes remain temporary",
+      "It keeps ORM object attributes accessible after commit, preventing DetachedInstanceError when FastAPI serialises the response after the session has closed",
+      "It makes the same session object reusable across multiple HTTP requests",
+      "It disables SQLAlchemy change-tracking for better write performance"
+    ],
+    correct: 1,
+    explanation: "By default SQLAlchemy marks all mapped attributes as expired after a commit. The next access fires a lazy reload. In async code the session is often closed by the time FastAPI serialises the response, so that lazy reload raises DetachedInstanceError or MissingGreenlet. Setting expire_on_commit=False tells SQLAlchemy to keep the pre-commit values in memory, so route handlers can return ORM objects after commit without needing a second round-trip to the database."
+  },
+  {
+    question: "Why use Alembic for migrations instead of `Base.metadata.create_all()` in production?",
+    options: [
+      "create_all() is deprecated in SQLAlchemy 2.0 and raises a DeprecationWarning",
+      "create_all() only creates missing tables and ignores existing ones — it cannot add columns, drop indexes, or modify constraints. Alembic generates versioned, reversible scripts that can be reviewed, applied incrementally, and rolled back.",
+      "create_all() requires a synchronous engine and cannot be used with asyncpg",
+      "Alembic is a mandatory dependency of FastAPI's startup lifecycle"
+    ],
+    correct: 1,
+    explanation: "create_all() is fine for greenfield development — it creates tables that don't exist. But it completely ignores tables that already exist, so adding a new column to a live database does nothing. Alembic compares your models against the real DB schema and generates an upgrade() / downgrade() migration script. These scripts are version-controlled, can be reviewed before applying, support rollback, and are essential for zero-downtime deployments and team workflows."
+  },
+  {
+    question: "What does `model_config = ConfigDict(from_attributes=True)` enable in a Pydantic response model?",
+    options: [
+      "Pydantic reads data from Python object attributes (like SQLAlchemy ORM instances) instead of requiring a dict input",
+      "Pydantic automatically generates database CREATE TABLE statements from the model fields",
+      "All model fields become Optional, useful for PATCH request bodies",
+      "Strict mode is enabled, rejecting any type coercion"
+    ],
+    correct: 0,
+    explanation: "By default Pydantic v2 only accepts dicts and mapping types as input. from_attributes=True (formerly orm_mode=True in Pydantic v1) tells Pydantic to also accept objects that expose values as attributes — exactly what SQLAlchemy ORM instances do. This allows UserOut.model_validate(db_user) to work without manually converting to a dict. FastAPI calls model_validate automatically when serialising a response_model, so you can return raw ORM objects directly from route handlers."
+  }
+]);
+</script>
+</body>
+</html>

@@ -1,0 +1,1153 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>L43 · CPython Internals: Bytecode, Frames &amp; the Eval Loop — Python A→Z</title>
+<link rel="stylesheet" href="../assets/style.css" />
+</head>
+<body>
+<div id="sidebar-placeholder"></div>
+<div id="main">
+  <div id="lesson-header">
+    <div class="lesson-track track-internals">🟠 Python Internals</div>
+    <h1>CPython Internals: Bytecode, Frames &amp; the Eval Loop</h1>
+    <div class="lesson-meta">
+      <span>📖 Lesson 43</span>
+      <span>⏱ 60 min</span>
+      <span>🧪 5 questions</span>
+      <span>💻 3 exercises</span>
+    </div>
+  </div>
+  <div id="content">
+
+    <div class="objectives">
+      <h4>🎯 Learning Objectives</h4>
+      <ul>
+        <li>Understand CPython's compilation pipeline: source → AST → bytecode → execution</li>
+        <li>Inspect bytecode with <code>dis</code> module and understand the most important opcodes</li>
+        <li>Understand what a frame object (<code>PyFrameObject</code>) is and what it contains</li>
+        <li>Trace the CPython eval loop (<code>ceval.c</code>) conceptually and understand how it dispatches opcodes</li>
+        <li>Use <code>code</code> objects: inspect <code>co_consts</code>, <code>co_varnames</code>, <code>co_code</code>, <code>co_flags</code></li>
+        <li>Understand the value stack and how it is used during bytecode execution</li>
+        <li>Use <code>sys._getframe()</code>, <code>inspect.currentframe()</code>, and frame introspection for advanced tooling</li>
+      </ul>
+    </div>
+
+    <!-- ═══════════════════════════════════════════════════════════ -->
+    <h2 id="compilation-pipeline">1 · The CPython Compilation Pipeline</h2>
+
+    <p>
+      Before any Python code runs, CPython transforms your source text through a series of
+      well-defined stages. Understanding this pipeline lets you reason about import caching,
+      write AST-level transformations, and demystify error messages that reference column
+      numbers, tokens, or "compile time".
+    </p>
+
+    <pre style="background:#1a1a2e;padding:16px;border-radius:8px;overflow-x:auto;font-size:0.82rem;color:#e0e0f0;">Source code (.py)
+    ↓  tokenise   (tokenize module)
+Token stream
+    ↓  parse      (Python's PEG parser, Grammar/python.gram)
+Abstract Syntax Tree (ast module)
+    ↓  compile    (compile() / PyAST_CompileObject)
+Code object (types.CodeType)
+    ↓  execute    (ceval.c — the eval loop)
+Result</pre>
+
+    <h3>Tokenisation</h3>
+    <p>
+      The <code>tokenize</code> module turns raw source bytes into a flat stream of
+      <em>tokens</em> — each a 5-tuple
+      <code>(type, string, start, end, line)</code>. Token types include
+      <code>NAME</code>, <code>NUMBER</code>, <code>STRING</code>, <code>OP</code>,
+      <code>NEWLINE</code>, <code>INDENT</code>, <code>DEDENT</code>, and
+      <code>COMMENT</code>. Tokenisation is line-oriented and requires no knowledge of
+      grammar — it simply identifies the atoms of the language.
+    </p>
+
+    <h3>Parsing</h3>
+    <p>
+      Since Python 3.9, CPython uses a hand-generated
+      <strong>PEG parser</strong> (Parsing Expression Grammar) defined in
+      <code>Grammar/python.gram</code> and compiled by the
+      <code>Tools/peg_generator</code> tool. The parser consumes the token stream and
+      emits an <strong>Abstract Syntax Tree</strong> — a tree of
+      <code>ast.AST</code> subclass instances (<code>ast.Module</code>,
+      <code>ast.FunctionDef</code>, <code>ast.BinOp</code>, …). The AST is fully exposed
+      to Python via the <code>ast</code> standard-library module, which enables powerful
+      metaprogramming and static analysis.
+    </p>
+
+    <h3>Compilation</h3>
+    <p>
+      <code>compile(source, filename, mode)</code> takes source text (or an already-parsed
+      AST) and returns a <code>types.CodeType</code> object. Internally CPython performs
+      name-resolution (distinguishing local, enclosing, global, and built-in scopes),
+      constant folding, and bytecode generation. The
+      <code>mode</code> argument is <code>"exec"</code> for statements,
+      <code>"eval"</code> for a single expression, or <code>"single"</code> for interactive
+      REPL mode.
+    </p>
+
+    <h3>Execution</h3>
+    <p>
+      <code>exec()</code> and every function call push a new <em>frame</em> onto the call
+      stack and hand it to the eval loop in <code>Python/ceval.c</code>. The loop reads
+      opcodes one by one and dispatches them to C handlers that manipulate a value stack of
+      <code>PyObject*</code> pointers.
+    </p>
+
+    <div style="position:relative"><pre><code class="language-python">import tokenize, ast, dis, io
+
+source = """
+def greet(name):
+    return f"Hello, {name}!"
+"""
+
+# Step 1 — tokens
+tokens = tokenize.tokenize(io.BytesIO(source.encode()).readline)
+for tok in tokens:
+    print(tok)
+
+# Step 2 — AST
+tree = ast.parse(source)
+print(ast.dump(tree, indent=2))
+
+# Step 3 — code object
+code = compile(source, "&lt;string&gt;", "exec")
+print(type(code))              # &lt;class 'code'&gt;
+print(code.co_consts)          # constants pool
+
+# Step 4 — disassemble
+dis.dis(code)</code></pre><span class="code-label">pipeline_demo.py</span></div>
+
+    <div class="callout callout-concept">
+      <strong>Concept:</strong> Everything in Python goes through this pipeline. When you
+      <code>import</code> a module, CPython compiles it to a <code>.pyc</code> file
+      (cached bytecode) and skips re-compilation on subsequent imports if the source
+      hasn't changed. The <code>.pyc</code> format is: magic number + timestamp/hash +
+      marshalled code object. The magic number encodes the CPython version, which is why
+      <code>.pyc</code> files from Python 3.11 cannot be loaded by Python 3.12.
+    </div>
+
+    <!-- ═══════════════════════════════════════════════════════════ -->
+    <h2 id="code-objects">2 · Code Objects</h2>
+
+    <p>
+      A <strong>code object</strong> (<code>types.CodeType</code>) is the compiled,
+      immutable representation of a function body, class body, module, or comprehension.
+      It encodes everything the eval loop needs to execute that block of code — the raw
+      bytecode instructions, the names of variables, the constants pool, and several
+      flags that control runtime behaviour. Code objects are <em>not</em> callable
+      directly; they become callable only when wrapped in a <code>function</code> object
+      (which binds the code object to a global namespace and a default-arguments tuple).
+    </p>
+
+    <div style="position:relative"><pre><code class="language-python">import types
+
+def add(x, y):
+    z = x + y
+    return z
+
+code = add.__code__    # every function carries its code object
+
+print(type(code))                  # &lt;class 'code'&gt;
+print(code.co_name)                # 'add'
+print(code.co_filename)            # file where defined
+print(code.co_firstlineno)         # 1
+print(code.co_argcount)            # 2  (x, y)
+print(code.co_varnames)            # ('x', 'y', 'z')  — local var names
+print(code.co_consts)              # (None,)  — constants (no numeric literals here)
+print(code.co_names)               # ()  — global names referenced
+print(code.co_cellvars)            # ()  — vars captured by inner closures
+print(code.co_freevars)            # ()  — vars captured FROM outer scope
+print(code.co_stacksize)           # max value stack depth needed
+print(code.co_flags)               # bit flags (CO_OPTIMIZED, CO_NEWLOCALS, CO_VARARGS…)
+print(code.co_nlocals)             # 3  (x, y, z)</code></pre><span class="code-label">code_objects.py</span></div>
+
+    <h3>Key <code>co_*</code> Attributes</h3>
+
+    <table>
+      <thead>
+        <tr>
+          <th>Attribute</th>
+          <th>Type</th>
+          <th>Description</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td><code>co_name</code></td><td>str</td><td>Function/class/module name</td></tr>
+        <tr><td><code>co_qualname</code></td><td>str</td><td>Fully qualified name (Python 3.11+)</td></tr>
+        <tr><td><code>co_filename</code></td><td>str</td><td>Source file</td></tr>
+        <tr><td><code>co_firstlineno</code></td><td>int</td><td>First line of the function</td></tr>
+        <tr><td><code>co_argcount</code></td><td>int</td><td>Number of positional args (not <code>*args</code>/<code>**kwargs</code>)</td></tr>
+        <tr><td><code>co_varnames</code></td><td>tuple[str]</td><td>All local variable names (args first, then locals)</td></tr>
+        <tr><td><code>co_consts</code></td><td>tuple</td><td>Constants pool (literals, nested code objects)</td></tr>
+        <tr><td><code>co_names</code></td><td>tuple[str]</td><td>Global names referenced</td></tr>
+        <tr><td><code>co_cellvars</code></td><td>tuple[str]</td><td>Locals captured by nested functions</td></tr>
+        <tr><td><code>co_freevars</code></td><td>tuple[str]</td><td>Names captured from enclosing scope</td></tr>
+        <tr><td><code>co_code</code></td><td>bytes</td><td>Raw bytecode (Python ≤ 3.10); use <code>co_code</code> or <code>co_consts</code></td></tr>
+        <tr><td><code>co_stacksize</code></td><td>int</td><td>Max operand stack depth needed</td></tr>
+        <tr><td><code>co_flags</code></td><td>int</td><td>Bitmask of <code>CO_*</code> flags</td></tr>
+      </tbody>
+    </table>
+
+    <div class="callout callout-tip">
+      <strong>Tip:</strong> <code>co_varnames</code> always starts with argument names,
+      then adds locals in definition order. This is how CPython implements
+      <em>fast locals</em> — an array indexed by position in <code>co_varnames</code>,
+      avoiding dictionary lookups for local variables. The C struct member is
+      <code>frame-&gt;localsplus[i]</code>, and the opcode
+      <code>LOAD_FAST i</code> simply indexes into that array — it's
+      <strong>O(1)</strong> with no hashing overhead.
+    </div>
+
+    <p>
+      The <code>co_flags</code> bitmask encodes important properties. The most common
+      flags are: <code>CO_OPTIMIZED</code> (0x0001) — locals use fast-locals array, not
+      a dict; <code>CO_NEWLOCALS</code> (0x0002) — a new locals dict is created;
+      <code>CO_VARARGS</code> (0x0004) — accepts <code>*args</code>;
+      <code>CO_VARKEYWORDS</code> (0x0008) — accepts <code>**kwargs</code>;
+      <code>CO_GENERATOR</code> (0x0020) — this is a generator function;
+      <code>CO_COROUTINE</code> (0x0100) — this is an <code>async def</code> function.
+      You can inspect them with the <code>inspect</code> module constants:
+      <code>inspect.CO_GENERATOR</code>, etc.
+    </p>
+
+    <!-- ═══════════════════════════════════════════════════════════ -->
+    <h2 id="bytecode-dis">3 · Bytecode &amp; the <code>dis</code> Module</h2>
+
+    <p>
+      Python bytecode is a compact sequence of <strong>2-byte instructions</strong>:
+      one byte for the <em>opcode</em> and one byte for its <em>argument</em>. For
+      arguments larger than 255, the <code>EXTENDED_ARG</code> prefix opcode
+      shifts the value up by one byte — allowing 16-, 24-, or 32-bit arguments.
+      The <code>dis</code> standard-library module decodes raw bytecode into a
+      human-readable format and provides structured access via
+      <code>dis.Instruction</code> named-tuples.
+    </p>
+
+    <div style="position:relative"><pre><code class="language-python">import dis
+
+def process(items, threshold=10):
+    result = []
+    for item in items:
+        if item &gt; threshold:
+            result.append(item * 2)
+    return result
+
+# Human-readable disassembly
+dis.dis(process)
+
+# Instruction objects (Python 3.12+)
+for instr in dis.get_instructions(process):
+    print(f"{instr.offset:4d}  {instr.opname:25s} {instr.argval!r}")
+
+# Raw bytecode bytes (Python ≤ 3.10 used co_code; 3.11+ use co_code still but layout changed)
+print(process.__code__.co_code.hex())</code></pre><span class="code-label">bytecode_demo.py</span></div>
+
+    <p>
+      The disassembly output shows one instruction per line with four columns:
+      the <strong>source line number</strong> (for the first instruction on that line),
+      the <strong>byte offset</strong> in the bytecode string,
+      the <strong>opname</strong> (symbolic name of the opcode), and the
+      <strong>argument</strong> (raw integer) plus its human-readable interpretation
+      in parentheses — for example, <code>LOAD_FAST 0 (items)</code> tells you that
+      argument 0 resolves to the local variable named <code>items</code>.
+    </p>
+
+    <h3>Essential Opcodes</h3>
+
+    <table>
+      <thead>
+        <tr>
+          <th>Opcode</th>
+          <th>Stack effect</th>
+          <th>Description</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td><code>LOAD_FAST</code></td><td>+1</td><td>Push local variable (by <code>co_varnames</code> index)</td></tr>
+        <tr><td><code>STORE_FAST</code></td><td>-1</td><td>Pop → store into local variable</td></tr>
+        <tr><td><code>LOAD_GLOBAL</code></td><td>+1</td><td>Push global (or builtin) variable</td></tr>
+        <tr><td><code>LOAD_CONST</code></td><td>+1</td><td>Push constant from <code>co_consts</code></td></tr>
+        <tr><td><code>LOAD_ATTR</code></td><td>0 (replaces TOS)</td><td>Attribute lookup: <code>TOS = TOS.attr</code></td></tr>
+        <tr><td><code>CALL</code></td><td>varies</td><td>Call a callable; pops args</td></tr>
+        <tr><td><code>RETURN_VALUE</code></td><td>-1</td><td>Return TOS to caller</td></tr>
+        <tr><td><code>POP_JUMP_IF_FALSE</code></td><td>-1</td><td>Pop TOS; jump if falsy</td></tr>
+        <tr><td><code>FOR_ITER</code></td><td>0/+1</td><td>Advance iterator; jump if exhausted</td></tr>
+        <tr><td><code>BUILD_LIST</code></td><td>-N+1</td><td>Pop N items, push list</td></tr>
+        <tr><td><code>BINARY_OP</code></td><td>-1</td><td>Binary operation on TOS and TOS1</td></tr>
+        <tr><td><code>GET_ITER</code></td><td>0</td><td><code>TOS = iter(TOS)</code></td></tr>
+        <tr><td><code>RESUME</code></td><td>0</td><td>Entry point marker (Python 3.11+)</td></tr>
+      </tbody>
+    </table>
+
+    <p>
+      <strong>Reading a stack trace:</strong> TOS means "top of stack", TOS1 is the item
+      below TOS, and so on. Each instruction pops its inputs and pushes its output.
+      The net stack depth change is the "stack effect" column above. The CPython compiler
+      computes the maximum stack depth statically (stored in <code>co_stacksize</code>)
+      and pre-allocates the C array — there is no dynamic resizing during execution.
+    </p>
+
+    <div class="callout callout-concept">
+      <strong>Concept — Specialising Adaptive Interpreter (Python 3.11+):</strong>
+      The bytecode was redesigned for CPython 3.11's
+      <em>specialising adaptive interpreter</em>. "Hot" opcodes like
+      <code>LOAD_ATTR</code> are initially executed as generic instructions.
+      After being observed several times with the same type signature, CPython
+      <em>specialises</em> them in-place — replacing <code>LOAD_ATTR</code> with
+      <code>LOAD_ATTR_MODULE</code>, <code>LOAD_ATTR_SLOT</code>,
+      <code>LOAD_ATTR_INSTANCE_VALUE</code>, etc. These specialised variants skip
+      the full attribute-lookup machinery and go directly to the fast path, delivering
+      meaningful speedups without a full JIT compilation step.
+    </div>
+
+    <!-- ═══════════════════════════════════════════════════════════ -->
+    <h2 id="frame-objects">4 · Frame Objects</h2>
+
+    <p>
+      Every function call creates a <strong>frame object</strong>
+      (<code>PyFrameObject</code> in C; exposed as <code>types.FrameType</code> in
+      Python). The frame holds the execution context for one invocation of a code object:
+      the current instruction pointer, the value stack, local variables (fast-locals
+      array), a reference to the enclosing frame, and a pointer to the globals dict.
+      Frames are chained — <code>f_back</code> links each frame to its caller — forming
+      the <strong>call stack</strong>.
+    </p>
+
+    <div style="position:relative"><pre><code class="language-python">import sys
+import types
+
+def inner():
+    frame = sys._getframe()        # current frame
+    print("=== inner() frame ===")
+    print(f"  f_code.co_name : {frame.f_code.co_name}")
+    print(f"  f_lineno       : {frame.f_lineno}")
+    print(f"  f_locals       : {frame.f_locals}")
+    print(f"  f_back         : {frame.f_back.f_code.co_name}")  # caller
+
+def outer():
+    x = 42
+    inner()
+
+outer()</code></pre><span class="code-label">frame_introspection.py</span></div>
+
+    <h3>Frame Attributes</h3>
+
+    <table>
+      <thead>
+        <tr>
+          <th>Attribute</th>
+          <th>Description</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td><code>f_code</code></td><td>The code object being executed</td></tr>
+        <tr><td><code>f_locals</code></td><td>Dict of local variables (snapshot; writing to it has caveats)</td></tr>
+        <tr><td><code>f_globals</code></td><td>The module's global namespace dict</td></tr>
+        <tr><td><code>f_builtins</code></td><td>The builtins namespace dict</td></tr>
+        <tr><td><code>f_back</code></td><td>The calling frame (<code>None</code> for the topmost frame)</td></tr>
+        <tr><td><code>f_lineno</code></td><td>Current line number being executed</td></tr>
+        <tr><td><code>f_lasti</code></td><td>Index of last attempted instruction in bytecode</td></tr>
+        <tr><td><code>f_trace</code></td><td>Callable invoked by the trace hook (used by debuggers/coverage)</td></tr>
+      </tbody>
+    </table>
+
+    <h3>Walking the Full Call Stack</h3>
+
+    <div style="position:relative"><pre><code class="language-python">import sys
+
+def walk_stack():
+    frame = sys._getframe()
+    depth = 0
+    while frame:
+        print(f"{'  ' * depth}{frame.f_code.co_name}() "
+              f"at {frame.f_code.co_filename}:{frame.f_lineno}")
+        frame = frame.f_back
+        depth += 1
+
+def c():
+    walk_stack()
+
+def b():
+    c()
+
+def a():
+    b()
+
+a()
+# Output (innermost first):
+#   walk_stack() at frame_walk.py:4
+#   c() at frame_walk.py:13
+#   b() at frame_walk.py:16
+#   a() at frame_walk.py:19
+#   &lt;module&gt;() at frame_walk.py:21</code></pre><span class="code-label">frame_walk.py</span></div>
+
+    <p>
+      The <code>inspect</code> module wraps this pattern in
+      <code>inspect.stack()</code> / <code>inspect.currentframe()</code>, returning
+      richer <code>FrameInfo</code> named-tuples that include the source line text.
+      Many logging and debugging libraries use this to capture the call site automatically.
+    </p>
+
+    <div class="callout callout-warn">
+      <strong>Warning:</strong> <code>frame.f_locals</code> returns a
+      <strong>snapshot dict</strong> built on demand — it does <em>not</em> reflect live
+      local variable writes for optimised (non-module) frames. CPython stores locals in
+      the fast-locals C array; reading <code>f_locals</code> triggers
+      <code>PyFrame_FastToLocals</code> which copies the C array into a Python dict.
+      Writing to the dict does <em>not</em> propagate back unless
+      <code>PyFrame_LocalsToFast</code> is called. Libraries like
+      <code>pytest</code> use frame introspection for assertion rewriting; debuggers
+      like <code>pdb</code> and <code>pydevd</code> use <code>f_trace</code> to step
+      through code one line at a time.
+    </div>
+
+    <!-- ═══════════════════════════════════════════════════════════ -->
+    <h2 id="eval-loop">5 · The Eval Loop (<code>ceval.c</code>)</h2>
+
+    <p>
+      The heart of CPython is <code>_PyEval_EvalFrameDefault</code> in
+      <code>Python/ceval.c</code> — a massive C function (thousands of lines) that
+      implements a <em>dispatch loop</em> over bytecode instructions. Understanding it
+      conceptually is the key to understanding CPython's performance characteristics.
+    </p>
+
+    <h3>Conceptual Pseudocode</h3>
+
+    <pre style="background:#1a1a2e;padding:16px;border-radius:8px;overflow-x:auto;font-size:0.82rem;color:#e0e0f0;">_PyEval_EvalFrameDefault(frame):
+    while True:
+        opcode, arg = next_instruction(frame)
+
+        switch(opcode):
+            case LOAD_FAST:
+                push(frame.fastlocals[arg])
+
+            case STORE_FAST:
+                frame.fastlocals[arg] = pop()
+
+            case BINARY_OP:
+                right = pop()
+                left  = pop()
+                push(left op right)   # dispatches to type's nb_add etc.
+
+            case CALL:
+                args = pop_n(arg)
+                func = pop()
+                new_frame = make_frame(func, args)
+                result = _PyEval_EvalFrameDefault(new_frame)  # recursive
+                push(result)
+
+            case RETURN_VALUE:
+                return pop()
+
+            case POP_JUMP_IF_FALSE:
+                cond = pop()
+                if not cond: frame.pc = arg
+
+            ...</pre>
+
+    <h3>The Value Stack</h3>
+    <p>
+      The value stack is a fixed-size C array of <code>PyObject*</code> pointers,
+      pre-allocated when the frame is created with size <code>co_stacksize</code>.
+      A <code>stack_pointer</code> register tracks the current top. Pushing an object
+      means <code>*stack_pointer++ = obj</code>; popping means
+      <code>obj = *--stack_pointer</code>. Every intermediate result of an expression —
+      loaded constants, attribute lookup results, return values — lives on this stack
+      between instructions.
+    </p>
+
+    <h3>Dispatch Mechanisms</h3>
+    <p>
+      CPython uses different strategies to dispatch the <code>switch(opcode)</code>
+      across versions:
+    </p>
+    <ul>
+      <li>
+        <strong>Pre-3.11 — computed goto:</strong> On GCC/Clang, CPython uses a
+        <code>goto *dispatch_table[opcode]</code> pattern (a GCC extension). This is
+        significantly faster than a <code>switch</code> because the CPU branch predictor
+        can learn per-opcode targets rather than predicting a single switch expression.
+      </li>
+      <li>
+        <strong>3.11+ — Specialising Adaptive Interpreter:</strong> The eval loop now
+        self-patches hot instructions in-place. After an instruction executes a few times
+        and its operand types are stable, CPython replaces the generic opcode byte with
+        a specialised variant (e.g. <code>LOAD_ATTR_SLOT</code>). If the type later
+        changes, it de-specialises back. This is a form of inline caching with no
+        separate JIT compilation phase.
+      </li>
+      <li>
+        <strong>3.13+ — Free-threaded (no-GIL) mode:</strong> With the GIL removed,
+        object access requires per-object locking or biased reference counting.
+        The eval loop adds memory barriers around certain operations. This is still
+        experimental and opt-in as of 3.13.
+      </li>
+    </ul>
+
+    <div class="callout callout-concept">
+      <strong>Concept — Why is Python "slow"?</strong>
+      The eval loop is inherently expensive compared to native code. Every single Python
+      operation involves: loading a <code>PyObject*</code> from the stack, checking its
+      type via <code>ob_type-&gt;tp_as_number-&gt;nb_add</code>, incrementing and
+      decrementing reference counts (<code>Py_INCREF</code>/<code>Py_DECREF</code>),
+      and potentially triggering garbage collection. A simple <code>a + b</code> in
+      Python generates multiple C function calls and memory accesses that a C compiler
+      would reduce to a single <code>ADD</code> instruction.
+      <br/><br/>
+      Tools that circumvent the eval loop for hot paths — PyPy (tracing JIT), Cython
+      (transpile to C), Numba (<code>@jit</code> with LLVM backend) — see 10–1000×
+      speedups for numeric work precisely because they eliminate this per-opcode
+      overhead.
+    </div>
+
+    <!-- ═══════════════════════════════════════════════════════════ -->
+    <h2 id="trace-hooks">6 · Trace Hooks &amp; <code>sys.settrace</code></h2>
+
+    <p>
+      CPython's eval loop has a built-in <strong>tracing hook</strong> mechanism that
+      powers all Python-level debuggers, coverage tools, and profilers. When a trace
+      function is installed via <code>sys.settrace(fn)</code>, the eval loop calls
+      <code>fn(frame, event, arg)</code> at precise moments during execution. The
+      callback's return value becomes the per-frame trace function — returning
+      <code>None</code> disables tracing for that frame; returning itself continues it.
+    </p>
+
+    <div style="position:relative"><pre><code class="language-python">import sys
+
+call_log = []
+
+def tracer(frame, event, arg):
+    """Called by the eval loop before each line/call/return/exception."""
+    if event == "call":
+        call_log.append(f"CALL   {frame.f_code.co_name}() at line {frame.f_lineno}")
+    elif event == "line":
+        call_log.append(f"LINE   {frame.f_code.co_name}:{frame.f_lineno}")
+    elif event == "return":
+        call_log.append(f"RETURN {frame.f_code.co_name}() → {arg!r}")
+    return tracer   # must return itself to continue tracing inner frames
+
+def add(a, b):
+    result = a + b
+    return result
+
+sys.settrace(tracer)
+add(3, 4)
+sys.settrace(None)
+
+for entry in call_log:
+    print(entry)
+
+# Typical output:
+# CALL   add() at line 12
+# LINE   add:13
+# LINE   add:14
+# RETURN add() → 7</code></pre><span class="code-label">settrace_demo.py</span></div>
+
+    <h3>Trace Events</h3>
+    <table>
+      <thead>
+        <tr><th>Event</th><th>When fired</th><th><code>arg</code> value</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>"call"</code></td><td>A function is called; before any bytecode executes</td><td><code>None</code></td></tr>
+        <tr><td><code>"line"</code></td><td>About to execute a new source line</td><td><code>None</code></td></tr>
+        <tr><td><code>"return"</code></td><td>Function is about to return</td><td>The return value</td></tr>
+        <tr><td><code>"exception"</code></td><td>An exception has been raised in this frame</td><td><code>(exc_type, exc_value, traceback)</code></td></tr>
+        <tr><td><code>"opcode"</code></td><td>Before each opcode (must enable <code>frame.f_trace_opcodes = True</code>)</td><td><code>None</code></td></tr>
+      </tbody>
+    </table>
+
+    <h3><code>sys.setprofile</code> — Lower-overhead Alternative</h3>
+    <p>
+      <code>sys.setprofile(fn)</code> is similar but fires only on
+      <code>"call"</code> and <code>"return"</code> events — no per-line overhead.
+      It is used by the <code>cProfile</code> module. Because there is no
+      <code>"line"</code> event, it cannot track which specific line executed, but the
+      reduced call frequency makes it far less intrusive for profiling.
+    </p>
+
+    <div style="position:relative"><pre><code class="language-python">import sys, time
+
+profile_data = {}
+
+def profiler(frame, event, arg):
+    name = frame.f_code.co_name
+    if event == "call":
+        profile_data[name] = {"start": time.perf_counter(), "calls": 0}
+    elif event == "return":
+        if name in profile_data:
+            elapsed = time.perf_counter() - profile_data[name]["start"]
+            profile_data[name]["elapsed"] = elapsed
+            profile_data[name]["calls"] += 1
+
+def fibonacci(n):
+    if n &lt;= 1:
+        return n
+    return fibonacci(n - 1) + fibonacci(n - 2)
+
+sys.setprofile(profiler)
+fibonacci(20)
+sys.setprofile(None)
+
+for fn, data in sorted(profile_data.items(), key=lambda x: -x[1].get("elapsed", 0)):
+    print(f"{fn:20s}  calls={data['calls']}  elapsed={data.get('elapsed', 0):.6f}s")</code></pre><span class="code-label">setprofile_demo.py</span></div>
+
+    <div class="callout callout-warn">
+      <strong>Warning — Performance overhead:</strong>
+      <code>sys.settrace</code> has <strong>significant</strong> performance overhead —
+      every source line triggers a Python-level function call from C. Coverage.py
+      minimises this by installing a trace function that simply sets a boolean bit per
+      line. For production profiling, prefer <strong>statistical profilers</strong> like
+      <code>py-spy</code>, which attach to a running process from outside and sample
+      the C-level call stack at configurable intervals (e.g. 100 Hz) with near-zero
+      overhead and no code instrumentation. <code>austin</code> and
+      <code>Scalene</code> are similarly non-intrusive.
+    </div>
+
+    <!-- ═══════════════════════════════════════════════════════════ -->
+    <h2 id="bytecode-manipulation">7 · Bytecode Manipulation &amp; <code>compile()</code></h2>
+
+    <p>
+      Because code objects are first-class Python values and <code>compile()</code> is
+      a built-in, advanced Python tooling can generate, inspect, and modify code at
+      runtime. This power underpins import hooks, template engines, test frameworks
+      (pytest's assertion rewriting), and domain-specific language compilers.
+    </p>
+
+    <h3>Compiling and Executing Dynamic Code</h3>
+
+    <div style="position:relative"><pre><code class="language-python">import ast
+import types
+import dis
+
+# ── Compile from string with custom filename ──
+src = """
+x = 10
+y = 20
+print(x + y)
+"""
+code = compile(src, "&lt;dynamic&gt;", "exec")
+exec(code)   # 30
+
+# ── Compile a function and inspect it ──
+func_src = "lambda a, b: a ** b + 1"
+code_obj  = compile(func_src, "&lt;lambda&gt;", "eval")
+fn = eval(code_obj)
+print(fn(2, 10))   # 1025</code></pre><span class="code-label">compile_dynamic.py</span></div>
+
+    <h3>Patching a Code Object with <code>.replace()</code></h3>
+    <p>
+      Since Python 3.8, <code>code.replace(**kwargs)</code> returns a new code object
+      with specific fields overwritten. This is the approved way to surgically modify
+      a code object without reinventing the marshalling format.
+    </p>
+
+    <div style="position:relative"><pre><code class="language-python">import types
+
+def original():
+    x = 100
+    return x
+
+print(original())   # 100
+
+# Replace the constant 100 with 999 in the constants pool
+new_consts = tuple(
+    999 if c == 100 else c
+    for c in original.__code__.co_consts
+)
+new_code = original.__code__.replace(co_consts=new_consts)
+
+# Wrap the patched code object in a new function object
+patched = types.FunctionType(
+    new_code,
+    original.__globals__,
+    original.__name__,
+)
+print(patched())   # 999</code></pre><span class="code-label">patch_code_object.py</span></div>
+
+    <h3>AST-Level Compilation</h3>
+    <p>
+      Working at the AST level is more portable than manipulating raw bytecode because
+      the AST is defined by the language grammar (stable across minor versions), whereas
+      bytecode layout changed in 3.6, 3.8, 3.10, 3.11, and 3.12.
+      <code>ast.fix_missing_locations()</code> fills in line-number and column-offset
+      fields required by the compiler.
+    </p>
+
+    <div style="position:relative"><pre><code class="language-python">import ast
+
+tree = ast.parse("result = x * 2 + 1")
+
+# Wrap the expression in a function definition
+func_def = ast.Module(body=[
+    ast.FunctionDef(
+        name="compute",
+        args=ast.arguments(
+            posonlyargs=[], args=[ast.arg(arg="x")],
+            vararg=None, kwonlyargs=[], kw_defaults=[],
+            kwarg=None, defaults=[],
+        ),
+        body=tree.body + [
+            ast.Return(value=ast.Name(id="result", ctx=ast.Load()))
+        ],
+        decorator_list=[],
+    )
+], type_ignores=[])
+
+ast.fix_missing_locations(tree)
+ast.fix_missing_locations(func_def)
+
+code = compile(func_def, "&lt;ast&gt;", "exec")
+ns = {}
+exec(code, ns)
+print(ns["compute"](5))   # 11</code></pre><span class="code-label">ast_compile.py</span></div>
+
+    <h3>Practical Use Cases</h3>
+    <ul>
+      <li>
+        <strong>pytest assertion rewriting:</strong> pytest installs an import hook that
+        rewrites the AST of test modules before compilation, transforming
+        <code>assert a == b</code> into code that records both operands for the failure
+        message.
+      </li>
+      <li>
+        <strong>Numba / Cython:</strong> Compile Python functions to native machine code
+        by walking the AST or bytecode and emitting LLVM IR or C.
+      </li>
+      <li>
+        <strong>Security sandboxing:</strong> Restrict allowed opcodes or AST node types
+        (e.g. ban <code>Import</code> nodes) before executing untrusted code.
+      </li>
+      <li>
+        <strong>Decorators with <code>@functools.wraps</code>:</strong> Preserve the
+        original function's <code>__wrapped__</code>, <code>__name__</code>, and
+        <code>__code__</code> for introspection tools.
+      </li>
+    </ul>
+
+    <div class="callout callout-warn">
+      <strong>Warning — Version fragility:</strong>
+      Bytecode manipulation is CPython-version-specific. The instruction format
+      changed significantly in 3.6 (word-code), 3.8 (<code>LOAD_CONST</code> changes),
+      3.10 (jump offsets), 3.11 (adaptive specialisation, exception table), and
+      3.12 (further frame restructuring). Code that manipulates <code>co_code</code>
+      bytes directly will break across versions. Prefer
+      <strong>AST-level transformations</strong> which go through the compiler and
+      are inherently portable. Libraries like <code>executing</code> and
+      <code>codetransformer</code> demonstrate safe, version-aware approaches.
+    </div>
+
+    <!-- ── 8. Closures, Cells & Free Variables ── -->
+    <h2 id="closures-cells">Closures, Cell Objects &amp; Free Variables</h2>
+    <p>
+      When a nested function references a variable from an enclosing scope, CPython
+      creates a <strong>cell object</strong> — a mutable box shared between the outer
+      and inner function's local variable arrays.
+    </p>
+    <div style="position:relative">
+      <pre><code class="language-python">import dis
+
+def make_counter(start=0):
+    count = start          # becomes a cell variable
+
+    def increment(step=1):
+        nonlocal count     # marks `count` as a free variable in increment
+        count += step
+        return count
+
+    return increment
+
+counter = make_counter(10)
+print(counter())    # 11
+print(counter(5))   # 16
+
+# Inspect the cell machinery
+print(make_counter.__code__.co_cellvars)   # ('count',)
+print(counter.__code__.co_freevars)        # ('count',)
+print(counter.__closure__)                 # (<cell at 0x...>,)
+print(counter.__closure__[0].cell_contents)  # 16
+
+# Disassemble inner to see LOAD_DEREF / STORE_DEREF opcodes
+dis.dis(counter)</code></pre>
+      <span class="code-label">closures.py</span>
+    </div>
+    <p>
+      <code>LOAD_DEREF</code> / <code>STORE_DEREF</code> access the shared cell object
+      rather than the fast-locals array. This is why <code>nonlocal</code> works across
+      multiple calls — the cell is allocated on the heap, not the C stack.
+    </p>
+    <div style="position:relative">
+      <pre><code class="language-python"># Classic "late binding" gotcha — all closures share the same cell
+fns = [lambda: i for i in range(5)]
+print([f() for f in fns])   # [4, 4, 4, 4, 4] — all see i=4 at call time
+
+# Fix: capture the value at definition time with a default argument
+fns_fixed = [lambda i=i: i for i in range(5)]
+print([f() for f in fns_fixed])   # [0, 1, 2, 3, 4]</code></pre>
+      <span class="code-label">late_binding.py</span>
+    </div>
+    <div class="callout callout-concept">
+      The late-binding gotcha is one of the most common Python interview questions. It is
+      a direct consequence of how closures work: the cell object stores a <em>reference</em>
+      to the variable, not its value at closure-creation time. The loop variable <code>i</code>
+      is a single cell shared by all five lambdas; by the time any of them is called, the
+      loop has finished and <code>i == 4</code>.
+    </div>
+
+    <!-- ── 9. Generator Frames & Coroutine State ── -->
+    <h2 id="generator-frames">Generator Frames &amp; Coroutine State</h2>
+    <p>
+      Generators and coroutines are suspended frames — when you call <code>next()</code>
+      or <code>await</code>, CPython resumes the frame from where it was paused.
+    </p>
+    <div style="position:relative">
+      <pre><code class="language-python">import dis, sys
+
+def countdown(n):
+    while n > 0:
+        yield n
+        n -= 1
+
+gen = countdown(3)
+
+# The generator object holds its frame
+print(type(gen.gi_frame))          # <class 'frame'>
+print(gen.gi_frame.f_lasti)        # -1 (not started yet)
+print(gen.gi_code.co_name)         # 'countdown'
+
+next(gen)   # runs until first yield
+print(gen.gi_frame.f_lasti)        # offset of the YIELD_VALUE instruction
+print(gen.gi_frame.f_locals)       # {'n': 3}  — local state preserved
+
+# Disassemble — look for YIELD_VALUE opcode
+dis.dis(countdown)
+
+# Coroutine state inspection
+import asyncio
+
+async def fetcher(url):
+    await asyncio.sleep(0)
+    return url
+
+coro = fetcher("https://example.com")
+print(coro.cr_frame)         # suspended frame
+print(coro.cr_code.co_name)  # 'fetcher'
+print(coro.cr_await)         # None (not yet running)
+coro.close()                 # clean up without running</code></pre>
+      <span class="code-label">generator_frames.py</span>
+    </div>
+    <div class="callout callout-concept">
+      When a generator yields, CPython saves the entire frame state (locals, stack pointer,
+      instruction pointer) inside the generator object. The frame is re-attached to the
+      eval loop when <code>next()</code> is called. This is why generators are memory-efficient
+      compared to building a full list — only one frame is live at a time, not all N items.
+    </div>
+
+    <!-- ── 10. Practical Tooling: coverage.py, pdb & py-spy ── -->
+    <h2 id="practical-tooling">Practical Tooling: coverage.py, pdb &amp; py-spy</h2>
+    <p>
+      Understanding the CPython internals makes the behaviour of essential development
+      tools obvious rather than magical.
+    </p>
+
+    <h3>How coverage.py works</h3>
+    <div style="position:relative">
+      <pre><code class="language-python">import sys
+
+executed_lines: dict[str, set[int]] = {}
+
+def coverage_tracer(frame, event, arg):
+    if event == "line":
+        filename = frame.f_code.co_filename
+        lineno   = frame.f_lineno
+        executed_lines.setdefault(filename, set()).add(lineno)
+    return coverage_tracer
+
+sys.settrace(coverage_tracer)
+
+# ── Code under measurement ──
+def add(a, b):
+    return a + b
+
+def greet(name):
+    if name:
+        return f"Hello, {name}"
+    return "Hello, stranger"
+
+add(1, 2)
+greet("Alice")
+# greet("") not called — else branch not covered
+
+sys.settrace(None)
+
+for filename, lines in executed_lines.items():
+    print(f"{filename}: lines {sorted(lines)}")</code></pre>
+      <span class="code-label">mini_coverage.py</span>
+    </div>
+
+    <h3>How pdb works</h3>
+    <p>
+      <code>pdb</code> uses <code>sys.settrace</code> with a <code>line</code>-event handler.
+      When the trace function is called, it checks whether the current
+      <code>(filename, lineno)</code> is a breakpoint — if so, it drops into an interactive
+      REPL. It can modify <code>frame.f_locals</code> (with limitations) and
+      <code>frame.f_lineno</code> to implement <code>jump</code>.
+    </p>
+
+    <h3>py-spy: Statistical profiling without sys.settrace</h3>
+    <div style="position:relative">
+      <pre><code class="language-bash"># py-spy attaches to a running Python process from OUTSIDE
+# No code changes needed, no settrace overhead
+pip install py-spy
+
+# Sample a running process (replace PID)
+py-spy top --pid 12345
+
+# Record a flamegraph
+py-spy record -o profile.svg --pid 12345
+
+# Profile a script directly
+py-spy record -o profile.svg -- python my_script.py</code></pre>
+      <span class="code-label">terminal</span>
+    </div>
+    <p>
+      <code>py-spy</code> reads the target process's memory directly (using platform APIs
+      like <code>ptrace</code> on Linux) to walk the frame linked list and sample
+      <code>f_code.co_filename</code> + <code>f_lineno</code> at regular intervals.
+      Because it never modifies the Python process, there is zero interpreter overhead —
+      it is safe to run against production processes.
+    </p>
+
+    <!-- ── Best Practices ── -->
+    <h2 id="best-practices">Best Practices</h2>
+    <ul>
+      <li><strong>Use <code>dis.dis()</code> to diagnose performance surprises</strong> — unexpected <code>LOAD_GLOBAL</code> inside a tight loop (instead of <code>LOAD_FAST</code>) is a common cause of slowness. Bind globals to locals before the loop.</li>
+      <li><strong>Prefer AST manipulation over bytecode manipulation</strong> — AST transforms survive Python version upgrades; raw bytecode does not. Libraries like <code>ast.NodeTransformer</code> are the right abstraction level.</li>
+      <li><strong>Use <code>sys.setprofile</code> not <code>sys.settrace</code> for profiling</strong> — <code>setprofile</code> only fires on function calls/returns (no per-line overhead), making it ~10× faster for profiling.</li>
+      <li><strong>Understand the closure late-binding trap</strong> — when creating closures in a loop, always capture the current value with a default-argument trick or <code>functools.partial</code>.</li>
+      <li><strong>Use <code>code.replace()</code> for surgical bytecode changes</strong> (Python 3.8+) rather than constructing a new <code>CodeType</code> from scratch — the <code>replace()</code> method handles all the fields you don't want to change.</li>
+      <li><strong>For production profiling, use <code>py-spy</code> or <code>Pyroscope</code></strong> — zero-overhead statistical profilers that read frame state from outside the process.</li>
+      <li><strong>Remember that <code>f_locals</code> is a snapshot</strong> — it does not reflect live writes to optimised frames; use it for inspection, not mutation.</li>
+      <li><strong>Know which CPython version changed the bytecode</strong> — 3.6 (wordcode), 3.10 (exception tables), 3.11 (frame revamp, specialising interpreter), 3.12 (inlined comprehension frames), 3.13 (free-threaded mode).</li>
+    </ul>
+
+    <!-- ── Exercises ── -->
+    <h2 id="exercises">Exercises</h2>
+    <div class="exercise-section">
+
+      <div class="exercise">
+        <h3>Exercise 1 — Bytecode Inspector CLI</h3>
+        <p>
+          Build a command-line tool that takes a Python source file and prints a
+          human-readable bytecode report for every function defined at module level:
+        </p>
+        <ul>
+          <li>Use <code>ast.parse()</code> to find all <code>FunctionDef</code> nodes.</li>
+          <li>Use <code>compile()</code> + <code>dis.get_instructions()</code> to extract the instructions for each function.</li>
+          <li>For each function, print: name, arg count, local variable count, stack size, and a table of opcodes with their offsets and arguments.</li>
+          <li>Highlight any <code>LOAD_GLOBAL</code> inside a loop body (hint: check if the offset falls between a <code>GET_ITER</code> and the matching <code>FOR_ITER</code> jump target) — these are potential optimisation points.</li>
+        </ul>
+        <details>
+          <summary>💡 Hint</summary>
+          <pre><code class="language-python">import ast, dis, sys
+
+def inspect_file(path: str) -> None:
+    source = open(path).read()
+    tree   = ast.parse(source, path)
+    code   = compile(source, path, "exec")
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef):
+            continue
+        # Compile just the function by wrapping in exec-mode code
+        fn_source = ast.get_source_segment(source, node) or ""
+        try:
+            fn_code = compile(fn_source, path, "exec")
+            # Find nested code object for the function
+            for const in fn_code.co_consts:
+                if hasattr(const, "co_name") and const.co_name == node.name:
+                    print(f"\n{'='*50}")
+                    print(f"Function: {node.name}  args={const.co_argcount}  "
+                          f"locals={const.co_nlocals}  stack={const.co_stacksize}")
+                    print(f"{'='*50}")
+                    dis.dis(const)
+        except SyntaxError:
+            pass
+
+if __name__ == "__main__":
+    inspect_file(sys.argv[1])</code></pre>
+        </details>
+      </div>
+
+      <div class="exercise">
+        <h3>Exercise 2 — Mini Call Tracer</h3>
+        <p>
+          Implement a <code>@trace</code> decorator that uses <code>sys.settrace</code>
+          to log every line executed inside the decorated function, showing the
+          line number, source text, and local variable state at that point:
+        </p>
+        <ul>
+          <li>The decorator should install a trace, call the function, then uninstall.</li>
+          <li>For each <code>line</code> event, read the source line from the file using <code>linecache.getline()</code>.</li>
+          <li>Print: <code>[line N] source_text | locals: {k: v}</code></li>
+          <li>Test it on a small function with a loop and a conditional.</li>
+          <li>Ensure the trace is always uninstalled in a <code>finally</code> block.</li>
+        </ul>
+        <details>
+          <summary>💡 Hint</summary>
+          <pre><code class="language-python">import sys, linecache, functools
+
+def trace(fn):
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        def local_tracer(frame, event, arg):
+            if event == "line" and frame.f_code is fn.__code__:
+                src = linecache.getline(frame.f_code.co_filename, frame.f_lineno).rstrip()
+                print(f"[line {frame.f_lineno:3d}] {src} | locals={frame.f_locals}")
+            return local_tracer
+
+        sys.settrace(local_tracer)
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            sys.settrace(None)
+    return wrapper
+
+@trace
+def fizzbuzz(n):
+    for i in range(1, n + 1):
+        if i % 15 == 0:
+            print("FizzBuzz")
+        elif i % 3 == 0:
+            print("Fizz")
+        elif i % 5 == 0:
+            print("Buzz")
+        else:
+            print(i)
+
+fizzbuzz(5)</code></pre>
+        </details>
+      </div>
+
+      <div class="exercise">
+        <h3>Exercise 3 — Constant Folding via Code Object Patching</h3>
+        <p>
+          Write a function <code>patch_constants(fn, mapping)</code> that replaces
+          constants in a function's code object without touching any other attributes:
+        </p>
+        <ul>
+          <li>Use <code>code.replace(co_consts=new_consts)</code> (Python 3.8+).</li>
+          <li>The <code>mapping</code> is a dict of <code>{old_value: new_value}</code>.</li>
+          <li>Return a new function with the patched code object using <code>types.FunctionType</code>.</li>
+          <li>Recursively patch nested code objects (e.g. lambda constants inside a function).</li>
+          <li>Test: patch <code>def tax_rate(): return 0.20</code> → <code>return 0.25</code>.</li>
+          <li>Verify with <code>dis.dis()</code> that the <code>LOAD_CONST</code> now shows the new value.</li>
+        </ul>
+        <details>
+          <summary>💡 Hint</summary>
+          <pre><code class="language-python">import types, dis
+
+def patch_constants(fn, mapping: dict):
+    def patch_code(code):
+        new_consts = tuple(
+            patch_code(c) if isinstance(c, types.CodeType)
+            else mapping.get(c, c)
+            for c in code.co_consts
+        )
+        return code.replace(co_consts=new_consts)
+
+    new_code = patch_code(fn.__code__)
+    return types.FunctionType(
+        new_code, fn.__globals__, fn.__name__,
+        fn.__defaults__, fn.__closure__,
+    )
+
+def tax_rate():
+    return 0.20
+
+patched = patch_constants(tax_rate, {0.20: 0.25})
+print(tax_rate())   # 0.20
+print(patched())    # 0.25
+dis.dis(patched)    # LOAD_CONST 0.25</code></pre>
+        </details>
+      </div>
+
+    </div><!-- /exercise-section -->
+
+    <div id="quiz-section"></div>
+    <div id="lesson-nav-footer"></div>
+  </div><!-- /content -->
+</div><!-- /main -->
+
+<script src="../assets/nav-data.js"></script>
+<script src="../assets/nav.js"></script>
+<script src="../assets/quiz.js"></script>
+<script src="../assets/highlight.js"></script>
+
+<script>
+buildLessonFooter();
+
+QuizWidget.render("quiz-section", [
+  {
+    question: "What is the correct order of CPython's compilation pipeline?",
+    options: [
+      "Source → Bytecode → AST → Tokens → Execution",
+      "Source → Tokens → AST → Code Object → Eval Loop",
+      "Source → AST → Tokens → Code Object → Eval Loop",
+      "Tokens → Source → Code Object → AST → Execution"
+    ],
+    correct: 1,
+    explanation: "CPython's pipeline is: (1) Tokenise — the source string is broken into a token stream by the tokenizer; (2) Parse — the PEG parser (Python 3.9+) builds an Abstract Syntax Tree from the tokens; (3) Compile — the compiler walks the AST and emits a code object (types.CodeType) containing bytecode and metadata; (4) Execute — _PyEval_EvalFrameDefault() in ceval.c interprets the bytecode one instruction at a time. The .pyc file cache stores the marshalled code object so steps 1–3 can be skipped on subsequent imports."
+  },
+  {
+    question: "What does `co_varnames` contain on a function's code object, and why does the order matter?",
+    options: [
+      "All global variables referenced by the function, in alphabetical order",
+      "All local variable names with argument names first (in declaration order), followed by other locals in assignment order — CPython indexes this array to implement O(1) LOAD_FAST/STORE_FAST",
+      "Only the variable names that are assigned within the function body, excluding parameters",
+      "A mapping of variable names to their current values at function definition time"
+    ],
+    correct: 1,
+    explanation: "co_varnames is a tuple of all local variable names: positional args first, then *args and **kwargs, then variables assigned in the body, in the order they first appear. CPython's fast locals are a contiguous C array of PyObject* pointers indexed by the variable's position in co_varnames — that is why LOAD_FAST and STORE_FAST take an integer index rather than doing a dict lookup. This makes local variable access O(1) and much faster than global lookups."
+  },
+  {
+    question: "Why does the classic closure-in-a-loop bug produce `[4, 4, 4, 4, 4]` instead of `[0, 1, 2, 3, 4]`?",
+    options: [
+      "Python evaluates default arguments lazily, deferring their computation until call time",
+      "All five lambdas close over the same cell object which references the loop variable `i`; by the time any lambda is called, the loop has finished and the cell contains 4",
+      "Python's scoping rules make loop variables local to the lambda, hiding the outer variable",
+      "The list comprehension creates copies of `i` but the lambda captures the last copy"
+    ],
+    correct: 1,
+    explanation: "Each lambda captures the variable `i` by reference via a cell object — not by value. All five lambdas share the same cell, which holds a pointer to `i` in the enclosing scope. The loop runs to completion (i=0,1,2,3,4) before any lambda is called. When the lambdas are finally called, they all dereference the same cell and find i=4. The fix is to use a default argument `lambda i=i: i` — default arguments ARE evaluated at definition time, so each lambda captures the current value of i as its own local default."
+  },
+  {
+    question: "What happens to a generator's frame when execution reaches a `yield` statement?",
+    options: [
+      "The frame is destroyed and recreated fresh on the next `next()` call",
+      "The frame is suspended — its locals, stack pointer, and instruction pointer are preserved inside the generator object — and the eval loop is exited, returning the yielded value to the caller",
+      "The frame is moved to a separate thread until the next `next()` call",
+      "The generator creates a copy of the frame on the heap so the original can be reused by other calls"
+    ],
+    correct: 1,
+    explanation: "When YIELD_VALUE executes, CPython saves the frame's entire state (local variable array, value stack, and instruction pointer stored as f_lasti) inside the generator object on the heap. The eval loop then returns the yielded value to whoever called next(). On the next next() call, CPython re-attaches the saved frame to the eval loop and resumes from exactly where it left off. This is why generators are O(1) memory per element — the frame is allocated once and reused; no list of all values is ever built."
+  },
+  {
+    question: "What is the key difference between `sys.settrace` and `py-spy` as profiling mechanisms?",
+    options: [
+      "sys.settrace works on all Python implementations; py-spy only works on CPython",
+      "sys.settrace installs a per-line Python callback inside the eval loop — adding overhead to every executed line; py-spy reads the frame linked list from outside the process at intervals with zero interpreter overhead",
+      "sys.settrace can only trace function calls; py-spy traces every line executed",
+      "They are equivalent in overhead — py-spy uses sys.settrace internally via a C extension"
+    ],
+    correct: 1,
+    explanation: "sys.settrace registers a Python callable that the eval loop invokes on every line, call, and return event. The overhead is substantial — calling a Python function for every line of execution can slow the program by 10–50×. py-spy is a separate Rust process that uses OS-level process inspection (ptrace on Linux, task_for_pid on macOS) to periodically walk the CPython frame linked list and sample f_code.co_filename + f_lineno. Because it never modifies the target process and samples at intervals (e.g. 100 Hz), the overhead is negligible and it is safe to run against production services."
+  }
+]);
+</script>
+</body>
+</html>

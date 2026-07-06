@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lesson 34: Node Affinity & Anti-Affinity</title>
+    <style>
+        :root {
+            --bg: #fafafa; --text: #1a1a1a; --accent: #326ce5;
+            --accent-light: #e8f0fe; --border: #e0e0e0; --code-bg: #f5f5f5;
+            --success: #2e7d32; --warn: #f57c00;
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: 'Georgia', serif; line-height: 1.7; color: var(--text); background: var(--bg); max-width: 780px; margin: 0 auto; padding: 2rem 1.5rem; }
+        h1 { font-size: 2rem; margin-bottom: 0.5rem; color: var(--accent); }
+        h2 { font-size: 1.4rem; margin-top: 2.5rem; margin-bottom: 0.8rem; border-bottom: 2px solid var(--accent); padding-bottom: 0.3rem; }
+        h3 { font-size: 1.1rem; margin-top: 1.5rem; margin-bottom: 0.5rem; }
+        p { margin-bottom: 1rem; }
+        .meta { color: #666; font-size: 0.9rem; margin-bottom: 2rem; }
+        .key-insight { background: var(--accent-light); border-left: 4px solid var(--accent); padding: 1rem 1.2rem; margin: 1.5rem 0; border-radius: 0 4px 4px 0; }
+        .key-insight strong { color: var(--accent); }
+        .production-note { background: #fff3e0; border-left: 4px solid var(--warn); padding: 1rem 1.2rem; margin: 1.5rem 0; border-radius: 0 4px 4px 0; }
+        .production-note::before { content: "🏭 Production: "; font-weight: bold; }
+        .exam-tip { background: #e8f5e9; border-left: 4px solid var(--success); padding: 1rem 1.2rem; margin: 1.5rem 0; border-radius: 0 4px 4px 0; }
+        .exam-tip::before { content: "🎯 Exam Tip: "; font-weight: bold; color: var(--success); }
+        code { font-family: 'Menlo', 'Consolas', monospace; font-size: 0.85em; background: var(--code-bg); padding: 0.15em 0.4em; border-radius: 3px; }
+        pre { background: var(--code-bg); padding: 1rem; border-radius: 4px; overflow-x: auto; margin: 1rem 0; font-size: 0.85rem; line-height: 1.5; }
+        ul, ol { margin: 0.5rem 0 1rem 1.5rem; }
+        li { margin-bottom: 0.4rem; }
+        table { width: 100%; border-collapse: collapse; margin: 1rem 0; font-size: 0.9rem; }
+        th, td { border: 1px solid var(--border); padding: 0.6rem 0.8rem; text-align: left; }
+        th { background: var(--accent-light); font-weight: bold; }
+        .diagram { background: white; border: 1px solid var(--border); border-radius: 8px; padding: 1.5rem; margin: 1.5rem 0; text-align: center; }
+        .cert-badge { display: inline-block; background: var(--accent); color: white; font-size: 0.7rem; padding: 0.15rem 0.5rem; border-radius: 10px; margin-left: 0.5rem; }
+        .quiz { background: #f9f9f9; border: 1px solid var(--border); border-radius: 8px; padding: 1.5rem; margin-top: 2rem; }
+        .quiz h2 { border-bottom: none; margin-top: 0; }
+        .quiz-q { margin-bottom: 1.2rem; }
+        .quiz-q p { font-weight: bold; margin-bottom: 0.3rem; }
+        .quiz-answer { display: none; background: #e8f5e9; padding: 0.5rem 0.8rem; border-radius: 4px; margin-top: 0.5rem; }
+        .reveal-btn { background: var(--accent); color: white; border: none; padding: 0.3rem 0.8rem; border-radius: 4px; cursor: pointer; font-size: 0.8rem; }
+        .reveal-btn:hover { opacity: 0.85; }
+    </style>
+</head>
+<body>
+
+<h1>Lesson 34: Node Affinity & Anti-Affinity</h1>
+<p class="meta">Chapter 6: Scheduling & Resource Management · <span class="cert-badge">CKA</span> <span class="cert-badge">CKAD</span> · ~18 min</p>
+
+<p>Node affinity is the <strong>expressive successor to <code>nodeSelector</code></strong>. While nodeSelector uses simple key=value label matching, node affinity supports operators (In, NotIn, Exists, DoesNotExist, Gt, Lt), soft preferences with weights, and the distinction between hard requirements and soft preferences.</p>
+
+<h2>1. nodeSelector vs Node Affinity</h2>
+
+<pre># nodeSelector — simple, limited:
+spec:
+  nodeSelector:
+    disktype: ssd
+    zone: us-east-1a
+# Pod MUST go to a node with BOTH labels. No "or", no "prefer", no operators.</pre>
+
+<pre># Node affinity — powerful, expressive:
+spec:
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution: ...   # Hard
+      preferredDuringSchedulingIgnoredDuringExecution: ...  # Soft</pre>
+
+<table>
+    <tr><th>Feature</th><th>nodeSelector</th><th>Node Affinity</th></tr>
+    <tr><td>Operators</td><td>Only exact match (=)</td><td>In, NotIn, Exists, DoesNotExist, Gt, Lt</td></tr>
+    <tr><td>Hard/Soft</td><td>Hard only (must match)</td><td>Both hard (required) and soft (preferred)</td></tr>
+    <tr><td>Weight</td><td>No</td><td>Yes — weighted scoring for soft rules</td></tr>
+    <tr><td>OR logic</td><td>No (all must match)</td><td>Yes (multiple <code>nodeSelectorTerms</code> = OR)</td></tr>
+    <tr><td>Use case</td><td>Simple constraints</td><td>Complex placement logic</td></tr>
+</table>
+
+<h2>2. Required Node Affinity (Hard)</h2>
+
+<p><code>requiredDuringSchedulingIgnoredDuringExecution</code> — the Pod <strong>must</strong> schedule on a matching node, or stays Pending.</p>
+
+<pre>spec:
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:                # OR between terms
+          - matchExpressions:             # AND between expressions in same term
+              - key: topology.kubernetes.io/zone
+                operator: In
+                values:
+                  - us-east-1a
+                  - us-east-1b
+              - key: node.kubernetes.io/instance-type
+                operator: In
+                values:
+                  - m5.xlarge
+                  - m5.2xlarge</pre>
+
+<h3>Logic Rules</h3>
+
+<ul>
+    <li><strong>Multiple <code>nodeSelectorTerms</code></strong> → OR (match any one term)</li>
+    <li><strong>Multiple <code>matchExpressions</code> within one term</strong> → AND (all must match)</li>
+</ul>
+
+<pre># This means: Node must be in (us-east-1a OR us-east-1b) AND (m5.xlarge OR m5.2xlarge)
+# If you want "zone a with m5" OR "zone c with c5", use two separate nodeSelectorTerms</pre>
+
+<h3>Available Operators</h3>
+
+<table>
+    <tr><th>Operator</th><th>Meaning</th><th>Example</th></tr>
+    <tr><td><code>In</code></td><td>Label value is in the list</td><td><code>zone In [us-east-1a, us-east-1b]</code></td></tr>
+    <tr><td><code>NotIn</code></td><td>Label value is NOT in the list</td><td><code>instance-type NotIn [t3.micro]</code> (avoid small)</td></tr>
+    <tr><td><code>Exists</code></td><td>Label key exists (any value)</td><td><code>gpu Exists</code> (has a GPU label)</td></tr>
+    <tr><td><code>DoesNotExist</code></td><td>Label key doesn't exist</td><td><code>dedicated DoesNotExist</code> (not a dedicated node)</td></tr>
+    <tr><td><code>Gt</code></td><td>Label value > given integer</td><td><code>gpu-count Gt 2</code></td></tr>
+    <tr><td><code>Lt</code></td><td>Label value < given integer</td><td><code>age Lt 30</code></td></tr>
+</table>
+
+<div class="key-insight">
+    <strong><code>NotIn</code> is how you express anti-affinity to nodes.</strong> There's no separate "node anti-affinity" resource — you use <code>NotIn</code> or <code>DoesNotExist</code> operators within node affinity to repel Pods from certain nodes. Example: <code>operator: NotIn, values: [spot]</code> keeps the Pod off spot instances.
+</div>
+
+<h2>3. Preferred Node Affinity (Soft)</h2>
+
+<p><code>preferredDuringSchedulingIgnoredDuringExecution</code> — the scheduler <strong>tries</strong> to match, but schedules elsewhere if no matching node is available. Uses weights to express preference strength.</p>
+
+<pre>spec:
+  affinity:
+    nodeAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 80                     # 1-100: higher = stronger preference
+          preference:
+            matchExpressions:
+              - key: topology.kubernetes.io/zone
+                operator: In
+                values: ["us-east-1a"]    # Strongly prefer zone a
+        - weight: 20
+          preference:
+            matchExpressions:
+              - key: node.kubernetes.io/instance-type
+                operator: In
+                values: ["m5.xlarge"]     # Weakly prefer m5.xlarge</pre>
+
+<h3>How Weights Work</h3>
+
+<pre># The scheduler scores each node:
+# For each preference that matches → add its weight to the node's score
+#
+# Node A: zone=us-east-1a, type=m5.xlarge → score += 80 + 20 = 100
+# Node B: zone=us-east-1a, type=c5.xlarge → score += 80 + 0  = 80
+# Node C: zone=us-east-1b, type=m5.xlarge → score += 0  + 20 = 20
+# Node D: zone=us-east-1b, type=c5.xlarge → score += 0  + 0  = 0
+#
+# Scheduler picks Node A (highest score)
+# But if Node A is full, it can still use B, C, or D (soft, not hard)</pre>
+
+<div class="key-insight">
+    <strong>Weights let you express priorities.</strong> "I really want zone A (weight 80) and slightly prefer m5 instances (weight 20)." The scheduler optimizes for the highest total score. If constraints conflict, higher weights win. This enables nuanced placement without creating unschedulable Pods.
+</div>
+
+<h3>Combining Required + Preferred</h3>
+
+<pre>spec:
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:     # MUST
+        nodeSelectorTerms:
+          - matchExpressions:
+              - key: topology.kubernetes.io/zone
+                operator: In
+                values: [us-east-1a, us-east-1b, us-east-1c]  # Must be in these zones
+      preferredDuringSchedulingIgnoredDuringExecution:    # PREFER
+        - weight: 70
+          preference:
+            matchExpressions:
+              - key: topology.kubernetes.io/zone
+                operator: In
+                values: [us-east-1a]     # Prefer zone a among the allowed zones
+# Result: Must be in zone a/b/c. Strongly prefers a. Falls back to b/c if a is full.</pre>
+
+<div class="production-note">
+    This combined pattern is the most common in production: use <code>required</code> to enforce hard constraints (correct region, correct instance family) and <code>preferred</code> to optimize within those bounds (prefer the cheaper zone, prefer nodes with image cache). Pods always schedule (within the hard constraints) but land in the best spot when possible.
+</div>
+
+<h2>4. "IgnoredDuringExecution" — What It Means</h2>
+
+<p>The full name <code>requiredDuringScheduling<strong>IgnoredDuringExecution</strong></code> means:</p>
+
+<ul>
+    <li><strong>During scheduling:</strong> The rule is enforced (required or preferred)</li>
+    <li><strong>During execution:</strong> If node labels change after scheduling, the Pod stays — it's NOT evicted</li>
+</ul>
+
+<pre># Example: Pod requires zone=us-east-1a
+# Pod schedules on node in us-east-1a ✓
+# Admin removes the zone label from the node
+# Pod STAYS — the rule is only checked at scheduling time</pre>
+
+<p>A future K8s feature (<code>requiredDuringSchedulingRequiredDuringExecution</code>) would evict Pods when labels change — but it doesn't exist yet.</p>
+
+<h2>5. Common Node Labels for Affinity</h2>
+
+<table>
+    <tr><th>Label</th><th>Example Value</th><th>Use Case</th></tr>
+    <tr><td><code>topology.kubernetes.io/zone</code></td><td><code>us-east-1a</code></td><td>Zone placement, HA distribution</td></tr>
+    <tr><td><code>topology.kubernetes.io/region</code></td><td><code>us-east-1</code></td><td>Regional constraints</td></tr>
+    <tr><td><code>node.kubernetes.io/instance-type</code></td><td><code>m5.2xlarge</code></td><td>Instance family selection</td></tr>
+    <tr><td><code>kubernetes.io/arch</code></td><td><code>amd64</code>, <code>arm64</code></td><td>Architecture-specific images</td></tr>
+    <tr><td><code>kubernetes.io/os</code></td><td><code>linux</code>, <code>windows</code></td><td>OS-specific workloads</td></tr>
+    <tr><td><code>node.kubernetes.io/disk-type</code></td><td><code>ssd</code>, <code>hdd</code></td><td>Storage-sensitive workloads</td></tr>
+    <tr><td>Custom: <code>team</code></td><td><code>platform</code></td><td>Dedicated team nodes</td></tr>
+    <tr><td>Custom: <code>gpu</code></td><td><code>nvidia-a100</code></td><td>ML workloads</td></tr>
+</table>
+
+<pre># See all labels on a node:
+kubectl get node worker-1 --show-labels
+
+# Add a custom label:
+kubectl label node worker-3 gpu=nvidia-a100</pre>
+
+<div class="exam-tip">
+    CKA exam: the most commonly tested labels are <code>topology.kubernetes.io/zone</code> for zone-aware scheduling and custom labels for nodeSelector/affinity. Know how to label nodes (<code>kubectl label node</code>) and write both required and preferred affinity rules. The YAML is verbose — practice until you can write it from memory.
+</div>
+
+<h2>6. nodeSelector vs Affinity — When to Use Which</h2>
+
+<table>
+    <tr><th>Scenario</th><th>Use</th><th>Why</th></tr>
+    <tr><td>Simple: "must be on SSD nodes"</td><td><code>nodeSelector: {disktype: ssd}</code></td><td>Cleaner, shorter YAML</td></tr>
+    <tr><td>"Must be in zone a OR b" (not c)</td><td>Required affinity with <code>In</code></td><td>nodeSelector can't do OR</td></tr>
+    <tr><td>"Prefer zone a, fall back to others"</td><td>Preferred affinity with weight</td><td>nodeSelector is hard only</td></tr>
+    <tr><td>"Must NOT be on spot instances"</td><td>Required affinity with <code>NotIn</code></td><td>nodeSelector can't negate</td></tr>
+    <tr><td>"Prefer large instances, accept small"</td><td>Preferred affinity</td><td>Soft preference impossible with nodeSelector</td></tr>
+</table>
+
+<h2>Summary</h2>
+
+<table>
+    <tr><th>Concept</th><th>Key Point</th></tr>
+    <tr><td>nodeSelector</td><td>Simple label matching (AND logic, exact match only)</td></tr>
+    <tr><td>Required affinity</td><td>Must match — Pod stays Pending if no node qualifies</td></tr>
+    <tr><td>Preferred affinity</td><td>Best-effort — scheduler scores nodes, picks highest weight match</td></tr>
+    <tr><td>Weights (1-100)</td><td>Higher = stronger preference. Scores are summed across preferences.</td></tr>
+    <tr><td>nodeSelectorTerms</td><td>Multiple terms = OR logic</td></tr>
+    <tr><td>matchExpressions</td><td>Multiple in same term = AND logic</td></tr>
+    <tr><td>Operators</td><td>In, NotIn, Exists, DoesNotExist, Gt, Lt</td></tr>
+    <tr><td>IgnoredDuringExecution</td><td>Rules only enforced at scheduling time — label changes don't evict</td></tr>
+    <tr><td>NotIn = anti-affinity</td><td>No separate "node anti-affinity" — use NotIn/DoesNotExist operators</td></tr>
+</table>
+
+<!-- Quiz -->
+<div class="quiz">
+    <h2>📝 Quiz: Node Affinity</h2>
+    
+    <div class="quiz-q">
+        <p>Q1: A Pod has <code>requiredDuringSchedulingIgnoredDuringExecution</code> with <code>zone In [us-east-1a]</code>. No node has that zone label. What happens?</p>
+        <button class="reveal-btn" onclick="this.nextElementSibling.style.display='block'">Show Answer</button>
+        <div class="quiz-answer"><strong>Pod stays Pending.</strong> Required affinity is a hard constraint. If no node matches, the Pod cannot be scheduled. It remains Pending with an event: "0/N nodes are available: N node(s) didn't match Pod's node affinity/selector."</div>
+    </div>
+    
+    <div class="quiz-q">
+        <p>Q2: A Pod has preferred affinity: weight 90 for zone=a, weight 10 for type=m5. Node X is in zone a with type c5. Node Y is in zone b with type m5. Which is chosen?</p>
+        <button class="reveal-btn" onclick="this.nextElementSibling.style.display='block'">Show Answer</button>
+        <div class="quiz-answer"><strong>Node X</strong> (score 90). Node X matches zone=a (weight 90) but not type=m5 (score: 90+0=90). Node Y matches type=m5 (weight 10) but not zone=a (score: 0+10=10). The scheduler picks the highest total score.</div>
+    </div>
+    
+    <div class="quiz-q">
+        <p>Q3: What's the difference between two <code>matchExpressions</code> in one <code>nodeSelectorTerm</code> vs two separate <code>nodeSelectorTerms</code>?</p>
+        <button class="reveal-btn" onclick="this.nextElementSibling.style.display='block'">Show Answer</button>
+        <div class="quiz-answer"><strong>Same term (AND):</strong> The node must match ALL expressions. E.g., zone=us-east-1a AND type=m5.xlarge.<br><strong>Separate terms (OR):</strong> The node must match ANY one complete term. E.g., (zone=us-east-1a AND type=m5) OR (zone=us-west-2a AND type=c5).</div>
+    </div>
+    
+    <div class="quiz-q">
+        <p>Q4: How do you express "don't schedule on spot instances" using node affinity?</p>
+        <button class="reveal-btn" onclick="this.nextElementSibling.style.display='block'">Show Answer</button>
+        <div class="quiz-answer">Use <code>NotIn</code> or <code>DoesNotExist</code> operator:<pre>requiredDuringSchedulingIgnoredDuringExecution:
+  nodeSelectorTerms:
+    - matchExpressions:
+        - key: node.kubernetes.io/lifecycle
+          operator: NotIn
+          values: ["spot"]</pre>Or if spot nodes have a label key <code>spot</code>:<br><code>operator: DoesNotExist, key: spot</code></div>
+    </div>
+    
+    <div class="quiz-q">
+        <p>Q5: A Pod is running on a node labeled <code>zone=us-east-1a</code>. The admin removes this label. The Pod has required affinity for <code>zone In [us-east-1a]</code>. Is the Pod evicted?</p>
+        <button class="reveal-btn" onclick="this.nextElementSibling.style.display='block'">Show Answer</button>
+        <div class="quiz-answer"><strong>No.</strong> The full name is <code>requiredDuringScheduling<em>IgnoredDuringExecution</em></code>. Once the Pod is running, affinity rules are not re-evaluated. The Pod stays on the node even if labels change. Only <code>NoExecute</code> taints can evict running Pods based on changed conditions.</div>
+    </div>
+    
+    <div class="quiz-q">
+        <p>Q6: When should you use <code>nodeSelector</code> instead of node affinity?</p>
+        <button class="reveal-btn" onclick="this.nextElementSibling.style.display='block'">Show Answer</button>
+        <div class="quiz-answer">When your constraint is <strong>simple exact-match AND logic</strong>: "this Pod must go to a node with label X=Y." nodeSelector is shorter, easier to read, and less error-prone for simple cases. Use node affinity when you need: OR logic, NotIn/Exists operators, soft preferences with weights, or multiple terms with different logic.</div>
+    </div>
+</div>
+
+</body>
+</html>

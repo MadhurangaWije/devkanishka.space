@@ -1,0 +1,416 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lesson 010 – Load Balancing & Traffic Management | AZ-305 Study Guide</title>
+    <link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<div class="lesson-wrap">
+
+    <header class="lesson-header fade-in">
+        <span class="lesson-number">Lesson 010 · 🟡 REVIEW</span>
+        <h1>Load Balancing &amp; Traffic Management</h1>
+        <p>You know Load Balancer and App Gateway from AZ-104. Now master the full decision matrix: L4 vs L7, global vs regional, and when to combine multiple load balancers for enterprise-grade resilience.</p>
+    </header>
+
+    <nav class="toc fade-in">
+        <h2>In This Lesson</h2>
+        <ol>
+            <li><a href="#four-services">The 4 Azure Load Balancers</a></li>
+            <li><a href="#decision-tree">Decision Tree: Choosing the Right Load Balancer</a></li>
+            <li><a href="#front-door">Azure Front Door Deep Dive</a></li>
+            <li><a href="#traffic-manager">Traffic Manager: DNS-Based Routing</a></li>
+            <li><a href="#app-gateway">App Gateway: Regional L7</a></li>
+            <li><a href="#combining">Combining Load Balancers</a></li>
+            <li><a href="#cross-region">Cross-Region HA Patterns</a></li>
+            <li><a href="#real-world">Real-World: Global SaaS Architecture</a></li>
+            <li><a href="#quiz">Knowledge Check</a></li>
+        </ol>
+    </nav>
+
+    <!-- Section 1 -->
+    <section id="four-services" class="fade-in">
+        <h2>The 4 Azure Load Balancers</h2>
+        <p>Azure offers four distinct load-balancing services. Each operates at a different layer and scope — understanding their boundaries is the single most important decision for AZ-305.</p>
+
+        <div class="compare-grid">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Service</th>
+                        <th>Layer</th>
+                        <th>Scope</th>
+                        <th>Key Features</th>
+                        <th>Cost Tier</th>
+                        <th>Best For</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td><strong>Azure Load Balancer</strong></td>
+                        <td>L4 (TCP/UDP)</td>
+                        <td>Regional</td>
+                        <td>HA ports, health probes, SNAT, zone-redundant</td>
+                        <td>Low (per-rule + data)</td>
+                        <td>Non-HTTP workloads, internal tier routing</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Application Gateway</strong></td>
+                        <td>L7 (HTTP/S)</td>
+                        <td>Regional</td>
+                        <td>Path/host routing, WAF v2, SSL offload, autoscale, private</td>
+                        <td>Medium (capacity units)</td>
+                        <td>Web apps needing WAF, path-based routing within a region</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Azure Front Door</strong></td>
+                        <td>L7 (HTTP/S)</td>
+                        <td>Global</td>
+                        <td>Anycast, WAF, caching, SSL offload, instant failover, Rules Engine</td>
+                        <td>Higher (per request + data transfer)</td>
+                        <td>Global web/API with low latency, DDoS + WAF at edge</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Traffic Manager</strong></td>
+                        <td>DNS</td>
+                        <td>Global</td>
+                        <td>Priority, weighted, geographic, performance, subnet routing</td>
+                        <td>Low (per million queries)</td>
+                        <td>Non-HTTP global routing, DR failover, DNS-level distribution</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+
+        <div class="key-concept">
+            <h3>🔑 Core Distinction</h3>
+            <ul>
+                <li><strong>L4</strong> sees only IP + port. Fastest, but no URL awareness.</li>
+                <li><strong>L7</strong> inspects HTTP headers, URL paths, cookies. Can route /api/* differently from /static/*.</li>
+                <li><strong>DNS-based</strong> (Traffic Manager) never touches data traffic — it resolves a name to an endpoint IP. TTL governs failover speed (30s–300s).</li>
+                <li><strong>Anycast</strong> (Front Door) routes the TCP connection itself to the nearest POP — sub-second failover, no DNS TTL wait.</li>
+            </ul>
+        </div>
+    </section>
+
+    <!-- Section 2 -->
+    <section id="decision-tree" class="fade-in">
+        <h2>Decision Tree: Choosing the Right Load Balancer</h2>
+        <p>Use this flowchart on exam day and in real designs:</p>
+
+        <div class="diagram slide-in-left" id="diagram-decision-tree"></div>
+
+        <div class="exam-tip">
+            <strong>AZ-305 Exam Tip:</strong> This decision tree appears frequently. The exam gives a scenario and asks which service to recommend. Key discriminators: HTTP vs non-HTTP, global vs regional, and whether WAF/caching is needed.
+        </div>
+
+        <div class="key-concept">
+            <h3>🔑 Quick Decision Rules</h3>
+            <ul>
+                <li><strong>Non-HTTP traffic?</strong> → Load Balancer (regional) or Traffic Manager (global DNS failover).</li>
+                <li><strong>HTTP + single region?</strong> → Application Gateway (especially if WAF or path routing needed).</li>
+                <li><strong>HTTP + multi-region + performance?</strong> → Front Door (anycast, instant failover, edge caching).</li>
+                <li><strong>Multi-region + non-HTTP or legacy?</strong> → Traffic Manager (DNS-based, protocol agnostic).</li>
+            </ul>
+        </div>
+    </section>
+
+    <!-- Section 3 -->
+    <section id="front-door" class="fade-in">
+        <h2>Azure Front Door Deep Dive</h2>
+        <p>Front Door is Azure's premium global L7 load balancer. It uses <strong>anycast</strong> — every Front Door POP advertises the same IP, so clients connect to the nearest POP automatically via BGP routing.</p>
+
+        <div class="key-concept">
+            <h3>🔑 Front Door Capabilities</h3>
+            <ul>
+                <li><strong>Anycast routing:</strong> User connects to nearest of 180+ edge POPs. No DNS wait for failover — TCP itself is re-routed.</li>
+                <li><strong>Instant failover:</strong> If a backend region fails health probes, traffic shifts to next-best backend in &lt;30 seconds — no TTL delay.</li>
+                <li><strong>WAF at the edge:</strong> Block attacks at the POP before traffic reaches your origin. Managed rule sets (OWASP 3.2, bot protection).</li>
+                <li><strong>Caching:</strong> Static content cached at edge POPs — reduces origin load and latency.</li>
+                <li><strong>SSL offload:</strong> Front Door terminates TLS, forwarding HTTP or re-encrypted HTTPS to backends.</li>
+                <li><strong>Rules Engine:</strong> URL rewrite, redirect, header manipulation, rate limiting — all at the edge.</li>
+                <li><strong>Private Link origins:</strong> Front Door Premium can connect to private backends (no public IP on origin).</li>
+            </ul>
+        </div>
+
+        <div class="callout-warning">
+            <strong>⚠️ When NOT to use Front Door:</strong> Non-HTTP workloads (use Traffic Manager). Single-region with no global presence (App Gateway is simpler/cheaper). Regulatory requirements forbidding edge termination of TLS in specific countries.
+        </div>
+
+        <h3>Front Door Tiers</h3>
+        <ul>
+            <li><strong>Standard:</strong> CDN + basic routing + managed WAF rules. Good for content delivery.</li>
+            <li><strong>Premium:</strong> Everything in Standard + Private Link origins + enhanced WAF (bot protection, geo-filtering) + Microsoft Threat Intelligence rules.</li>
+        </ul>
+    </section>
+
+    <!-- Section 4 -->
+    <section id="traffic-manager" class="fade-in">
+        <h2>Traffic Manager: DNS-Based Global Routing</h2>
+        <p>Traffic Manager works at the DNS layer. It never proxies traffic — it simply resolves your FQDN to the best endpoint IP based on the routing method you configure.</p>
+
+        <div class="key-concept">
+            <h3>🔑 Routing Methods</h3>
+            <ul>
+                <li><strong>Priority:</strong> Active/passive failover. All traffic to endpoint #1 unless it fails health check → endpoint #2.</li>
+                <li><strong>Weighted:</strong> Distribute traffic by percentage (e.g., 80/20 for canary deployments).</li>
+                <li><strong>Performance:</strong> Route to the lowest-latency endpoint based on the user's DNS resolver location.</li>
+                <li><strong>Geographic:</strong> Route based on the geographic origin of the DNS query (e.g., EU users → EU endpoint). Useful for data sovereignty.</li>
+                <li><strong>Subnet:</strong> Map specific client IP ranges to specific endpoints.</li>
+                <li><strong>MultiValue:</strong> Return multiple healthy endpoints in DNS response (client picks one).</li>
+            </ul>
+        </div>
+
+        <h3>When Traffic Manager is Sufficient</h3>
+        <ul>
+            <li>Non-HTTP protocols (SQL, RDP, custom TCP)</li>
+            <li>You don't need edge WAF or caching</li>
+            <li>You can tolerate DNS TTL-based failover (30–300 seconds)</li>
+            <li>You need geographic routing for compliance (e.g., "German users must only resolve to the Frankfurt endpoint")</li>
+            <li>Budget-conscious global routing — Traffic Manager is the cheapest global option</li>
+        </ul>
+
+        <div class="callout-warning">
+            <strong>⚠️ Limitation:</strong> DNS TTL means clients may cache stale endpoints for the TTL duration during failover. Set TTL low (30s) for fast failover, but this increases DNS query volume and cost.
+        </div>
+    </section>
+
+    <!-- Section 5 -->
+    <section id="app-gateway" class="fade-in">
+        <h2>Application Gateway: Regional L7 Powerhouse</h2>
+        <p>App Gateway is your in-region HTTP load balancer with deep L7 features. From AZ-104 you know the basics — here's the architect's view.</p>
+
+        <div class="key-concept">
+            <h3>🔑 Architect-Level Decisions</h3>
+            <ul>
+                <li><strong>Path-based routing:</strong> /api/* → API backend pool, /images/* → storage, /app/* → App Service.</li>
+                <li><strong>Multi-site hosting:</strong> Route by Host header — consolidate multiple apps behind one gateway.</li>
+                <li><strong>WAF v2:</strong> OWASP Core Rule Set 3.2, custom rules, exclusions. <em>Required</em> for PCI-DSS workloads in-region.</li>
+                <li><strong>Autoscaling (v2):</strong> Scales from 0 to 125 capacity units based on traffic. No pre-provisioning needed.</li>
+                <li><strong>Private-only:</strong> Deploy in a private subnet with no public IP — for internal apps or behind Front Door.</li>
+                <li><strong>Mutual TLS (mTLS):</strong> Client certificate authentication at the gateway.</li>
+                <li><strong>Connection draining:</strong> Gracefully remove backend instances during deployments.</li>
+            </ul>
+        </div>
+
+        <h3>v1 vs v2 SKU</h3>
+        <p>Always use <strong>v2</strong> for new deployments. v1 is legacy — no autoscale, no zone redundancy, no key vault integration. The exam assumes v2.</p>
+    </section>
+
+    <!-- Section 6 -->
+    <section id="combining" class="fade-in">
+        <h2>Combining Load Balancers</h2>
+        <p>Enterprise architectures often layer multiple load-balancing services. Common patterns:</p>
+
+        <h3>Pattern 1: Front Door + Application Gateway</h3>
+        <ul>
+            <li><strong>Front Door</strong> handles global routing, edge WAF, caching, SSL offload.</li>
+            <li><strong>App Gateway (private)</strong> in each region handles path-based routing, additional WAF rules, and routes to backend compute (AKS, VMs, App Service).</li>
+            <li>Lock down App Gateway to only accept traffic from Front Door (check <code>X-Azure-FDID</code> header or use Private Link with Front Door Premium).</li>
+        </ul>
+
+        <h3>Pattern 2: Traffic Manager + Load Balancer</h3>
+        <ul>
+            <li><strong>Traffic Manager</strong> resolves DNS to the healthiest region.</li>
+            <li><strong>Load Balancer (L4)</strong> in each region distributes TCP/UDP across backend VMs.</li>
+            <li>Use case: Non-HTTP workloads needing global failover (gaming servers, IoT ingestion, database replicas).</li>
+        </ul>
+
+        <h3>Pattern 3: Front Door + Load Balancer (internal)</h3>
+        <ul>
+            <li>Front Door terminates HTTP at edge, sends to App Service or VMs.</li>
+            <li>Internal Load Balancer distributes traffic between application tier and data tier within a VNet.</li>
+        </ul>
+
+        <div class="diagram slide-in-left" id="diagram-multi-region"></div>
+    </section>
+
+    <!-- Section 7 -->
+    <section id="cross-region" class="fade-in">
+        <h2>Cross-Region HA Patterns</h2>
+
+        <div class="key-concept">
+            <h3>🔑 Active-Active vs Active-Passive</h3>
+            <ul>
+                <li><strong>Active-Active:</strong> Both regions serve traffic simultaneously. Front Door (performance routing) or Traffic Manager (weighted/performance). Requires data replication strategy.</li>
+                <li><strong>Active-Passive:</strong> Secondary region is standby. Traffic Manager (priority) or Front Door with failover routing. Simpler data consistency but higher RTO.</li>
+            </ul>
+        </div>
+
+        <h3>Design Considerations</h3>
+        <ul>
+            <li><strong>Health probes:</strong> All services probe backends — configure probe paths that actually validate app health (not just TCP port open).</li>
+            <li><strong>Data replication:</strong> The load balancer handles traffic routing, but you must separately ensure data is available in the failover region (Cosmos DB multi-region, SQL Geo-Replication, Storage GRS).</li>
+            <li><strong>Failback strategy:</strong> After primary recovers, how do you shift traffic back? Automatic (risky) or manual (slower but safer)?</li>
+            <li><strong>Cost:</strong> Active-active doubles compute cost. Use consumption-based services (Functions, App Service auto-scale to 0) to reduce standby costs in passive regions.</li>
+        </ul>
+    </section>
+
+    <!-- Section 8 -->
+    <section id="real-world" class="fade-in">
+        <h2>Real-World: Global SaaS with Regional Compliance</h2>
+        <div class="key-concept">
+            <h3>📋 Scenario</h3>
+            <p>A SaaS company serves customers in US, EU, and APAC. Requirements:</p>
+            <ul>
+                <li>EU customer data must stay in EU (GDPR)</li>
+                <li>Sub-100ms latency for all regions</li>
+                <li>Survive a full region failure with &lt;1 min failover</li>
+                <li>WAF protection at the edge</li>
+                <li>Path-based routing: /api/* to microservices, /app/* to frontend</li>
+            </ul>
+        </div>
+
+        <h3>Solution Architecture</h3>
+        <ol>
+            <li><strong>Azure Front Door Premium</strong> — global entry point with anycast, edge WAF, Private Link to origins.</li>
+            <li><strong>Geographic routing rules</strong> in Front Door — EU users pinned to EU backend group (GDPR compliance); US/APAC routed by latency.</li>
+            <li><strong>Application Gateway (private, WAF v2)</strong> in each region — path-based routing to AKS clusters.</li>
+            <li><strong>Internal Load Balancer</strong> within each region's VNet for service-to-service traffic between microservices.</li>
+            <li><strong>Cosmos DB with multi-region writes</strong> — EU region as primary write for EU data, with geo-fencing.</li>
+        </ol>
+
+        <h3>Why Not Alternatives?</h3>
+        <ul>
+            <li><em>Traffic Manager alone?</em> — DNS TTL delay fails the &lt;1 min failover SLA. No edge WAF.</li>
+            <li><em>Front Door without App Gateway?</em> — Works for simple backends, but the team needs private-only backends with in-region WAF layering and mTLS to services.</li>
+            <li><em>Load Balancer for global?</em> — L4 only, regional only. Can't meet global latency or L7 routing needs.</li>
+        </ul>
+    </section>
+
+    <!-- Quiz -->
+    <section id="quiz" class="fade-in">
+        <h2>Knowledge Check</h2>
+        <div id="quiz-container"></div>
+    </section>
+
+    <nav class="lesson-nav">
+        <a href="0009-networking-foundations.html">&larr; Prev: Lesson 009</a>
+        <a href="0011-dns-private-endpoints.html">Next: Lesson 011 &rarr;</a>
+    </nav>
+</div>
+
+<script src="../assets/diagrams.js"></script>
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+
+    // Decision Tree Diagram
+    AzureLessons.BoxDiagram('diagram-decision-tree', {
+        nodes: [
+            { id: 'start', label: 'Incoming\nTraffic', x: 300, y: 20, w: 140, h: 50, shape: 'box', icon: 'network', tooltip: 'Start: what type of traffic?' },
+            { id: 'q1', label: 'HTTP/HTTPS?', x: 300, y: 110, w: 150, h: 50, shape: 'diamond', icon: 'question', tooltip: 'First decision: is it web traffic?' },
+            { id: 'q2', label: 'Global or\nRegional?', x: 120, y: 210, w: 140, h: 55, shape: 'diamond', icon: 'question', tooltip: 'Non-HTTP: need global reach?' },
+            { id: 'q3', label: 'Global or\nRegional?', x: 480, y: 210, w: 140, h: 55, shape: 'diamond', icon: 'question', tooltip: 'HTTP: need global reach?' },
+            { id: 'lb', label: 'Azure Load\nBalancer (L4)', x: 50, y: 330, w: 150, h: 50, shape: 'box', icon: 'loadbalancer', tooltip: 'Regional L4: TCP/UDP distribution' },
+            { id: 'tm', label: 'Traffic\nManager (DNS)', x: 220, y: 330, w: 150, h: 50, shape: 'box', icon: 'dns', tooltip: 'Global DNS-based routing for non-HTTP' },
+            { id: 'ag', label: 'Application\nGateway (L7)', x: 400, y: 330, w: 150, h: 50, shape: 'box', icon: 'appgateway', tooltip: 'Regional L7: WAF, path routing' },
+            { id: 'fd', label: 'Azure Front\nDoor (L7)', x: 570, y: 330, w: 150, h: 50, shape: 'box', icon: 'frontdoor', tooltip: 'Global L7: anycast, WAF, caching' }
+        ],
+        edges: [
+            { from: 'start', to: 'q1', label: '', style: 'solid' },
+            { from: 'q1', to: 'q2', label: 'No', style: 'solid' },
+            { from: 'q1', to: 'q3', label: 'Yes', style: 'solid' },
+            { from: 'q2', to: 'lb', label: 'Regional', style: 'solid' },
+            { from: 'q2', to: 'tm', label: 'Global', style: 'solid' },
+            { from: 'q3', to: 'ag', label: 'Regional', style: 'solid' },
+            { from: 'q3', to: 'fd', label: 'Global', style: 'solid' }
+        ],
+        groups: []
+    });
+
+    // Multi-region architecture diagram
+    AzureLessons.BoxDiagram('diagram-multi-region', {
+        nodes: [
+            { id: 'users', label: 'Global Users', x: 300, y: 20, w: 140, h: 45, shape: 'box', icon: 'users', tooltip: 'Users in US, EU, APAC' },
+            { id: 'fd', label: 'Azure Front Door\n(Global L7 + WAF)', x: 300, y: 100, w: 200, h: 50, shape: 'box', icon: 'frontdoor', tooltip: 'Anycast entry, edge WAF, SSL offload' },
+            { id: 'ag-us', label: 'App Gateway\n(US West)', x: 120, y: 210, w: 150, h: 50, shape: 'box', icon: 'appgateway', tooltip: 'Regional WAF + path routing' },
+            { id: 'ag-eu', label: 'App Gateway\n(EU West)', x: 300, y: 210, w: 150, h: 50, shape: 'box', icon: 'appgateway', tooltip: 'Regional WAF + path routing' },
+            { id: 'ag-ap', label: 'App Gateway\n(APAC SE)', x: 480, y: 210, w: 150, h: 50, shape: 'box', icon: 'appgateway', tooltip: 'Regional WAF + path routing' },
+            { id: 'be-us', label: 'AKS + ILB\n(US West)', x: 120, y: 320, w: 150, h: 50, shape: 'box', icon: 'compute', tooltip: 'Backend compute with internal LB' },
+            { id: 'be-eu', label: 'AKS + ILB\n(EU West)', x: 300, y: 320, w: 150, h: 50, shape: 'box', icon: 'compute', tooltip: 'Backend compute with internal LB' },
+            { id: 'be-ap', label: 'AKS + ILB\n(APAC SE)', x: 480, y: 320, w: 150, h: 50, shape: 'box', icon: 'compute', tooltip: 'Backend compute with internal LB' }
+        ],
+        edges: [
+            { from: 'users', to: 'fd', label: 'anycast', style: 'solid' },
+            { from: 'fd', to: 'ag-us', label: '', style: 'solid' },
+            { from: 'fd', to: 'ag-eu', label: '', style: 'solid' },
+            { from: 'fd', to: 'ag-ap', label: '', style: 'solid' },
+            { from: 'ag-us', to: 'be-us', label: 'private', style: 'solid' },
+            { from: 'ag-eu', to: 'be-eu', label: 'private', style: 'solid' },
+            { from: 'ag-ap', to: 'be-ap', label: 'private', style: 'solid' }
+        ],
+        groups: [
+            { label: 'US Region', x: 40, y: 190, w: 240, h: 200 },
+            { label: 'EU Region', x: 220, y: 190, w: 240, h: 200 },
+            { label: 'APAC Region', x: 400, y: 190, w: 240, h: 200 }
+        ]
+    });
+
+    // Quiz
+    AzureLessons.Quiz('quiz-container', [
+        {
+            question: "A company needs global load balancing for a real-time multiplayer game server using UDP. Which service should you recommend?",
+            options: [
+                "Azure Front Door",
+                "Azure Application Gateway",
+                "Azure Traffic Manager with performance routing",
+                "Azure Load Balancer with cross-region tier"
+            ],
+            correct: 2,
+            explanation: "Front Door and App Gateway are L7 HTTP-only. Traffic Manager with performance routing handles non-HTTP global routing by resolving DNS to the lowest-latency endpoint. The cross-region Load Balancer is an option but Traffic Manager is the established pattern for UDP/game scenarios."
+        },
+        {
+            question: "You need sub-second failover for a global web application when a region goes down. Which service provides this?",
+            options: [
+                "Traffic Manager with priority routing (TTL=30s)",
+                "Azure Front Door with backend health probes",
+                "Application Gateway with zone redundancy",
+                "DNS failover with Azure DNS"
+            ],
+            correct: 1,
+            explanation: "Front Door uses anycast — when a backend fails health probes, it reroutes at the network level without waiting for DNS TTL expiry. Traffic Manager relies on DNS TTL (minimum 30s), so failover is slower. App Gateway is regional only."
+        },
+        {
+            question: "An organization requires that EU users' traffic never leaves Europe, while US users get the lowest latency. Which combination achieves this?",
+            options: [
+                "Traffic Manager with performance routing only",
+                "Front Door with geographic routing rules for EU + latency routing for US",
+                "Two separate Application Gateways with no global layer",
+                "Azure Load Balancer cross-region with proximity rules"
+            ],
+            correct: 1,
+            explanation: "Front Door supports routing rules that pin geographic regions to specific backend groups (EU users → EU backend) while using latency-based routing for other regions. Traffic Manager geographic routing could work but lacks edge WAF and instant failover."
+        },
+        {
+            question: "You're designing an internal API that needs path-based routing (/v1/* to old service, /v2/* to new service) within a single region. No internet exposure needed. Best choice?",
+            options: [
+                "Azure Front Door Standard",
+                "Application Gateway v2 in a private subnet (no public IP)",
+                "Azure Load Balancer with HA ports",
+                "Traffic Manager with subnet routing"
+            ],
+            correct: 1,
+            explanation: "App Gateway v2 supports private-only deployment with path-based routing — perfect for internal L7 needs. Front Door is internet-facing. Load Balancer is L4 (no path awareness). Traffic Manager is DNS-only and global."
+        },
+        {
+            question: "A company uses Front Door for global entry and wants to ensure backend App Gateways only accept traffic from Front Door. What's the most secure approach?",
+            options: [
+                "NSG rules allowing only Front Door's IP ranges",
+                "Front Door Premium with Private Link to the App Gateway",
+                "Validate the X-Azure-FDID header in App Gateway WAF rules",
+                "Restrict by geographic IP filtering on App Gateway"
+            ],
+            correct: 1,
+            explanation: "Front Door Premium with Private Link ensures traffic flows over Microsoft's backbone to a private endpoint — the App Gateway has no public IP to attack. Header validation (X-Azure-FDID) is good but can be spoofed if the public IP is discovered. NSG with Front Door IPs works but the IP list changes and is shared across all Front Door instances."
+        }
+    ]);
+
+    // Initialize interactions
+    AzureLessons.ScrollReveal();
+    AzureLessons.Collapsible();
+});
+</script>
+</body>
+</html>

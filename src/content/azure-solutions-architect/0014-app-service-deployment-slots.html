@@ -1,0 +1,379 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lesson 014 – App Service Deployment Slots | AZ-305 Study Guide</title>
+    <link rel="stylesheet" href="../assets/styles.css">
+    <script src="../assets/diagrams.js"></script>
+</head>
+<body>
+<div class="lesson-wrap">
+
+    <!-- Header -->
+    <header class="lesson-header fade-in">
+        <span class="lesson-number">Lesson 014 · 🟡 REVIEW</span>
+        <h1>App Service Deployment Slots</h1>
+        <p>You know how to deploy web apps. Now architect the tier selection that unlocks production features, design blue-green deployments with slot swaps, decide between Premium v3 + VNet integration and App Service Environments for regulated workloads, and plan scaling strategies.</p>
+    </header>
+
+    <!-- Table of Contents -->
+    <nav class="toc fade-in">
+        <h2>In This Lesson</h2>
+        <ol>
+            <li><a href="#tier-decisions">App Service Plan Tiers as Architecture Decisions</a></li>
+            <li><a href="#vnet-integration">VNet Integration Options</a></li>
+            <li><a href="#ase">When ASE Is Justified</a></li>
+            <li><a href="#deployment-slots">Deployment Slots: Blue-Green Pattern</a></li>
+            <li><a href="#scaling">Scaling Architecture</a></li>
+            <li><a href="#real-world">Real-World: PCI Compliance — Premium v3 vs ASE</a></li>
+            <li><a href="#quiz">Knowledge Check</a></li>
+        </ol>
+    </nav>
+
+    <!-- Section 1: Tier Decisions -->
+    <section id="tier-decisions" class="fade-in">
+        <h2>1. App Service Plan Tiers as Architecture Decisions</h2>
+        <p>Each tier unlocks capabilities that matter to architects. Choosing the wrong tier isn't just a cost issue — it blocks features you'll need later (slots, VNet integration, scale-out limits).</p>
+
+        <div class="box-diagram slide-in-left" id="diagram-tier-tree" data-diagram='{
+            "nodes": [
+                {"id": "free", "label": "Free / Shared\nNo SLA\nNo slots\nNo VNet", "x": 300, "y": 20, "w": 180, "h": 80, "shape": "box", "icon": "🚫", "tooltip": "Dev/test only. Shared infra, no custom domains on Free."},
+                {"id": "basic", "label": "Basic\nNo autoscale\nNo slots\n3 instances max", "x": 140, "y": 140, "w": 180, "h": 80, "shape": "box", "icon": "🟡", "tooltip": "Low-traffic apps not needing deployment slots."},
+                {"id": "standard", "label": "Standard\n5 slots\nAutoscale\n10 instances", "x": 300, "y": 140, "w": 180, "h": 80, "shape": "box", "icon": "✅", "tooltip": "First production-ready tier with slots and autoscale."},
+                {"id": "premium", "label": "Premium v3\n20 slots\nVNet integration\n30 instances", "x": 460, "y": 140, "w": 180, "h": 80, "shape": "box", "icon": "🚀", "tooltip": "Regional VNet integration, zone redundancy, larger instances."},
+                {"id": "isolated", "label": "Isolated v2 (ASE)\n20 slots\nFull isolation\n100 instances", "x": 300, "y": 280, "w": 200, "h": 80, "shape": "box", "icon": "🔒", "tooltip": "Dedicated infrastructure in your VNet. Highest isolation."}
+            ],
+            "edges": [
+                {"from": "free", "to": "basic", "label": "Need custom domain", "style": "dashed"},
+                {"from": "free", "to": "standard", "label": "Need slots/autoscale", "style": "solid"},
+                {"from": "basic", "to": "standard", "label": "Need slots", "style": "dashed"},
+                {"from": "standard", "to": "premium", "label": "Need VNet/perf", "style": "solid"},
+                {"from": "premium", "to": "isolated", "label": "Need full isolation", "style": "solid"}
+            ],
+            "groups": [
+                {"label": "Shared Multi-Tenant", "x": 120, "y": 0, "w": 540, "h": 230},
+                {"label": "Fully Isolated (ASE)", "x": 270, "y": 260, "w": 250, "h": 120}
+            ]
+        }'></div>
+
+        <div class="key-concept">
+            <h3>🔑 Tier Unlock Table</h3>
+            <table class="compare-table">
+                <thead>
+                    <tr>
+                        <th>Feature</th>
+                        <th>Free/Shared</th>
+                        <th>Basic</th>
+                        <th>Standard</th>
+                        <th>Premium v3</th>
+                        <th>Isolated v2</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr><td>Custom domains</td><td>Shared only</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td></tr>
+                    <tr><td>Deployment slots</td><td>—</td><td>—</td><td>5</td><td>20</td><td>20</td></tr>
+                    <tr><td>Autoscale</td><td>—</td><td>—</td><td>✅</td><td>✅</td><td>✅</td></tr>
+                    <tr><td>VNet integration</td><td>—</td><td>—</td><td>—</td><td>Regional</td><td>Full (injected)</td></tr>
+                    <tr><td>Max instances</td><td>—</td><td>3</td><td>10</td><td>30</td><td>100</td></tr>
+                    <tr><td>Zone redundancy</td><td>—</td><td>—</td><td>—</td><td>✅</td><td>✅</td></tr>
+                    <tr><td>SLA</td><td>None</td><td>99.95%</td><td>99.95%</td><td>99.95%</td><td>99.95%</td></tr>
+                    <tr><td>Per-app scaling</td><td>—</td><td>—</td><td>—</td><td>✅</td><td>✅</td></tr>
+                </tbody>
+            </table>
+        </div>
+
+        <div class="callout-warning">
+            <strong>⚠️ Never use Free/Shared for production.</strong> No SLA, shared CPU quotas, no custom SSL on Free. If someone says "we'll just use Free for the internal tool" — remind them there's no SLA and daily CPU limits will throttle the app.
+        </div>
+    </section>
+
+    <!-- Section 2: VNet Integration -->
+    <section id="vnet-integration" class="fade-in">
+        <h2>2. VNet Integration Options</h2>
+        <p>Two fundamentally different networking models exist for App Service. Choose based on isolation requirements, not just connectivity needs.</p>
+
+        <div class="compare-grid slide-in-right">
+            <h3>Premium v3 + VNet Integration vs ASE v2</h3>
+            <table class="compare-table">
+                <thead>
+                    <tr>
+                        <th>Dimension</th>
+                        <th>Premium v3 + Regional VNet Integration</th>
+                        <th>ASE v2 (Isolated v2)</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr><td><strong>Network model</strong></td><td>Outbound via delegated subnet; inbound still public (use Private Endpoints for inbound)</td><td>Fully injected into your VNet — both inbound and outbound are private</td></tr>
+                    <tr><td><strong>Inbound access</strong></td><td>Public IP + access restrictions, or Private Endpoint</td><td>Internal Load Balancer (ILB) — no public exposure by default</td></tr>
+                    <tr><td><strong>DNS</strong></td><td>Standard Azure DNS / custom domains</td><td>Custom DNS zone (yourapp.appserviceenvironment.net)</td></tr>
+                    <tr><td><strong>Compute isolation</strong></td><td>Shared multi-tenant stamps (logical isolation)</td><td>Dedicated single-tenant hardware</td></tr>
+                    <tr><td><strong>Compliance posture</strong></td><td>Good for most workloads; may not satisfy auditors requiring physical isolation</td><td>Meets PCI-DSS, HIPAA, FedRAMP requirements for dedicated compute</td></tr>
+                    <tr><td><strong>Deploy time</strong></td><td>Minutes</td><td>2-3 hours (dedicated stamp provisioning)</td></tr>
+                    <tr><td><strong>Cost</strong></td><td>$$  (pay per instance)</td><td>$$$$  (flat stamp fee + per instance)</td></tr>
+                    <tr><td><strong>Scale ceiling</strong></td><td>30 instances per plan</td><td>100 instances per plan</td></tr>
+                    <tr><td><strong>Zone redundancy</strong></td><td>✅ (plan-level)</td><td>✅ (ASE-level)</td></tr>
+                </tbody>
+            </table>
+        </div>
+
+        <div class="key-concept">
+            <h3>🔑 Decision Rule</h3>
+            <p><strong>Start with Premium v3 + Private Endpoints.</strong> Only escalate to ASE when you need: (1) dedicated/isolated compute for compliance, (2) > 30 instance scale, or (3) custom internal DNS naming for the app itself. Most "we need ASE" conversations end with "Premium v3 + Private Endpoint + Service Endpoints is sufficient."</p>
+        </div>
+    </section>
+
+    <!-- Section 3: When ASE Is Justified -->
+    <section id="ase" class="fade-in">
+        <h2>3. When ASE Is Justified</h2>
+
+        <div class="collapsible">
+            <div class="collapsible-header">Compliance Isolation</div>
+            <div class="collapsible-body">
+                <p>Auditors for PCI-DSS Level 1 or certain government frameworks require proof that no other tenant's code runs on the same physical hardware. ASE provides single-tenant stamps — you own the entire compute cluster. Premium v3 runs on shared stamps with logical isolation (separate VMs, but shared underlying infrastructure).</p>
+            </div>
+        </div>
+
+        <div class="collapsible">
+            <div class="collapsible-header">Custom Internal DNS</div>
+            <div class="collapsible-body">
+                <p>ASE gives you a private DNS zone (e.g., <code>payments.internal.contoso.net</code>) that resolves only within your VNet. Without ASE, you use Private Endpoints and private DNS zones — similar result, but ASE bakes it in natively without managing separate PE resources per app.</p>
+            </div>
+        </div>
+
+        <div class="collapsible">
+            <div class="collapsible-header">Dedicated Compute with High Density</div>
+            <div class="collapsible-body">
+                <p>Need 50+ App Service instances for a single app or 100+ across plans? ASE supports up to 100 instances per plan with Isolated v2 SKUs (I1v2 through I6v2 with up to 64 vCPU / 128 GiB RAM per instance). Combined with per-app scaling, this handles extreme multi-tenant SaaS patterns.</p>
+            </div>
+        </div>
+
+        <div class="exam-tip">
+            <h3>📝 Exam Tip</h3>
+            <p>AZ-305 loves "compliance requires network isolation" scenarios. If the question says "no shared infrastructure" or "dedicated hardware" — the answer is ASE (Isolated tier), not Premium + VNet integration. If it just says "private connectivity to backend databases" — Premium + VNet integration or Private Endpoints suffice.</p>
+        </div>
+    </section>
+
+    <!-- Section 4: Deployment Slots -->
+    <section id="deployment-slots" class="fade-in">
+        <h2>4. Deployment Slots: Blue-Green Pattern</h2>
+        <p>Slots are live app instances with their own hostnames running on the same plan. The swap operation routes traffic atomically — no cold starts, no downtime.</p>
+
+        <div class="box-diagram slide-in-left" id="diagram-blue-green" data-diagram='{
+            "nodes": [
+                {"id": "users", "label": "Users", "x": 300, "y": 20, "w": 100, "h": 50, "shape": "box", "icon": "👥", "tooltip": "Production traffic"},
+                {"id": "prod", "label": "Production Slot\n(v2.1 → v2.2)", "x": 200, "y": 130, "w": 180, "h": 70, "shape": "box", "icon": "🟢", "tooltip": "Receives live traffic. After swap, runs new version."},
+                {"id": "staging", "label": "Staging Slot\n(v2.2 → v2.1)", "x": 420, "y": 130, "w": 180, "h": 70, "shape": "box", "icon": "🔵", "tooltip": "Deploy here first. Validate. Then swap to production."},
+                {"id": "swap", "label": "SWAP\n(atomic)", "x": 310, "y": 240, "w": 120, "h": 50, "shape": "box", "icon": "🔄", "tooltip": "Swaps VIPs + app settings (non-sticky). ~0 downtime."},
+                {"id": "db", "label": "Shared Backend\n(SQL / Storage)", "x": 300, "y": 340, "w": 180, "h": 60, "shape": "box", "icon": "🗄️", "tooltip": "Both slots share the same backend. DB migrations must be backward-compatible."}
+            ],
+            "edges": [
+                {"from": "users", "to": "prod", "label": "100% traffic", "style": "solid"},
+                {"from": "prod", "to": "swap", "label": "", "style": "dashed"},
+                {"from": "staging", "to": "swap", "label": "", "style": "dashed"},
+                {"from": "prod", "to": "db", "label": "", "style": "solid"},
+                {"from": "staging", "to": "db", "label": "", "style": "solid"}
+            ],
+            "groups": [
+                {"label": "App Service Plan (Standard+ required)", "x": 170, "y": 100, "w": 460, "h": 210}
+            ]
+        }'></div>
+
+        <div class="key-concept">
+            <h3>🔑 Slot Settings: Sticky vs Swapped</h3>
+            <ul>
+                <li><strong>Sticky (slot settings)</strong> — stay with the slot, NOT the app code: connection strings marked "slot setting", app settings marked sticky, auth configs, CORS, handler mappings. Use for environment-specific values (e.g., staging DB connection string stays in staging).</li>
+                <li><strong>Swapped</strong> — travel with the app code: app settings NOT marked sticky, runtime version, web sockets on/off, managed identity associations. These are your "application configuration."</li>
+            </ul>
+        </div>
+
+        <div class="collapsible">
+            <div class="collapsible-header">Warm-Up &amp; Auto-Swap</div>
+            <div class="collapsible-body">
+                <h4>Warm-Up</h4>
+                <p>Before a swap completes, Azure sends HTTP requests to the staging slot's root (or a custom <code>applicationInitialization</code> path). The swap only finishes when the slot returns HTTP 200. This prevents cold-start latency hitting production users.</p>
+                <pre><code>&lt;!-- web.config applicationInitialization --&gt;
+&lt;applicationInitialization&gt;
+    &lt;add initializationPage="/health" /&gt;
+    &lt;add initializationPage="/api/warmup" /&gt;
+&lt;/applicationInitialization&gt;</code></pre>
+
+                <h4>Auto-Swap</h4>
+                <p>Configure a slot to auto-swap to production after deployment succeeds. Useful for CI/CD pipelines targeting a staging slot — code lands in staging, warms up, then auto-swaps to production with zero manual intervention.</p>
+
+                <h4>Traffic Routing (Canary)</h4>
+                <p>Route a percentage of traffic to a non-production slot for canary testing. E.g., send 10% of users to the staging slot to validate before a full swap. Configured per-slot in the Azure portal or via <code>az webapp traffic-routing set</code>.</p>
+            </div>
+        </div>
+
+        <div class="callout-warning">
+            <strong>⚠️ Database migrations must be backward-compatible.</strong> Both slots share the same backend. If you deploy breaking schema changes before the swap, the current production code (still running on the old version) will fail. Always use expand-contract migration patterns.
+        </div>
+    </section>
+
+    <!-- Section 5: Scaling Architecture -->
+    <section id="scaling" class="fade-in">
+        <h2>5. Scaling Architecture</h2>
+
+        <div class="key-concept">
+            <h3>🔑 Scale-Up vs Scale-Out</h3>
+            <table class="compare-table">
+                <thead>
+                    <tr>
+                        <th>Dimension</th>
+                        <th>Scale-Up (vertical)</th>
+                        <th>Scale-Out (horizontal)</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr><td>What changes</td><td>Instance size (SKU)</td><td>Number of instances</td></tr>
+                    <tr><td>Downtime</td><td>Brief restart during SKU change</td><td>None — new instances added behind LB</td></tr>
+                    <tr><td>Limit</td><td>Largest SKU in tier</td><td>Tier-dependent (10/30/100)</td></tr>
+                    <tr><td>Use when</td><td>Single-threaded app needs more CPU/RAM</td><td>Stateless app needs more throughput</td></tr>
+                </tbody>
+            </table>
+        </div>
+
+        <div class="collapsible">
+            <div class="collapsible-header">Autoscale Rules</div>
+            <div class="collapsible-body">
+                <p>Autoscale (Standard+) uses rules based on metrics or schedules:</p>
+                <ul>
+                    <li><strong>Metric-based:</strong> CPU%, memory%, HTTP queue length, custom metrics from Application Insights</li>
+                    <li><strong>Schedule-based:</strong> Scale to 10 instances weekdays 8am-6pm, 2 instances nights/weekends</li>
+                    <li><strong>Cool-down:</strong> Default 5 minutes between scale actions — prevents flapping</li>
+                </ul>
+                <p><strong>Architecture tip:</strong> Always set a minimum instance count ≥ 2 for production. A single instance has no HA — if the underlying node fails, your app is down until a new instance starts.</p>
+            </div>
+        </div>
+
+        <div class="collapsible">
+            <div class="collapsible-header">Per-App Scaling</div>
+            <div class="collapsible-body">
+                <p>By default, all apps in a plan run on ALL instances. Per-app scaling (Premium v3+) lets you limit how many instances each app uses. This prevents a noisy-neighbor app from consuming all plan capacity.</p>
+                <p>Example: A plan with 10 instances hosts 3 apps. App A uses max 5 instances, App B uses max 3, App C uses max 4. The platform distributes across the pool intelligently.</p>
+            </div>
+        </div>
+    </section>
+
+    <!-- Section 6: Real-World -->
+    <section id="real-world" class="fade-in">
+        <h2>6. Real-World: PCI Compliance — Premium v3 vs ASE</h2>
+
+        <div class="real-world-example">
+            <h3>💼 Scenario</h3>
+            <p>A SaaS payment-processing company needs to host their card-data-handling APIs in Azure. Their PCI QSA (Qualified Security Assessor) requires:</p>
+            <ul>
+                <li>No shared compute infrastructure with other tenants</li>
+                <li>All traffic to/from the app must traverse private networks only</li>
+                <li>Custom internal DNS for service-to-service communication</li>
+                <li>Ability to scale to 50+ instances during peak processing</li>
+            </ul>
+
+            <h3>❌ Why Premium v3 + VNet Integration Falls Short</h3>
+            <ul>
+                <li>Compute is on shared multi-tenant stamps — QSA won't accept "logical isolation"</li>
+                <li>Inbound traffic requires Private Endpoints (additional complexity) — not natively private</li>
+                <li>Max 30 instances per plan — below the 50+ requirement</li>
+            </ul>
+
+            <h3>✅ Solution: ASE v2 (ILB mode)</h3>
+            <ul>
+                <li><strong>Dedicated stamp</strong> — single-tenant hardware satisfies QSA's "no shared infrastructure" requirement</li>
+                <li><strong>ILB ASE</strong> — no public IP at all; inbound via internal load balancer inside VNet</li>
+                <li><strong>Custom DNS zone</strong> — <code>payments.internal.contoso.net</code> resolves only within the VNet</li>
+                <li><strong>100 instance ceiling</strong> — room for 50+ instances with headroom</li>
+                <li><strong>Cost tradeoff</strong> — ~$8,000/month stamp fee + per-instance cost. Justified for PCI Level 1 workloads handling millions in card transactions.</li>
+            </ul>
+
+            <h3>Deployment Strategy</h3>
+            <p>Blue-green with slots: deploy to staging slot → run automated PCI compliance scans against staging URL → auto-swap to production after scan passes. Sticky settings hold staging-specific logging levels (verbose) and test connection strings.</p>
+        </div>
+    </section>
+
+    <!-- Lesson Summary -->
+    <section class="lesson-summary fade-in">
+        <h2>Summary</h2>
+        <ul>
+            <li><strong>Tier = capability gate:</strong> Standard unlocks slots; Premium unlocks VNet integration; Isolated unlocks dedicated hardware.</li>
+            <li><strong>VNet integration ≠ ASE:</strong> Regional VNet integration (Premium) gives outbound private connectivity. ASE gives full network injection (inbound + outbound).</li>
+            <li><strong>ASE justification:</strong> Physical isolation compliance, >30 instances, native internal DNS.</li>
+            <li><strong>Slots = zero-downtime deployments:</strong> Swap is atomic. Sticky settings stay with slots. Always warm up before swap.</li>
+            <li><strong>Scale-out > Scale-up</strong> for stateless apps. Always min 2 instances in production. Use per-app scaling to prevent noisy neighbors.</li>
+        </ul>
+    </section>
+
+    <!-- Quiz -->
+    <section id="quiz" class="fade-in">
+        <h2>Knowledge Check</h2>
+        <div class="quiz" id="lesson-quiz"></div>
+    </section>
+
+    <!-- Navigation -->
+    <nav class="lesson-nav fade-in">
+        <a href="0013-disk-storage-performance.html">← Lesson 013: Disk Storage &amp; Performance</a>
+        <a href="0015-serverless-functions-logic-apps.html">Lesson 015: Serverless Functions &amp; Logic Apps →</a>
+    </nav>
+
+</div>
+
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    // Render diagrams
+    AzureLessons.Diagrams();
+
+    // Quiz
+    AzureLessons.Quiz('#lesson-quiz', [
+        {
+            question: "A company needs deployment slots and autoscale for their production web app but does NOT need VNet integration. What is the minimum App Service plan tier?",
+            options: [
+                "Basic",
+                "Standard",
+                "Premium v3",
+                "Isolated v2"
+            ],
+            correct: 1,
+            explanation: "Standard is the minimum tier that provides both deployment slots (up to 5) and autoscale. Basic has neither. Premium v3 and Isolated v2 work but are more expensive than needed without VNet requirements."
+        },
+        {
+            question: "During a slot swap, which setting type stays with the staging slot rather than moving to production?",
+            options: [
+                "Runtime framework version",
+                "App settings NOT marked as slot setting",
+                "Connection strings marked as 'slot setting'",
+                "WebSocket configuration"
+            ],
+            correct: 2,
+            explanation: "Settings marked as 'slot setting' (sticky) remain with the slot. They don't travel with the code during a swap. This is how you keep staging-specific connection strings in the staging slot. Runtime version, non-sticky app settings, and WebSocket config all swap with the code."
+        },
+        {
+            question: "A healthcare company's compliance officer requires that no other Azure tenant's workloads run on the same physical compute. They need private inbound access and custom DNS. Which architecture satisfies ALL requirements?",
+            options: [
+                "Premium v3 with regional VNet integration and Private Endpoints",
+                "Standard tier with IP access restrictions and service endpoints",
+                "ASE v2 in ILB mode with Isolated v2 plan",
+                "Premium v3 with Azure Front Door and WAF"
+            ],
+            correct: 2,
+            explanation: "Only ASE (Isolated tier) provides dedicated single-tenant physical compute. ILB mode gives private inbound access with no public IP. ASE natively supports custom internal DNS. Premium v3 uses shared multi-tenant stamps — even with Private Endpoints, the compute itself is shared."
+        },
+        {
+            question: "An architect configures autoscale with a scale-out rule (CPU > 70% → add 1 instance) and a scale-in rule (CPU < 30% → remove 1 instance). The app rapidly oscillates between 2 and 4 instances every few minutes. What is the BEST fix?",
+            options: [
+                "Remove the scale-in rule entirely",
+                "Increase the cool-down period and widen the metric threshold gap",
+                "Switch to manual scaling with a fixed instance count",
+                "Change to schedule-based scaling only"
+            ],
+            correct: 1,
+            explanation: "Flapping (rapid scale-out/in oscillation) is solved by increasing the cool-down period (e.g., from 5 to 15 minutes) and widening the gap between scale-out and scale-in thresholds (e.g., out at 75%, in at 25%). Removing scale-in wastes money. Fixed/manual scaling loses elasticity. Schedule-based alone doesn't respond to demand spikes."
+        }
+    ]);
+
+    // Initialize interactions
+    AzureLessons.ScrollReveal();
+    AzureLessons.Collapsible();
+});
+</script>
+</body>
+</html>

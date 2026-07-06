@@ -1,0 +1,472 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>0086 · Kubelet Deep Dive — Pod Lifecycle &amp; CRI</title>
+<style>
+  :root {
+    --bg: #0d1117; --surface: #161b22; --surface2: #21262d;
+    --border: #30363d; --text: #e6edf3; --muted: #8b949e;
+    --blue: #58a6ff; --green: #3fb950; --yellow: #d29922;
+    --red: #f85149; --purple: #bc8cff; --orange: #ffa657;
+    --violet: #a78bfa;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; line-height: 1.7; }
+  a { color: var(--blue); text-decoration: none; }
+  .wrap { max-width: 960px; margin: 0 auto; padding: 0 24px; }
+  nav { background: var(--surface); border-bottom: 1px solid var(--border); padding: 14px 0; position: sticky; top: 0; z-index: 100; }
+  nav .wrap { display: flex; justify-content: space-between; align-items: center; }
+  .nav-badge { background: var(--surface2); border: 1px solid var(--border); border-radius: 20px; padding: 4px 14px; font-size: .8rem; color: var(--muted); }
+  .nav-links { display: flex; gap: 20px; font-size: .9rem; }
+  .hero { padding: 72px 0 48px; text-align: center; }
+  .hero-chip { display: inline-block; background: linear-gradient(135deg, #130f23, #0d1a2e); border: 1px solid var(--violet); border-radius: 20px; padding: 4px 16px; font-size: .8rem; color: var(--violet); margin-bottom: 20px; }
+  .hero h1 { font-size: 2.8rem; font-weight: 700; letter-spacing: -.02em; background: linear-gradient(135deg, #e6edf3, var(--violet)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; }
+  .hero .sub { font-size: 1.15rem; color: var(--muted); max-width: 680px; margin: 16px auto 0; }
+  .meta-row { display: flex; gap: 24px; justify-content: center; flex-wrap: wrap; margin-top: 32px; }
+  .meta-pill { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 8px 18px; font-size: .85rem; color: var(--muted); }
+  .meta-pill span { color: var(--text); font-weight: 600; }
+  section { padding: 56px 0; border-top: 1px solid var(--border); }
+  h2 { font-size: 1.75rem; font-weight: 700; margin-bottom: 16px; }
+  h3 { font-size: 1.2rem; font-weight: 600; margin: 28px 0 10px; color: var(--blue); }
+  p { margin-bottom: 14px; }
+  ul, ol { margin: 10px 0 14px 22px; }
+  li { margin-bottom: 6px; }
+  pre { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 20px; overflow-x: auto; font-size: .85rem; line-height: 1.6; margin: 16px 0; }
+  code { font-family: "JetBrains Mono", "Fira Code", Consolas, monospace; }
+  p code, li code { background: var(--surface2); border: 1px solid var(--border); border-radius: 4px; padding: 1px 6px; font-size: .85em; }
+  .callout { border-radius: 10px; padding: 18px 22px; margin: 20px 0; border-left: 4px solid; }
+  .callout.info   { background: #111d2c; border-color: var(--blue);   }
+  .callout.warn   { background: #1c1a11; border-color: var(--yellow); }
+  .callout.tip    { background: #0d1f0f; border-color: var(--green);  }
+  .callout.danger { background: #1f0d0d; border-color: var(--red);    }
+  .callout strong { display: block; margin-bottom: 6px; }
+  .diagram { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 28px; margin: 24px 0; overflow-x: auto; }
+  .diagram svg { display: block; margin: 0 auto; }
+  .card-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 16px; margin: 20px 0; }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 20px; }
+  .card h4 { font-size: 1rem; font-weight: 600; margin-bottom: 8px; color: var(--violet); }
+  .card p  { font-size: .9rem; color: var(--muted); margin: 0; }
+  table { width: 100%; border-collapse: collapse; margin: 16px 0; font-size: .9rem; }
+  th { background: var(--surface2); padding: 10px 14px; text-align: left; border: 1px solid var(--border); color: var(--muted); font-weight: 600; }
+  td { padding: 10px 14px; border: 1px solid var(--border); }
+  tr:nth-child(even) td { background: #111519; }
+  .quiz-block { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 28px; margin: 20px 0; }
+  .quiz-q { font-weight: 600; margin-bottom: 14px; font-size: 1rem; }
+  .quiz-options { list-style: none; margin: 0; padding: 0; }
+  .quiz-options li { background: var(--surface2); border: 1px solid var(--border); border-radius: 8px; padding: 10px 16px; margin-bottom: 8px; cursor: pointer; transition: border-color .2s; }
+  .quiz-options li:hover { border-color: var(--violet); }
+  .reveal-btn { background: var(--violet); color: #0d1117; border: none; border-radius: 8px; padding: 10px 22px; font-weight: 700; cursor: pointer; margin-top: 12px; font-size: .9rem; }
+  .answer { display: none; margin-top: 14px; background: #130f23; border: 1px solid var(--violet); border-radius: 8px; padding: 14px 18px; font-size: .9rem; }
+  footer { padding: 48px 0; border-top: 1px solid var(--border); text-align: center; color: var(--muted); font-size: .9rem; }
+  .nav-btn { display: inline-flex; align-items: center; gap: 8px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 8px 18px; font-size: .9rem; color: var(--text); transition: border-color .2s; }
+  .nav-btn:hover { border-color: var(--violet); }
+  .phase-flow { display: flex; flex-wrap: wrap; gap: 0; margin: 20px 0; }
+  .pf-step { background: var(--surface); border: 1px solid var(--border); padding: 12px 16px; font-size: .82rem; text-align: center; flex: 1; min-width: 90px; }
+  .pf-step:first-child { border-radius: 8px 0 0 8px; }
+  .pf-step:last-child  { border-radius: 0 8px 8px 0; }
+  .pf-step + .pf-step  { border-left: none; }
+  .pf-step strong { display: block; font-size: .78rem; margin-bottom: 3px; }
+  .pf-step.pending  { border-color: var(--muted);  color: var(--muted);  }
+  .pf-step.pulling  { border-color: var(--yellow); color: var(--yellow); background: #1c1a11; }
+  .pf-step.creating { border-color: var(--blue);   color: var(--blue);   background: #111d2c; }
+  .pf-step.starting { border-color: var(--purple); color: var(--purple); background: #13111f; }
+  .pf-step.running  { border-color: var(--green);  color: var(--green);  background: #0d1f0f; }
+  .pf-step.terminating { border-color: var(--red); color: var(--red);    background: #1f0d0d; }
+</style>
+</head>
+<body>
+
+<nav>
+  <div class="wrap">
+    <span class="nav-badge">Chapter 11 · Deep Internals</span>
+    <div class="nav-links">
+      <a href="0085-controller-manager.html">← Prev</a>
+      <a href="0000-overview.html">Index</a>
+      <a href="0087-kube-proxy-modes.html">Next →</a>
+    </div>
+  </div>
+</nav>
+
+<div class="hero">
+  <div class="wrap">
+    <div class="hero-chip">Lesson 86 · Chapter 11</div>
+    <h1>Kubelet Deep Dive</h1>
+    <p class="sub">The node agent that manages every pod's lifecycle — from admission and image pull through CRI/CNI/CSI integration to health monitoring and node-pressure eviction.</p>
+    <div class="meta-row">
+      <div class="meta-pill">⏱ Duration <span>60 min</span></div>
+      <div class="meta-pill">🎯 Level <span>Advanced</span></div>
+      <div class="meta-pill">📦 Chapter <span>11 — Deep Internals</span></div>
+      <div class="meta-pill">🔖 Tag <span>Kubelet · CRI · CNI · Eviction</span></div>
+    </div>
+  </div>
+</div>
+
+<section>
+  <div class="wrap">
+    <h2>🏗️ Kubelet Architecture</h2>
+    <p>The kubelet is the node agent — a long-running process on every node (including control-plane nodes). It watches the API server for Pods assigned to its node (<code>spec.nodeName == thisNode</code>), then drives each Pod through its full lifecycle using three plugin interfaces: <strong>CRI</strong> (container runtime), <strong>CNI</strong> (networking), and <strong>CSI</strong> (storage).</p>
+
+    <div class="diagram">
+      <svg width="760" height="300" viewBox="0 0 760 300" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <!-- API Server top -->
+        <rect x="280" y="8" width="200" height="40" rx="8" fill="#111d2c" stroke="#58a6ff" stroke-width="1.5"/>
+        <text x="380" y="24" text-anchor="middle" font-family="monospace" font-size="11" fill="#58a6ff">kube-apiserver</text>
+        <text x="380" y="38" text-anchor="middle" font-family="monospace" font-size="9" fill="#8b949e">Watch pods assigned to node</text>
+
+        <!-- Kubelet box -->
+        <rect x="100" y="70" width="560" height="100" rx="12" fill="#161b22" stroke="#a78bfa" stroke-width="2"/>
+        <text x="380" y="90" text-anchor="middle" font-family="monospace" font-size="13" fill="#a78bfa">kubelet</text>
+
+        <rect x="120" y="100" width="120" height="44" rx="8" fill="#130f23" stroke="#a78bfa" stroke-width="1"/>
+        <text x="180" y="118" text-anchor="middle" font-family="monospace" font-size="10" fill="#a78bfa">Pod Manager</text>
+        <text x="180" y="132" text-anchor="middle" font-family="monospace" font-size="9" fill="#8b949e">desired ↔ actual</text>
+
+        <rect x="260" y="100" width="120" height="44" rx="8" fill="#130f23" stroke="#a78bfa" stroke-width="1"/>
+        <text x="320" y="118" text-anchor="middle" font-family="monospace" font-size="10" fill="#a78bfa">PLEG</text>
+        <text x="320" y="132" text-anchor="middle" font-family="monospace" font-size="9" fill="#8b949e">Pod Lifecycle Event Gen</text>
+
+        <rect x="400" y="100" width="120" height="44" rx="8" fill="#130f23" stroke="#a78bfa" stroke-width="1"/>
+        <text x="460" y="118" text-anchor="middle" font-family="monospace" font-size="10" fill="#a78bfa">Eviction Manager</text>
+        <text x="460" y="132" text-anchor="middle" font-family="monospace" font-size="9" fill="#8b949e">node pressure</text>
+
+        <rect x="540" y="100" width="100" height="44" rx="8" fill="#130f23" stroke="#a78bfa" stroke-width="1"/>
+        <text x="590" y="118" text-anchor="middle" font-family="monospace" font-size="10" fill="#a78bfa">Volume Mgr</text>
+        <text x="590" y="132" text-anchor="middle" font-family="monospace" font-size="9" fill="#8b949e">attach / mount</text>
+
+        <!-- Plugin layer -->
+        <rect x="60"  y="195" width="180" height="50" rx="10" fill="#0d1f0f" stroke="#3fb950" stroke-width="1.5"/>
+        <text x="150" y="218" text-anchor="middle" font-family="monospace" font-size="12" fill="#3fb950">CRI</text>
+        <text x="150" y="234" text-anchor="middle" font-family="monospace" font-size="9" fill="#8b949e">containerd / CRI-O</text>
+
+        <rect x="290" y="195" width="180" height="50" rx="10" fill="#111d2c" stroke="#58a6ff" stroke-width="1.5"/>
+        <text x="380" y="218" text-anchor="middle" font-family="monospace" font-size="12" fill="#58a6ff">CNI</text>
+        <text x="380" y="234" text-anchor="middle" font-family="monospace" font-size="9" fill="#8b949e">Calico / Cilium / Flannel</text>
+
+        <rect x="520" y="195" width="180" height="50" rx="10" fill="#1c1a11" stroke="#d29922" stroke-width="1.5"/>
+        <text x="610" y="218" text-anchor="middle" font-family="monospace" font-size="12" fill="#d29922">CSI</text>
+        <text x="610" y="234" text-anchor="middle" font-family="monospace" font-size="9" fill="#8b949e">EBS / GCP PD / Longhorn</text>
+
+        <!-- Arrows -->
+        <line x1="380" y1="48" x2="380" y2="70" stroke="#58a6ff" stroke-width="1.5" marker-end="url(#kb1)"/>
+        <line x1="180" y1="170" x2="150" y2="195" stroke="#3fb950" stroke-width="1.5" marker-end="url(#kb2)"/>
+        <line x1="320" y1="170" x2="380" y2="195" stroke="#58a6ff" stroke-width="1.5" marker-end="url(#kb3)"/>
+        <line x1="590" y1="170" x2="610" y2="195" stroke="#d29922" stroke-width="1.5" marker-end="url(#kb4)"/>
+
+        <!-- Node box -->
+        <rect x="20" y="260" width="720" height="30" rx="8" fill="#111519" stroke="#30363d" stroke-width="1"/>
+        <text x="380" y="279" text-anchor="middle" font-family="monospace" font-size="10" fill="#8b949e">Worker Node (Linux kernel: cgroups, namespaces, iptables)</text>
+
+        <defs>
+          <marker id="kb1" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L0,6 L8,3 z" fill="#58a6ff"/></marker>
+          <marker id="kb2" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L0,6 L8,3 z" fill="#3fb950"/></marker>
+          <marker id="kb3" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L0,6 L8,3 z" fill="#58a6ff"/></marker>
+          <marker id="kb4" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L0,6 L8,3 z" fill="#d29922"/></marker>
+        </defs>
+      </svg>
+    </div>
+
+    <div class="card-grid">
+      <div class="card"><h4>PLEG</h4><p>Pod Lifecycle Event Generator — polls the container runtime every second and emits events when container state changes (started, died, etc.).</p></div>
+      <div class="card"><h4>Pod Manager</h4><p>Reconciles desired pod state (from API server) with actual state (from PLEG). Drives CRI calls to create/stop/restart containers.</p></div>
+      <div class="card"><h4>Eviction Manager</h4><p>Monitors node memory, disk, and PID pressure. Evicts pods when thresholds are exceeded to protect node stability.</p></div>
+      <div class="card"><h4>Volume Manager</h4><p>Attaches/detaches volumes via CSI and mounts/unmounts them into pod sandbox directories before container start.</p></div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>🚀 Pod Lifecycle — Admit to Running</h2>
+
+    <div class="phase-flow">
+      <div class="pf-step pending"><strong>Pending</strong>nodeName set</div>
+      <div class="pf-step pulling"><strong>Pulling</strong>image pull</div>
+      <div class="pf-step creating"><strong>Creating</strong>sandbox + volumes</div>
+      <div class="pf-step starting"><strong>Starting</strong>init containers</div>
+      <div class="pf-step running"><strong>Running</strong>app containers</div>
+      <div class="pf-step terminating"><strong>Terminating</strong>SIGTERM → SIGKILL</div>
+    </div>
+
+    <h3>1 — Admission</h3>
+    <p>When the kubelet sees a new Pod assigned to its node it first runs admission handlers — these are local checks (not API server admission):</p>
+    <ul>
+      <li><strong>Resource availability</strong> — enough CPU/memory on node, not exceeding node allocatable</li>
+      <li><strong>Node selectors / affinity</strong> — should have been enforced by scheduler but kubelet double-checks</li>
+      <li><strong>Eviction thresholds</strong> — if the node is already under memory pressure, the pod may be rejected</li>
+    </ul>
+
+    <h3>2 — Image Pull</h3>
+    <p>Kubelet asks the CRI (containerd) to pull required images. Pull policy controls this:</p>
+    <table>
+      <thead><tr><th>imagePullPolicy</th><th>Behaviour</th></tr></thead>
+      <tbody>
+        <tr><td><code>Always</code></td><td>Pull on every pod start — ensures latest image but slower startup</td></tr>
+        <tr><td><code>IfNotPresent</code></td><td>Pull only if image not cached locally (default for tagged images)</td></tr>
+        <tr><td><code>Never</code></td><td>Never pull — image must already exist on node</td></tr>
+      </tbody>
+    </table>
+
+    <div class="callout warn">
+      <strong>⚠️ Use digest-pinned images in production</strong>
+      With <code>imagePullPolicy: IfNotPresent</code> and a mutable tag like <code>:latest</code>, different nodes may run different image versions. Pin with <code>image: nginx@sha256:abc…</code> for reproducibility.
+    </div>
+
+    <h3>3 — Sandbox &amp; Volume Setup</h3>
+    <p>Kubelet creates the <strong>pause container</strong> (infra/sandbox) first. This container holds the network namespace shared by all containers in the pod. Then CNI is called to attach the network interface and assign the pod IP. Then CSI volumes are mounted.</p>
+
+    <h3>4 — Init Containers</h3>
+    <p>Init containers run sequentially to completion before any app containers start. A failure restarts the init container (per <code>restartPolicy</code>). Use cases: DB schema migration, config file generation, waiting for dependencies.</p>
+    <pre><code>spec:
+  initContainers:
+    - name: wait-for-db
+      image: busybox
+      command: ['sh', '-c',
+        'until nc -z postgres-svc 5432; do echo waiting; sleep 2; done']
+    - name: run-migrations
+      image: myapp:latest
+      command: ['./migrate', '--up']
+  containers:
+    - name: app
+      image: myapp:latest</code></pre>
+
+    <h3>5 — Lifecycle Hooks &amp; Probes</h3>
+    <pre><code>spec:
+  containers:
+    - name: app
+      lifecycle:
+        postStart:               # runs immediately after container starts
+          exec:
+            command: ["/bin/sh", "-c", "echo started > /tmp/ready"]
+        preStop:                 # runs before SIGTERM — use for graceful drain
+          exec:
+            command: ["/bin/sh", "-c", "nginx -s quit; sleep 5"]
+      startupProbe:              # delays liveness until app is ready to start
+        httpGet: { path: /healthz, port: 8080 }
+        failureThreshold: 30
+        periodSeconds: 10
+      livenessProbe:             # restart container if unhealthy
+        httpGet: { path: /healthz, port: 8080 }
+        initialDelaySeconds: 0
+        periodSeconds: 10
+        failureThreshold: 3
+      readinessProbe:            # remove from Service endpoints if not ready
+        httpGet: { path: /ready, port: 8080 }
+        periodSeconds: 5
+        failureThreshold: 3</code></pre>
+
+    <div class="callout tip">
+      <strong>💡 preStop hook + terminationGracePeriodSeconds</strong>
+      Kubernetes sends SIGTERM <em>concurrently</em> with the <code>preStop</code> hook. Set <code>terminationGracePeriodSeconds</code> long enough for both the hook and the graceful shutdown to finish. Add a <code>sleep 5</code> in preStop to let the load balancer drain connections before the process exits.
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>🔌 CRI, CNI &amp; CSI Integration</h2>
+
+    <h3>CRI — Container Runtime Interface</h3>
+    <p>The kubelet talks to the container runtime via a gRPC API defined by CRI. This decouples the kubelet from any specific runtime. The two main CRI implementations are <strong>containerd</strong> and <strong>CRI-O</strong>.</p>
+
+    <table>
+      <thead><tr><th>CRI call</th><th>What it does</th></tr></thead>
+      <tbody>
+        <tr><td><code>RunPodSandbox</code></td><td>Creates the pause container and network namespace</td></tr>
+        <tr><td><code>PullImage</code></td><td>Pulls an OCI image if not cached; returns image ref</td></tr>
+        <tr><td><code>CreateContainer</code></td><td>Creates a container in the sandbox (not yet started)</td></tr>
+        <tr><td><code>StartContainer</code></td><td>Starts the created container</td></tr>
+        <tr><td><code>StopContainer</code></td><td>Sends SIGTERM then SIGKILL after grace period</td></tr>
+        <tr><td><code>RemovePodSandbox</code></td><td>Tears down sandbox and network namespace</td></tr>
+        <tr><td><code>ContainerStatus</code></td><td>Gets container state, exit code, start time</td></tr>
+      </tbody>
+    </table>
+
+    <pre><code># Inspect containers via crictl (bypasses kubelet/docker)
+crictl ps                          # running containers
+crictl pods                        # running sandboxes
+crictl images                      # cached images
+crictl logs &lt;container-id&gt;         # container stdout/stderr
+crictl exec -it &lt;container-id&gt; sh  # shell into container
+crictl inspect &lt;container-id&gt;      # full container spec + state
+
+# Check CRI socket kubelet is using
+ps aux | grep kubelet | grep container-runtime-endpoint
+# or in kubelet config: --container-runtime-endpoint=unix:///run/containerd/containerd.sock</code></pre>
+
+    <h3>CNI — Container Network Interface</h3>
+    <p>After the CRI creates the pod sandbox, the kubelet invokes the CNI plugin binary to configure networking. CNI plugins are executables in <code>/opt/cni/bin/</code> called with a JSON config from <code>/etc/cni/net.d/</code>.</p>
+    <pre><code"># CNI is called with ADD/DEL/CHECK commands
+# ADD: called when sandbox is created — assigns IP, sets up veth pair, routes
+# DEL: called when sandbox is deleted — tears down networking
+# CHECK: verifies network state matches config
+
+# CNI config example (Flannel)
+cat /etc/cni/net.d/10-flannel.conflist
+# {
+#   "name": "cbr0",
+#   "plugins": [
+#     { "type": "flannel", "delegate": { "hairpinMode": true, "isDefaultGateway": true } },
+#     { "type": "portmap", "capabilities": { "portMappings": true } }
+#   ]
+# }
+
+# View pod network namespace
+POD_ID=$(crictl pods --name myapp -q)
+crictl inspectp $POD_ID | jq '.status.network'</code></pre>
+
+    <h3>CSI — Container Storage Interface</h3>
+    <p>The kubelet's Volume Manager interacts with CSI drivers via gRPC to attach, mount, and unmount volumes. The flow for a PVC-backed volume:</p>
+    <ol>
+      <li><strong>Attach</strong> — CSI controller plugin attaches the cloud disk to the node (EBS <code>AttachVolume</code>)</li>
+      <li><strong>Mount</strong> — CSI node plugin mounts the device to a global mount point on the node</li>
+      <li><strong>Bind-mount</strong> — Kubelet bind-mounts from the global path into the pod's container filesystem</li>
+    </ol>
+    <pre><code"># Check volume attachment status
+kubectl get volumeattachments
+# NAME                               ATTACHER                  PV           NODE     ATTACHED
+# csi-abc123...                      ebs.csi.aws.com           pvc-xyz...   node-1   true
+
+# Inspect mounted volumes on a node
+ls /var/lib/kubelet/pods/&lt;pod-uid&gt;/volumes/
+# kubernetes.io~configmap/  kubernetes.io~secret/  kubernetes.io~csi/
+
+# Check if a CSI driver is registered
+kubectl get csidrivers
+kubectl get csinodes</code></pre>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>📊 Node Status, Eviction &amp; Production Tips</h2>
+
+    <h3>Node Status Reporting</h3>
+    <p>Kubelet updates the Node object in the API server every <code>--node-status-update-frequency</code> (default 10s). It reports conditions, allocatable resources, images cached, and attached volumes.</p>
+    <pre><code># Node conditions reported by kubelet
+kubectl describe node worker-1 | grep -A 20 Conditions
+# Type                 Status   Reason
+# MemoryPressure       False    KubeletHasSufficientMemory
+# DiskPressure         False    KubeletHasNoDiskPressure
+# PIDPressure          False    KubeletHasSufficientPID
+# Ready                True     KubeletReady
+
+# Allocatable vs Capacity — kubelet reserves resources for OS + kubelet itself
+kubectl get node worker-1 -o json | jq '{capacity: .status.capacity, allocatable: .status.allocatable}'
+# capacity.memory:    16Gi
+# allocatable.memory: 15.5Gi  ← ~500Mi reserved for system</code></pre>
+
+    <h3>Node-Pressure Eviction</h3>
+    <p>When the eviction manager detects resource pressure it evicts pods — lowest priority and highest consumption first — to protect node stability.</p>
+    <table>
+      <thead><tr><th>Signal</th><th>Soft threshold</th><th>Hard threshold</th><th>Effect</th></tr></thead>
+      <tbody>
+        <tr><td><code>memory.available</code></td><td>&lt; 500Mi (grace period)</td><td>&lt; 100Mi (immediate)</td><td>Evict pods, set MemoryPressure=True</td></tr>
+        <tr><td><code>nodefs.available</code></td><td>&lt; 10% (grace period)</td><td>&lt; 5% (immediate)</td><td>Evict pods, set DiskPressure=True</td></tr>
+        <tr><td><code>imagefs.available</code></td><td>&lt; 15%</td><td>&lt; 10%</td><td>Garbage collect images, evict if still low</td></tr>
+        <tr><td><code>pid.available</code></td><td>&lt; 20%</td><td>&lt; 10%</td><td>Evict pods, set PIDPressure=True</td></tr>
+      </tbody>
+    </table>
+
+    <pre><code"># Configure eviction thresholds in kubelet config
+apiVersion: kubelet.config.k8s.io/v1beta1
+kind: KubeletConfiguration
+evictionHard:
+  memory.available: "200Mi"
+  nodefs.available: "10%"
+  imagefs.available: "15%"
+evictionSoft:
+  memory.available: "500Mi"
+  nodefs.available: "15%"
+evictionSoftGracePeriod:
+  memory.available: "1m30s"
+  nodefs.available: "2m"
+evictionMaxPodGracePeriod: 90   # cap on graceful termination during eviction</code></pre>
+
+    <h3>Key kubelet Configuration Flags</h3>
+    <pre><code"># Preferred: use KubeletConfiguration file
+--config=/etc/kubernetes/kubelet-config.yaml
+
+# Key settings:
+apiVersion: kubelet.config.k8s.io/v1beta1
+kind: KubeletConfiguration
+cgroupDriver: systemd                    # must match container runtime (containerd)
+maxPods: 110                             # max pods per node (default 110)
+kubeReserved:                            # reserve for kubelet/OS
+  cpu: "200m"
+  memory: "512Mi"
+systemReserved:
+  cpu: "200m"
+  memory: "256Mi"
+nodeStatusUpdateFrequency: "10s"
+imageGCHighThresholdPercent: 85          # start GC when image fs > 85%
+imageGCLowThresholdPercent: 80           # stop GC when image fs < 80%
+containerLogMaxSize: "50Mi"              # per-container log rotation size
+containerLogMaxFiles: 5</code></pre>
+
+    <div class="card-grid">
+      <div class="card"><h4>Match cgroupDriver</h4><p>Kubelet and containerd must use the same cgroup driver (<code>systemd</code> or <code>cgroupfs</code>). Mismatch causes pod failures with cgroup errors.</p></div>
+      <div class="card"><h4>Set kubeReserved</h4><p>Always reserve CPU and memory for the kubelet and system. Without it, node-level processes compete with pods and can cause OOM kills of system daemons.</p></div>
+      <div class="card"><h4>Monitor PLEG</h4><p>Watch for "PLEG is not healthy" in kubelet logs — means the runtime is slow to respond. Usually indicates containerd or the node itself is under heavy load.</p></div>
+      <div class="card"><h4>Use crictl not docker</h4><p>On modern nodes containerd is the runtime. Use <code>crictl</code> for debugging — <code>docker</code> commands won't see kubelet-managed containers.</p></div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>📝 Knowledge Check</h2>
+
+    <div class="quiz-block">
+      <div class="quiz-q">Q1. A pod has been running for weeks and suddenly its container is restarted without any deployment change. What kubelet mechanism most likely triggered this?</div>
+      <ul class="quiz-options">
+        <li>A) The scheduler evicted the pod and rescheduled it</li>
+        <li>B) The liveness probe failed — kubelet restarted the container</li>
+        <li>C) The API server sent a restart command</li>
+        <li>D) The node's cgroup driver was changed</li>
+      </ul>
+      <button class="reveal-btn" onclick="this.nextElementSibling.style.display='block'">Reveal Answer</button>
+      <div class="answer">✅ <strong>B) Liveness probe failure.</strong> Kubelet continuously runs liveness probes. If a probe fails <code>failureThreshold</code> consecutive times, kubelet restarts the container in-place (without rescheduling). Check <code>kubectl describe pod</code> for "Liveness probe failed" events and <code>kubectl get pod -o json | jq '.status.containerStatuses[].restartCount'</code>.</div>
+    </div>
+
+    <div class="quiz-block">
+      <div class="quiz-q">Q2. What is the purpose of the <strong>pause container</strong> (infra container) in every pod sandbox?</div>
+      <ul class="quiz-options">
+        <li>A) It runs health checks for all containers in the pod</li>
+        <li>B) It holds the shared network namespace (IP, ports) that all pod containers join</li>
+        <li>C) It provides the shared process namespace for inter-container communication</li>
+        <li>D) It is used by the kubelet to inject secrets into containers</li>
+      </ul>
+      <button class="reveal-btn" onclick="this.nextElementSibling.style.display='block'">Reveal Answer</button>
+      <div class="answer">✅ <strong>B) Holds the shared network namespace.</strong> The pause container is created first by the CRI and holds the network namespace (IP address, loopback, routes). All other containers in the pod join this namespace — that's why they can reach each other on <code>localhost</code> and share the same pod IP. The pause container does nothing else (it just sleeps).</div>
+    </div>
+
+    <div class="quiz-block">
+      <div class="quiz-q">Q3. A node's <code>memory.available</code> drops below the hard eviction threshold. What does kubelet do immediately?</div>
+      <ul class="quiz-options">
+        <li>A) Cordons the node and waits for an operator to drain it</li>
+        <li>B) Restarts the kubelet process to free memory</li>
+        <li>C) Evicts pods starting with the lowest-priority and highest-memory consumers; sets MemoryPressure=True</li>
+        <li>D) Sends a SIGKILL to all containers on the node simultaneously</li>
+      </ul>
+      <button class="reveal-btn" onclick="this.nextElementSibling.style.display='block'">Reveal Answer</button>
+      <div class="answer">✅ <strong>C) Evicts pods; sets MemoryPressure=True.</strong> Kubelet's eviction manager selects pods to evict based on QoS class (BestEffort first, then Burstable, Guaranteed last) and memory consumption. It sets the <code>MemoryPressure</code> node condition to True, which causes the scheduler to avoid scheduling new BestEffort/Burstable pods on that node.</div>
+    </div>
+  </div>
+</section>
+</section>
+
+<footer>
+  <div class="wrap">
+    <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:16px;">
+      <div><a class="nav-btn" href="0085-controller-manager.html">← 0085 Controller Manager</a></div>
+      <div style="color:var(--muted); font-size:.85rem;">Lesson 86 of 100 · Chapter 11: Deep Internals</div>
+      <div><a class="nav-btn" href="0087-kube-proxy-modes.html">0087 kube-proxy Modes →</a></div>
+    </div>
+    <p style="margin-top:24px; font-size:.8rem;">Kubernetes Learning Curriculum · Built for production engineers</p>
+  </div>
+</footer>
+
+</body>
+</html>

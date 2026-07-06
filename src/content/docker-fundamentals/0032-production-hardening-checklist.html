@@ -1,0 +1,416 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lesson 32: Production Hardening Checklist</title>
+  <link rel="stylesheet" href="../assets/lesson-style.css">
+  <style>
+    /* Checklist grid */
+    .checklist-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 0.4rem 1.5rem;
+      margin: 1rem 0 1.5rem;
+      list-style: none;
+      padding: 0;
+    }
+    @media (max-width: 600px) { .checklist-grid { grid-template-columns: 1fr; } }
+    .checklist-grid li {
+      display: flex;
+      align-items: flex-start;
+      gap: 0.5rem;
+      font-family: var(--font-heading);
+      font-size: 0.92rem;
+      padding: 0.45rem 0.7rem;
+      background: #f8fafc;
+      border: 1px solid var(--color-border);
+      border-radius: 5px;
+    }
+    .checklist-grid li .cb {
+      display: inline-block;
+      width: 1.1rem;
+      height: 1.1rem;
+      border: 2px solid #94a3b8;
+      border-radius: 3px;
+      flex-shrink: 0;
+      margin-top: 0.1rem;
+    }
+    /* Annotated command */
+    .annotated { position: relative; }
+    .anno {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 0 0.8rem;
+      background: #1e293b;
+      border-radius: 8px;
+      padding: 1rem 1.2rem;
+      margin-bottom: 1.5rem;
+      font-family: var(--font-mono);
+      font-size: 0.82rem;
+      line-height: 1.7;
+    }
+    .anno-cmd { color: #93c5fd; }
+    .anno-note { color: #86efac; font-style: italic; white-space: nowrap; }
+    /* Section labels */
+    .section-label {
+      display: inline-block;
+      font-family: var(--font-heading);
+      font-size: 0.75rem;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      padding: 0.2rem 0.6rem;
+      border-radius: 3px;
+      margin-bottom: 0.7rem;
+    }
+    .label-image  { background: #dbeafe; color: #1e40af; }
+    .label-runtime{ background: #dcfce7; color: #166534; }
+    .label-network{ background: #fce7f3; color: #9d174d; }
+    .label-ops    { background: #fef3c7; color: #92400e; }
+    .label-k8s    { background: #ede9fe; color: #5b21b6; }
+  </style>
+</head>
+<body>
+
+  <div class="lesson-meta">
+    <span>📦 Lesson 32</span>
+    <span>⏱️ 20–25 minutes</span>
+    <span>🔒 Production Hardening</span>
+  </div>
+
+  <h1>Production Hardening Checklist</h1>
+  <p class="subtitle">A comprehensive reference for deploying containers securely. Use this as a checklist before every production release — no single measure is sufficient; defense in depth wins.</p>
+
+  <!-- ============================================================ -->
+  <h2>1. The Hardening Philosophy</h2>
+
+  <p><strong>Defense in depth</strong> means adding independent layers of security so that if one fails, the others still protect you. For containers, that means hardening the image, the runtime, the network, and the orchestrator — not just one layer.</p>
+
+  <div class="callout">
+    <div class="callout-title">Assume Breach</div>
+    Attackers <em>will</em> eventually get through. Your goal is to <strong>limit blast radius</strong>: restrict what a compromised container can read, write, execute, or communicate with. Each hardening step shrinks what an attacker can do after breaking in.
+  </div>
+
+  <!-- Defense-in-depth SVG -->
+  <div class="diagram">
+    <svg viewBox="0 0 480 260" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Defense-in-depth rings diagram">
+      <!-- Host -->
+      <ellipse cx="240" cy="130" rx="230" ry="118" fill="#fef3c7" stroke="#d97706" stroke-width="2"/>
+      <text x="240" y="15" text-anchor="middle" font-family="system-ui,sans-serif" font-size="12" fill="#92400e" font-weight="700">HOST</text>
+      <!-- Orchestrator -->
+      <ellipse cx="240" cy="130" rx="188" ry="96" fill="#ede9fe" stroke="#7c3aed" stroke-width="2"/>
+      <text x="240" y="42" text-anchor="middle" font-family="system-ui,sans-serif" font-size="11" fill="#5b21b6" font-weight="700">ORCHESTRATOR</text>
+      <!-- Network -->
+      <ellipse cx="240" cy="130" rx="148" ry="75" fill="#fce7f3" stroke="#db2777" stroke-width="2"/>
+      <text x="240" y="62" text-anchor="middle" font-family="system-ui,sans-serif" font-size="11" fill="#9d174d" font-weight="700">NETWORK</text>
+      <!-- Runtime -->
+      <ellipse cx="240" cy="130" rx="108" ry="54" fill="#dcfce7" stroke="#16a34a" stroke-width="2"/>
+      <text x="240" y="83" text-anchor="middle" font-family="system-ui,sans-serif" font-size="11" fill="#166534" font-weight="700">RUNTIME</text>
+      <!-- Image -->
+      <ellipse cx="240" cy="130" rx="66" ry="33" fill="#dbeafe" stroke="#2563eb" stroke-width="2"/>
+      <text x="240" y="134" text-anchor="middle" font-family="system-ui,sans-serif" font-size="11" fill="#1e40af" font-weight="700">IMAGE</text>
+    </svg>
+    <p class="diagram-caption">Each ring is an independent security layer — a breach of the inner layer is contained by outer rings.</p>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>2. Image Hardening</h2>
+  <span class="section-label label-image">Image Layer</span>
+  <ul class="checklist-grid">
+    <li><span class="cb"></span>Use minimal base image (distroless / alpine / scratch)</li>
+    <li><span class="cb"></span>Pin base image by digest (<code>FROM image@sha256:…</code>)</li>
+    <li><span class="cb"></span>No secrets in image — use BuildKit <code>--mount=type=secret</code></li>
+    <li><span class="cb"></span>Scan for vulnerabilities; fail CI on critical findings</li>
+    <li><span class="cb"></span>Generate and attach SBOM (Software Bill of Materials)</li>
+    <li><span class="cb"></span>Sign image with Cosign and enforce policy</li>
+    <li><span class="cb"></span>Rebuild regularly to pick up base image patches</li>
+  </ul>
+
+  <!-- ============================================================ -->
+  <h2>3. Runtime Hardening</h2>
+  <span class="section-label label-runtime">Runtime Layer</span>
+  <ul class="checklist-grid">
+    <li><span class="cb"></span>Run as non-root — <code>USER 10001</code> (numeric UID)</li>
+    <li><span class="cb"></span>Read-only root filesystem — <code>--read-only</code></li>
+    <li><span class="cb"></span>Drop all capabilities, add only needed — <code>--cap-drop=ALL --cap-add=NET_BIND_SERVICE</code></li>
+    <li><span class="cb"></span>Enable <code>--security-opt no-new-privileges</code></li>
+    <li><span class="cb"></span>Set memory and CPU limits — <code>--memory --cpus</code></li>
+    <li><span class="cb"></span>Set PID limit — <code>--pids-limit 100</code> (prevents fork bombs)</li>
+    <li><span class="cb"></span>Use custom seccomp profile if possible</li>
+    <li><span class="cb"></span>Mount sensitive paths as read-only (<code>:ro</code> bind mounts)</li>
+  </ul>
+
+  <!-- ============================================================ -->
+  <h2>4. Network Hardening</h2>
+  <span class="section-label label-network">Network Layer</span>
+  <ul class="checklist-grid">
+    <li><span class="cb"></span>Use user-defined networks (not default bridge)</li>
+    <li><span class="cb"></span>Don't expose ports unless needed — no <code>-p 0.0.0.0:…</code></li>
+    <li><span class="cb"></span>Apply network policies to restrict inter-service traffic</li>
+    <li><span class="cb"></span>Enable mTLS between services (or use a service mesh)</li>
+    <li><span class="cb"></span>No <code>--net=host</code> in production unless strictly required</li>
+  </ul>
+
+  <!-- ============================================================ -->
+  <h2>5. Operational Hardening</h2>
+  <span class="section-label label-ops">Ops Layer</span>
+  <ul class="checklist-grid">
+    <li><span class="cb"></span>Health checks defined (<code>HEALTHCHECK</code> in Dockerfile)</li>
+    <li><span class="cb"></span>Restart policy set — <code>on-failure:5</code> (not <code>always</code>)</li>
+    <li><span class="cb"></span>Logs to stdout — captured by log driver, not written to container FS</li>
+    <li><span class="cb"></span>Resource limits prevent noisy-neighbor problem</li>
+    <li><span class="cb"></span>Graceful shutdown — trap SIGTERM, drain connections, exit cleanly</li>
+    <li><span class="cb"></span>Immutable deployments — never patch a running container; redeploy</li>
+  </ul>
+
+  <!-- ============================================================ -->
+  <h2>6. Orchestrator-Level Hardening</h2>
+  <span class="section-label label-k8s">Orchestrator Layer</span>
+  <ul class="checklist-grid">
+    <li><span class="cb"></span>Pod Security Standards enforced (Restricted profile)</li>
+    <li><span class="cb"></span>Admission control — only signed images from approved registries</li>
+    <li><span class="cb"></span>RBAC configured — least privilege for service accounts</li>
+    <li><span class="cb"></span>Network policies applied per namespace</li>
+    <li><span class="cb"></span>Secrets encrypted at rest in etcd</li>
+  </ul>
+
+  <!-- ============================================================ -->
+  <h2>7. The Quick Audit</h2>
+
+  <h3>The Fully-Hardened <code>docker run</code> Command</h3>
+  <p>Every flag earns its place. Know why each one is there:</p>
+
+  <div class="anno">
+    <span class="anno-cmd">docker run \</span>                                         <span class="anno-note"># start here</span>
+    <span class="anno-cmd">  --user 10001:10001 \</span>                                <span class="anno-note"># non-root numeric UID:GID</span>
+    <span class="anno-cmd">  --read-only \</span>                                        <span class="anno-note"># immutable root FS</span>
+    <span class="anno-cmd">  --tmpfs /tmp:rw,noexec,nosuid,size=64m \</span>            <span class="anno-note"># writable scratch, no exec</span>
+    <span class="anno-cmd">  --cap-drop ALL \</span>                                     <span class="anno-note"># remove every capability</span>
+    <span class="anno-cmd">  --cap-add NET_BIND_SERVICE \</span>                         <span class="anno-note"># re-add only what's needed</span>
+    <span class="anno-cmd">  --security-opt no-new-privileges \</span>                  <span class="anno-note"># block privilege escalation</span>
+    <span class="anno-cmd">  --security-opt seccomp=hardened.json \</span>              <span class="anno-note"># custom syscall allowlist</span>
+    <span class="anno-cmd">  --memory 256m --memory-swap 256m \</span>                  <span class="anno-note"># hard memory cap, no swap</span>
+    <span class="anno-cmd">  --cpus 0.5 \</span>                                         <span class="anno-note"># half a CPU core max</span>
+    <span class="anno-cmd">  --pids-limit 100 \</span>                                   <span class="anno-note"># fork-bomb protection</span>
+    <span class="anno-cmd">  --network app-net \</span>                                  <span class="anno-note"># user-defined network</span>
+    <span class="anno-cmd">  --restart on-failure:5 \</span>                             <span class="anno-note"># retry up to 5 times</span>
+    <span class="anno-cmd">  --health-cmd "curl -f http://localhost/healthz" \</span>    <span class="anno-note"># liveness probe</span>
+    <span class="anno-cmd">  --health-interval 10s --health-retries 3 \</span>          <span class="anno-note"># check frequency</span>
+    <span class="anno-cmd">  myregistry.io/myapp@sha256:abc123...</span>               <span class="anno-note"># pinned by digest</span>
+  </div>
+
+  <h3>Verify with <code>docker inspect</code></h3>
+  <div class="code-block">
+    <div class="code-header">Spot-check key hardening settings</div>
+    <pre><code># Check user
+docker inspect myapp | jq '.[0].Config.User'
+# → "10001:10001"
+
+# Check capabilities
+docker inspect myapp | jq '.[0].HostConfig.CapDrop, .[0].HostConfig.CapAdd'
+# → ["ALL"]  ["NET_BIND_SERVICE"]
+
+# Check read-only FS
+docker inspect myapp | jq '.[0].HostConfig.ReadonlyRootfs'
+# → true
+
+# Check resource limits
+docker inspect myapp | jq '{mem: .[0].HostConfig.Memory, cpus: .[0].HostConfig.NanoCpus}'
+# → {"mem": 268435456, "cpus": 500000000}
+
+# Check PID limit
+docker inspect myapp | jq '.[0].HostConfig.PidsLimit'
+# → 100</code></pre>
+  </div>
+
+  <h3>Fully-Hardened Kubernetes PodSpec</h3>
+  <div class="code-block">
+    <div class="code-header">hardened-pod.yaml</div>
+    <pre><code>apiVersion: v1
+kind: Pod
+metadata:
+  name: hardened-app
+  annotations:
+    # Cosign admission webhook verifies image signature
+    policy.sigstore.dev/include: "true"
+spec:
+  automountServiceAccountToken: false   # no K8s API access unless needed
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 10001
+    runAsGroup: 10001
+    fsGroup: 10001
+    seccompProfile:
+      type: RuntimeDefault               # kernel syscall filter
+  containers:
+    - name: app
+      image: myregistry.io/myapp@sha256:abc123...
+      securityContext:
+        allowPrivilegeEscalation: false  # no-new-privileges equivalent
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+          add:  ["NET_BIND_SERVICE"]
+      resources:
+        requests: { cpu: "100m", memory: "128Mi" }
+        limits:   { cpu: "500m", memory: "256Mi" }
+      livenessProbe:
+        httpGet: { path: /healthz, port: 8080 }
+        initialDelaySeconds: 5
+        periodSeconds: 10
+      volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+  volumes:
+    - name: tmp
+      emptyDir: { medium: Memory, sizeLimit: 64Mi }</code></pre>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>Knowledge Check</h2>
+
+  <div class="quiz" data-quiz="missing-step">
+    <p class="quiz-question">Quiz 1 — Spot the Gap: A team uses a distroless image, runs as UID 10001, and sets <code>--read-only</code>. They expose port 443. Which critical runtime hardening step is most likely still missing?</p>
+    <ul class="quiz-options">
+      <li data-correct="false">They should use Alpine instead of distroless</li>
+      <li data-correct="true">They haven't dropped capabilities or enabled <code>no-new-privileges</code></li>
+      <li data-correct="false">They need to rebuild the image more frequently</li>
+      <li data-correct="false">The image should be scanned with Trivy</li>
+    </ul>
+    <div class="quiz-feedback"
+         data-correct="Capability dropping and no-new-privileges are independent of the base image choice. Non-root + read-only is a great start, but a process can still abuse Linux capabilities it was never supposed to have."
+         data-incorrect="The base image and scanning are image-layer concerns. The gap here is at the runtime layer — capabilities and privilege escalation prevention.">
+    </div>
+  </div>
+
+  <div class="quiz" data-quiz="flag-meaning">
+    <p class="quiz-question">Quiz 2 — Flag Quiz: What does <code>--pids-limit 100</code> protect against?</p>
+    <ul class="quiz-options">
+      <li data-correct="false">Memory exhaustion from large allocations</li>
+      <li data-correct="false">Network flooding (DDoS from within the container)</li>
+      <li data-correct="true">Fork bombs — runaway process creation that exhausts the host PID table</li>
+      <li data-correct="false">Privilege escalation via setuid binaries</li>
+    </ul>
+    <div class="quiz-feedback"
+         data-correct="A fork bomb spawns processes exponentially until the system runs out of PIDs. --pids-limit caps how many processes a container can create, preventing it from taking down the host or neighbouring containers."
+         data-incorrect="--pids-limit is specifically about process count, not memory, network, or privilege. Memory is controlled with --memory; network flooding is a separate concern.">
+    </div>
+  </div>
+
+  <div class="quiz" data-quiz="risk-omission">
+    <p class="quiz-question">Quiz 3 — Risk Assessment: An app container runs in production with <code>--net=host</code> for "simpler networking." What is the primary security risk?</p>
+    <ul class="quiz-options">
+      <li data-correct="false">The container cannot be restarted automatically</li>
+      <li data-correct="false">Health checks stop working correctly</li>
+      <li data-correct="true">The container shares the host network stack and can bind to any port, sniff all host traffic, and bypass network policies</li>
+      <li data-correct="false">Image signing verification is skipped</li>
+    </ul>
+    <div class="quiz-feedback"
+         data-correct="--net=host removes the network namespace isolation entirely. A compromised container can listen on host ports, intercept traffic from other containers, and evade any network policy enforcement — a severe blast-radius expansion."
+         data-incorrect="The risk is network-namespace isolation, not restart or health-check behaviour. Network policies are enforced at the namespace level and have no effect when --net=host is used.">
+    </div>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>Hands-On: Harden an Unhardened Container</h2>
+
+  <div class="hands-on">
+    <div class="hands-on-title">Lab: Full Hardening Walkthrough</div>
+    <p><strong>Starting point</strong> — an insecure nginx container:</p>
+    <pre><code>docker run -d --name insecure-nginx -p 80:80 nginx:latest</code></pre>
+
+    <p><strong>Step 1 — Inspect the baseline (spot the problems):</strong></p>
+    <pre><code>docker inspect insecure-nginx | jq '
+  .[0] | {
+    user:     .Config.User,
+    readonly: .HostConfig.ReadonlyRootfs,
+    capdrop:  .HostConfig.CapDrop,
+    capadd:   .HostConfig.CapAdd,
+    memory:   .HostConfig.Memory,
+    pids:     .HostConfig.PidsLimit
+  }'
+# user: ""  ← running as root!
+# readonly: false  ← writable FS
+# capdrop: null  ← no caps dropped</code></pre>
+
+    <p><strong>Step 2 — Apply every checklist item:</strong></p>
+    <pre><code>docker network create --driver bridge hardened-net
+
+docker run -d --name hardened-nginx \
+  --user 101:101 \
+  --read-only \
+  --tmpfs /tmp:rw,noexec,nosuid,size=32m \
+  --tmpfs /var/cache/nginx:rw,noexec,nosuid \
+  --tmpfs /var/run:rw,noexec,nosuid \
+  --cap-drop ALL \
+  --cap-add NET_BIND_SERVICE \
+  --cap-add CHOWN \
+  --security-opt no-new-privileges \
+  --memory 128m --memory-swap 128m \
+  --cpus 0.25 \
+  --pids-limit 50 \
+  --network hardened-net \
+  --restart on-failure:3 \
+  -p 127.0.0.1:8080:80 \
+  nginx:alpine</code></pre>
+
+    <p><strong>Step 3 — Verify each setting:</strong></p>
+    <pre><code># All checks should return expected hardened values
+docker inspect hardened-nginx | jq '
+  .[0] | {
+    user:     .Config.User,
+    readonly: .HostConfig.ReadonlyRootfs,
+    capdrop:  .HostConfig.CapDrop,
+    capadd:   .HostConfig.CapAdd,
+    memory:   .HostConfig.Memory,
+    pids:     .HostConfig.PidsLimit,
+    newnoprivs: .HostConfig.SecurityOpt
+  }'</code></pre>
+
+    <p><strong>Step 4 — Confirm it's still serving traffic:</strong></p>
+    <pre><code>curl http://127.0.0.1:8080/
+# → Welcome to nginx!</code></pre>
+
+    <p><strong>What you proved:</strong> Every hardening flag is in place, verified by <code>docker inspect</code>, and the app still works. That's the goal — security without breaking functionality.</p>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>Industry Standards & Regulated Environments</h2>
+
+  <div class="callout industry">
+    <div class="callout-title">🏦 CIS Docker Benchmark, NIST 800-190 & Regulated Industries</div>
+    <p><strong>CIS Docker Benchmark</strong> (Center for Internet Security) is the de-facto audit standard. It maps directly to the checklist above, with scored and unscored checks. Run it with:</p>
+    <pre style="margin:0.5rem 0;"><code>docker run --rm -it \
+  --net host --pid host --userns host --cap-add audit_control \
+  -v /var/lib:/var/lib -v /var/run/docker.sock:/var/run/docker.sock \
+  docker/docker-bench-security</code></pre>
+    <p style="margin-top:0.8rem;"><strong>NIST SP 800-190</strong> (<em>Application Container Security Guide</em>) provides a risk-based framework covering image risks, registry risks, orchestrator risks, container runtime risks, and host OS risks — aligned with the five rings above.</p>
+    <p style="margin-top:0.8rem;"><strong>Banking (PCI-DSS):</strong> Requires encrypted secrets, no shared credentials, audit logging of all privileged operations, and network segmentation — all addressed by this checklist.</p>
+    <p style="margin-top:0.8rem;"><strong>Healthcare (HIPAA):</strong> PHI containers must enforce access controls, encrypt data in transit (mTLS) and at rest (encrypted secrets), and maintain audit trails. Immutable deployments + SBOM are increasingly auditor requirements.</p>
+    <p style="margin-top:0.8rem;">Both frameworks expect you to demonstrate compliance via <strong>automated policy enforcement</strong> (admission controllers, OPA/Gatekeeper) — not manual reviews.</p>
+  </div>
+
+  <!-- ============================================================ -->
+  <div class="takeaways">
+    <h3>Key Takeaways</h3>
+    <ul>
+      <li><strong>Defense in depth</strong> — each layer (Image → Runtime → Network → Orchestrator → Host) is independent; failing one doesn't mean all fail</li>
+      <li><strong>Assume breach</strong> — harden for damage limitation, not just prevention</li>
+      <li><strong>Non-root + read-only FS + drop capabilities</strong> are the highest-impact runtime steps — do these first</li>
+      <li><strong>Pin by digest</strong> — tags are mutable; digests guarantee exactly what you tested</li>
+      <li><strong>Automate enforcement</strong> — admission controllers beat documentation; policies are enforced, docs get stale</li>
+      <li><strong>CIS Benchmark + NIST 800-190</strong> give you auditable, industry-recognised checklists for regulated environments</li>
+      <li><strong>Verify, don't assume</strong> — always run <code>docker inspect</code> to confirm flags applied as expected</li>
+    </ul>
+  </div>
+
+  <!-- ============================================================ -->
+  <div class="lesson-nav">
+    <a href="0031-image-size-optimization.html">← Prev: Image Size Optimization</a>
+    <a href="0033-container-anti-patterns.html">Next: Container Anti-Patterns →</a>
+  </div>
+
+  <script src="../assets/quiz.js"></script>
+</body>
+</html>

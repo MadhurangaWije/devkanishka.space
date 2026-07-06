@@ -1,0 +1,737 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>L38 · Pydantic &amp; Validation — Python A→Z</title>
+<link rel="stylesheet" href="../assets/style.css" />
+</head>
+<body>
+<div id="sidebar-placeholder"></div>
+<div id="main">
+  <div id="lesson-header">
+    <div class="lesson-track track-fastapi">🟩 FastAPI</div>
+    <h1>Pydantic &amp; Validation</h1>
+    <div class="lesson-meta">
+      <span>📖 Lesson 38</span>
+      <span>⏱ 45 min</span>
+      <span>🧪 5 questions</span>
+      <span>💻 3 exercises</span>
+    </div>
+  </div>
+  <div id="content">
+
+    <div class="objectives"><h4>🎯 Learning Objectives</h4><ul>
+      <li>Define Pydantic v2 models with typed fields, defaults, and <code>Field()</code> constraints</li>
+      <li>Use built-in validators: <code>EmailStr</code>, <code>AnyUrl</code>, <code>constr</code>, <code>conint</code>, <code>confloat</code></li>
+      <li>Write <code>@field_validator</code> and <code>@model_validator</code> for custom validation logic</li>
+      <li>Understand Pydantic's coercion rules and strict mode</li>
+      <li>Use <code>model_dump()</code>, <code>model_dump_json()</code>, <code>model_validate()</code>, and <code>model_validate_json()</code></li>
+      <li>Compose models with nested objects and discriminated unions</li>
+      <li>Configure models with <code>model_config</code> (aliases, extra fields, frozen, populate by name)</li>
+    </ul></div>
+
+    <!-- ═══════════════════════════════════════════════════════════ -->
+    <h2 id="why-pydantic">1 · Why Pydantic?</h2>
+
+    <p>Pydantic is a data validation and settings management library that leverages Python type annotations. Rather than writing manual checks scattered through your code, you declare a model class, and Pydantic guarantees that any instance satisfies its constraints.</p>
+
+    <p>Pydantic v2 (released 2023) rewrote the validation core in Rust, delivering 5–50× faster validation than v1. While it powers FastAPI, Pydantic is equally useful standalone — for CLI tools, config loading, ETL pipelines, and anywhere you receive untrusted data.</p>
+
+    <p>The core philosophy is <strong>parse, don't validate</strong>: transform raw, untyped data into typed, trusted Python objects in a single step. If something is wrong, you get a rich, structured error — not a vague crash two functions later.</p>
+
+    <p>Compare the traditional approach with Pydantic:</p>
+
+    <div style="position:relative"><pre><code class="language-python"># Without Pydantic — manual, error-prone
+def create_user(data: dict):
+    if "name" not in data or not isinstance(data["name"], str):
+        raise ValueError("name must be a string")
+    if "age" not in data or not isinstance(data["age"], int) or data["age"] < 0:
+        raise ValueError("age must be a non-negative integer")
+    if "email" not in data or "@" not in data["email"]:
+        raise ValueError("invalid email")
+    return {"name": data["name"], "age": data["age"], "email": data["email"]}
+
+# With Pydantic — declarative, automatic
+from pydantic import BaseModel, EmailStr
+
+class User(BaseModel):
+    name: str
+    age: int
+    email: EmailStr
+
+user = User(name="Alice", age=30, email="alice@example.com")  # validated + typed</code></pre><span class="code-label">comparison.py</span></div>
+
+    <div class="callout callout-concept"><strong>Concept:</strong> Pydantic raises <code>ValidationError</code> with structured, human-readable error details — not bare <code>ValueError</code> strings. Every error includes the field path, the offending value, and the reason.</div>
+
+    <!-- ═══════════════════════════════════════════════════════════ -->
+    <h2 id="basemodel-basics">2 · BaseModel Basics</h2>
+
+    <p>A Pydantic model is a class that inherits from <code>BaseModel</code>. Fields are declared with type annotations. You control defaults, constraints, and metadata through <code>Field()</code>.</p>
+
+    <div style="position:relative"><pre><code class="language-python">from pydantic import BaseModel, Field
+from typing import Optional
+from datetime import datetime
+
+class Product(BaseModel):
+    id: int                                          # required
+    name: str = Field(min_length=1, max_length=100)
+    description: Optional[str] = None               # optional, defaults to None
+    price: float = Field(gt=0, description="Price in USD, must be positive")
+    stock: int = Field(default=0, ge=0)             # ge = greater-than-or-equal
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    tags: list[str] = Field(default_factory=list)
+
+# Instantiation
+p = Product(id=1, name="Widget", price=9.99)
+print(p.name)                  # Widget
+print(p.stock)                 # 0 (default)
+print(p.created_at)            # datetime object
+
+# Serialisation
+print(p.model_dump())          # dict with all fields
+print(p.model_dump_json())     # JSON string
+print(p.model_dump(exclude={"created_at"}))  # exclude fields
+print(p.model_dump(include={"id", "name", "price"}))  # include only</code></pre><span class="code-label">basemodel_basics.py</span></div>
+
+    <p>The <code>Field()</code> function accepts many constraint parameters:</p>
+
+    <table>
+      <thead>
+        <tr>
+          <th>Parameter</th>
+          <th>Type</th>
+          <th>Purpose</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td><code>gt</code></td><td>numeric</td><td>Greater than</td></tr>
+        <tr><td><code>ge</code></td><td>numeric</td><td>Greater than or equal</td></tr>
+        <tr><td><code>lt</code></td><td>numeric</td><td>Less than</td></tr>
+        <tr><td><code>le</code></td><td>numeric</td><td>Less than or equal</td></tr>
+        <tr><td><code>min_length</code></td><td>int</td><td>Minimum string/list length</td></tr>
+        <tr><td><code>max_length</code></td><td>int</td><td>Maximum string/list length</td></tr>
+        <tr><td><code>pattern</code></td><td>str (regex)</td><td>String must match regex</td></tr>
+        <tr><td><code>description</code></td><td>str</td><td>Human-readable description (shows in JSON Schema)</td></tr>
+        <tr><td><code>default</code></td><td>any</td><td>Default value</td></tr>
+        <tr><td><code>default_factory</code></td><td>callable</td><td>Factory for mutable defaults</td></tr>
+        <tr><td><code>alias</code></td><td>str</td><td>Alternate name for parsing input</td></tr>
+        <tr><td><code>repr</code></td><td>bool</td><td>Include in <code>__repr__</code> output</td></tr>
+        <tr><td><code>exclude</code></td><td>bool</td><td>Exclude from serialisation by default</td></tr>
+      </tbody>
+    </table>
+
+    <!-- ═══════════════════════════════════════════════════════════ -->
+    <h2 id="builtin-types">3 · Built-in Types &amp; Constrained Types</h2>
+
+    <p>Pydantic ships with many specialised types that validate common formats out of the box:</p>
+
+    <div style="position:relative"><pre><code class="language-python">from pydantic import (
+    BaseModel, EmailStr, AnyUrl, AnyHttpUrl,
+    constr, conint, confloat, PositiveInt, PositiveFloat,
+    NonNegativeInt,
+)
+from pydantic.networks import IPvAnyAddress
+from typing import Optional
+from uuid import UUID
+from decimal import Decimal
+
+class SignupForm(BaseModel):
+    username:  constr(min_length=3, max_length=20, pattern=r'^[a-zA-Z0-9_]+$')
+    email:     EmailStr
+    age:       conint(ge=13, le=120)
+    score:     confloat(ge=0.0, le=100.0)
+    website:   Optional[AnyHttpUrl] = None
+    user_id:   UUID
+    balance:   Decimal = Decimal("0.00")
+    ip_addr:   Optional[IPvAnyAddress] = None</code></pre><span class="code-label">builtin_types.py</span></div>
+
+    <p><code>EmailStr</code> requires the optional dependency: <code>pip install pydantic[email]</code>. <code>AnyUrl</code> validates URL structure (scheme, host, etc.). <code>UUID</code> automatically coerces strings like <code>"550e8400-e29b-..."</code> into <code>uuid.UUID</code> objects. Use <code>Decimal</code> for money — it preserves precision unlike <code>float</code>.</p>
+
+    <p>In Pydantic v2, the preferred way to define constrained types is with <code>Annotated</code>:</p>
+
+    <div style="position:relative"><pre><code class="language-python">from typing import Annotated
+from pydantic import BaseModel, Field
+
+Username = Annotated[str, Field(min_length=3, max_length=20, pattern=r'^[a-zA-Z0-9_]+$')]
+PositivePrice = Annotated[float, Field(gt=0)]
+
+class Item(BaseModel):
+    name: Username
+    price: PositivePrice</code></pre><span class="code-label">annotated_types.py</span></div>
+
+    <div class="callout callout-tip"><strong>Tip:</strong> Define reusable <code>Annotated</code> type aliases at module level — they self-document and can be shared across models without repeating constraints.</div>
+
+    <!-- ═══════════════════════════════════════════════════════════ -->
+    <h2 id="field-validators">4 · Field Validators (<code>@field_validator</code>)</h2>
+
+    <p>When built-in constraints aren't enough, use <code>@field_validator</code> to run custom logic on individual fields. Validators can reject values (raise <code>ValueError</code>) or transform them (return a modified value).</p>
+
+    <div style="position:relative"><pre><code class="language-python">from pydantic import BaseModel, field_validator, ValidationInfo
+from typing import Optional
+
+class UserProfile(BaseModel):
+    username: str
+    password: str
+    confirm_password: str
+    bio: Optional[str] = None
+
+    @field_validator("username")
+    @classmethod
+    def username_no_spaces(cls, v: str) -> str:
+        if " " in v:
+            raise ValueError("username cannot contain spaces")
+        return v.lower()          # validators can transform values
+
+    @field_validator("password")
+    @classmethod
+    def password_strength(cls, v: str) -> str:
+        if len(v) < 8:
+            raise ValueError("password must be at least 8 characters")
+        if not any(c.isupper() for c in v):
+            raise ValueError("password must contain at least one uppercase letter")
+        return v
+
+    @field_validator("bio", mode="before")  # mode="before" runs before type coercion
+    @classmethod
+    def strip_bio(cls, v):
+        if isinstance(v, str):
+            return v.strip() or None
+        return v</code></pre><span class="code-label">field_validators.py</span></div>
+
+    <p><strong><code>mode="before"</code></strong> — the validator runs on the raw input, before Pydantic attempts type coercion. This is useful when you need to pre-process or normalise messy input.</p>
+
+    <p><strong><code>mode="after"</code></strong> (the default) — the validator runs after coercion, so <code>v</code> is already the correct Python type. Use this for business-logic checks.</p>
+
+    <p>Returning a value from a validator <em>replaces</em> the field value. This means validators double as transformers — you can lowercase usernames, strip whitespace, or compute derived values.</p>
+
+    <!-- ═══════════════════════════════════════════════════════════ -->
+    <h2 id="model-validators">5 · Model Validators (<code>@model_validator</code>)</h2>
+
+    <p>Model validators have access to <em>all</em> fields at once, making them ideal for cross-field checks (e.g., "start must be before end") or computed fields that depend on multiple inputs.</p>
+
+    <div style="position:relative"><pre><code class="language-python">from pydantic import BaseModel, model_validator
+from typing import Self
+
+class DateRange(BaseModel):
+    start_date: str
+    end_date: str
+    max_days: int = 365
+
+    @model_validator(mode="after")
+    def check_date_order(self) -> Self:
+        if self.start_date >= self.end_date:
+            raise ValueError("start_date must be before end_date")
+        return self
+
+class DiscountedProduct(BaseModel):
+    price: float
+    discount_pct: float = 0.0
+    final_price: float = 0.0
+
+    @model_validator(mode="after")
+    def compute_final_price(self) -> Self:
+        # model validators can set computed fields
+        self.final_price = round(self.price * (1 - self.discount_pct / 100), 2)
+        return self</code></pre><span class="code-label">model_validators_after.py</span></div>
+
+    <p><strong><code>mode="after"</code></strong> — receives the fully validated model instance. You access fields via <code>self</code> and return <code>Self</code>.</p>
+
+    <p><strong><code>mode="before"</code></strong> — receives the raw input (typically a dict) before any field validation. You can reshape the data entirely:</p>
+
+    <div style="position:relative"><pre><code class="language-python">from pydantic import BaseModel, model_validator
+
+class Config(BaseModel):
+    host: str
+    port: int
+
+    @model_validator(mode="before")
+    @classmethod
+    def parse_url(cls, data):
+        # Accept either a dict or a "host:port" string
+        if isinstance(data, str):
+            host, port = data.split(":")
+            return {"host": host, "port": int(port)}
+        return data
+
+cfg = Config.model_validate("localhost:5432")
+print(cfg.host, cfg.port)  # localhost 5432</code></pre><span class="code-label">model_validators_before.py</span></div>
+
+    <div class="callout callout-warn"><strong>Warning:</strong> In <code>mode="before"</code> model validators, the data is unvalidated — always check types defensively and handle unexpected formats gracefully.</div>
+
+    <!-- ═══════════════════════════════════════════════════════════ -->
+    <h2 id="parsing-serialisation">6 · Parsing &amp; Serialisation</h2>
+
+    <p>Pydantic models are both parsers (raw data → typed object) and serialisers (typed object → dict/JSON). The v2 API uses consistent <code>model_*</code> method names.</p>
+
+    <div style="position:relative"><pre><code class="language-python">from pydantic import BaseModel
+from datetime import datetime
+
+class Event(BaseModel):
+    title: str
+    timestamp: datetime
+    attendees: list[str]
+
+# ── Parsing ──
+# From dict
+e1 = Event.model_validate({
+    "title": "PyCon",
+    "timestamp": "2024-06-01T09:00:00",  # string → datetime coercion
+    "attendees": ["Alice", "Bob"],
+})
+
+# From JSON string
+e2 = Event.model_validate_json(
+    '{"title":"DjangoCon","timestamp":"2024-09-10T10:00:00","attendees":["Carol"]}'
+)
+
+# ── Serialisation ──
+print(e1.model_dump())
+# {"title": "PyCon", "timestamp": datetime(2024, 6, 1, 9, 0), "attendees": [...]}
+
+print(e1.model_dump(mode="json"))   # datetime → ISO string, ready for json.dumps
+print(e1.model_dump_json())         # full JSON string directly
+
+# Partial serialisation
+print(e1.model_dump(include={"title", "timestamp"}))
+print(e1.model_dump(exclude={"attendees"}))
+print(e1.model_dump(exclude_none=True))    # skip None fields
+print(e1.model_dump(exclude_unset=True))   # skip fields not explicitly set by caller</code></pre><span class="code-label">parsing_serialisation.py</span></div>
+
+    <div class="callout callout-concept"><strong>Concept:</strong> <code>exclude_unset=True</code> is critical for PATCH endpoints — only fields the client explicitly sent are included in the output, so you don't accidentally overwrite database values with defaults for fields the user never intended to change.</div>
+
+    <!-- ═══════════════════════════════════════════════════════════ -->
+    <h2 id="nested-models-unions">7 · Nested Models &amp; Discriminated Unions</h2>
+
+    <p>Real-world data is rarely flat. Pydantic validates nested models recursively — just use one model as a field type inside another. Raw dicts are automatically coerced into the nested model.</p>
+
+    <div style="position:relative"><pre><code class="language-python">from pydantic import BaseModel, Field
+from typing import Literal, Union, Annotated
+
+# ── Nested models ──
+class Address(BaseModel):
+    street: str
+    city: str
+    country: str = "US"
+
+class Company(BaseModel):
+    name: str
+    address: Address         # nested model — validated recursively
+    employees: list[str] = []
+
+c = Company(
+    name="Acme",
+    address={"street": "123 Main St", "city": "Springfield"},  # dict auto-coerced
+)
+print(c.address.city)   # Springfield
+
+# ── Discriminated unions ──
+class Cat(BaseModel):
+    type: Literal["cat"]
+    meows_per_day: int
+
+class Dog(BaseModel):
+    type: Literal["dog"]
+    barks_per_day: int
+
+Pet = Annotated[Union[Cat, Dog], Field(discriminator="type")]
+
+class Owner(BaseModel):
+    name: str
+    pet: Pet
+
+o = Owner(name="Alice", pet={"type": "cat", "meows_per_day": 42})
+print(type(o.pet))          # &lt;class 'Cat'&gt;
+print(o.pet.meows_per_day)  # 42</code></pre><span class="code-label">nested_unions.py</span></div>
+
+    <p><strong>Discriminated unions</strong> use a literal field (the "discriminator") to decide which model to validate against. Benefits over plain <code>Union</code>:</p>
+    <ul>
+      <li><strong>Performance:</strong> O(1) lookup by discriminator value instead of trying each model sequentially.</li>
+      <li><strong>Error messages:</strong> Pydantic reports exactly which variant failed and why, instead of confusing multi-model errors.</li>
+      <li><strong>OpenAPI generation:</strong> FastAPI produces clean, unambiguous schema docs with a <code>discriminator</code> mapping.</li>
+    </ul>
+
+    <!-- ── 8. model_config ── -->
+    <h2 id="model-config">Model Configuration with <code>model_config</code></h2>
+    <p>
+      Pydantic v2 uses a <code>model_config</code> class variable (a <code>ConfigDict</code>)
+      to control model behaviour — replacing v1's inner <code>class Config</code>.
+    </p>
+    <div style="position:relative">
+      <pre><code class="language-python">from pydantic import BaseModel, ConfigDict, Field
+
+class StrictUser(BaseModel):
+    model_config = ConfigDict(
+        strict=True,            # no coercion — int("3") raises, must pass int
+        frozen=True,            # instances are immutable (like frozen dataclass)
+        populate_by_name=True,  # allow both alias and field name when parsing
+        str_strip_whitespace=True,  # auto-strip leading/trailing whitespace from str fields
+        extra="forbid",         # raise if extra fields are passed
+    )
+
+    username: str = Field(alias="user_name")
+    age: int
+
+u = StrictUser(user_name="alice", age=30)   # alias works
+u = StrictUser(username="alice", age=30)    # field name also works (populate_by_name)
+# u.username = "bob"  → raises — frozen=True</code></pre>
+      <span class="code-label">model_config.py</span>
+    </div>
+
+    <h3>Key <code>ConfigDict</code> Options</h3>
+    <table>
+      <thead><tr><th>Option</th><th>Default</th><th>Effect</th></tr></thead>
+      <tbody>
+        <tr><td><code>strict</code></td><td><code>False</code></td><td>Disable all type coercion — values must already be the correct type</td></tr>
+        <tr><td><code>frozen</code></td><td><code>False</code></td><td>Make instances immutable; enables hashing</td></tr>
+        <tr><td><code>extra</code></td><td><code>"ignore"</code></td><td><code>"allow"</code> stores extras, <code>"forbid"</code> raises, <code>"ignore"</code> silently drops</td></tr>
+        <tr><td><code>populate_by_name</code></td><td><code>False</code></td><td>Accept both the field name and its alias during parsing</td></tr>
+        <tr><td><code>str_strip_whitespace</code></td><td><code>False</code></td><td>Strip leading/trailing whitespace from all <code>str</code> fields</td></tr>
+        <tr><td><code>str_to_lower</code></td><td><code>False</code></td><td>Lowercase all <code>str</code> fields after parsing</td></tr>
+        <tr><td><code>use_enum_values</code></td><td><code>False</code></td><td>Store the enum's <em>value</em> rather than the enum member</td></tr>
+        <tr><td><code>validate_default</code></td><td><code>False</code></td><td>Run validators on default values too</td></tr>
+        <tr><td><code>from_attributes</code></td><td><code>False</code></td><td>Allow building models from ORM objects (<code>model.attr</code> instead of dict)</td></tr>
+      </tbody>
+    </table>
+
+    <div class="callout callout-tip">
+      <strong>ORM integration:</strong> set <code>from_attributes=True</code> to parse SQLAlchemy
+      or Django ORM model instances directly:
+      <code>UserOut.model_validate(db_user)</code> — no manual <code>.dict()</code> needed.
+    </div>
+
+    <!-- ── 9. Computed Fields & model_serializer ── -->
+    <h2 id="computed-fields">Computed Fields &amp; Custom Serialisers</h2>
+    <div style="position:relative">
+      <pre><code class="language-python">from pydantic import BaseModel, computed_field, field_serializer
+from datetime import date
+
+class Person(BaseModel):
+    first_name: str
+    last_name: str
+    birth_date: date
+
+    @computed_field                      # included in model_dump() automatically
+    @property
+    def full_name(self) -> str:
+        return f"{self.first_name} {self.last_name}"
+
+    @computed_field
+    @property
+    def age(self) -> int:
+        today = date.today()
+        return today.year - self.birth_date.year - (
+            (today.month, today.day) < (self.birth_date.month, self.birth_date.day)
+        )
+
+    @field_serializer("birth_date")      # custom serialiser for one field
+    def serialize_date(self, v: date) -> str:
+        return v.strftime("%d %b %Y")    # "15 Jun 1990"
+
+p = Person(first_name="Alice", last_name="Smith", birth_date="1990-06-15")
+print(p.full_name)            # Alice Smith
+print(p.model_dump())         # includes full_name, age; birth_date as "15 Jun 1990"</code></pre>
+      <span class="code-label">computed_fields.py</span>
+    </div>
+
+    <!-- ── 10. Pydantic Settings ── -->
+    <h2 id="pydantic-settings">Pydantic Settings — Config from Env Vars</h2>
+    <p>
+      <code>pydantic-settings</code> extends Pydantic for application configuration —
+      loading values from environment variables, <code>.env</code> files, secrets,
+      and JSON with the same validation pipeline.
+    </p>
+    <div style="position:relative">
+      <pre><code class="language-bash">pip install pydantic-settings</code></pre>
+      <span class="code-label">terminal</span>
+    </div>
+    <div style="position:relative">
+      <pre><code class="language-python">from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import AnyUrl, Field
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=".env",           # load from .env in addition to real env vars
+        env_file_encoding="utf-8",
+        case_sensitive=False,      # DATABASE_URL == database_url
+    )
+
+    app_name: str = "MyAPI"
+    debug: bool = False
+    database_url: AnyUrl
+    secret_key: str = Field(min_length=32)
+    allowed_hosts: list[str] = ["localhost"]
+    max_connections: int = Field(default=10, ge=1, le=100)
+
+# Instantiation reads from env vars (or .env file)
+# export DATABASE_URL=postgresql://user:pass@localhost/db
+# export SECRET_KEY=supersecretkey12345678901234567890
+settings = Settings()
+print(settings.database_url)
+print(settings.debug)          # False unless DEBUG=true in env</code></pre>
+      <span class="code-label">config.py</span>
+    </div>
+    <div style="position:relative">
+      <pre><code class="language-bash"># .env file example
+APP_NAME=ProductionAPI
+DEBUG=false
+DATABASE_URL=postgresql://user:pass@db.host/mydb
+SECRET_KEY=a-very-long-random-secret-key-goes-here-1234
+ALLOWED_HOSTS=["api.example.com","www.example.com"]</code></pre>
+      <span class="code-label">.env</span>
+    </div>
+
+    <p>Use a cached singleton in FastAPI with <code>lru_cache</code>:</p>
+    <div style="position:relative">
+      <pre><code class="language-python">from functools import lru_cache
+from fastapi import Depends
+
+@lru_cache
+def get_settings() -> Settings:
+    return Settings()
+
+# In a route or dependency:
+from fastapi import FastAPI
+app = FastAPI()
+
+@app.get("/info")
+def info(settings: Settings = Depends(get_settings)):
+    return {"app": settings.app_name, "debug": settings.debug}</code></pre>
+      <span class="code-label">main.py</span>
+    </div>
+
+    <div class="callout callout-warn">
+      Never hardcode secrets in <code>model_config</code> or source files. Always load from
+      environment variables or a secrets manager (AWS Secrets Manager, HashiCorp Vault).
+      The <code>.env</code> file is for local development only — add it to <code>.gitignore</code>.
+    </div>
+
+    <!-- ── Best Practices ── -->
+    <h2 id="best-practices">Best Practices</h2>
+    <ul>
+      <li><strong>Define separate request and response models</strong> — <code>UserCreate</code> (has password), <code>UserOut</code> (no password), <code>UserUpdate</code> (all Optional). Never reuse one model for all three roles.</li>
+      <li><strong>Use <code>Annotated</code> type aliases</strong> for reusable constraints — <code>PositivePrice = Annotated[float, Field(gt=0)]</code> — define once, use everywhere.</li>
+      <li><strong>Prefer <code>@model_validator(mode="after")</code></strong> for cross-field validation; prefer <code>@field_validator</code> for single-field rules.</li>
+      <li><strong>Use <code>exclude_unset=True</code> in PATCH handlers</strong> — only fields the client sent will appear in the dict, preventing accidental overwrites.</li>
+      <li><strong>Set <code>extra="forbid"</code> on request models</strong> — reject unknown fields to prevent parameter pollution attacks.</li>
+      <li><strong>Use <code>from_attributes=True</code> when integrating with ORMs</strong> — lets you call <code>UserOut.model_validate(db_row)</code> without a manual conversion layer.</li>
+      <li><strong>Use <code>pydantic-settings</code> for all configuration</strong> — typed, validated, .env-aware config beats <code>os.getenv()</code> scattered through your codebase.</li>
+      <li><strong>Validators should raise <code>ValueError</code></strong> (or <code>AssertionError</code>) — Pydantic wraps them into <code>ValidationError</code> automatically with field context.</li>
+    </ul>
+
+    <!-- ── Exercises ── -->
+    <h2 id="exercises">Exercises</h2>
+    <div class="exercise-section">
+
+      <div class="exercise">
+        <h3>Exercise 1 — User Registration Models</h3>
+        <p>Build a complete set of Pydantic models for a user registration system:</p>
+        <ul>
+          <li><code>UserCreate</code>: <code>username</code> (3–20 chars, alphanumeric + underscore), <code>email</code> (EmailStr), <code>password</code> (min 8, must have uppercase + digit), <code>age</code> (13–120).</li>
+          <li><code>UserOut</code>: <code>id</code> (int), <code>username</code>, <code>email</code>, <code>created_at</code> (datetime). No password field.</li>
+          <li><code>UserUpdate</code>: all fields Optional except nothing is required.</li>
+          <li>Add a <code>@model_validator(mode="after")</code> on <code>UserCreate</code> that raises if <code>username</code> is a substring of <code>password</code> (weak password).</li>
+          <li>Demonstrate: valid creation, a ValidationError for weak password, and <code>model_dump(exclude_unset=True)</code> on a partial update.</li>
+        </ul>
+        <details>
+          <summary>💡 Hint</summary>
+          <pre><code class="language-python">from pydantic import BaseModel, EmailStr, Field, field_validator, model_validator
+from pydantic import ConfigDict
+from typing import Optional, Annotated
+from datetime import datetime
+
+UsernameStr = Annotated[str, Field(min_length=3, max_length=20, pattern=r'^[a-zA-Z0-9_]+$')]
+
+class UserCreate(BaseModel):
+    username: UsernameStr
+    email: EmailStr
+    password: str = Field(min_length=8)
+    age: int = Field(ge=13, le=120)
+
+    @field_validator("password")
+    @classmethod
+    def password_complexity(cls, v: str) -> str:
+        if not any(c.isupper() for c in v):
+            raise ValueError("must contain an uppercase letter")
+        if not any(c.isdigit() for c in v):
+            raise ValueError("must contain a digit")
+        return v
+
+    @model_validator(mode="after")
+    def password_not_username(self):
+        if self.username.lower() in self.password.lower():
+            raise ValueError("password must not contain the username")
+        return self
+
+class UserOut(BaseModel):
+    id: int
+    username: str
+    email: EmailStr
+    created_at: datetime
+
+class UserUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    username: Optional[UsernameStr] = None
+    email: Optional[EmailStr] = None
+    age: Optional[int] = Field(default=None, ge=13, le=120)</code></pre>
+        </details>
+      </div>
+
+      <div class="exercise">
+        <h3>Exercise 2 — Discriminated Union for Notifications</h3>
+        <p>Model a notification system that supports multiple delivery channels:</p>
+        <ul>
+          <li><code>EmailNotification</code>: <code>type: Literal["email"]</code>, <code>to_address: EmailStr</code>, <code>subject: str</code>, <code>body: str</code>.</li>
+          <li><code>SMSNotification</code>: <code>type: Literal["sms"]</code>, <code>phone_number: str</code> (E.164 format, e.g. <code>+14155551234</code>), <code>message: str</code> (max 160 chars).</li>
+          <li><code>WebhookNotification</code>: <code>type: Literal["webhook"]</code>, <code>url: AnyHttpUrl</code>, <code>payload: dict</code>.</li>
+          <li>Create a <code>NotificationRequest</code> model with a <code>notification</code> field using a discriminated union on <code>type</code>.</li>
+          <li>Parse three JSON strings (one per type) and confirm the correct class is instantiated.</li>
+        </ul>
+        <details>
+          <summary>💡 Hint</summary>
+          <pre><code class="language-python">from pydantic import BaseModel, EmailStr, AnyHttpUrl, Field
+from pydantic.networks import AnyHttpUrl
+from typing import Literal, Union, Annotated
+
+class EmailNotification(BaseModel):
+    type: Literal["email"]
+    to_address: EmailStr
+    subject: str
+    body: str
+
+class SMSNotification(BaseModel):
+    type: Literal["sms"]
+    phone_number: str = Field(pattern=r'^\+[1-9]\d{7,14}$')
+    message: str = Field(max_length=160)
+
+class WebhookNotification(BaseModel):
+    type: Literal["webhook"]
+    url: AnyHttpUrl
+    payload: dict
+
+Notification = Annotated[
+    Union[EmailNotification, SMSNotification, WebhookNotification],
+    Field(discriminator="type")
+]
+
+class NotificationRequest(BaseModel):
+    notification: Notification
+
+# Test
+r = NotificationRequest.model_validate_json(
+    '{"notification": {"type": "sms", "phone_number": "+14155551234", "message": "Hi!"}}'
+)
+print(type(r.notification))  # SMSNotification</code></pre>
+        </details>
+      </div>
+
+      <div class="exercise">
+        <h3>Exercise 3 — Settings &amp; FastAPI Integration</h3>
+        <p>Wire <code>pydantic-settings</code> into a small FastAPI app:</p>
+        <ul>
+          <li>Create a <code>Settings</code> model with: <code>app_name: str</code>, <code>debug: bool = False</code>, <code>database_url: AnyUrl</code>, <code>api_key: str = Field(min_length=20)</code>.</li>
+          <li>Load from a <code>.env</code> file using <code>SettingsConfigDict(env_file=".env")</code>.</li>
+          <li>Cache the settings with <code>@lru_cache</code> and expose via <code>Depends(get_settings)</code>.</li>
+          <li>Add a <code>GET /config</code> route that returns <code>app_name</code> and <code>debug</code> (never expose <code>api_key</code> or <code>database_url</code>).</li>
+          <li>Write a pytest test that overrides the dependency with a test settings object using <code>app.dependency_overrides</code>.</li>
+        </ul>
+        <details>
+          <summary>💡 Hint — test with dependency override</summary>
+          <pre><code class="language-python">from fastapi.testclient import TestClient
+from main import app, get_settings
+from config import Settings
+
+def get_test_settings():
+    return Settings(
+        app_name="TestApp",
+        debug=True,
+        database_url="postgresql://test:test@localhost/test",
+        api_key="test-api-key-at-least-20-chars",
+    )
+
+app.dependency_overrides[get_settings] = get_test_settings
+client = TestClient(app)
+
+def test_config_endpoint():
+    resp = client.get("/config")
+    assert resp.status_code == 200
+    assert resp.json()["app_name"] == "TestApp"
+    assert "api_key" not in resp.json()</code></pre>
+        </details>
+      </div>
+
+    </div><!-- /exercise-section -->
+
+    <div id="quiz-section"></div>
+    <div id="lesson-nav-footer"></div>
+  </div><!-- /content -->
+</div><!-- /main -->
+
+<script src="../assets/nav-data.js"></script>
+<script src="../assets/nav.js"></script>
+<script src="../assets/quiz.js"></script>
+<script src="../assets/highlight.js"></script>
+
+<script>
+buildLessonFooter();
+
+QuizWidget.render("quiz-section", [
+  {
+    question: "What is the difference between `@field_validator(mode='before')` and the default `mode='after'`?",
+    options: [
+      "mode='before' runs after type coercion; mode='after' runs on the raw input value",
+      "mode='before' runs on the raw input before type coercion and can transform it; mode='after' runs on the already-coerced typed value",
+      "mode='before' is only valid on optional fields; mode='after' works on all field types",
+      "There is no difference — both receive the same value at the same point in validation"
+    ],
+    correct: 1,
+    explanation: "mode='before' receives the raw, uncoerced value exactly as it arrived (e.g. a string '  hello  ' before str coercion/stripping). It can transform the raw data before Pydantic's type checking runs. mode='after' (the default) receives the value after it has been coerced to the declared type — useful for semantic validation on a known-good type. Use 'before' when you need to normalise raw input; use 'after' for business-rule checks on a clean value."
+  },
+  {
+    question: "Why should you use `model_dump(exclude_unset=True)` in a PATCH endpoint handler?",
+    options: [
+      "It makes the serialisation faster by skipping None values",
+      "It returns only the fields the client explicitly sent, so you don't accidentally overwrite database fields the client did not intend to change",
+      "It excludes all fields with default values, regardless of whether the client set them",
+      "It is required by FastAPI to produce a valid 204 No Content response"
+    ],
+    correct: 1,
+    explanation: "exclude_unset=True omits fields that were not explicitly provided during model instantiation — fields that fell back to their defaults. In a PATCH operation the client may only send {\"price\": 9.99} meaning 'change price, leave everything else'. If you use model_dump() without exclude_unset, you get all fields including the defaults, and a blind database update would overwrite existing values with those defaults. exclude_unset=True gives you only the client's intended changes."
+  },
+  {
+    question: "What does `extra='forbid'` in `model_config` do?",
+    options: [
+      "It prevents the model from being subclassed",
+      "It raises a ValidationError if the input data contains any fields not declared in the model",
+      "It forbids None values on any field",
+      "It disables field aliases so only the declared field names are accepted"
+    ],
+    correct: 1,
+    explanation: "extra='forbid' tells Pydantic to raise a ValidationError if the parsed data includes keys that are not declared as fields on the model. This is useful on request models to reject unexpected fields (parameter pollution, typos) early. The default is extra='ignore' which silently discards unknown fields. extra='allow' stores them in model.__pydantic_extra__."
+  },
+  {
+    question: "What is the advantage of a discriminated union over a plain `Union[Cat, Dog]`?",
+    options: [
+      "Discriminated unions allow more than two types; plain Union is limited to two",
+      "Discriminated unions use a literal discriminator field for O(1) model selection and better error messages; plain Union tries each model in order until one succeeds",
+      "Discriminated unions skip validation entirely, making them faster",
+      "Plain Union raises immediately on the first failure; discriminated unions collect all errors"
+    ],
+    correct: 1,
+    explanation: "With a plain Union, Pydantic tries each member in order until one validates successfully — O(n) and error messages can be confusing. A discriminated union uses a Literal field (e.g. type: Literal['cat']) to immediately select the correct model in O(1). This gives much clearer error messages ('expected cat, dog, or fish; got bird') and is required for FastAPI to generate correct OpenAPI schemas for the union."
+  },
+  {
+    question: "When using `pydantic-settings`, what is the recommended way to provide the settings instance to FastAPI route handlers?",
+    options: [
+      "Import the settings object directly at module level in every route file",
+      "Set the settings as an app.state attribute and access it via request.app.state",
+      "Wrap the Settings constructor in a function decorated with @lru_cache and inject it via Depends()",
+      "Pass the settings as a global variable using FastAPI's startup event"
+    ],
+    correct: 2,
+    explanation: "The idiomatic pattern is: define get_settings() that returns Settings(), decorate it with @lru_cache (so the .env file is only read once), and inject it into routes with Depends(get_settings). The lru_cache ensures a singleton — the same Settings object is returned on every call. The Depends() approach allows easy testing: you can override get_settings with a test version via app.dependency_overrides[get_settings] = get_test_settings without touching source code."
+  }
+]);
+</script>
+</body>
+</html>

@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lesson 30 — Observability for Pipelines</title>
+  <link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+
+  <div class="lesson-meta">
+    <span class="number">LESSON 30</span> &middot; Architecture &middot; ~12 minutes
+  </div>
+
+  <h1>Observability for Pipelines</h1>
+  <p>You can't improve what you don't measure. This lesson teaches which metrics to track, how to build pipeline dashboards, and when to alert — turning your CI/CD from a black box into an observable system.</p>
+
+  <div class="progress">
+    <span>Lesson 30 of 33</span>
+    <div class="progress-bar"><div class="progress-fill" style="width: 90%"></div></div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>The DORA Metrics (Revisited as an Architect)</h2>
+
+  <table>
+    <thead><tr><th>Metric</th><th>What to Measure</th><th>Alert When</th><th>Target (Elite)</th></tr></thead>
+    <tbody>
+      <tr><td><strong>Deployment frequency</strong></td><td>Deploys per day/week</td><td>Drops below baseline</td><td>Multiple per day</td></tr>
+      <tr><td><strong>Lead time</strong></td><td>Commit → running in prod</td><td>> 1 hour</td><td>&lt; 1 hour</td></tr>
+      <tr><td><strong>Change failure rate</strong></td><td>Rollbacks / total deploys</td><td>> 10%</td><td>&lt; 5%</td></tr>
+      <tr><td><strong>MTTR</strong></td><td>Incident → recovery time</td><td>> 30 min</td><td>&lt; 1 hour</td></tr>
+    </tbody>
+  </table>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>Pipeline-Specific Metrics</h2>
+
+  <table>
+    <thead><tr><th>Metric</th><th>Why It Matters</th><th>Where to Get It</th></tr></thead>
+    <tbody>
+      <tr><td>CI duration (P50, P95)</td><td>Developer experience</td><td>GitHub Actions API / workflow logs</td></tr>
+      <tr><td>CI success rate</td><td>Pipeline reliability</td><td>Failed runs / total runs</td></tr>
+      <tr><td>Queue time</td><td>Runner availability</td><td>Time between trigger and first step start</td></tr>
+      <tr><td>Cache hit rate</td><td>Optimization effectiveness</td><td>Cache action output</td></tr>
+      <tr><td>Image build time</td><td>Container pipeline speed</td><td>docker/build-push-action duration</td></tr>
+      <tr><td>ArgoCD sync duration</td><td>GitOps deploy speed</td><td>ArgoCD metrics endpoint</td></tr>
+      <tr><td>Flaky test rate</td><td>Trust in CI</td><td>Tests that pass/fail inconsistently</td></tr>
+    </tbody>
+  </table>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>Building a Pipeline Dashboard</h2>
+
+<pre><code>      - <span style="color:#89b4fa">name:</span> <span style="color:#a6e3a1">Emit metrics</span>
+        <span style="color:#89b4fa">if:</span> <span style="color:#a6e3a1">always()</span>
+        <span style="color:#89b4fa">run:</span> <span style="color:#a6e3a1">|</span>
+          <span style="color:#6c7086"># Write to GitHub Step Summary (free, built-in)</span>
+          <span style="color:#a6e3a1">echo "## ⏱️ Pipeline Metrics" >> $GITHUB_STEP_SUMMARY</span>
+          <span style="color:#a6e3a1">echo "| Metric | Value |" >> $GITHUB_STEP_SUMMARY</span>
+          <span style="color:#a6e3a1">echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY</span>
+          <span style="color:#a6e3a1">echo "| Run | #${{ github.run_number }} |" >> $GITHUB_STEP_SUMMARY</span>
+          <span style="color:#a6e3a1">echo "| Duration | ${SECONDS}s |" >> $GITHUB_STEP_SUMMARY</span>
+          <span style="color:#a6e3a1">echo "| Status | ${{ job.status }} |" >> $GITHUB_STEP_SUMMARY</span>
+
+          <span style="color:#6c7086"># Push to your observability platform (Datadog, Prometheus, etc.)</span>
+          <span style="color:#a6e3a1">curl -X POST "$METRICS_ENDPOINT" -d '{</span>
+            <span style="color:#a6e3a1">"metric": "cicd.duration",</span>
+            <span style="color:#a6e3a1">"value": "'$SECONDS'",</span>
+            <span style="color:#a6e3a1">"tags": ["repo:${{ github.repository }}", "status:${{ job.status }}"]</span>
+          <span style="color:#a6e3a1">}' 2>/dev/null || true</span>
+</code></pre>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>When to Alert</h2>
+
+  <div class="diagram">
+    <svg viewBox="0 0 650 100" xmlns="http://www.w3.org/2000/svg">
+      <rect x="20" y="10" width="195" height="75" rx="4" fill="#ffebee" stroke="#c62828"/>
+      <text x="117" y="30" text-anchor="middle" font-size="8" font-weight="bold" fill="#c62828">🚨 Page (immediate)</text>
+      <text x="117" y="48" text-anchor="middle" font-size="7" fill="#555">• Prod deploy failed + no rollback</text>
+      <text x="117" y="62" text-anchor="middle" font-size="7" fill="#555">• ArgoCD lost sync > 30 min</text>
+      <text x="117" y="76" text-anchor="middle" font-size="7" fill="#555">• Secret exposure detected</text>
+      
+      <rect x="230" y="10" width="195" height="75" rx="4" fill="#fff3e0" stroke="#f57c00"/>
+      <text x="327" y="30" text-anchor="middle" font-size="8" font-weight="bold" fill="#e65100">⚠️ Warn (next day)</text>
+      <text x="327" y="48" text-anchor="middle" font-size="7" fill="#555">• CI success rate < 90%</text>
+      <text x="327" y="62" text-anchor="middle" font-size="7" fill="#555">• CI duration P95 > 10 min</text>
+      <text x="327" y="76" text-anchor="middle" font-size="7" fill="#555">• Cache hit rate < 70%</text>
+      
+      <rect x="440" y="10" width="195" height="75" rx="4" fill="#e3f2fd" stroke="#1976d2"/>
+      <text x="537" y="30" text-anchor="middle" font-size="8" font-weight="bold" fill="#1976d2">📊 Track (weekly review)</text>
+      <text x="537" y="48" text-anchor="middle" font-size="7" fill="#555">• Deployment frequency trend</text>
+      <text x="537" y="62" text-anchor="middle" font-size="7" fill="#555">• Lead time trend</text>
+      <text x="537" y="76" text-anchor="middle" font-size="7" fill="#555">• Cost per deploy</text>
+    </svg>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>🧠 Recall Check</h2>
+
+  <div class="recall">
+    <ol>
+      <li>Name the four DORA metrics and their elite-level targets.</li>
+      <li>What should you alert on IMMEDIATELY vs review weekly?</li>
+      <li>Why track "flaky test rate" as a CI metric?</li>
+    </ol>
+    <details>
+      <summary>Reveal answers</summary>
+      <ol>
+        <li>Deployment frequency (multiple/day), Lead time (&lt;1 hour), Change failure rate (&lt;5%), MTTR (&lt;1 hour).</li>
+        <li><strong>Immediate:</strong> production failure without rollback, prolonged drift, secret exposure. <strong>Weekly:</strong> trends in duration, success rate, deployment frequency — these are optimization signals, not emergencies.</li>
+        <li>Flaky tests erode trust in CI. Developers start ignoring failures ("it's probably flaky") → real bugs slip through. A consistently green CI pipeline requires fixing or quarantining flaky tests.</li>
+      </ol>
+    </details>
+  </div>
+
+  <p><strong>Next lesson:</strong> Disaster Recovery — what to do when everything breaks.</p>
+
+</body>
+</html>

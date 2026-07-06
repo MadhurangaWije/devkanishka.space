@@ -1,0 +1,407 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lesson 013 – Disk Storage &amp; Performance | AZ-305 Study Guide</title>
+    <link rel="stylesheet" href="../assets/styles.css">
+    <script src="../assets/diagrams.js"></script>
+</head>
+<body>
+<div class="lesson-wrap">
+
+    <!-- Header -->
+    <header class="lesson-header fade-in">
+        <span class="lesson-number">Lesson 013 · 🟡 REVIEW</span>
+        <h1>Disk Storage &amp; Performance</h1>
+        <p>You already know how to attach managed disks. Now architect disk tier selection for workload classes, calculate IOPS/throughput ceilings from VM+disk pairings, choose encryption strategies for compliance, and design shared-disk clusters.</p>
+    </header>
+
+    <!-- Table of Contents -->
+    <nav class="toc fade-in">
+        <h2>In This Lesson</h2>
+        <ol>
+            <li><a href="#tier-matrix">Disk Tier Matrix</a></li>
+            <li><a href="#premium-v2">Premium SSD v2: Independent Tuning</a></li>
+            <li><a href="#ultra-disk">Ultra Disk: Sub-ms Latency</a></li>
+            <li><a href="#vm-ceiling">VM Ceiling Concept</a></li>
+            <li><a href="#bursting">Disk Bursting: Credit vs On-Demand</a></li>
+            <li><a href="#encryption">Encryption Architecture</a></li>
+            <li><a href="#shared-disks">Shared Disks</a></li>
+            <li><a href="#real-world">Real-World: SQL Always On with Sub-5ms Latency</a></li>
+            <li><a href="#quiz">Knowledge Check</a></li>
+        </ol>
+    </nav>
+
+    <!-- Section 1: Disk Tier Matrix -->
+    <section id="tier-matrix" class="fade-in">
+        <h2>1. Disk Tier Matrix</h2>
+        <p>Azure offers five managed-disk tiers. Each tier trades cost for performance guarantees. Choosing the wrong tier is the #1 cause of "it's slow" tickets that escalate to architects.</p>
+
+        <div class="box-diagram slide-in-left" id="diagram-tier-ladder" data-diagram='{
+            "nodes": [
+                {"id": "hdd", "label": "Standard HDD\n≤2,000 IOPS\n≤500 MB/s\n~ms latency", "x": 50, "y": 400, "w": 200, "h": 90, "shape": "box", "icon": "💿", "tooltip": "Archive, backups, dev/test. Cheapest."},
+                {"id": "ssd", "label": "Standard SSD\n≤6,000 IOPS\n≤750 MB/s\n<10ms latency", "x": 50, "y": 290, "w": 200, "h": 90, "shape": "box", "icon": "⚡", "tooltip": "Web servers, light OLTP, dev workloads."},
+                {"id": "prem", "label": "Premium SSD (v1)\n≤20,000 IOPS\n≤900 MB/s\n<5ms latency", "x": 50, "y": 180, "w": 200, "h": 90, "shape": "box", "icon": "🚀", "tooltip": "Production databases, enterprise apps."},
+                {"id": "premv2", "label": "Premium SSD v2\n≤80,000 IOPS\n≤1,200 MB/s\n<1ms latency", "x": 50, "y": 70, "w": 200, "h": 90, "shape": "box", "icon": "⚡🚀", "tooltip": "Independently configure IOPS, throughput, size."},
+                {"id": "ultra", "label": "Ultra Disk\n≤400,000 IOPS\n≤10,000 MB/s\nSub-ms latency", "x": 50, "y": -40, "w": 200, "h": 90, "shape": "box", "icon": "🔥", "tooltip": "SAP HANA, SQL critical, analytics. AZ-only."}
+            ],
+            "edges": [
+                {"from": "hdd", "to": "ssd", "label": "↑ Cost", "style": "dashed"},
+                {"from": "ssd", "to": "prem", "label": "↑ Cost", "style": "dashed"},
+                {"from": "prem", "to": "premv2", "label": "↑ Cost", "style": "dashed"},
+                {"from": "premv2", "to": "ultra", "label": "↑ Cost", "style": "dashed"}
+            ],
+            "groups": [{"label": "Disk Tier Ladder (Performance ↑  Cost ↑)", "x": 30, "y": -60, "w": 240, "h": 570}]
+        }'></div>
+
+        <table class="compare-table">
+            <thead>
+                <tr>
+                    <th>Tier</th>
+                    <th>Max IOPS</th>
+                    <th>Max Throughput</th>
+                    <th>Latency</th>
+                    <th>Best For</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr><td>Standard HDD</td><td>2,000</td><td>500 MB/s</td><td>~ms</td><td>Backups, archives, dev/test</td></tr>
+                <tr><td>Standard SSD</td><td>6,000</td><td>750 MB/s</td><td>&lt;10 ms</td><td>Web servers, light OLTP</td></tr>
+                <tr><td>Premium SSD</td><td>20,000</td><td>900 MB/s</td><td>&lt;5 ms</td><td>Prod databases, enterprise apps</td></tr>
+                <tr><td>Premium SSD v2</td><td>80,000</td><td>1,200 MB/s</td><td>&lt;1 ms</td><td>High-perf DB, flexible tuning</td></tr>
+                <tr><td>Ultra Disk</td><td>400,000</td><td>10,000 MB/s</td><td>Sub-ms</td><td>SAP HANA, mission-critical SQL</td></tr>
+            </tbody>
+        </table>
+
+        <div class="callout tip">
+            <strong>Architecture heuristic:</strong> Start with Premium SSD for production. Only escalate to v2/Ultra when measured latency requirements demand it — they have placement constraints.
+        </div>
+    </section>
+
+    <!-- Section 2: Premium SSD v2 -->
+    <section id="premium-v2" class="fade-in">
+        <h2>2. Premium SSD v2: Independent Tuning</h2>
+        <p>Unlike Premium SSD (v1) where IOPS/throughput are fixed to disk size, Premium SSD v2 lets you independently set three dimensions:</p>
+        <ul>
+            <li><strong>Capacity</strong> — 1 GiB to 64 TiB</li>
+            <li><strong>IOPS</strong> — 3,000 baseline + up to 80,000 (provisioned separately)</li>
+            <li><strong>Throughput</strong> — 125 MB/s baseline + up to 1,200 MB/s</li>
+        </ul>
+        <p>This decoupling means you don't over-provision capacity just to get IOPS — saving 30-60% on workloads with high IOPS but low storage needs (e.g., a 256 GiB database log disk needing 20,000 IOPS).</p>
+
+        <div class="callout warning">
+            <strong>Constraints:</strong> Premium SSD v2 requires Availability Zone deployment. No support for disk-level snapshots via the portal (use incremental snapshots via API/CLI). Cannot be used as OS disks.
+        </div>
+    </section>
+
+    <!-- Section 3: Ultra Disk -->
+    <section id="ultra-disk" class="fade-in">
+        <h2>3. Ultra Disk: Sub-ms Latency</h2>
+        <p>Ultra Disks deliver sub-millisecond latency with massive IOPS — purpose-built for SAP HANA, tier-1 SQL Server, and high-frequency transaction processing.</p>
+
+        <h3>Key constraints architects must know:</h3>
+        <ul>
+            <li>Availability Zone deployment <strong>required</strong> — no zone-redundant option</li>
+            <li>Limited VM series: ESv3, DSv3, ESv5, DSv5, M-series, Mv2, LSv2/3</li>
+            <li>Cannot be used as OS disks</li>
+            <li>No disk-level snapshots (use application-consistent backup)</li>
+            <li>No Azure Site Recovery support — plan DR separately</li>
+            <li>IOPS and throughput adjustable <em>without detaching</em> (dynamic scaling)</li>
+        </ul>
+
+        <div class="callout tip">
+            <strong>When to choose Ultra over Premium SSD v2:</strong> When you need >80,000 IOPS per disk, >1,200 MB/s throughput, or guaranteed sub-millisecond p99 latency. For most high-performance workloads, Premium SSD v2 is sufficient and cheaper.
+        </div>
+    </section>
+
+    <!-- Section 4: VM Ceiling Concept -->
+    <section id="vm-ceiling" class="fade-in">
+        <h2>4. VM Ceiling Concept</h2>
+        <p>A common architect mistake: choosing an expensive Ultra Disk then pairing it with a VM that can't deliver those IOPS. The <strong>effective performance = min(VM cap, sum of disk performance)</strong>.</p>
+
+        <div class="box-diagram slide-in-left" id="diagram-vm-ceiling" data-diagram='{
+            "nodes": [
+                {"id": "vm", "label": "VM Size Cap\nE.g. Standard_D8s_v5\n12,800 IOPS / 290 MB/s", "x": 50, "y": 20, "w": 260, "h": 80, "shape": "box", "icon": "🖥️", "tooltip": "VM size defines the absolute ceiling for cached + uncached disk IO."},
+                {"id": "disk", "label": "Disk(s) Provisioned\nE.g. 2× P30 = 10,000 IOPS\n(5,000 each)", "x": 50, "y": 130, "w": 260, "h": 80, "shape": "box", "icon": "💿", "tooltip": "Total disk IOPS from all attached data disks."},
+                {"id": "actual", "label": "Actual = min(VM, Disk)\n= 10,000 IOPS ✓\n(under VM cap of 12,800)", "x": 50, "y": 240, "w": 260, "h": 80, "shape": "box", "icon": "✅", "tooltip": "In this case disk is the bottleneck, not the VM."},
+                {"id": "bad", "label": "BAD: 4× P50 = 30,000 IOPS\nbut VM cap = 12,800\nActual = 12,800 ⚠️", "x": 370, "y": 130, "w": 260, "h": 80, "shape": "box", "icon": "⚠️", "tooltip": "Over-provisioned disks wasted — VM is the bottleneck."}
+            ],
+            "edges": [
+                {"from": "vm", "to": "actual", "label": "ceiling", "style": "solid"},
+                {"from": "disk", "to": "actual", "label": "provisioned", "style": "solid"},
+                {"from": "vm", "to": "bad", "label": "caps here!", "style": "dashed"}
+            ],
+            "groups": [{"label": "VM Ceiling = Absolute Bottleneck", "x": 30, "y": 0, "w": 620, "h": 340}]
+        }'></div>
+
+        <h3>Calculation formula:</h3>
+        <div class="code-block">
+            <pre>
+Effective IOPS   = min(VM_uncached_IOPS, Σ disk_IOPS)
+Effective MB/s   = min(VM_uncached_throughput, Σ disk_throughput)
+
+Example: Standard_E8s_v5
+  VM cap: 12,800 uncached IOPS / 290 MB/s
+  4× P30 disks: 4 × 5,000 = 20,000 IOPS / 4 × 200 = 800 MB/s
+  Effective: 12,800 IOPS / 290 MB/s ← VM is bottleneck!
+
+Fix: Upgrade VM to E16s_v5 (25,600 IOPS / 580 MB/s)
+  Effective: 20,000 IOPS / 580 MB/s ← Now disks are bottleneck
+            </pre>
+        </div>
+
+        <div class="callout exam-tip">
+            <strong>🎯 Exam Tip:</strong> AZ-305 frequently presents scenarios where the candidate must identify whether the VM or the disk is the bottleneck. Always check both the VM's uncached disk IOPS/throughput limit AND the disk tier limits. The answer is always min(VM, Disk).
+        </div>
+    </section>
+
+    <!-- Section 5: Disk Bursting -->
+    <section id="bursting" class="fade-in">
+        <h2>5. Disk Bursting: Credit-Based vs On-Demand</h2>
+        <p>Bursting lets disks temporarily exceed their baseline performance — critical for boot storms, batch imports, and spiky workloads.</p>
+
+        <table class="compare-table">
+            <thead>
+                <tr>
+                    <th>Aspect</th>
+                    <th>Credit-Based</th>
+                    <th>On-Demand</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr><td>Available on</td><td>Premium SSD ≤P20 (512 GiB), all Standard SSD</td><td>Premium SSD >P20</td></tr>
+                <tr><td>Max burst IOPS</td><td>3,500</td><td>Up to 30,000</td></tr>
+                <tr><td>Duration</td><td>Up to 30 min (until credits exhaust)</td><td>Unlimited (while demand exists)</td></tr>
+                <tr><td>Cost</td><td>Free (included)</td><td>Pay per burst IO above baseline</td></tr>
+                <tr><td>Credits accrue</td><td>When actual IO &lt; baseline</td><td>N/A — no credit bank</td></tr>
+                <tr><td>VM-level bursting</td><td>Yes — independent credit pool</td><td>Yes — combined with disk burst</td></tr>
+            </tbody>
+        </table>
+
+        <div class="callout warning">
+            <strong>Design trap:</strong> Credit-based bursting is NOT suitable for sustained high-IO workloads. Once credits deplete, performance drops to baseline instantly. For sustained performance, provision the right tier or enable on-demand bursting.
+        </div>
+    </section>
+
+    <!-- Section 6: Encryption -->
+    <section id="encryption" class="fade-in">
+        <h2>6. Encryption Architecture</h2>
+        <p>All Azure managed disks are encrypted at rest. The architecture decision is <em>who controls the keys</em> and <em>how many layers</em>.</p>
+
+        <table class="compare-table">
+            <thead>
+                <tr>
+                    <th>Option</th>
+                    <th>Key Management</th>
+                    <th>Encryption Layers</th>
+                    <th>Use Case</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><strong>PMK</strong><br>(Platform-Managed Key)</td>
+                    <td>Microsoft manages keys — zero config</td>
+                    <td>AES-256 at storage layer</td>
+                    <td>Default. Meets most compliance baselines.</td>
+                </tr>
+                <tr>
+                    <td><strong>CMK</strong><br>(Customer-Managed Key)</td>
+                    <td>You manage in Key Vault (or Managed HSM)</td>
+                    <td>AES-256 at storage layer, your key wraps DEK</td>
+                    <td>Regulatory requirement for key custody (HIPAA, PCI, sovereign).</td>
+                </tr>
+                <tr>
+                    <td><strong>Double Encryption</strong></td>
+                    <td>PMK + CMK (or PMK + PMK)</td>
+                    <td>Two layers: infra-level + storage-level</td>
+                    <td>High-security environments requiring defense-in-depth.</td>
+                </tr>
+                <tr>
+                    <td><strong>Encryption at Host</strong></td>
+                    <td>PMK or CMK</td>
+                    <td>Data encrypted on VM host before reaching storage</td>
+                    <td>Temp disks + OS/data disk caches also encrypted. Required for certain government workloads.</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <h3>CMK Implementation Checklist</h3>
+        <ul>
+            <li>Create Key Vault (or Managed HSM) with soft-delete + purge protection enabled</li>
+            <li>Create a <strong>Disk Encryption Set (DES)</strong> — links Key Vault key to disks</li>
+            <li>Grant DES identity <code>Key Vault Crypto Service Encryption User</code> role on the Key Vault</li>
+            <li>Assign DES to disks at creation (or update existing disks)</li>
+            <li>Enable <strong>auto-rotation</strong> in DES to follow Key Vault key version changes</li>
+        </ul>
+
+        <div class="callout exam-tip">
+            <strong>🎯 Exam Tip:</strong> "Encryption at host" is the only option that protects temp disks and disk caches. If a question mentions temp disk security or cache encryption, that's the answer. It must be explicitly enabled on the VM — it's not on by default.
+        </div>
+    </section>
+
+    <!-- Section 7: Shared Disks -->
+    <section id="shared-disks" class="fade-in">
+        <h2>7. Shared Disks</h2>
+        <p>Azure Shared Disks allow a single managed disk to be attached to multiple VMs simultaneously — enabling lift-and-shift of clustered workloads.</p>
+
+        <h3>Key scenarios:</h3>
+        <ul>
+            <li><strong>SQL Server FCI</strong> (Failover Cluster Instance) — shared data/log disks</li>
+            <li><strong>SAP ASCS/ERS clusters</strong> — shared transport directory</li>
+            <li><strong>Windows Server Failover Clusters</strong> — clustered file servers</li>
+        </ul>
+
+        <h3>Constraints &amp; design rules:</h3>
+        <ul>
+            <li>Supported on Premium SSD, Premium SSD v2, and Ultra Disk only</li>
+            <li>Max hosts: 10 (Premium SSD/v2), 5 (Ultra) — varies by disk size</li>
+            <li><strong>No built-in fencing</strong> — you must use SCSI PR (Persistent Reservations) or application-level coordination</li>
+            <li>ReadOnly host caching disabled — always <code>None</code></li>
+            <li>Availability Zone alignment required — all VMs must be in same AZ or use AZ-spanning with Ultra</li>
+        </ul>
+
+        <div class="callout warning">
+            <strong>Architect decision:</strong> Shared disks are for cluster-aware applications ONLY. They are NOT a general-purpose shared file system. For shared file access, use Azure Files, Azure NetApp Files, or NFS.
+        </div>
+    </section>
+
+    <!-- Section 8: Real-World -->
+    <section id="real-world" class="fade-in">
+        <h2>8. Real-World: SQL Server Always On with Sub-5ms Latency</h2>
+
+        <div class="real-world-scenario">
+            <h3>📋 Scenario</h3>
+            <p>A financial services company is migrating SQL Server Always On Availability Groups to Azure. Requirements:</p>
+            <ul>
+                <li>Write latency p99 &lt; 5 ms on transaction log</li>
+                <li>60,000 IOPS sustained on data files</li>
+                <li>Encryption with customer-controlled keys (PCI-DSS)</li>
+                <li>Multi-AZ for HA, RPO = 0</li>
+            </ul>
+
+            <h3>🏗️ Architecture Decision</h3>
+            <table class="compare-table">
+                <thead>
+                    <tr><th>Component</th><th>Choice</th><th>Rationale</th></tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td>VM Size</td>
+                        <td>Standard_E64s_v5</td>
+                        <td>80,000 uncached IOPS / 2,000 MB/s — headroom above 60K requirement</td>
+                    </tr>
+                    <tr>
+                        <td>Data Disks</td>
+                        <td>Premium SSD v2 × 2 (striped)<br>30,000 IOPS each = 60,000 total</td>
+                        <td>Independent IOPS tuning avoids over-provisioning capacity</td>
+                    </tr>
+                    <tr>
+                        <td>Log Disk</td>
+                        <td>Premium SSD v2 × 1<br>512 GiB / 20,000 IOPS</td>
+                        <td>Sub-ms latency meets &lt;5ms p99 requirement with margin</td>
+                    </tr>
+                    <tr>
+                        <td>TempDB</td>
+                        <td>Local NVMe (ephemeral)</td>
+                        <td>Lowest latency, acceptable data loss (tempdb is transient)</td>
+                    </tr>
+                    <tr>
+                        <td>Encryption</td>
+                        <td>CMK via Disk Encryption Set + Encryption at Host</td>
+                        <td>PCI requires key custody; host encryption covers caches</td>
+                    </tr>
+                    <tr>
+                        <td>HA</td>
+                        <td>AG with synchronous commit across 2 AZs</td>
+                        <td>RPO = 0 with automatic failover</td>
+                    </tr>
+                </tbody>
+            </table>
+
+            <h3>Why not Ultra Disk?</h3>
+            <p>Premium SSD v2 delivers sub-ms latency at lower cost. Ultra would be justified only if the workload exceeded 80,000 IOPS per disk or needed guaranteed sub-0.5ms p99. The financial model showed 40% cost savings with Premium SSD v2 for equivalent performance.</p>
+        </div>
+    </section>
+
+    <!-- Quiz -->
+    <section id="quiz" class="fade-in">
+        <h2>Knowledge Check</h2>
+        <div id="quiz-container"></div>
+    </section>
+
+    <!-- Navigation -->
+    <nav class="lesson-nav fade-in">
+        <a href="0012-storage-accounts-deep-dive.html" class="prev">← Lesson 012: Storage Accounts Deep Dive</a>
+        <a href="0014-database-solutions.html" class="next">Lesson 014: Database Solutions →</a>
+    </nav>
+
+</div>
+
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    // Initialize diagrams
+    if (typeof defined !== 'undefined' || typeof BoxDiagram !== 'undefined') {
+        document.querySelectorAll('.box-diagram[data-diagram]').forEach(el => {
+            try {
+                const config = JSON.parse(el.getAttribute('data-diagram'));
+                if (typeof BoxDiagram !== 'undefined') BoxDiagram.render(el, config);
+            } catch(e) { console.warn('Diagram parse error:', e); }
+        });
+    }
+
+    // Quiz
+    AzureLessons.Quiz('quiz-container', [
+        {
+            question: "A team deploys an E8s_v5 VM (12,800 uncached IOPS) with 4× P30 Premium SSD disks (5,000 IOPS each = 20,000 total). What effective IOPS will the workload achieve?",
+            options: [
+                "20,000 IOPS — disk performance is additive",
+                "12,800 IOPS — VM size is the bottleneck",
+                "5,000 IOPS — limited to single disk performance",
+                "80,000 IOPS — bursting provides additional headroom"
+            ],
+            correct: 1,
+            explanation: "Effective IOPS = min(VM cap, Σ disk IOPS) = min(12,800, 20,000) = 12,800. The VM's uncached disk IOPS limit caps total IO regardless of how many disks are attached. Solution: upgrade to a larger VM size."
+        },
+        {
+            question: "Which encryption option protects data on temporary disks and in the host-level disk cache?",
+            options: [
+                "Platform-Managed Keys (PMK) — default encryption",
+                "Customer-Managed Keys (CMK) via Disk Encryption Set",
+                "Azure Disk Encryption (BitLocker/DM-Crypt)",
+                "Encryption at Host"
+            ],
+            correct: 3,
+            explanation: "Encryption at Host encrypts data on the VM host before it reaches storage, covering temp disks and OS/data disk caches. PMK and CMK only protect data at the storage layer. ADE protects OS/data disk content but not host-level caches."
+        },
+        {
+            question: "An architect needs 50,000 IOPS on a 256 GiB disk for a database log volume. Which tier is most cost-effective?",
+            options: [
+                "Premium SSD P50 (4 TiB) — only way to get 50K IOPS on Premium v1",
+                "Premium SSD v2 — provision 256 GiB with 50,000 IOPS independently",
+                "Ultra Disk — only tier supporting 50K IOPS",
+                "Standard SSD with on-demand bursting enabled"
+            ],
+            correct: 1,
+            explanation: "Premium SSD v2 decouples capacity from IOPS. You can provision exactly 256 GiB with 50,000 IOPS — no need to buy 4 TiB just for performance (Premium v1) or pay Ultra Disk premium. Standard SSD max is 6,000 IOPS."
+        },
+        {
+            question: "A SQL Server Failover Cluster Instance (FCI) needs shared storage in Azure across 2 VMs. Which combination is valid?",
+            options: [
+                "Standard SSD with shared disk enabled, host caching = ReadWrite",
+                "Premium SSD with shared disk enabled, host caching = None, SCSI Persistent Reservations",
+                "Azure Files Premium with SMB Multichannel",
+                "Premium SSD with shared disk enabled, host caching = ReadOnly"
+            ],
+            correct: 1,
+            explanation: "Shared disks for FCI require Premium SSD (or v2/Ultra), host caching must be None (mandatory for shared disks), and SCSI Persistent Reservations provide fencing. Azure Files works for some scenarios but FCI specifically requires block storage. ReadOnly/ReadWrite caching is not supported on shared disks."
+        }
+    ]);
+
+    // Initialize interactions
+    AzureLessons.ScrollReveal();
+    AzureLessons.Collapsible();
+});
+</script>
+</body>
+</html>

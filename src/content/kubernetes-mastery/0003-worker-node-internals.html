@@ -1,0 +1,464 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lesson 3: Worker Node Internals</title>
+    <style>
+        :root {
+            --bg: #fafafa; --text: #1a1a1a; --accent: #326ce5;
+            --accent-light: #e8f0fe; --border: #e0e0e0; --code-bg: #f5f5f5;
+            --success: #2e7d32; --warn: #f57c00;
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: 'Georgia', serif; line-height: 1.7; color: var(--text); background: var(--bg); max-width: 780px; margin: 0 auto; padding: 2rem 1.5rem; }
+        h1 { font-size: 2rem; margin-bottom: 0.5rem; color: var(--accent); }
+        h2 { font-size: 1.4rem; margin-top: 2.5rem; margin-bottom: 0.8rem; border-bottom: 2px solid var(--accent); padding-bottom: 0.3rem; }
+        h3 { font-size: 1.1rem; margin-top: 1.5rem; margin-bottom: 0.5rem; }
+        p { margin-bottom: 1rem; }
+        .meta { color: #666; font-size: 0.9rem; margin-bottom: 2rem; }
+        .key-insight { background: var(--accent-light); border-left: 4px solid var(--accent); padding: 1rem 1.2rem; margin: 1.5rem 0; border-radius: 0 4px 4px 0; }
+        .key-insight strong { color: var(--accent); }
+        .production-note { background: #fff3e0; border-left: 4px solid var(--warn); padding: 1rem 1.2rem; margin: 1.5rem 0; border-radius: 0 4px 4px 0; }
+        .production-note::before { content: "🏭 Production: "; font-weight: bold; }
+        code { font-family: 'Menlo', 'Consolas', monospace; font-size: 0.85em; background: var(--code-bg); padding: 0.15em 0.4em; border-radius: 3px; }
+        pre { background: var(--code-bg); padding: 1rem; border-radius: 4px; overflow-x: auto; margin: 1rem 0; font-size: 0.85rem; line-height: 1.5; }
+        ul, ol { margin: 0.5rem 0 1rem 1.5rem; }
+        li { margin-bottom: 0.4rem; }
+        table { width: 100%; border-collapse: collapse; margin: 1rem 0; font-size: 0.9rem; }
+        th, td { border: 1px solid var(--border); padding: 0.6rem 0.8rem; text-align: left; }
+        th { background: var(--accent-light); font-weight: bold; }
+        .diagram { background: white; border: 1px solid var(--border); border-radius: 8px; padding: 1.5rem; margin: 1.5rem 0; text-align: center; }
+        .cert-badge { display: inline-block; background: var(--accent); color: white; font-size: 0.7rem; padding: 0.15rem 0.5rem; border-radius: 10px; margin-left: 0.5rem; }
+        .quiz { background: #f9f9f9; border: 1px solid var(--border); border-radius: 8px; padding: 1.5rem; margin-top: 2rem; }
+        .quiz h2 { border-bottom: none; margin-top: 0; }
+        .quiz-q { margin-bottom: 1.2rem; }
+        .quiz-q p { font-weight: bold; margin-bottom: 0.3rem; }
+        .quiz-answer { display: none; background: #e8f5e9; padding: 0.5rem 0.8rem; border-radius: 4px; margin-top: 0.5rem; }
+        .reveal-btn { background: var(--accent); color: white; border: none; padding: 0.3rem 0.8rem; border-radius: 4px; cursor: pointer; font-size: 0.8rem; }
+        .reveal-btn:hover { opacity: 0.85; }
+    </style>
+</head>
+<body>
+
+<h1>Lesson 3: Worker Node Internals</h1>
+<p class="meta">Chapter 1: Foundations & Architecture · <span class="cert-badge">CKA</span> <span class="cert-badge">CKAD</span> · ~20 min</p>
+
+<p>The control plane makes decisions. Worker nodes <em>execute</em> them. Every container you run lives on a worker node, managed by three components working in concert: the <strong>kubelet</strong>, <strong>kube-proxy</strong>, and the <strong>container runtime</strong>.</p>
+
+<h2>1. kubelet — The Node Agent</h2>
+
+<p>The kubelet is a <strong>systemd service</strong> (not a container) running on every worker node. It is the bridge between the Kubernetes API and the container runtime on that machine.</p>
+
+<h3>What the kubelet Does</h3>
+
+<ol>
+    <li><strong>Watches</strong> the API server for Pods assigned to its node (via <code>spec.nodeName</code>)</li>
+    <li><strong>Translates</strong> Pod specs into container runtime calls (via CRI)</li>
+    <li><strong>Manages</strong> Pod lifecycle — starts, stops, restarts containers</li>
+    <li><strong>Runs probes</strong> — liveness, readiness, startup</li>
+    <li><strong>Reports status</strong> — Pod conditions and node conditions back to the API server</li>
+    <li><strong>Manages volumes</strong> — mounts/unmounts as Pods start/stop</li>
+    <li><strong>Enforces resources</strong> — sets cgroup limits for CPU/memory</li>
+    <li><strong>Evicts Pods</strong> — when node is under resource pressure</li>
+</ol>
+
+<div class="diagram">
+<svg viewBox="0 0 650 220" xmlns="http://www.w3.org/2000/svg" font-family="Menlo, monospace" font-size="10">
+    <defs><marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0 L10 5 L0 10z" fill="#326ce5"/></marker></defs>
+    
+    <!-- API Server (remote) -->
+    <rect x="10" y="80" width="100" height="50" rx="5" fill="#e8f0fe" stroke="#326ce5" stroke-width="1.5"/>
+    <text x="60" y="103" text-anchor="middle" font-size="9" font-weight="bold">API Server</text>
+    <text x="60" y="118" text-anchor="middle" font-size="8" fill="#666">(remote)</text>
+    
+    <!-- kubelet -->
+    <rect x="170" y="60" width="130" height="90" rx="6" fill="#e8f5e9" stroke="#2e7d32" stroke-width="2"/>
+    <text x="235" y="85" text-anchor="middle" font-weight="bold" font-size="11">kubelet</text>
+    <text x="235" y="100" text-anchor="middle" font-size="8" fill="#666">Pod Lifecycle Mgr</text>
+    <text x="235" y="113" text-anchor="middle" font-size="8" fill="#666">PLEG</text>
+    <text x="235" y="126" text-anchor="middle" font-size="8" fill="#666">Volume Manager</text>
+    <text x="235" y="139" text-anchor="middle" font-size="8" fill="#666">Eviction Manager</text>
+    
+    <!-- CRI -->
+    <rect x="360" y="50" width="120" height="50" rx="5" fill="#fff3e0" stroke="#f57c00" stroke-width="1.5"/>
+    <text x="420" y="73" text-anchor="middle" font-weight="bold" font-size="9">Container Runtime</text>
+    <text x="420" y="88" text-anchor="middle" font-size="8" fill="#666">containerd / CRI-O</text>
+    
+    <!-- CNI -->
+    <rect x="360" y="120" width="120" height="40" rx="5" fill="#f3e5f5" stroke="#7b1fa2" stroke-width="1.5"/>
+    <text x="420" y="143" text-anchor="middle" font-weight="bold" font-size="9">CNI Plugin</text>
+    
+    <!-- CSI -->
+    <rect x="530" y="50" width="100" height="50" rx="5" fill="#e3f2fd" stroke="#1565c0" stroke-width="1.5"/>
+    <text x="580" y="73" text-anchor="middle" font-weight="bold" font-size="9">CSI Driver</text>
+    <text x="580" y="88" text-anchor="middle" font-size="8" fill="#666">(storage)</text>
+    
+    <!-- Pods -->
+    <rect x="530" y="140" width="100" height="50" rx="5" fill="#c8e6c9" stroke="#2e7d32" stroke-width="1"/>
+    <text x="580" y="163" text-anchor="middle" font-size="9" font-weight="bold">Pods</text>
+    <text x="580" y="178" text-anchor="middle" font-size="8" fill="#666">(containers)</text>
+    
+    <!-- Arrows -->
+    <line x1="110" y1="105" x2="170" y2="105" stroke="#326ce5" stroke-width="1.5" marker-end="url(#arr)"/>
+    <text x="140" y="98" text-anchor="middle" font-size="7" fill="#666">watch</text>
+    
+    <line x1="300" y1="80" x2="360" y2="75" stroke="#f57c00" stroke-width="1.5" marker-end="url(#arr)"/>
+    <text x="330" y="70" text-anchor="middle" font-size="7" fill="#666">CRI gRPC</text>
+    
+    <line x1="300" y1="130" x2="360" y2="135" stroke="#7b1fa2" stroke-width="1.5" marker-end="url(#arr)"/>
+    <text x="330" y="142" text-anchor="middle" font-size="7" fill="#666">CNI</text>
+    
+    <line x1="480" y1="75" x2="530" y2="75" stroke="#1565c0" stroke-width="1.5" marker-end="url(#arr)"/>
+    <line x1="480" y1="100" x2="550" y2="140" stroke="#2e7d32" stroke-width="1" marker-end="url(#arr)"/>
+</svg>
+</div>
+
+<h3>PLEG — Pod Lifecycle Event Generator</h3>
+
+<p>The kubelet doesn't poll the container runtime constantly. Instead, <strong>PLEG</strong> periodically (every 1 second) queries the runtime for the list of all containers and compares it to the last known state. Changes generate events that trigger the kubelet's sync loop.</p>
+
+<pre># A common production issue:
+PLEG is not healthy
+# This means PLEG took >3min to relist containers.
+# Causes: overloaded node, slow container runtime, too many containers on one node.</pre>
+
+<div class="production-note">
+    "PLEG is not healthy" is one of the most common node NotReady causes. It typically means the node has too many Pods (container runtime is slow to list) or the runtime itself is stuck. Solution: check container runtime health, reduce Pod density, or investigate I/O pressure.
+</div>
+
+<h3>kubelet Pod Admission</h3>
+
+<p>Before starting a Pod, the kubelet runs its own admission checks (separate from API server admission):</p>
+
+<ul>
+    <li><strong>Resource check</strong>: Does the node have enough allocatable CPU/memory?</li>
+    <li><strong>PID pressure</strong>: Is the node running out of process IDs?</li>
+    <li><strong>Node affinity</strong>: Double-check (in case of race conditions)</li>
+    <li><strong>Tolerations</strong>: Can the Pod tolerate the node's taints?</li>
+</ul>
+
+<p>If admission fails, the Pod stays Pending with a reason like <code>OutOfCpu</code> or <code>OutOfMemory</code>.</p>
+
+<h3>Node Registration</h3>
+
+<p>When the kubelet starts, it <strong>self-registers</strong> with the API server — creating or updating its Node object with:</p>
+
+<ul>
+    <li>Capacity (total CPU, memory, max pods)</li>
+    <li>Allocatable (capacity minus system-reserved and kube-reserved)</li>
+    <li>Node conditions (Ready, MemoryPressure, DiskPressure, PIDPressure)</li>
+    <li>Node labels and annotations</li>
+</ul>
+
+<pre># Check allocatable vs capacity:
+kubectl describe node worker-1 | grep -A5 "Allocatable"
+# Allocatable:
+#   cpu:     3800m       (4 cores - 200m reserved)
+#   memory:  7400Mi      (8Gi - 600Mi reserved)
+#   pods:    110         (default max)</pre>
+
+<div class="key-insight">
+    <strong>Key:</strong> <code>Allocatable ≠ Capacity</code>. The kubelet reserves resources for system daemons (<code>--system-reserved</code>) and for itself (<code>--kube-reserved</code>). The scheduler uses <em>allocatable</em> when deciding if a Pod fits.
+</div>
+
+<h2>2. kube-proxy — Service Networking</h2>
+
+<p>kube-proxy makes <code>Service</code> objects work. When you create a Service with a ClusterIP, kube-proxy ensures that any traffic sent to that virtual IP gets routed to one of the backing Pods.</p>
+
+<h3>Three Modes</h3>
+
+<table>
+    <tr><th>Mode</th><th>Mechanism</th><th>When to Use</th></tr>
+    <tr><td><strong>iptables</strong> (default)</td><td>Programs iptables rules for NAT</td><td>Most clusters < 5000 Services</td></tr>
+    <tr><td><strong>IPVS</strong></td><td>Uses Linux IPVS kernel module (L4 load balancer)</td><td>Large clusters, need advanced LB algorithms</td></tr>
+    <tr><td><strong>nftables</strong> (new, v1.29+)</td><td>Uses nftables instead of iptables</td><td>Modern kernels, replacing iptables</td></tr>
+</table>
+
+<h3>How iptables Mode Works</h3>
+
+<p>For each Service, kube-proxy creates iptables rules that:</p>
+
+<ol>
+    <li><strong>DNAT</strong> packets destined for the ClusterIP to a randomly-selected Pod IP</li>
+    <li>Apply <strong>probability-based</strong> load balancing (each Pod gets 1/N chance)</li>
+    <li>Handle <strong>session affinity</strong> if configured</li>
+</ol>
+
+<pre># Example: Service "web" (10.96.0.100:80) → 3 Pods
+# kube-proxy generates rules like:
+-A KUBE-SERVICES -d 10.96.0.100/32 -p tcp --dport 80 -j KUBE-SVC-XXXXX
+-A KUBE-SVC-XXXXX -m statistic --mode random --probability 0.333 -j KUBE-SEP-AAA
+-A KUBE-SVC-XXXXX -m statistic --mode random --probability 0.500 -j KUBE-SEP-BBB
+-A KUBE-SVC-XXXXX -j KUBE-SEP-CCC
+-A KUBE-SEP-AAA -p tcp -j DNAT --to-destination 10.244.1.5:8080
+-A KUBE-SEP-BBB -p tcp -j DNAT --to-destination 10.244.2.3:8080
+-A KUBE-SEP-CCC -p tcp -j DNAT --to-destination 10.244.3.7:8080</pre>
+
+<div class="key-insight">
+    <strong>Key:</strong> kube-proxy doesn't proxy traffic itself (despite the name). It programs kernel-level rules. Traffic flows directly from source Pod → destination Pod via the kernel's networking stack. kube-proxy just configures the rules.
+</div>
+
+<h3>Why IPVS at Scale?</h3>
+
+<p>iptables rules are O(n) — every packet traverses the chain linearly. With 10,000 Services × 10 endpoints = 100,000 rules, this gets slow. IPVS uses hash tables (O(1) lookup) and supports multiple load-balancing algorithms: round-robin, least-connections, weighted, etc.</p>
+
+<div class="production-note">
+    Signs you need IPVS: high latency on service calls, <code>iptables-save</code> output is hundreds of thousands of lines, kube-proxy takes minutes to sync rules after endpoint changes. Switch with: <code>kube-proxy --proxy-mode=ipvs</code>.
+</div>
+
+<h3>The "No kube-proxy" Option</h3>
+
+<p>Modern CNI plugins like <strong>Cilium</strong> can replace kube-proxy entirely using eBPF. Instead of iptables/IPVS rules, Cilium programs eBPF maps in the kernel — faster lookups, more features (topology-aware routing, Maglev hashing), and easier debugging.</p>
+
+<h2>3. Container Runtime & CRI</h2>
+
+<p>The kubelet doesn't run containers directly. It speaks the <strong>Container Runtime Interface (CRI)</strong> — a gRPC API — to a container runtime that does the actual work.</p>
+
+<h3>CRI Architecture</h3>
+
+<div class="diagram">
+<svg viewBox="0 0 600 150" xmlns="http://www.w3.org/2000/svg" font-family="Menlo, monospace" font-size="10">
+    <defs><marker id="arr5" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0 L10 5 L0 10z" fill="#326ce5"/></marker></defs>
+    
+    <rect x="10" y="50" width="90" height="50" rx="5" fill="#e8f5e9" stroke="#2e7d32" stroke-width="1.5"/>
+    <text x="55" y="78" text-anchor="middle" font-weight="bold">kubelet</text>
+    
+    <line x1="100" y1="75" x2="150" y2="75" stroke="#326ce5" stroke-width="2" marker-end="url(#arr5)"/>
+    <text x="125" y="65" text-anchor="middle" font-size="8" fill="#666">CRI gRPC</text>
+    
+    <rect x="150" y="30" width="120" height="90" rx="5" fill="#fff3e0" stroke="#f57c00" stroke-width="1.5"/>
+    <text x="210" y="55" text-anchor="middle" font-weight="bold">containerd</text>
+    <text x="210" y="70" text-anchor="middle" font-size="8" fill="#666">Image mgmt</text>
+    <text x="210" y="83" text-anchor="middle" font-size="8" fill="#666">Snapshot mgmt</text>
+    <text x="210" y="96" text-anchor="middle" font-size="8" fill="#666">Task lifecycle</text>
+    <text x="210" y="109" text-anchor="middle" font-size="8" fill="#666">Networking (CNI)</text>
+    
+    <line x1="270" y1="75" x2="320" y2="55" stroke="#f57c00" stroke-width="1.5" marker-end="url(#arr5)"/>
+    <line x1="270" y1="75" x2="320" y2="95" stroke="#f57c00" stroke-width="1.5" marker-end="url(#arr5)"/>
+    
+    <rect x="320" y="30" width="100" height="40" rx="4" fill="#e8f0fe" stroke="#326ce5" stroke-width="1"/>
+    <text x="370" y="48" text-anchor="middle" font-size="9" font-weight="bold">runc</text>
+    <text x="370" y="62" text-anchor="middle" font-size="8" fill="#666">OCI runtime</text>
+    
+    <rect x="320" y="80" width="100" height="40" rx="4" fill="#f3e5f5" stroke="#7b1fa2" stroke-width="1"/>
+    <text x="370" y="98" text-anchor="middle" font-size="9" font-weight="bold">kata / gVisor</text>
+    <text x="370" y="112" text-anchor="middle" font-size="8" fill="#666">sandboxed</text>
+    
+    <rect x="460" y="30" width="120" height="40" rx="4" fill="#c8e6c9" stroke="#2e7d32" stroke-width="1"/>
+    <text x="520" y="53" text-anchor="middle" font-size="9">Linux container</text>
+    
+    <rect x="460" y="80" width="120" height="40" rx="4" fill="#c8e6c9" stroke="#2e7d32" stroke-width="1"/>
+    <text x="520" y="103" text-anchor="middle" font-size="9">microVM / sandbox</text>
+    
+    <line x1="420" y1="50" x2="460" y2="50" stroke="#326ce5" stroke-width="1" marker-end="url(#arr5)"/>
+    <line x1="420" y1="100" x2="460" y2="100" stroke="#7b1fa2" stroke-width="1" marker-end="url(#arr5)"/>
+</svg>
+</div>
+
+<h3>CRI API — Two Services</h3>
+
+<table>
+    <tr><th>Service</th><th>Methods</th><th>Purpose</th></tr>
+    <tr><td><strong>RuntimeService</strong></td><td>RunPodSandbox, CreateContainer, StartContainer, StopContainer, RemoveContainer</td><td>Pod & container lifecycle</td></tr>
+    <tr><td><strong>ImageService</strong></td><td>PullImage, ListImages, RemoveImage, ImageStatus</td><td>Image management</td></tr>
+</table>
+
+<h3>containerd vs CRI-O</h3>
+
+<table>
+    <tr><th>Feature</th><th>containerd</th><th>CRI-O</th></tr>
+    <tr><td>Origin</td><td>Docker (extracted as standalone)</td><td>Red Hat / Kubernetes SIG</td></tr>
+    <tr><td>Scope</td><td>General-purpose (also used outside K8s)</td><td>Kubernetes-only</td></tr>
+    <tr><td>Used by</td><td>EKS, GKE, Docker Desktop, k3s</td><td>OpenShift, some kubeadm setups</td></tr>
+    <tr><td>OCI runtime</td><td>runc (default), kata, gVisor</td><td>runc (default), kata, gVisor</td></tr>
+    <tr><td>Footprint</td><td>Slightly larger (more features)</td><td>Minimal, K8s-focused</td></tr>
+</table>
+
+<div class="key-insight">
+    <strong>Docker removal (K8s 1.24):</strong> Kubernetes dropped <code>dockershim</code>. Docker was never a CRI-compliant runtime — the kubelet used a shim layer. Now it speaks CRI directly to containerd or CRI-O. Docker-built images still work perfectly (they're OCI images).
+</div>
+
+<h2>4. Pod Sandbox Lifecycle</h2>
+
+<p>A Pod is <em>not</em> just "a group of containers." At the OS level, a Pod is a <strong>sandbox</strong> — a set of shared Linux namespaces that containers join.</p>
+
+<h3>The Pause Container</h3>
+
+<p>Every Pod has a hidden "pause" container (also called the "infra container"). It's a tiny process that:</p>
+
+<ol>
+    <li>Creates and holds the Pod's network namespace</li>
+    <li>Acts as PID 1 (reaps zombie processes)</li>
+    <li>Stays running for the Pod's entire lifetime</li>
+</ol>
+
+<p>All other containers in the Pod <em>join</em> the pause container's namespaces. This is why containers in the same Pod share:</p>
+
+<table>
+    <tr><th>Shared</th><th>Implication</th></tr>
+    <tr><td>Network namespace</td><td>Same IP, same ports, <code>localhost</code> communication</td></tr>
+    <tr><td>IPC namespace</td><td>Shared memory, semaphores between containers</td></tr>
+    <tr><td>UTS namespace (optional)</td><td>Same hostname</td></tr>
+    <tr><td><strong>NOT shared:</strong> PID namespace (unless <code>shareProcessNamespace: true</code>)</td><td>By default, each container has its own PID 1</td></tr>
+    <tr><td><strong>NOT shared:</strong> Filesystem</td><td>Must use <code>emptyDir</code> volumes to share files</td></tr>
+</table>
+
+<h3>Full Pod Startup Sequence</h3>
+
+<div class="diagram">
+<svg viewBox="0 0 650 280" xmlns="http://www.w3.org/2000/svg" font-family="Menlo, monospace" font-size="9">
+    <defs><marker id="arr6" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto"><path d="M0 0 L10 5 L0 10z" fill="#326ce5"/></marker></defs>
+    
+    <!-- Step boxes -->
+    <rect x="10" y="10" width="190" height="35" rx="4" fill="#e8f0fe" stroke="#326ce5" stroke-width="1.5"/>
+    <text x="105" y="31" text-anchor="middle" font-size="9">1. RunPodSandbox (pause ctr)</text>
+    
+    <rect x="10" y="55" width="190" height="35" rx="4" fill="#f3e5f5" stroke="#7b1fa2" stroke-width="1.5"/>
+    <text x="105" y="76" text-anchor="middle" font-size="9">2. CNI: attach network interface</text>
+    
+    <rect x="10" y="100" width="190" height="35" rx="4" fill="#fff3e0" stroke="#f57c00" stroke-width="1.5"/>
+    <text x="105" y="121" text-anchor="middle" font-size="9">3. Pull images (if not cached)</text>
+    
+    <rect x="10" y="145" width="190" height="35" rx="4" fill="#e8f5e9" stroke="#2e7d32" stroke-width="1.5"/>
+    <text x="105" y="166" text-anchor="middle" font-size="9">4. Run init containers (sequential)</text>
+    
+    <rect x="10" y="190" width="190" height="35" rx="4" fill="#e8f5e9" stroke="#2e7d32" stroke-width="1.5"/>
+    <text x="105" y="211" text-anchor="middle" font-size="9">5. Run app containers (parallel)</text>
+    
+    <rect x="10" y="235" width="190" height="35" rx="4" fill="#c8e6c9" stroke="#2e7d32" stroke-width="1.5"/>
+    <text x="105" y="256" text-anchor="middle" font-size="9">6. Start probes (startup first)</text>
+    
+    <!-- Arrows -->
+    <path d="M 105 45 L 105 55" stroke="#326ce5" stroke-width="1" marker-end="url(#arr6)"/>
+    <path d="M 105 90 L 105 100" stroke="#326ce5" stroke-width="1" marker-end="url(#arr6)"/>
+    <path d="M 105 135 L 105 145" stroke="#326ce5" stroke-width="1" marker-end="url(#arr6)"/>
+    <path d="M 105 180 L 105 190" stroke="#326ce5" stroke-width="1" marker-end="url(#arr6)"/>
+    <path d="M 105 225 L 105 235" stroke="#326ce5" stroke-width="1" marker-end="url(#arr6)"/>
+    
+    <!-- Annotations -->
+    <text x="220" y="31" font-size="8" fill="#666">Creates network ns, IPC ns, mounts</text>
+    <text x="220" y="76" font-size="8" fill="#666">Assigns Pod IP, sets up veth pair</text>
+    <text x="220" y="121" font-size="8" fill="#666">ImagePullBackOff if this fails</text>
+    <text x="220" y="166" font-size="8" fill="#666">Each must exit 0 before next starts</text>
+    <text x="220" y="211" font-size="8" fill="#666">All app containers start together</text>
+    <text x="220" y="256" font-size="8" fill="#666">Pod becomes Ready when readiness passes</text>
+</svg>
+</div>
+
+<h3>Pod Shutdown Sequence</h3>
+
+<p>When a Pod is deleted, the kubelet executes a graceful shutdown:</p>
+
+<ol>
+    <li>Pod enters <code>Terminating</code> state</li>
+    <li>Pod is removed from Service endpoints (stops receiving traffic)</li>
+    <li><code>preStop</code> hook runs (if defined)</li>
+    <li><code>SIGTERM</code> sent to PID 1 in each container</li>
+    <li>Wait up to <code>terminationGracePeriodSeconds</code> (default: 30s)</li>
+    <li>If still running: <code>SIGKILL</code></li>
+    <li>CNI: detach network</li>
+    <li>Remove sandbox</li>
+</ol>
+
+<div class="production-note">
+    A common bug: your app doesn't handle SIGTERM, and gets SIGKILL'd after 30s. Users see connection resets during deploys. Fix: handle SIGTERM in your app (graceful drain), or use a <code>preStop</code> hook: <code>lifecycle.preStop.exec.command: ["sleep", "5"]</code> to give in-flight requests time to complete.
+</div>
+
+<div class="key-insight">
+    <strong>Race condition:</strong> Endpoint removal (step 2) and SIGTERM (step 4) happen <em>concurrently</em>, not sequentially. Traffic might still arrive after SIGTERM is sent because kube-proxy hasn't updated its rules yet. This is why the <code>preStop: sleep 5</code> pattern exists — it gives time for endpoint propagation.
+</div>
+
+<h2>5. Eviction Manager — When the Node Runs Out</h2>
+
+<p>The kubelet monitors node resources and evicts Pods when thresholds are breached:</p>
+
+<table>
+    <tr><th>Signal</th><th>Default Threshold</th><th>Condition Set</th></tr>
+    <tr><td><code>memory.available</code></td><td>&lt; 100Mi</td><td>MemoryPressure</td></tr>
+    <tr><td><code>nodefs.available</code></td><td>&lt; 10%</td><td>DiskPressure</td></tr>
+    <tr><td><code>imagefs.available</code></td><td>&lt; 15%</td><td>DiskPressure</td></tr>
+    <tr><td><code>pid.available</code></td><td>&lt; varies</td><td>PIDPressure</td></tr>
+</table>
+
+<h3>Eviction Order (QoS-based)</h3>
+
+<ol>
+    <li><strong>BestEffort</strong> Pods (no requests/limits) — evicted first</li>
+    <li><strong>Burstable</strong> Pods exceeding their requests</li>
+    <li><strong>Guaranteed</strong> Pods (requests = limits) — evicted last, only in extreme pressure</li>
+</ol>
+
+<div class="production-note">
+    Always set resource requests on production workloads. Without them, your Pods are BestEffort and are the first to be killed under memory pressure — regardless of how important they are. Resource requests are not just for scheduling — they're your eviction shield.
+</div>
+
+<h2>Node Status — What the Control Plane Sees</h2>
+
+<pre>kubectl describe node worker-1
+
+Conditions:
+  Type             Status  Reason
+  ----             ------  ------
+  Ready            True    KubeletReady
+  MemoryPressure   False   KubeletHasSufficientMemory
+  DiskPressure     False   KubeletHasNoDiskPressure
+  PIDPressure      False   KubeletHasSufficientPID
+
+# If Ready becomes Unknown (kubelet stops reporting):
+# → Node controller waits 40s, then marks NotReady
+# → After pod-eviction-timeout (5min), Pods are evicted</pre>
+
+<h2>Summary</h2>
+
+<table>
+    <tr><th>Component</th><th>Runs As</th><th>Primary Job</th><th>Failure Impact</th></tr>
+    <tr><td>kubelet</td><td>systemd service</td><td>Pod lifecycle, reporting</td><td>Node goes NotReady, no new Pods</td></tr>
+    <tr><td>kube-proxy</td><td>DaemonSet (usually)</td><td>Service → Pod routing rules</td><td>Services stop working on that node</td></tr>
+    <tr><td>containerd</td><td>systemd service</td><td>Pull images, run containers</td><td>No containers start, PLEG fails</td></tr>
+    <tr><td>pause container</td><td>Per-Pod infra container</td><td>Hold namespaces</td><td>Pod's network dies</td></tr>
+</table>
+
+<!-- Quiz -->
+<div class="quiz">
+    <h2>📝 Quiz: Worker Node Internals</h2>
+    
+    <div class="quiz-q">
+        <p>Q1: What is the pause container and why does every Pod have one?</p>
+        <button class="reveal-btn" onclick="this.nextElementSibling.style.display='block'">Show Answer</button>
+        <div class="quiz-answer">The pause container is a minimal infra container that <strong>creates and holds the Pod's network namespace</strong>. Other containers join its namespaces. It ensures the network namespace persists even if app containers restart, and it serves as PID 1 to reap zombie processes.</div>
+    </div>
+    
+    <div class="quiz-q">
+        <p>Q2: A Pod has containers A and B. Container A listens on port 8080. How does container B reach it?</p>
+        <button class="reveal-btn" onclick="this.nextElementSibling.style.display='block'">Show Answer</button>
+        <div class="quiz-answer"><code>localhost:8080</code>. Since both containers share the same network namespace (via the pause container), they share the same network stack and can communicate over localhost.</div>
+    </div>
+    
+    <div class="quiz-q">
+        <p>Q3: You see "PLEG is not healthy" in kubelet logs. What does this mean and what do you check?</p>
+        <button class="reveal-btn" onclick="this.nextElementSibling.style.display='block'">Show Answer</button>
+        <div class="quiz-answer">PLEG (Pod Lifecycle Event Generator) took too long to list containers from the runtime (>3 min). Check: <strong>(1)</strong> Container runtime health (<code>crictl ps</code>). <strong>(2)</strong> Node I/O and CPU pressure. <strong>(3)</strong> Number of Pods/containers on that node — may be too many.</div>
+    </div>
+    
+    <div class="quiz-q">
+        <p>Q4: During a rolling deployment, users see brief connection resets. What's likely happening and how do you fix it?</p>
+        <button class="reveal-btn" onclick="this.nextElementSibling.style.display='block'">Show Answer</button>
+        <div class="quiz-answer"><strong>Race condition:</strong> SIGTERM is sent to the Pod concurrently with endpoint removal. Traffic arrives after the Pod starts shutting down but before kube-proxy removes it from routing rules. Fix: add a <code>preStop: sleep 5</code> hook to delay shutdown, giving endpoint propagation time to complete.</div>
+    </div>
+    
+    <div class="quiz-q">
+        <p>Q5: Why does Kubernetes use CRI (an abstraction) instead of calling containerd directly?</p>
+        <button class="reveal-btn" onclick="this.nextElementSibling.style.display='block'">Show Answer</button>
+        <div class="quiz-answer"><strong>Pluggability.</strong> CRI is a standard gRPC interface that any runtime can implement. This lets you swap containerd for CRI-O, or use specialized runtimes (gVisor, Kata) for different security/isolation needs — without changing the kubelet at all.</div>
+    </div>
+    
+    <div class="quiz-q">
+        <p>Q6: A node has 4 CPU cores. <code>--kube-reserved=500m</code> and <code>--system-reserved=500m</code> are set. How much CPU is allocatable for Pods?</p>
+        <button class="reveal-btn" onclick="this.nextElementSibling.style.display='block'">Show Answer</button>
+        <div class="quiz-answer"><strong>3000m (3 cores).</strong> Allocatable = Capacity - kube-reserved - system-reserved = 4000m - 500m - 500m = 3000m. The scheduler will never assign Pods requesting more than 3000m total CPU to this node.</div>
+    </div>
+</div>
+
+</body>
+</html>

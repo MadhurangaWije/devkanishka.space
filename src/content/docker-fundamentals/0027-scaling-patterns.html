@@ -1,0 +1,424 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lesson 27: Scaling Patterns</title>
+  <link rel="stylesheet" href="../assets/lesson-style.css">
+</head>
+<body>
+
+  <div class="lesson-meta">
+    <span>📦 Lesson 27 of 30</span>
+    <span>⏱️ 20–25 minutes</span>
+    <span>📈 Scaling Patterns</span>
+  </div>
+
+  <h1>Scaling Patterns</h1>
+  <p class="subtitle">Containers unlock elastic scaling — but scaling well requires understanding the patterns, trade-offs, and deployment strategies that keep services reliable under changing load.</p>
+
+  <!-- ============================================================ -->
+  <h2>1. Horizontal vs Vertical Scaling</h2>
+
+  <p><strong>Vertical scaling</strong> means giving a single container more resources — more CPU cores, more memory. You're making a bigger box.</p>
+  <p><strong>Horizontal scaling</strong> means running more containers (replicas) behind a load balancer. You're adding more boxes.</p>
+
+  <p>Containers are designed for horizontal scaling:</p>
+  <ul>
+    <li><strong>Stateless</strong> — each replica is identical, no shared local state</li>
+    <li><strong>Identical</strong> — built from the same image, guaranteed consistency</li>
+    <li><strong>Fast to start</strong> — seconds, not minutes like VMs</li>
+    <li><strong>Cheap</strong> — minimal overhead per instance</li>
+  </ul>
+
+  <div class="callout">
+    <strong>Rule of thumb:</strong> Scale vertically when you can't parallelize (single-threaded workloads, databases). Scale horizontally for everything else — web servers, APIs, workers, proxies.
+  </div>
+
+  <!-- SVG: Horizontal scaling diagram -->
+  <svg viewBox="0 0 600 260" xmlns="http://www.w3.org/2000/svg" style="max-width:600px;width:100%;margin:1.5rem auto;display:block;">
+    <!-- Load Balancer -->
+    <rect x="240" y="10" width="120" height="50" rx="8" fill="#4fc3f7" stroke="#0277bd" stroke-width="2"/>
+    <text x="300" y="40" text-anchor="middle" font-size="13" font-weight="bold" fill="#01579b">Load Balancer</text>
+    <!-- Lines from LB to replicas -->
+    <line x1="270" y1="60" x2="100" y2="110" stroke="#0277bd" stroke-width="2"/>
+    <line x1="300" y1="60" x2="300" y2="110" stroke="#0277bd" stroke-width="2"/>
+    <line x1="330" y1="60" x2="500" y2="110" stroke="#0277bd" stroke-width="2"/>
+    <!-- Replica 1 -->
+    <rect x="50" y="110" width="100" height="60" rx="6" fill="#a5d6a7" stroke="#388e3c" stroke-width="2"/>
+    <text x="100" y="137" text-anchor="middle" font-size="11" fill="#1b5e20">Container</text>
+    <text x="100" y="155" text-anchor="middle" font-size="11" fill="#1b5e20">Replica 1</text>
+    <!-- Replica 2 -->
+    <rect x="250" y="110" width="100" height="60" rx="6" fill="#a5d6a7" stroke="#388e3c" stroke-width="2"/>
+    <text x="300" y="137" text-anchor="middle" font-size="11" fill="#1b5e20">Container</text>
+    <text x="300" y="155" text-anchor="middle" font-size="11" fill="#1b5e20">Replica 2</text>
+    <!-- Replica 3 -->
+    <rect x="450" y="110" width="100" height="60" rx="6" fill="#a5d6a7" stroke="#388e3c" stroke-width="2"/>
+    <text x="500" y="137" text-anchor="middle" font-size="11" fill="#1b5e20">Container</text>
+    <text x="500" y="155" text-anchor="middle" font-size="11" fill="#1b5e20">Replica 3</text>
+    <!-- Users -->
+    <text x="300" y="210" text-anchor="middle" font-size="12" fill="#555">Each replica handles a portion of traffic — identical, stateless, disposable</text>
+    <!-- Arrows showing more can be added -->
+    <text x="300" y="240" text-anchor="middle" font-size="11" fill="#888">+ easily add Replica 4, 5, 6... as load grows</text>
+  </svg>
+
+  <!-- ============================================================ -->
+  <h2>2. Manual Scaling</h2>
+
+  <p>When you know the load pattern (e.g., marketing campaign at 9 AM), you can scale manually:</p>
+
+  <pre><code># Docker Swarm
+docker service scale web=5
+
+# Kubernetes
+kubectl scale deployment web --replicas=5
+
+# Docker Compose (v2)
+docker compose up --scale web=5</code></pre>
+
+  <p>Manual scaling is appropriate when:</p>
+  <ul>
+    <li>Load is predictable and scheduled</li>
+    <li>You want human oversight before adding capacity</li>
+    <li>Cost control is critical (autoscalers can overshoot)</li>
+  </ul>
+
+  <!-- ============================================================ -->
+  <h2>3. Autoscaling</h2>
+
+  <p>Autoscaling adjusts replica count based on real-time metrics:</p>
+
+  <table>
+    <thead>
+      <tr><th>Metric</th><th>Use Case</th><th>Example Target</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>CPU utilization</td><td>Compute-heavy APIs</td><td>Keep at 70%</td></tr>
+      <tr><td>Memory usage</td><td>In-memory caches, JVM apps</td><td>Keep below 80%</td></tr>
+      <tr><td>Request rate (RPS)</td><td>Web frontends</td><td>1000 req/s per pod</td></tr>
+      <tr><td>Queue depth</td><td>Background workers</td><td>Queue &lt; 100 messages</td></tr>
+      <tr><td>Custom metrics</td><td>Business-specific</td><td>Active WebSocket connections</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Kubernetes HPA (Horizontal Pod Autoscaler)</h3>
+  <pre><code>apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: web-hpa
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: web
+  minReplicas: 2
+  maxReplicas: 20
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70</code></pre>
+
+  <p><strong>Target-based scaling:</strong> "Keep average CPU at 70%" — the HPA calculates how many pods are needed: <code>desired = ceil(current * (currentMetric / targetMetric))</code>.</p>
+
+  <h3>AWS Auto Scaling</h3>
+  <p>ECS and Fargate support target tracking policies with the same concept — pick a metric, set a target, let the platform adjust task count.</p>
+
+  <!-- ============================================================ -->
+  <h2>4. Scale to Zero</h2>
+
+  <p>Serverless containers take horizontal scaling to its logical endpoint: if there's no traffic, run <em>zero</em> replicas.</p>
+
+  <table>
+    <thead>
+      <tr><th>Platform</th><th>How It Works</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Google Cloud Run</td><td>HTTP-triggered, scales 0→N automatically</td></tr>
+      <tr><td>Knative Serving</td><td>K8s-native, activator proxy queues during cold start</td></tr>
+      <tr><td>KEDA</td><td>Event-driven autoscaler for K8s, supports 50+ event sources</td></tr>
+    </tbody>
+  </table>
+
+  <p><strong>Cold start trade-off:</strong> Going from 0→1 takes time (pull image, start process, warm up). Mitigations: keep minimum=1, use small images, pre-warm on schedule.</p>
+
+  <p><strong>When to use scale-to-zero:</strong></p>
+  <ul>
+    <li>Event-driven workloads (process a webhook, then idle)</li>
+    <li>Batch/cron jobs</li>
+    <li>Low-traffic services (dev/staging, internal tools)</li>
+    <li>Cost-sensitive environments</li>
+  </ul>
+
+  <!-- ============================================================ -->
+  <h2>5. Deployment Strategies</h2>
+
+  <p>How you update services at scale determines downtime, risk, and rollback speed.</p>
+
+  <!-- SVG: Deployment strategies comparison -->
+  <svg viewBox="0 0 620 300" xmlns="http://www.w3.org/2000/svg" style="max-width:620px;width:100%;margin:1.5rem auto;display:block;">
+    <!-- Rolling Update -->
+    <text x="100" y="20" text-anchor="middle" font-size="12" font-weight="bold" fill="#333">Rolling Update</text>
+    <rect x="30" y="30" width="30" height="30" rx="4" fill="#a5d6a7" stroke="#388e3c" stroke-width="1.5"/>
+    <rect x="70" y="30" width="30" height="30" rx="4" fill="#a5d6a7" stroke="#388e3c" stroke-width="1.5"/>
+    <rect x="110" y="30" width="30" height="30" rx="4" fill="#81d4fa" stroke="#0277bd" stroke-width="1.5"/>
+    <rect x="150" y="30" width="30" height="30" rx="4" fill="#a5d6a7" stroke="#388e3c" stroke-width="1.5"/>
+    <text x="100" y="80" text-anchor="middle" font-size="10" fill="#555">t=1: replace one at a time</text>
+    <rect x="30" y="95" width="30" height="30" rx="4" fill="#81d4fa" stroke="#0277bd" stroke-width="1.5"/>
+    <rect x="70" y="95" width="30" height="30" rx="4" fill="#81d4fa" stroke="#0277bd" stroke-width="1.5"/>
+    <rect x="110" y="95" width="30" height="30" rx="4" fill="#81d4fa" stroke="#0277bd" stroke-width="1.5"/>
+    <rect x="150" y="95" width="30" height="30" rx="4" fill="#81d4fa" stroke="#0277bd" stroke-width="1.5"/>
+    <text x="100" y="145" text-anchor="middle" font-size="10" fill="#555">t=end: all new version</text>
+    <!-- Legend -->
+    <rect x="30" y="160" width="12" height="12" fill="#a5d6a7" stroke="#388e3c" stroke-width="1"/>
+    <text x="47" y="171" font-size="9" fill="#333">Old (v1)</text>
+    <rect x="100" y="160" width="12" height="12" fill="#81d4fa" stroke="#0277bd" stroke-width="1"/>
+    <text x="117" y="171" font-size="9" fill="#333">New (v2)</text>
+
+    <!-- Blue-Green -->
+    <text x="320" y="20" text-anchor="middle" font-size="12" font-weight="bold" fill="#333">Blue-Green</text>
+    <rect x="240" y="30" width="70" height="50" rx="6" fill="#a5d6a7" stroke="#388e3c" stroke-width="1.5"/>
+    <text x="275" y="58" text-anchor="middle" font-size="10" fill="#1b5e20">Blue (v1)</text>
+    <rect x="330" y="30" width="70" height="50" rx="6" fill="#81d4fa" stroke="#0277bd" stroke-width="1.5"/>
+    <text x="365" y="58" text-anchor="middle" font-size="10" fill="#01579b">Green (v2)</text>
+    <text x="320" y="100" text-anchor="middle" font-size="10" fill="#555">Both run simultaneously</text>
+    <!-- Arrow showing switch -->
+    <path d="M275 110 L275 130 L365 130 L365 110" fill="none" stroke="#e65100" stroke-width="2" marker-end="url(#arrow-orange)"/>
+    <defs><marker id="arrow-orange" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L10,5 L0,10 Z" fill="#e65100"/></marker></defs>
+    <text x="320" y="150" text-anchor="middle" font-size="10" fill="#e65100">Switch traffic atomically</text>
+
+    <!-- Canary -->
+    <text x="530" y="20" text-anchor="middle" font-size="12" font-weight="bold" fill="#333">Canary</text>
+    <!-- Traffic split visualization -->
+    <rect x="470" y="30" width="80" height="30" rx="4" fill="#a5d6a7" stroke="#388e3c" stroke-width="1.5"/>
+    <text x="510" y="49" text-anchor="middle" font-size="9" fill="#1b5e20">95% → v1</text>
+    <rect x="560" y="30" width="30" height="30" rx="4" fill="#ffcc80" stroke="#e65100" stroke-width="1.5"/>
+    <text x="575" y="49" text-anchor="middle" font-size="9" fill="#bf360c">5%</text>
+    <text x="530" y="80" text-anchor="middle" font-size="10" fill="#555">Start: small % to v2</text>
+    <rect x="470" y="95" width="50" height="30" rx="4" fill="#a5d6a7" stroke="#388e3c" stroke-width="1.5"/>
+    <text x="495" y="114" text-anchor="middle" font-size="9" fill="#1b5e20">50%</text>
+    <rect x="530" y="95" width="50" height="30" rx="4" fill="#81d4fa" stroke="#0277bd" stroke-width="1.5"/>
+    <text x="555" y="114" text-anchor="middle" font-size="9" fill="#01579b">50%</text>
+    <text x="530" y="145" text-anchor="middle" font-size="10" fill="#555">Gradually increase</text>
+
+    <!-- Summary row -->
+    <text x="100" y="200" text-anchor="middle" font-size="10" fill="#666">Zero downtime</text>
+    <text x="100" y="215" text-anchor="middle" font-size="10" fill="#666">Gradual rollout</text>
+    <text x="320" y="200" text-anchor="middle" font-size="10" fill="#666">Instant rollback</text>
+    <text x="320" y="215" text-anchor="middle" font-size="10" fill="#666">2x resources needed</text>
+    <text x="530" y="200" text-anchor="middle" font-size="10" fill="#666">Lowest risk</text>
+    <text x="530" y="215" text-anchor="middle" font-size="10" fill="#666">Needs traffic splitting</text>
+  </svg>
+
+  <h3>Strategy Details</h3>
+
+  <table>
+    <thead>
+      <tr><th>Strategy</th><th>How</th><th>Rollback</th><th>Risk</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><strong>Rolling Update</strong></td><td>Replace pods one-by-one</td><td>Continue rolling (slow)</td><td>Brief mixed versions</td></tr>
+      <tr><td><strong>Blue-Green</strong></td><td>Run both, switch LB</td><td>Switch back instantly</td><td>Double resources during deploy</td></tr>
+      <tr><td><strong>Canary</strong></td><td>Route small % to new</td><td>Route 100% back to old</td><td>Complex routing infra</td></tr>
+      <tr><td><strong>A/B Testing</strong></td><td>Route by user attributes</td><td>Remove routing rule</td><td>Not strictly a deploy strategy</td></tr>
+    </tbody>
+  </table>
+
+  <pre><code># Kubernetes rolling update (default)
+kubectl set image deployment/web web=myapp:v2
+
+# Control the rollout speed
+spec:
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1        # 1 extra pod during update
+      maxUnavailable: 0  # never go below desired count</code></pre>
+
+  <!-- ============================================================ -->
+  <h2>6. Scaling Challenges</h2>
+
+  <h3>Stateful Services</h3>
+  <p>Databases, caches with local state, and file-based systems can't simply add replicas. Solutions:</p>
+  <ul>
+    <li>Use managed services (RDS, Cloud SQL) — let the provider handle replication</li>
+    <li>StatefulSets in K8s with persistent volumes</li>
+    <li>Read replicas for read-heavy workloads</li>
+  </ul>
+
+  <h3>Session Affinity</h3>
+  <p>If your app stores sessions in memory, requests from the same user must hit the same pod. Better fix: externalize sessions to Redis/Memcached.</p>
+
+  <h3>Connection Limits</h3>
+  <p>Database connection pools don't scale linearly. 50 pods × 10 connections = 500 connections to your DB. Use connection poolers (PgBouncer, ProxySQL).</p>
+
+  <h3>Thundering Herd</h3>
+  <p>When autoscaler adds 10 pods simultaneously, they all start hitting the same cold caches, warming up at once. Mitigations: stagger startup, pre-warm caches, rate-limit on cold start.</p>
+
+  <h3>Graceful Scale-Down</h3>
+  <p>When removing replicas, you must drain existing connections:</p>
+  <pre><code># Kubernetes handles this with:
+# 1. Pod removed from Service endpoints (no new traffic)
+# 2. SIGTERM sent to container
+# 3. preStop hook + terminationGracePeriodSeconds for draining
+spec:
+  terminationGracePeriodSeconds: 30
+  containers:
+  - lifecycle:
+      preStop:
+        exec:
+          command: ["/bin/sh", "-c", "sleep 5"]</code></pre>
+
+  <!-- ============================================================ -->
+  <h2>7. Capacity Planning</h2>
+
+  <h3>Resource Requests and Limits (Kubernetes)</h3>
+  <pre><code>resources:
+  requests:          # Guaranteed minimum (used for scheduling)
+    cpu: 250m        # 0.25 CPU cores
+    memory: 256Mi
+  limits:            # Hard ceiling (throttled/OOM-killed)
+    cpu: 1000m
+    memory: 512Mi</code></pre>
+
+  <h3>Bin-Packing Efficiency</h3>
+  <p>Schedulers fit pods onto nodes like items in a bin. Over-requesting wastes capacity; under-requesting causes contention.</p>
+
+  <h3>Right-Sizing Containers</h3>
+  <table>
+    <thead>
+      <tr><th>Problem</th><th>Symptom</th><th>Fix</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Too generous</td><td>Low utilization, wasted $$$</td><td>Lower requests based on actual usage</td></tr>
+      <tr><td>Too tight</td><td>OOMKilled, CPU throttling</td><td>Increase limits, profile under load</td></tr>
+      <tr><td>No limits set</td><td>One pod starves others</td><td>Always set limits in production</td></tr>
+    </tbody>
+  </table>
+
+  <p><strong>Monitoring informs scaling:</strong> Use metrics (Prometheus, Datadog) to observe actual resource usage and tune requests/limits. Tools like Goldilocks and VPA (Vertical Pod Autoscaler) can recommend values.</p>
+
+  <!-- ============================================================ -->
+  <h2>Interactive Quizzes</h2>
+
+  <div class="quiz" id="quiz1"
+    data-question="A stateless web API is receiving 10x more traffic than usual. What scaling approach is most appropriate?"
+    data-options="Vertical scaling (bigger container)|Horizontal scaling (more replicas)|Scale to zero|Restart the container"
+    data-answer="1"
+    data-explanation="Stateless web APIs are ideal candidates for horizontal scaling — just add more identical replicas behind a load balancer. Vertical scaling has hard limits and requires downtime.">
+  </div>
+
+  <div class="quiz" id="quiz2"
+    data-question="You have a background job worker that processes messages from a queue. Which autoscaling metric makes the most sense?"
+    data-options="CPU utilization|Memory usage|Queue depth|HTTP request rate"
+    data-answer="2"
+    data-explanation="Queue depth directly reflects the actual backlog of work. CPU might be low if workers are I/O-bound, and HTTP request rate doesn't apply to queue consumers. Scale based on the metric that represents demand.">
+  </div>
+
+  <div class="quiz" id="quiz3"
+    data-question="You want to deploy a new version with the ability to instantly rollback if metrics degrade, and you can afford double the resources temporarily. Which strategy?"
+    data-options="Rolling update|Blue-Green deployment|Canary deployment|A/B testing"
+    data-answer="1"
+    data-explanation="Blue-Green deployment runs both old and new versions simultaneously. Traffic switches atomically to the new version, and you can switch back instantly. It requires double resources during the transition but provides the fastest rollback.">
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>Hands-On Task</h2>
+
+  <div class="hands-on">
+    <h3>🛠️ Scale and Update with Zero Downtime</h3>
+    <p>Deploy a service in Docker Swarm, scale it, perform a rolling update, and verify zero-downtime.</p>
+
+    <pre><code># 1. Initialize Swarm (if not already)
+docker swarm init
+
+# 2. Create a service with v1
+docker service create \
+  --name web \
+  --replicas 2 \
+  --publish 8080:80 \
+  --update-delay 5s \
+  --update-parallelism 1 \
+  nginx:1.24-alpine
+
+# 3. Verify it's running
+docker service ps web
+curl http://localhost:8080
+
+# 4. Scale to 5 replicas
+docker service scale web=5
+
+# 5. Watch replicas come up
+docker service ps web
+# All 5 should show "Running"
+
+# 6. In another terminal, run a continuous health check
+while true; do
+  curl -s -o /dev/null -w "%{http_code}\n" http://localhost:8080
+  sleep 0.5
+done
+
+# 7. Perform a rolling update to v2
+docker service update \
+  --image nginx:1.25-alpine \
+  --update-parallelism 1 \
+  --update-delay 5s \
+  web
+
+# 8. Watch the rolling update progress
+docker service ps web
+# You'll see old tasks shutting down, new ones starting
+
+# 9. Verify zero downtime
+# The health check loop should show uninterrupted 200s
+
+# 10. Rollback if needed
+docker service rollback web
+
+# Cleanup
+docker service rm web</code></pre>
+
+    <p><strong>What to observe:</strong></p>
+    <ul>
+      <li>During scale-up, new containers start in seconds</li>
+      <li>During rolling update, Swarm replaces one container at a time (update-parallelism=1)</li>
+      <li>The health check loop never sees a non-200 response — zero downtime</li>
+      <li>Rollback instantly reverts to the previous image</li>
+    </ul>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>Industry Callout</h2>
+
+  <div class="callout">
+    <strong>🏢 Spotify</strong> runs 2,000+ microservices. Their autoscaling system considers not just CPU but also custom metrics like "audio streams per pod" and "search queries per second." They use conservative scale-down (slow to remove pods) and aggressive scale-up (fast to add) to avoid flapping.
+  </div>
+
+  <div class="callout">
+    <strong>🏢 Netflix</strong> pioneered "adaptive scaling" — their system learns traffic patterns over time and pre-scales before predicted load spikes (e.g., new show releases at midnight). Combined with canary deployments and automated rollback, they deploy hundreds of times per day across thousands of instances.
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>Key Takeaways</h2>
+
+  <ul class="takeaways">
+    <li><strong>Horizontal over vertical</strong> — containers are built for horizontal scaling; keep them stateless and identical</li>
+    <li><strong>Autoscale on the right metric</strong> — CPU isn't always the answer; use the metric that represents actual demand (queue depth, RPS, custom)</li>
+    <li><strong>Scale to zero saves money</strong> — but cold starts have a cost; balance latency vs. spend</li>
+    <li><strong>Choose your deployment strategy</strong> — rolling for simplicity, blue-green for instant rollback, canary for lowest risk</li>
+    <li><strong>Stateful services need special care</strong> — externalize state, use connection poolers, plan for graceful shutdown</li>
+    <li><strong>Right-size your containers</strong> — monitor actual usage, set appropriate requests/limits, avoid waste and OOMs</li>
+    <li><strong>Scaling is a system problem</strong> — consider databases, caches, DNS, and downstream services, not just your app</li>
+  </ul>
+
+  <!-- ============================================================ -->
+  <nav class="prev-next">
+    <a href="0026-service-discovery-and-load-balancing.html">← Prev: Service Discovery &amp; Load Balancing</a>
+    <a href="0028-building-your-own-container-runtime.html">Next: Building Your Own Container Runtime →</a>
+  </nav>
+
+  <script src="../assets/quiz.js"></script>
+</body>
+</html>

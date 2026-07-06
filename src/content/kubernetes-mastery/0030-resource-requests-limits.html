@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lesson 30: Resource Requests & Limits</title>
+    <style>
+        :root {
+            --bg: #fafafa; --text: #1a1a1a; --accent: #326ce5;
+            --accent-light: #e8f0fe; --border: #e0e0e0; --code-bg: #f5f5f5;
+            --success: #2e7d32; --warn: #f57c00;
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: 'Georgia', serif; line-height: 1.7; color: var(--text); background: var(--bg); max-width: 780px; margin: 0 auto; padding: 2rem 1.5rem; }
+        h1 { font-size: 2rem; margin-bottom: 0.5rem; color: var(--accent); }
+        h2 { font-size: 1.4rem; margin-top: 2.5rem; margin-bottom: 0.8rem; border-bottom: 2px solid var(--accent); padding-bottom: 0.3rem; }
+        h3 { font-size: 1.1rem; margin-top: 1.5rem; margin-bottom: 0.5rem; }
+        p { margin-bottom: 1rem; }
+        .meta { color: #666; font-size: 0.9rem; margin-bottom: 2rem; }
+        .key-insight { background: var(--accent-light); border-left: 4px solid var(--accent); padding: 1rem 1.2rem; margin: 1.5rem 0; border-radius: 0 4px 4px 0; }
+        .key-insight strong { color: var(--accent); }
+        .production-note { background: #fff3e0; border-left: 4px solid var(--warn); padding: 1rem 1.2rem; margin: 1.5rem 0; border-radius: 0 4px 4px 0; }
+        .production-note::before { content: "🏭 Production: "; font-weight: bold; }
+        .exam-tip { background: #e8f5e9; border-left: 4px solid var(--success); padding: 1rem 1.2rem; margin: 1.5rem 0; border-radius: 0 4px 4px 0; }
+        .exam-tip::before { content: "🎯 Exam Tip: "; font-weight: bold; color: var(--success); }
+        code { font-family: 'Menlo', 'Consolas', monospace; font-size: 0.85em; background: var(--code-bg); padding: 0.15em 0.4em; border-radius: 3px; }
+        pre { background: var(--code-bg); padding: 1rem; border-radius: 4px; overflow-x: auto; margin: 1rem 0; font-size: 0.85rem; line-height: 1.5; }
+        ul, ol { margin: 0.5rem 0 1rem 1.5rem; }
+        li { margin-bottom: 0.4rem; }
+        table { width: 100%; border-collapse: collapse; margin: 1rem 0; font-size: 0.9rem; }
+        th, td { border: 1px solid var(--border); padding: 0.6rem 0.8rem; text-align: left; }
+        th { background: var(--accent-light); font-weight: bold; }
+        .diagram { background: white; border: 1px solid var(--border); border-radius: 8px; padding: 1.5rem; margin: 1.5rem 0; text-align: center; }
+        .cert-badge { display: inline-block; background: var(--accent); color: white; font-size: 0.7rem; padding: 0.15rem 0.5rem; border-radius: 10px; margin-left: 0.5rem; }
+        .quiz { background: #f9f9f9; border: 1px solid var(--border); border-radius: 8px; padding: 1.5rem; margin-top: 2rem; }
+        .quiz h2 { border-bottom: none; margin-top: 0; }
+        .quiz-q { margin-bottom: 1.2rem; }
+        .quiz-q p { font-weight: bold; margin-bottom: 0.3rem; }
+        .quiz-answer { display: none; background: #e8f5e9; padding: 0.5rem 0.8rem; border-radius: 4px; margin-top: 0.5rem; }
+        .reveal-btn { background: var(--accent); color: white; border: none; padding: 0.3rem 0.8rem; border-radius: 4px; cursor: pointer; font-size: 0.8rem; }
+        .reveal-btn:hover { opacity: 0.85; }
+    </style>
+</head>
+<body>
+
+<h1>Lesson 30: Resource Requests & Limits</h1>
+<p class="meta">Chapter 6: Scheduling & Resource Management · <span class="cert-badge">CKA</span> <span class="cert-badge">CKAD</span> · ~22 min</p>
+
+<p>Resource requests and limits are the foundation of Kubernetes resource management. They determine <strong>where Pods are scheduled</strong> (requests), <strong>how much they can use</strong> (limits), and <strong>what happens when they exceed those bounds</strong> (throttling or OOMKill). Getting them right is the difference between a stable cluster and 3 AM pager alerts.</p>
+
+<h2>1. Requests vs Limits</h2>
+
+<pre>spec:
+  containers:
+    - name: app
+      image: myapp:latest
+      resources:
+        requests:                    # GUARANTEED minimum
+          cpu: 250m                  # 250 millicores = 0.25 CPU cores
+          memory: 256Mi              # 256 mebibytes
+        limits:                      # MAXIMUM allowed
+          cpu: 1000m                 # 1 full CPU core
+          memory: 512Mi              # 512 mebibytes</pre>
+
+<table>
+    <tr><th></th><th>Requests</th><th>Limits</th></tr>
+    <tr><td><strong>Purpose</strong></td><td>Scheduling guarantee — "I need at least this much"</td><td>Hard cap — "Never use more than this"</td></tr>
+    <tr><td><strong>Used by scheduler?</strong></td><td>✅ Yes — determines if Pod fits on node</td><td>❌ No — scheduler ignores limits</td></tr>
+    <tr><td><strong>CPU exceeded</strong></td><td>N/A (always gets requests)</td><td>Throttled (CFS quota)</td></tr>
+    <tr><td><strong>Memory exceeded</strong></td><td>N/A (always gets requests)</td><td><strong>OOMKilled</strong></td></tr>
+    <tr><td><strong>Can be omitted?</strong></td><td>Yes (but BestEffort QoS)</td><td>Yes (unlimited usage)</td></tr>
+</table>
+
+<div class="key-insight">
+    <strong>The fundamental asymmetry: CPU is compressible, memory is not.</strong><br>
+    • <strong>CPU:</strong> If a container exceeds its limit, it's throttled (slowed down) — it still runs, just slower.<br>
+    • <strong>Memory:</strong> If a container exceeds its limit, it's <strong>killed</strong> (OOMKill) — the kernel has no choice because memory can't be "taken back" from a process without killing it.
+</div>
+
+<h3>Resource Units</h3>
+
+<table>
+    <tr><th>Resource</th><th>Unit</th><th>Examples</th></tr>
+    <tr><td rowspan="3"><strong>CPU</strong></td><td>Cores (decimal)</td><td><code>0.5</code> = half a core</td></tr>
+    <tr><td>Millicores</td><td><code>500m</code> = half a core, <code>100m</code> = 0.1 core</td></tr>
+    <tr><td>Whole cores</td><td><code>2</code> = 2 full cores</td></tr>
+    <tr><td rowspan="3"><strong>Memory</strong></td><td>Bytes (decimal SI)</td><td><code>128M</code> = 128,000,000 bytes</td></tr>
+    <tr><td>Bytes (binary)</td><td><code>128Mi</code> = 128 × 1024² = 134,217,728 bytes</td></tr>
+    <tr><td>Other units</td><td><code>1Gi</code> = 1 gibibyte, <code>500Ki</code> = 500 kibibytes</td></tr>
+</table>
+
+<div class="exam-tip">
+    <code>1 CPU</code> = 1 AWS vCPU = 1 GCP Core = 1 Azure vCore = 1 hyperthread. <code>100m</code> is the minimum meaningful request. Always use <code>Mi</code>/<code>Gi</code> (binary) for memory — it matches how the kernel measures RSS.
+</div>
+
+<h2>2. CPU — How It Actually Works</h2>
+
+<h3>CPU Requests → CFS Shares</h3>
+
+<p>CPU requests map to <strong>Linux CFS (Completely Fair Scheduler) shares</strong>. They're a <em>relative</em> weight, not an absolute reservation:</p>
+
+<pre># Pod A: requests.cpu = 500m → CFS shares = 512
+# Pod B: requests.cpu = 250m → CFS shares = 256
+
+# When both compete for CPU on the same core:
+# Pod A gets 2/3 of CPU time (512 / (512+256))
+# Pod B gets 1/3 of CPU time (256 / (512+256))
+
+# When Pod B is idle, Pod A can use ALL available CPU
+# Requests only matter under contention</pre>
+
+<div class="key-insight">
+    <strong>CPU requests are guarantees under contention.</strong> If the node has spare CPU, a container can burst beyond its request (up to its limit). Requests only kick in when multiple containers compete — then each gets at least their requested share.
+</div>
+
+<h3>CPU Limits → CFS Quota (Throttling)</h3>
+
+<p>CPU limits map to <strong>CFS bandwidth control</strong>. The kernel enforces a hard ceiling:</p>
+
+<pre># limits.cpu = 1000m means:
+# In every 100ms period (cfs_period_us), this container can use 100ms of CPU time
+# If it tries to use more → throttled (process is paused until next period)
+
+# limits.cpu = 500m:
+# 50ms of CPU per 100ms period
+
+# Check throttling:
+cat /sys/fs/cgroup/cpu/cpu.stat
+# nr_throttled 12847        ← times the container was throttled
+# throttled_time 8234567890 ← nanoseconds spent throttled</pre>
+
+<div class="diagram">
+<svg viewBox="0 0 600 100" xmlns="http://www.w3.org/2000/svg" font-family="Menlo, monospace" font-size="9">
+    <text x="300" y="15" text-anchor="middle" font-weight="bold" font-size="10">CPU Throttling: limit=500m (50ms per 100ms period)</text>
+    
+    <!-- Period boxes -->
+    <rect x="30" y="30" width="100" height="30" rx="3" fill="#c8e6c9" stroke="#2e7d32" stroke-width="1"/>
+    <rect x="30" y="30" width="50" height="30" rx="3" fill="#2e7d32"/>
+    <text x="80" y="49" text-anchor="middle" font-size="8" fill="white">50ms used</text>
+    <text x="80" y="75" text-anchor="middle" font-size="7" fill="#666">Period 1: OK</text>
+    
+    <rect x="150" y="30" width="100" height="30" rx="3" fill="#c8e6c9" stroke="#2e7d32" stroke-width="1"/>
+    <rect x="150" y="30" width="50" height="30" rx="3" fill="#2e7d32"/>
+    <rect x="200" y="30" width="30" height="30" rx="0" fill="#ffcdd2" stroke="#c62828" stroke-width="1"/>
+    <text x="215" y="49" text-anchor="middle" font-size="7" fill="#c62828">🛑</text>
+    <text x="200" y="75" text-anchor="middle" font-size="7" fill="#c62828">Period 2: Throttled!</text>
+    
+    <rect x="270" y="30" width="100" height="30" rx="3" fill="#c8e6c9" stroke="#2e7d32" stroke-width="1"/>
+    <rect x="270" y="30" width="30" height="30" rx="3" fill="#2e7d32"/>
+    <text x="320" y="49" text-anchor="middle" font-size="8" fill="#666">30ms used</text>
+    <text x="320" y="75" text-anchor="middle" font-size="7" fill="#666">Period 3: Under limit</text>
+    
+    <text x="470" y="50" text-anchor="middle" font-size="9" fill="#c62828">Throttling adds latency</text>
+    <text x="470" y="65" text-anchor="middle" font-size="9" fill="#c62828">spikes — not OOM, but</text>
+    <text x="470" y="80" text-anchor="middle" font-size="9" fill="#c62828">P99 latency increases</text>
+</svg>
+</div>
+
+<div class="production-note">
+    <strong>The CPU limits debate:</strong> Many production teams set CPU <em>requests</em> but NOT CPU <em>limits</em>. Rationale: CPU throttling causes latency spikes (visible in P99) even when the node has idle CPU available. Without limits, Pods can burst freely when there's spare capacity. The risk: one Pod can starve others during peak. The compromise: set requests generously, omit limits, and monitor for noisy neighbors. Google's Borg and many SRE teams follow this pattern.
+</div>
+
+<h2>3. Memory — How It Actually Works</h2>
+
+<h3>Memory Requests → Scheduling Only</h3>
+
+<p>Memory requests tell the scheduler: "This Pod needs at least 256Mi." The scheduler won't place the Pod on a node unless <code>allocatable memory - sum(requests of existing Pods) ≥ 256Mi</code>. But requests don't enforce anything at runtime — a Pod can use more than its request.</p>
+
+<h3>Memory Limits → Cgroup Hard Limit (OOMKill)</h3>
+
+<pre># limits.memory = 512Mi means:
+# Kernel sets cgroup memory.limit_in_bytes = 536870912
+# If the process's RSS exceeds this → OOMKilled immediately
+
+# OOMKill event visible in:
+kubectl describe pod myapp
+# Last State:   Terminated
+#   Reason:     OOMKilled
+#   Exit Code:  137                 # 128 + 9 (SIGKILL)</pre>
+
+<h3>What Counts Toward Memory Usage?</h3>
+
+<table>
+    <tr><th>Counts</th><th>Doesn't Count</th></tr>
+    <tr><td>Resident Set Size (RSS) — actual pages in RAM</td><td>File-backed pages (page cache) that can be evicted</td></tr>
+    <tr><td>Anonymous memory (heap, stack)</td><td>Shared memory mapped from files (can be reclaimed)</td></tr>
+    <tr><td>tmpfs volumes (emptyDir medium: Memory)</td><td>Kernel memory (partially — depends on cgroup v1 vs v2)</td></tr>
+</table>
+
+<div class="key-insight">
+    <strong>Memory is non-compressible.</strong> Unlike CPU (where the kernel just schedules less time), memory can't be "squeezed." If a process allocates 600Mi and the limit is 512Mi, the only option is to kill the process. This is why memory limits are more dangerous than CPU limits — an OOMKill disrupts the workload entirely.
+</div>
+
+<h3>OOMKill Priority (within a cgroup)</h3>
+
+<pre># When a container hits its memory limit:
+# The kernel's OOM killer picks a process within that cgroup to kill
+# Usually the process with the highest memory usage (oom_score)
+# In single-process containers (most K8s Pods): the main process dies
+# → Container exits with code 137 → kubelet restarts it</pre>
+
+<h3>Node-Level OOM (Eviction)</h3>
+
+<p>Separate from container-level OOMKill: if the <em>node's</em> available memory drops below the kubelet's eviction threshold (default 100Mi), the kubelet evicts Pods based on their QoS class (BestEffort first, then Burstable exceeding requests, then Guaranteed).</p>
+
+<div class="production-note">
+    Always set memory limits in production. Without them, a memory leak in one Pod can consume all node memory, causing the kernel OOM killer to kill random processes (potentially kubelet itself or other critical Pods). Memory limits contain the blast radius.
+</div>
+
+<h2>4. LimitRange — Namespace-Level Defaults & Constraints</h2>
+
+<p>A LimitRange sets default requests/limits and min/max constraints for Pods in a namespace. Enforced by the <code>LimitRanger</code> admission controller.</p>
+
+<pre>apiVersion: v1
+kind: LimitRange
+metadata:
+  name: resource-constraints
+  namespace: production
+spec:
+  limits:
+    - type: Container
+      default:                      # Applied if Pod doesn't specify limits
+        cpu: 500m
+        memory: 256Mi
+      defaultRequest:               # Applied if Pod doesn't specify requests
+        cpu: 100m
+        memory: 128Mi
+      min:                          # Minimum allowed (reject if below)
+        cpu: 50m
+        memory: 64Mi
+      max:                          # Maximum allowed (reject if above)
+        cpu: 4000m
+        memory: 4Gi
+    - type: Pod
+      max:                          # Max for entire Pod (sum of containers)
+        cpu: 8000m
+        memory: 8Gi</pre>
+
+<h3>What LimitRange Enforces</h3>
+
+<table>
+    <tr><th>Field</th><th>Effect</th></tr>
+    <tr><td><code>default</code></td><td>Auto-injects limits if container doesn't specify them</td></tr>
+    <tr><td><code>defaultRequest</code></td><td>Auto-injects requests if container doesn't specify them</td></tr>
+    <tr><td><code>min</code></td><td>Reject Pod creation if requests/limits below minimum</td></tr>
+    <tr><td><code>max</code></td><td>Reject Pod creation if requests/limits above maximum</td></tr>
+    <tr><td><code>maxLimitRequestRatio</code></td><td>Max ratio of limit/request (prevents huge burst allowance)</td></tr>
+</table>
+
+<div class="exam-tip">
+    CKA exam: LimitRange silently injects defaults. If you create a Pod without resource requests, and a LimitRange exists, the Pod gets the <code>defaultRequest</code> values automatically. Check with <code>kubectl describe pod</code> — you'll see resources you didn't set.
+</div>
+
+<h2>5. Production Best Practices</h2>
+
+<h3>The Recommended Pattern</h3>
+
+<pre># For stateless web services:
+resources:
+  requests:
+    cpu: 100m        # Based on observed average usage
+    memory: 256Mi    # Based on observed RSS
+  limits:
+    # cpu: omitted   # Allow bursting (no throttling)
+    memory: 512Mi    # 2x request — hard cap to prevent OOM impact on node
+
+# For databases:
+resources:
+  requests:
+    cpu: 1000m       # Generous — databases need consistent CPU
+    memory: 2Gi      # Observed working set
+  limits:
+    cpu: 2000m       # Allow some burst
+    memory: 2Gi      # Same as request (Guaranteed QoS — no OOM surprise)</pre>
+
+<h3>How to Determine the Right Values</h3>
+
+<pre># 1. Start without limits, deploy, observe actual usage:
+kubectl top pods                     # Current usage snapshot
+# NAME      CPU(cores)   MEMORY(bytes)
+# web-abc   45m          180Mi
+
+# 2. Use metrics-server or Prometheus for historical data:
+# Look at P95 CPU over 7 days → set request at P50, limit at P99
+# Look at max memory over 7 days → set request at average, limit at max + 20%
+
+# 3. Use VPA (Vertical Pod Autoscaler) in recommendation mode:
+kubectl get vpa web-vpa -o yaml
+# → recommendation: requests.cpu=120m, requests.memory=200Mi</pre>
+
+<div class="production-note">
+    <strong>Right-sizing is iterative.</strong> Start with generous estimates (prevent OOM), observe actual usage with monitoring (Prometheus, Datadog, kubectl top), then tighten. Over-requesting wastes cluster resources (under-utilized nodes). Under-requesting causes evictions and scheduling failures. Tools like Goldilocks and VPA automate this.
+</div>
+
+<h2>Summary</h2>
+
+<table>
+    <tr><th>Concept</th><th>Key Point</th></tr>
+    <tr><td>Requests</td><td>Scheduling guarantee — scheduler uses this to place Pods</td></tr>
+    <tr><td>Limits</td><td>Hard ceiling — enforced by cgroups at runtime</td></tr>
+    <tr><td>CPU exceeded limit</td><td>Throttled (CFS quota) — slows down, doesn't kill</td></tr>
+    <tr><td>Memory exceeded limit</td><td>OOMKilled — process killed (exit code 137)</td></tr>
+    <tr><td>CPU is compressible</td><td>Can be shared/throttled without harm</td></tr>
+    <tr><td>Memory is incompressible</td><td>Can't be reclaimed without killing — OOM is the only option</td></tr>
+    <tr><td>No limits set</td><td>Pod can use all node resources (dangerous for memory)</td></tr>
+    <tr><td>LimitRange</td><td>Namespace-level defaults and min/max constraints</td></tr>
+    <tr><td>CPU units</td><td><code>1000m</code> = 1 core; <code>100m</code> = 0.1 core</td></tr>
+    <tr><td>Memory units</td><td>Use <code>Mi</code>/<code>Gi</code> (binary). <code>128Mi</code> = 128 × 1024²</td></tr>
+    <tr><td>Best practice</td><td>Always set memory limits. CPU limits are debated — many teams omit them.</td></tr>
+</table>
+
+<!-- Quiz -->
+<div class="quiz">
+    <h2>📝 Quiz: Resource Requests & Limits</h2>
+    
+    <div class="quiz-q">
+        <p>Q1: A container has <code>requests.cpu: 250m</code> and <code>limits.cpu: 1000m</code>. The node has spare CPU. Can the container use 800m?</p>
+        <button class="reveal-btn" onclick="this.nextElementSibling.style.display='block'">Show Answer</button>
+        <div class="quiz-answer"><strong>Yes.</strong> The container can burst up to its limit (1000m). CPU requests only matter under contention — when the node has spare capacity, the container can use up to its limit freely. It would only be throttled if it tried to exceed 1000m.</div>
+    </div>
+    
+    <div class="quiz-q">
+        <p>Q2: A container has <code>limits.memory: 512Mi</code> and its RSS reaches 520Mi. What happens?</p>
+        <button class="reveal-btn" onclick="this.nextElementSibling.style.display='block'">Show Answer</button>
+        <div class="quiz-answer">The kernel's <strong>OOM killer immediately kills the process</strong> (SIGKILL, exit code 137). Memory limits are hard — there's no "throttling" for memory. The kubelet then restarts the container based on the Pod's restartPolicy. If this happens repeatedly → CrashLoopBackOff.</div>
+    </div>
+    
+    <div class="quiz-q">
+        <p>Q3: A node has 4 CPU cores allocatable. Pod A requests 2 CPU, Pod B requests 1 CPU. Both have no limits. Both are CPU-bound. How is CPU divided?</p>
+        <button class="reveal-btn" onclick="this.nextElementSibling.style.display='block'">Show Answer</button>
+        <div class="quiz-answer">Under contention, CPU is divided proportionally to requests: Pod A gets <strong>2/3 of available CPU</strong> (≈2.67 cores) and Pod B gets <strong>1/3</strong> (≈1.33 cores). Without limits, both can burst beyond their requests — the total is divided by CFS share ratio. The 4th core's share is split 2:1.</div>
+    </div>
+    
+    <div class="quiz-q">
+        <p>Q4: Why do many production teams set memory limits but NOT CPU limits?</p>
+        <button class="reveal-btn" onclick="this.nextElementSibling.style.display='block'">Show Answer</button>
+        <div class="quiz-answer"><strong>Memory limits:</strong> Essential because a memory leak without a limit can OOMKill other Pods or crash the node. The blast radius is uncontained.<br><strong>CPU limits omitted:</strong> CPU throttling causes latency spikes (P99 increases) even when the node has idle CPU. Without limits, Pods burst freely using spare CPU. The downside (noisy neighbor) is manageable with proper requests and monitoring.</div>
+    </div>
+    
+    <div class="quiz-q">
+        <p>Q5: A namespace has a LimitRange with <code>default.memory: 256Mi</code>. A developer creates a Pod with no resource spec. What memory limit does the Pod get?</p>
+        <button class="reveal-btn" onclick="this.nextElementSibling.style.display='block'">Show Answer</button>
+        <div class="quiz-answer"><strong>256Mi.</strong> The LimitRanger admission controller automatically injects the default limit. The Pod spec will show <code>limits.memory: 256Mi</code> even though the developer didn't set it. Check with <code>kubectl describe pod</code>. If <code>defaultRequest</code> is also set, requests are injected too.</div>
+    </div>
+    
+    <div class="quiz-q">
+        <p>Q6: A container is being throttled (high <code>nr_throttled</code> in cpu.stat) even though node CPU utilization is only 30%. How is this possible?</p>
+        <button class="reveal-btn" onclick="this.nextElementSibling.style.display='block'">Show Answer</button>
+        <div class="quiz-answer">CPU limits use <strong>CFS quota per period</strong> — they're enforced regardless of node-wide utilization. If the limit is 500m, the container gets 50ms per 100ms period — even if the other 3.5 cores are idle. The limit is a hard per-container cap, not a share of available resources. This is the core argument against CPU limits: they waste available capacity.</div>
+    </div>
+</div>
+
+</body>
+</html>

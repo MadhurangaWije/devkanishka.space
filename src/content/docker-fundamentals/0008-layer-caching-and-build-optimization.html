@@ -1,0 +1,397 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lesson 8: Layer Caching & Build Optimization</title>
+  <link rel="stylesheet" href="../assets/lesson-style.css">
+</head>
+<body>
+
+  <div class="lesson-meta">
+    <span>📦 Lesson 8 of 12</span>
+    <span>⏱️ 14–18 minutes</span>
+    <span>⚡ Performance</span>
+  </div>
+
+  <h1>Layer Caching &amp; Build Optimization</h1>
+  <p class="subtitle">Docker builds are <strong>incremental by default</strong> — but only if you structure your Dockerfile to let the cache work. This lesson teaches you to cut build times from minutes to seconds and shrink images from gigabytes to megabytes.</p>
+
+  <!-- ============================================================ -->
+  <h2>1. How Docker Build Cache Works</h2>
+
+  <p>Every instruction in a Dockerfile produces a <strong>layer</strong>. Docker hashes the instruction text plus the content of any files involved. If the hash matches a previously built layer, Docker skips execution and reuses the cached result — a <em>cache hit</em>.</p>
+
+  <p>The critical rule: <strong>once a layer misses the cache, every subsequent layer is rebuilt from scratch</strong>. The cache is a chain — one break invalidates everything downstream.</p>
+
+  <div class="diagram">
+    <!-- SVG: Cache hit vs cache miss flow -->
+    <svg viewBox="0 0 520 280" width="520" height="280" xmlns="http://www.w3.org/2000/svg" font-family="system-ui, sans-serif" font-size="12">
+      <!-- Title -->
+      <text x="260" y="20" text-anchor="middle" font-size="14" font-weight="bold" fill="#334155">Cache Hit vs Cache Miss</text>
+
+      <!-- Cache HIT side -->
+      <text x="140" y="45" text-anchor="middle" font-size="12" font-weight="bold" fill="#16a34a">✓ All Cached (no changes)</text>
+      <!-- Layers -->
+      <rect x="40" y="55" width="200" height="30" rx="4" fill="#dcfce7" stroke="#16a34a" stroke-width="1.5"/>
+      <text x="140" y="74" text-anchor="middle" fill="#166534">FROM node:20 — cached ✓</text>
+      <rect x="40" y="92" width="200" height="30" rx="4" fill="#dcfce7" stroke="#16a34a" stroke-width="1.5"/>
+      <text x="140" y="111" text-anchor="middle" fill="#166534">RUN apt-get install — cached ✓</text>
+      <rect x="40" y="129" width="200" height="30" rx="4" fill="#dcfce7" stroke="#16a34a" stroke-width="1.5"/>
+      <text x="140" y="148" text-anchor="middle" fill="#166534">COPY package.json — cached ✓</text>
+      <rect x="40" y="166" width="200" height="30" rx="4" fill="#dcfce7" stroke="#16a34a" stroke-width="1.5"/>
+      <text x="140" y="185" text-anchor="middle" fill="#166534">RUN npm install — cached ✓</text>
+      <rect x="40" y="203" width="200" height="30" rx="4" fill="#dcfce7" stroke="#16a34a" stroke-width="1.5"/>
+      <text x="140" y="222" text-anchor="middle" fill="#166534">COPY . . — cached ✓</text>
+      <text x="140" y="255" text-anchor="middle" font-size="11" fill="#166534">⏱️ Build time: &lt;1s</text>
+
+      <!-- Cache MISS side -->
+      <text x="390" y="45" text-anchor="middle" font-size="12" font-weight="bold" fill="#dc2626">✗ Source changed → cascade</text>
+      <rect x="290" y="55" width="200" height="30" rx="4" fill="#dcfce7" stroke="#16a34a" stroke-width="1.5"/>
+      <text x="390" y="74" text-anchor="middle" fill="#166534">FROM node:20 — cached ✓</text>
+      <rect x="290" y="92" width="200" height="30" rx="4" fill="#dcfce7" stroke="#16a34a" stroke-width="1.5"/>
+      <text x="390" y="111" text-anchor="middle" fill="#166534">RUN apt-get install — cached ✓</text>
+      <rect x="290" y="129" width="200" height="30" rx="4" fill="#fee2e2" stroke="#dc2626" stroke-width="1.5"/>
+      <text x="390" y="148" text-anchor="middle" fill="#991b1b">COPY . . — CHANGED ✗</text>
+      <rect x="290" y="166" width="200" height="30" rx="4" fill="#fee2e2" stroke="#dc2626" stroke-width="1.5"/>
+      <text x="390" y="185" text-anchor="middle" fill="#991b1b">RUN npm install — rebuilt ✗</text>
+      <rect x="290" y="203" width="200" height="30" rx="4" fill="#fee2e2" stroke="#dc2626" stroke-width="1.5"/>
+      <text x="390" y="222" text-anchor="middle" fill="#991b1b">CMD node app.js — rebuilt ✗</text>
+      <text x="390" y="255" text-anchor="middle" font-size="11" fill="#991b1b">⏱️ Build time: 45s (npm install re-runs!)</text>
+
+      <!-- Arrow showing cascade -->
+      <path d="M 295 145 L 280 145 L 280 220 L 288 220" fill="none" stroke="#dc2626" stroke-width="1.5" stroke-dasharray="4,3" marker-end="url(#arrowRed)"/>
+      <defs>
+        <marker id="arrowRed" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto">
+          <path d="M0,0 L6,3 L0,6 Z" fill="#dc2626"/>
+        </marker>
+      </defs>
+    </svg>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>2. The Order Matters</h2>
+
+  <p>The golden rule: <strong>put things that change least at the top, things that change most at the bottom.</strong></p>
+
+  <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem;">
+    <div>
+      <h3 style="color: #dc2626;">❌ Bad — Copy everything early</h3>
+      <pre><code>FROM node:20
+WORKDIR /app
+COPY . .
+RUN npm install
+RUN npm run build
+CMD ["node", "dist/app.js"]</code></pre>
+      <p><small>Any source change → <code>npm install</code> re-runs (45s wasted).</small></p>
+    </div>
+    <div>
+      <h3 style="color: #16a34a;">✅ Good — Dependencies first</h3>
+      <pre><code>FROM node:20
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN npm ci
+COPY . .
+RUN npm run build
+CMD ["node", "dist/app.js"]</code></pre>
+      <p><small>Source change → only <code>COPY . .</code> and build re-run. <code>npm ci</code> stays cached.</small></p>
+    </div>
+  </div>
+
+  <div class="callout tip">
+    <div class="callout-title">Rule of Thumb</div>
+    <p>Frequency of change should increase as you go <em>down</em> the Dockerfile: base image → system deps → language deps → source code → build step.</p>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>3. Cache Busting</h2>
+
+  <p>The cache is invalidated (busted) when:</p>
+  <ul>
+    <li><strong>COPY/ADD</strong> — any file in the source has changed (content hash, not timestamp)</li>
+    <li><strong>RUN</strong> — the command string itself changed</li>
+    <li><strong>ARG</strong> — the argument value changed</li>
+    <li><strong>Parent layer</strong> — any upstream layer was rebuilt</li>
+  </ul>
+
+  <p>Sometimes you <em>want</em> to bust the cache intentionally — e.g., to force a fresh <code>apt-get update</code>:</p>
+
+  <pre><code># Force cache bust with a changing ARG
+ARG CACHEBUST=1
+RUN apt-get update && apt-get install -y curl
+
+# Build with: docker build --build-arg CACHEBUST=$(date +%s) .</code></pre>
+
+  <div class="callout warning">
+    <div class="callout-title">Don't Separate update and install</div>
+    <p><code>RUN apt-get update</code> on its own gets cached. A later <code>RUN apt-get install</code> then uses stale package lists. Always combine them: <code>RUN apt-get update && apt-get install -y pkg</code>.</p>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>4. Multi-Stage Builds</h2>
+
+  <p>The single most impactful optimisation. You build in one stage (with compilers, dev tools, everything), then copy <strong>only the final artifact</strong> into a minimal runtime image. Build tools never ship to production.</p>
+
+  <div class="diagram">
+    <!-- SVG: Multi-stage build diagram -->
+    <svg viewBox="0 0 520 200" width="520" height="200" xmlns="http://www.w3.org/2000/svg" font-family="system-ui, sans-serif" font-size="12">
+      <!-- Build stage -->
+      <rect x="10" y="30" width="210" height="150" rx="6" fill="#fef3c7" stroke="#d97706" stroke-width="2"/>
+      <text x="115" y="22" text-anchor="middle" font-size="13" font-weight="bold" fill="#92400e">Stage 1: Build</text>
+      <text x="115" y="52" text-anchor="middle" fill="#78350f">FROM golang:1.22</text>
+      <text x="115" y="72" text-anchor="middle" fill="#78350f">COPY . .</text>
+      <text x="115" y="92" text-anchor="middle" fill="#78350f">RUN go build -o /app</text>
+      <rect x="50" y="110" width="130" height="30" rx="4" fill="#fde68a" stroke="#b45309" stroke-width="1"/>
+      <text x="115" y="129" text-anchor="middle" font-weight="bold" fill="#78350f">/app (12 MB binary)</text>
+      <text x="115" y="165" text-anchor="middle" font-size="11" fill="#92400e">Total stage: ~800 MB</text>
+
+      <!-- Arrow -->
+      <path d="M 225 125 L 295 125" fill="none" stroke="#0369a1" stroke-width="2" marker-end="url(#arrowBlue)"/>
+      <text x="260" y="115" text-anchor="middle" font-size="10" fill="#0369a1">COPY --from</text>
+      <defs>
+        <marker id="arrowBlue" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+          <path d="M0,0 L8,4 L0,8 Z" fill="#0369a1"/>
+        </marker>
+      </defs>
+
+      <!-- Final stage -->
+      <rect x="300" y="30" width="210" height="150" rx="6" fill="#dcfce7" stroke="#16a34a" stroke-width="2"/>
+      <text x="405" y="22" text-anchor="middle" font-size="13" font-weight="bold" fill="#166534">Stage 2: Runtime</text>
+      <text x="405" y="52" text-anchor="middle" fill="#14532d">FROM alpine:3.19</text>
+      <text x="405" y="72" text-anchor="middle" fill="#14532d">COPY --from=build /app /app</text>
+      <text x="405" y="92" text-anchor="middle" fill="#14532d">CMD ["/app"]</text>
+      <rect x="340" y="110" width="130" height="30" rx="4" fill="#bbf7d0" stroke="#16a34a" stroke-width="1"/>
+      <text x="405" y="129" text-anchor="middle" font-weight="bold" fill="#14532d">/app (12 MB binary)</text>
+      <text x="405" y="165" text-anchor="middle" font-size="11" fill="#166534">Final image: ~12 MB 🎉</text>
+    </svg>
+  </div>
+
+  <p>Full multi-stage Dockerfile for a Go application:</p>
+
+  <pre><code># ---- Build Stage ----
+FROM golang:1.22-alpine AS build
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /app ./cmd/server
+
+# ---- Runtime Stage ----
+FROM alpine:3.19
+RUN apk --no-cache add ca-certificates
+COPY --from=build /app /app
+EXPOSE 8080
+USER 1000
+CMD ["/app"]</code></pre>
+
+  <div class="callout tip">
+    <div class="callout-title">Use scratch for maximum minimalism</div>
+    <p>For statically linked binaries, use <code>FROM scratch</code> as the final stage — literally an empty filesystem. Your image is just your binary, often under 10 MB.</p>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>5. .dockerignore</h2>
+
+  <p>Before building, Docker sends the entire <strong>build context</strong> (usually your project directory) to the daemon. Without a <code>.dockerignore</code>, this includes massive irrelevant files.</p>
+
+  <pre><code># .dockerignore
+.git
+node_modules
+dist
+*.log
+.env
+.env.*
+__pycache__
+*.pyc
+.DS_Store
+coverage
+.idea
+.vscode</code></pre>
+
+  <table>
+    <thead><tr><th>Metric</th><th>Without .dockerignore</th><th>With .dockerignore</th></tr></thead>
+    <tbody>
+      <tr><td>Build context sent</td><td>#{350 MB}</td><td>#{4.2 MB}</td></tr>
+      <tr><td>Time to send context</td><td>8.3s</td><td>0.1s</td></tr>
+      <tr><td>Risk of secret leaks</td><td>High (.env copied)</td><td>Low</td></tr>
+    </tbody>
+  </table>
+
+  <!-- ============================================================ -->
+  <h2>6. BuildKit Features</h2>
+
+  <p>BuildKit is Docker's modern build backend (default since Docker 23.0). It adds significant improvements:</p>
+
+  <ul>
+    <li><strong>Parallel execution</strong> — independent stages build concurrently</li>
+    <li><strong>Better caching</strong> — mount caches survive between builds</li>
+    <li><strong>Secret mounts</strong> — inject secrets without baking them into layers</li>
+    <li><strong>SSH forwarding</strong> — access private repos during build without copying keys</li>
+  </ul>
+
+  <pre><code># Enable BuildKit (if not default)
+export DOCKER_BUILDKIT=1
+
+# Secret mount — never stored in a layer
+RUN --mount=type=secret,id=npmrc,target=/root/.npmrc npm ci
+
+# Build command:
+docker build --secret id=npmrc,src=$HOME/.npmrc .
+
+# Cache mount — persists package manager cache between builds
+RUN --mount=type=cache,target=/root/.cache/pip pip install -r requirements.txt
+
+# SSH mount — clone private repos
+RUN --mount=type=ssh git clone git@github.com:company/private-lib.git</code></pre>
+
+  <div class="callout info">
+    <div class="callout-title">🏭 Industry: CI Layer Caching</div>
+    <p>CI systems use layer caching to avoid rebuilding from scratch on every commit:</p>
+    <ul>
+      <li><strong>GitHub Actions</strong> — <code>docker/build-push-action</code> with <code>cache-from: type=gha</code> stores layers in GitHub's cache</li>
+      <li><strong>Registry caching</strong> — <code>--cache-from=type=registry,ref=myrepo:cache</code> pulls cached layers from a registry</li>
+      <li><strong>BuildKit inline cache</strong> — <code>--build-arg BUILDKIT_INLINE_CACHE=1</code> embeds cache metadata in the image itself</li>
+    </ul>
+    <p>This cuts CI build times from 5–10 minutes to under 30 seconds for typical code changes.</p>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>7. Measuring Build Performance</h2>
+
+  <p>You can't optimise what you don't measure. Key tools:</p>
+
+  <pre><code># See every step's timing with plain output
+docker build --progress=plain -t myapp .
+
+# Inspect layer sizes in the final image
+docker history myapp
+
+# Example output:
+IMAGE        CREATED BY                          SIZE
+a1b2c3d4     CMD ["/app"]                        0B
+e5f6g7h8     COPY --from=build /app /app         12.4MB
+i9j0k1l2     RUN apk --no-cache add ca-certs     0.5MB
+m3n4o5p6     /bin/sh (alpine base)               7.8MB</code></pre>
+
+  <pre><code># Dive — interactive image layer explorer
+# Install: https://github.com/wagoodman/dive
+dive myapp
+
+# Shows: layer contents, wasted space, efficiency score</code></pre>
+
+  <div class="callout tip">
+    <div class="callout-title">Target a score</div>
+    <p>Dive gives an "efficiency score" (0–100%). Aim for 95%+. Common waste: leftover package manager caches, unnecessary build files, duplicate layers.</p>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>Interactive Quizzes</h2>
+
+  <div class="quiz" id="quiz1">
+    <h3>Quiz 1: Cache Invalidation</h3>
+    <p>You have this Dockerfile order: FROM → COPY . . → RUN npm install → CMD. You change one line of source code. What happens?</p>
+    <ul class="quiz-options">
+      <li data-correct="false">Only the CMD layer is rebuilt</li>
+      <li data-correct="true">COPY, npm install, and CMD are all rebuilt</li>
+      <li data-correct="false">Only COPY is rebuilt, npm install stays cached</li>
+      <li data-correct="false">Nothing is rebuilt — Docker detects only source changed</li>
+    </ul>
+    <div class="quiz-feedback" data-correct="Once COPY detects a file change, it and ALL downstream layers rebuild. That's why npm install re-runs unnecessarily here."></div>
+  </div>
+
+  <div class="quiz" id="quiz2">
+    <h3>Quiz 2: Multi-Stage Builds</h3>
+    <p>What is the primary benefit of multi-stage builds?</p>
+    <ul class="quiz-options">
+      <li data-correct="false">They make builds faster by parallelising all stages</li>
+      <li data-correct="false">They allow using multiple base images simultaneously at runtime</li>
+      <li data-correct="true">They produce smaller final images by excluding build-time tools and dependencies</li>
+      <li data-correct="false">They enable running multiple processes in one container</li>
+    </ul>
+    <div class="quiz-feedback" data-correct="Multi-stage builds let you use heavy build tools in one stage but ship only the compiled artifact in a minimal runtime image."></div>
+  </div>
+
+  <div class="quiz" id="quiz3">
+    <h3>Quiz 3: .dockerignore</h3>
+    <p>What happens if you DON'T have a .dockerignore and your project has a 500MB node_modules directory?</p>
+    <ul class="quiz-options">
+      <li data-correct="false">Docker automatically ignores node_modules</li>
+      <li data-correct="true">The entire 500MB is sent as build context, slowing the build even if you never COPY it</li>
+      <li data-correct="false">The build fails with a context size error</li>
+      <li data-correct="false">node_modules is only sent if COPY . . is used</li>
+    </ul>
+    <div class="quiz-feedback" data-correct="The build context is sent to the Docker daemon BEFORE any Dockerfile instructions run. All files in the context directory are transferred regardless of what you COPY."></div>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>Hands-On Tasks</h2>
+
+  <div class="callout practice">
+    <div class="callout-title">🛠️ Task 1: Reorder for Cache Efficiency</div>
+    <p>Start with this poorly-ordered Dockerfile and fix it to maximise cache hits on source code changes:</p>
+    <pre><code># Bad order — fix this!
+FROM node:20-alpine
+WORKDIR /app
+COPY . .
+RUN npm ci
+RUN npm run build
+EXPOSE 3000
+CMD ["node", "dist/index.js"]</code></pre>
+    <p><strong>Steps:</strong></p>
+    <ol>
+      <li>Create a project with <code>package.json</code> and a <code>src/index.ts</code> file</li>
+      <li>Build the image and note the time: <code>docker build --progress=plain -t task1 .</code></li>
+      <li>Change <code>src/index.ts</code> and rebuild — observe <code>npm ci</code> re-runs (~30s)</li>
+      <li>Reorder: move <code>COPY package.json package-lock.json ./</code> and <code>RUN npm ci</code> before <code>COPY . .</code></li>
+      <li>Rebuild after another source change — <code>npm ci</code> should be cached (build: ~2s)</li>
+    </ol>
+    <p><strong>Expected result:</strong> Rebuild drops from ~30s to ~2s for source-only changes.</p>
+  </div>
+
+  <div class="callout practice">
+    <div class="callout-title">🛠️ Task 2: Multi-Stage Image Slimming</div>
+    <p>Convert this single-stage Dockerfile to multi-stage and compare image sizes:</p>
+    <pre><code># Single-stage (builds AND ships everything)
+FROM golang:1.22
+WORKDIR /src
+COPY . .
+RUN go build -o /app ./cmd/server
+EXPOSE 8080
+CMD ["/app"]</code></pre>
+    <p><strong>Steps:</strong></p>
+    <ol>
+      <li>Build the single-stage version: <code>docker build -t app-fat .</code></li>
+      <li>Check its size: <code>docker images app-fat</code> (expect ~800–900 MB)</li>
+      <li>Create a multi-stage version: build in <code>golang:1.22</code>, copy binary to <code>alpine:3.19</code></li>
+      <li>Build: <code>docker build -t app-slim .</code></li>
+      <li>Compare: <code>docker images | grep app-</code> (expect ~12–15 MB for slim)</li>
+      <li>Verify it runs: <code>docker run --rm app-slim</code></li>
+    </ol>
+    <p><strong>Expected result:</strong> 98%+ reduction in image size with identical functionality.</p>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>Key Takeaways</h2>
+
+  <div class="callout success">
+    <div class="callout-title">Remember These</div>
+    <ul>
+      <li><strong>Cache is a chain</strong> — one broken link rebuilds everything after it</li>
+      <li><strong>Order by change frequency</strong> — least-changing instructions first</li>
+      <li><strong>Separate dependency install from source copy</strong> — the single biggest speedup</li>
+      <li><strong>Multi-stage builds</strong> — build heavy, ship light (90%+ size reduction is typical)</li>
+      <li><strong>.dockerignore is free performance</strong> — always use it</li>
+      <li><strong>BuildKit cache mounts</strong> — persist package manager caches across builds</li>
+      <li><strong>Measure with --progress=plain and docker history</strong> — find the slow layers</li>
+    </ul>
+  </div>
+
+  <!-- ============================================================ -->
+  <nav class="prev-next">
+    <a href="0007-your-first-dockerfile.html">← Prev: Your First Dockerfile</a>
+    <a href="0009-tags-registries-and-distribution.html">Next: Tags, Registries &amp; Distribution →</a>
+  </nav>
+
+  <script src="../assets/quiz.js"></script>
+</body>
+</html>

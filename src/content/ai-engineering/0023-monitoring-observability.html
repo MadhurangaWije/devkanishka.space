@@ -1,0 +1,555 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lesson 23: Monitoring &amp; Observability | AI Engineering</title>
+    <link rel="stylesheet" href="../assets/lesson.css">
+    <link rel="stylesheet" href="../assets/prism-theme.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-python.min.js"></script>
+    <script src="../assets/diagrams.js"></script>
+</head>
+<body>
+    <div class="lesson-header">
+        <div class="module-badge">Module 5: Production &amp; Safety</div>
+        <h1>Monitoring &amp; Observability</h1>
+        <p class="lesson-subtitle">Instrument every LLM call, trace requests end-to-end, detect drift, and build alerting pipelines that catch quality regressions before your users do.</p>
+    </div>
+
+    <div class="lesson-meta">
+        <span class="pill">Lesson 23 of 23</span>
+        <span class="pill">~25 min</span>
+        <span class="pill">Advanced</span>
+    </div>
+
+    <main class="lesson-content">
+
+        <!-- Section 1: What to Instrument -->
+        <section>
+            <h2>What to Instrument</h2>
+            <div class="concept-box">
+                <h3>Every LLM Call Must Be Logged</h3>
+                <p>In production, you're flying blind without observability. Every single LLM call should capture:</p>
+                <ul>
+                    <li><strong>Input</strong> — the full prompt (or at minimum a hash + length)</li>
+                    <li><strong>Output</strong> — the model's complete response</li>
+                    <li><strong>Model</strong> — which model handled the request</li>
+                    <li><strong>Latency</strong> — time from request to final token</li>
+                    <li><strong>Cost</strong> — calculated from token counts and pricing</li>
+                    <li><strong>Tokens</strong> — input tokens, output tokens, total</li>
+                </ul>
+                <p>Without this data, you cannot debug failures, optimize costs, or prove quality to stakeholders.</p>
+            </div>
+
+            <div class="diagram-container" id="obs-pipeline"></div>
+
+            <div class="callout tip">
+                <strong>Tip:</strong> Start logging on day one — even to a local SQLite file. Retroactively adding observability is 10x harder than building it in from the start.
+            </div>
+        </section>
+
+        <!-- Section 2: Traces -->
+        <section>
+            <h2>Traces: Linking Related Calls</h2>
+            <p>A single user request often triggers multiple LLM calls — a router, a generator, a validator. <strong>Traces</strong> link these together:</p>
+
+            <div class="concept-box">
+                <h3>Trace Structure</h3>
+                <ul>
+                    <li><strong>trace_id</strong> — unique identifier for the entire user request</li>
+                    <li><strong>span_id</strong> — unique identifier for each individual LLM call within the trace</li>
+                    <li><strong>parent_span_id</strong> — links child spans to their parent (for nested calls)</li>
+                </ul>
+                <p>This lets you reconstruct the full execution path: which calls happened, in what order, how long each took, and where failures occurred.</p>
+            </div>
+
+            <div class="diagram-container" id="obs-stack"></div>
+        </section>
+
+        <!-- Section 3: LLMTracer Implementation -->
+        <section>
+            <h2>Building an LLM Tracer</h2>
+            <p>Here's a production-ready tracer that captures everything as a context manager:</p>
+
+            <div class="code-block">
+                <pre><code class="language-python">import time
+import uuid
+import json
+import sqlite3
+from contextlib import contextmanager
+from dataclasses import dataclass, field
+from typing import Optional
+
+@dataclass
+class Span:
+    """A single instrumented LLM call."""
+    span_id: str = field(default_factory=lambda: str(uuid.uuid4())[:8])
+    trace_id: str = ""
+    name: str = ""
+    start_time: float = 0.0
+    end_time: float = 0.0
+    input_text: str = ""
+    output_text: str = ""
+    model: str = ""
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cost: float = 0.0
+    error: Optional[str] = None
+
+    @property
+    def latency_ms(self) -> float:
+        return (self.end_time - self.start_time) * 1000
+
+
+class LLMTracer:
+    """Instruments LLM calls with tracing and persistence."""
+
+    def __init__(self, db_path: str = "llm_traces.db"):
+        self.db_path = db_path
+        self.spans: list[Span] = []
+        self.current_trace_id = str(uuid.uuid4())[:12]
+        self._init_db()
+
+    def _init_db(self):
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS spans (
+                    span_id TEXT PRIMARY KEY,
+                    trace_id TEXT,
+                    name TEXT,
+                    start_time REAL,
+                    end_time REAL,
+                    latency_ms REAL,
+                    input_text TEXT,
+                    output_text TEXT,
+                    model TEXT,
+                    input_tokens INTEGER,
+                    output_tokens INTEGER,
+                    cost REAL,
+                    error TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+
+    @contextmanager
+    def span(self, name: str, model: str = ""):
+        """Context manager to trace an LLM call."""
+        s = Span(
+            trace_id=self.current_trace_id,
+            name=name,
+            model=model,
+            start_time=time.time()
+        )
+        try:
+            yield s
+        except Exception as e:
+            s.error = str(e)
+            raise
+        finally:
+            s.end_time = time.time()
+            self.spans.append(s)
+
+    def flush(self):
+        """Write all pending spans to SQLite."""
+        with sqlite3.connect(self.db_path) as conn:
+            for s in self.spans:
+                conn.execute("""
+                    INSERT OR REPLACE INTO spans
+                    (span_id, trace_id, name, start_time, end_time,
+                     latency_ms, input_text, output_text, model,
+                     input_tokens, output_tokens, cost, error)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (s.span_id, s.trace_id, s.name, s.start_time,
+                      s.end_time, s.latency_ms, s.input_text,
+                      s.output_text, s.model, s.input_tokens,
+                      s.output_tokens, s.cost, s.error))
+        self.spans.clear()
+
+    def new_trace(self):
+        """Start a new trace (new user request)."""
+        self.current_trace_id = str(uuid.uuid4())[:12]
+
+    def get_stats(self, hours: int = 24) -> dict:
+        """Return aggregated metrics for the last N hours."""
+        cutoff = time.time() - (hours * 3600)
+        with sqlite3.connect(self.db_path) as conn:
+            row = conn.execute("""
+                SELECT
+                    COUNT(*) as total_calls,
+                    AVG(latency_ms) as avg_latency_ms,
+                    MAX(latency_ms) as p99_latency_ms,
+                    SUM(cost) as total_cost,
+                    SUM(input_tokens + output_tokens) as total_tokens,
+                    SUM(CASE WHEN error IS NOT NULL THEN 1 ELSE 0 END) as errors
+                FROM spans WHERE start_time > ?
+            """, (cutoff,)).fetchone()
+
+        return {
+            "total_calls": row[0],
+            "avg_latency_ms": round(row[1] or 0, 1),
+            "p99_latency_ms": round(row[2] or 0, 1),
+            "total_cost": round(row[3] or 0, 4),
+            "total_tokens": row[4] or 0,
+            "error_count": row[5],
+            "error_rate": round((row[5] / row[0]) * 100, 2) if row[0] else 0
+        }
+
+
+# --- Usage ---
+tracer = LLMTracer()
+
+with tracer.span("summarize", model="gpt-4o-mini") as s:
+    # Your LLM call here
+    s.input_text = "Summarize this article..."
+    response = "Article summary here."  # openai.chat(...)
+    s.output_text = response
+    s.input_tokens = 150
+    s.output_tokens = 45
+    s.cost = 0.00012
+
+tracer.flush()
+print(tracer.get_stats(hours=1))</code></pre>
+            </div>
+        </section>
+
+        <!-- Section 4: Evaluation in Production -->
+        <section>
+            <h2>Evaluation in Production</h2>
+            <div class="concept-box">
+                <h3>Sample &amp; Score with LLM-as-Judge</h3>
+                <p>You can't manually review every response. Instead, sample a percentage of calls and score them automatically:</p>
+                <ol class="step-list">
+                    <li>Sample X% of production calls (start with 5-10%)</li>
+                    <li>Send input + output to a judge model with a scoring rubric</li>
+                    <li>Store scores alongside the trace data</li>
+                    <li>Track quality over time — plot daily/weekly averages</li>
+                    <li>Alert when quality drops below threshold</li>
+                </ol>
+            </div>
+
+            <div class="code-block">
+                <pre><code class="language-python">import random
+
+SAMPLE_RATE = 0.05  # Score 5% of calls
+
+def maybe_evaluate(span: Span, client) -> Optional[float]:
+    """Probabilistically evaluate a span's quality."""
+    if random.random() > SAMPLE_RATE:
+        return None
+
+    score_response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{
+            "role": "system",
+            "content": """Score this AI response 1-5:
+5 = perfect, complete, accurate
+4 = good with minor issues
+3 = acceptable but could improve
+2 = significant problems
+1 = wrong or harmful
+
+Respond with just the number."""
+        }, {
+            "role": "user",
+            "content": f"Input: {span.input_text}\n\nOutput: {span.output_text}"
+        }]
+    )
+    return float(score_response.choices[0].message.content.strip())</code></pre>
+            </div>
+        </section>
+
+        <!-- Section 5: Drift Detection -->
+        <section>
+            <h2>Drift Detection</h2>
+            <div class="concept-box">
+                <h3>Two Types of Drift</h3>
+                <p><strong>Input Distribution Drift:</strong> The types of queries your users send change over time. Monitor this by embedding inputs and tracking centroid distance — if new inputs are far from your training distribution, your system may struggle.</p>
+                <p><strong>Output Quality Drift:</strong> Model updates, prompt changes, or shifting inputs can degrade output quality silently. Track your LLM-as-judge scores over rolling windows — a sustained drop signals regression.</p>
+            </div>
+
+            <div class="code-block">
+                <pre><code class="language-python">import numpy as np
+from collections import deque
+
+class DriftDetector:
+    """Detects embedding drift in input distribution."""
+
+    def __init__(self, window_size: int = 1000, threshold: float = 0.15):
+        self.baseline_embeddings: list[np.ndarray] = []
+        self.recent_embeddings: deque = deque(maxlen=window_size)
+        self.threshold = threshold
+        self.baseline_centroid: Optional[np.ndarray] = None
+
+    def set_baseline(self, embeddings: list[np.ndarray]):
+        """Set baseline from initial production data."""
+        self.baseline_embeddings = embeddings
+        self.baseline_centroid = np.mean(embeddings, axis=0)
+
+    def add_embedding(self, embedding: np.ndarray) -> dict:
+        """Add new embedding and check for drift."""
+        self.recent_embeddings.append(embedding)
+
+        if len(self.recent_embeddings) < 100:
+            return {"drifted": False, "distance": 0.0}
+
+        recent_centroid = np.mean(list(self.recent_embeddings), axis=0)
+        distance = np.linalg.norm(recent_centroid - self.baseline_centroid)
+
+        return {
+            "drifted": distance > self.threshold,
+            "distance": round(float(distance), 4),
+            "threshold": self.threshold
+        }</code></pre>
+            </div>
+        </section>
+
+        <!-- Section 6: Alerting -->
+        <section>
+            <h2>Alerting: Thresholds &amp; Notifications</h2>
+            <div class="concept-box">
+                <h3>Key Alert Thresholds</h3>
+                <table class="comparison-table">
+                    <thead>
+                        <tr>
+                            <th>Metric</th>
+                            <th>Warning</th>
+                            <th>Critical</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td>Error rate</td>
+                            <td>&gt; 2%</td>
+                            <td>&gt; 5%</td>
+                        </tr>
+                        <tr>
+                            <td>Latency p99</td>
+                            <td>&gt; 5s</td>
+                            <td>&gt; 15s</td>
+                        </tr>
+                        <tr>
+                            <td>Cost per hour</td>
+                            <td>&gt; 2x baseline</td>
+                            <td>&gt; 5x baseline</td>
+                        </tr>
+                        <tr>
+                            <td>Quality score (avg)</td>
+                            <td>&lt; 3.5</td>
+                            <td>&lt; 3.0</td>
+                        </tr>
+                        <tr>
+                            <td>Input drift distance</td>
+                            <td>&gt; 0.1</td>
+                            <td>&gt; 0.2</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <div class="code-block">
+                <pre><code class="language-python">import requests
+
+class AlertManager:
+    """Simple threshold-based alerting."""
+
+    def __init__(self, webhook_url: str):
+        self.webhook_url = webhook_url
+        self.thresholds = {
+            "error_rate": {"warning": 2.0, "critical": 5.0},
+            "p99_latency_ms": {"warning": 5000, "critical": 15000},
+            "hourly_cost": {"warning": 2.0, "critical": 5.0},  # multiplier
+            "quality_score": {"warning": 3.5, "critical": 3.0},
+        }
+
+    def check(self, stats: dict, baseline_cost: float = 1.0):
+        """Check stats against thresholds and fire alerts."""
+        alerts = []
+
+        if stats["error_rate"] > self.thresholds["error_rate"]["critical"]:
+            alerts.append(f"🚨 CRITICAL: Error rate {stats['error_rate']}%")
+        elif stats["error_rate"] > self.thresholds["error_rate"]["warning"]:
+            alerts.append(f"⚠️ WARNING: Error rate {stats['error_rate']}%")
+
+        if stats["p99_latency_ms"] > self.thresholds["p99_latency_ms"]["critical"]:
+            alerts.append(f"🚨 CRITICAL: p99 latency {stats['p99_latency_ms']}ms")
+
+        for alert in alerts:
+            self._send(alert)
+
+        return alerts
+
+    def _send(self, message: str):
+        """Send alert to Slack/PagerDuty webhook."""
+        requests.post(self.webhook_url, json={"text": message})</code></pre>
+            </div>
+        </section>
+
+        <!-- Section 7: Langfuse Integration -->
+        <section>
+            <h2>Langfuse Integration</h2>
+            <div class="concept-box">
+                <h3>Open-Source Observability for LLMs</h3>
+                <p><strong>Langfuse</strong> is an open-source, self-hostable LLM observability platform. It provides tracing, evaluation, prompt management, and cost tracking out of the box — with a drop-in OpenAI wrapper that requires zero code changes.</p>
+            </div>
+
+            <div class="code-block">
+                <pre><code class="language-python"># pip install langfuse
+# The drop-in wrapper — just change the import!
+from langfuse.openai import openai
+
+# All calls are automatically traced — no other changes needed
+client = openai.OpenAI()
+
+response = client.chat.completions.create(
+    model="gpt-4o-mini",
+    messages=[{"role": "user", "content": "Explain observability"}]
+)
+# Trace automatically sent to Langfuse dashboard
+# Includes: latency, tokens, cost, full input/output
+
+# Optional: add metadata to traces
+from langfuse.decorators import observe
+
+@observe()
+def my_ai_pipeline(query: str) -> str:
+    """Entire function is traced as a span."""
+    # Each LLM call inside becomes a child span
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": query}]
+    )
+    return response.choices[0].message.content</code></pre>
+            </div>
+
+            <div class="callout tip">
+                <strong>Tip:</strong> Set <code>LANGFUSE_HOST</code>, <code>LANGFUSE_PUBLIC_KEY</code>, and <code>LANGFUSE_SECRET_KEY</code> as environment variables. For self-hosting, run <code>docker compose up</code> with their official compose file.
+            </div>
+        </section>
+
+        <!-- Section 8: Phoenix/Arize -->
+        <section>
+            <h2>Phoenix / Arize Integration</h2>
+            <div class="concept-box">
+                <h3>Enterprise-Grade Observability</h3>
+                <p><strong>Phoenix</strong> (by Arize) is another open-source option with strong drift detection and embedding visualization. It integrates via OpenTelemetry, making it compatible with any LLM framework.</p>
+                <ul>
+                    <li><strong>Phoenix</strong> — local-first, great for development and debugging</li>
+                    <li><strong>Arize</strong> — cloud platform with advanced drift detection, A/B testing, and team collaboration</li>
+                    <li>Both support OpenTelemetry traces, so you can switch between them</li>
+                </ul>
+            </div>
+
+            <div class="code-block">
+                <pre><code class="language-python"># pip install arize-phoenix openinference-instrumentation-openai
+import phoenix as px
+from openinference.instrumentation.openai import OpenAIInstrumentor
+
+# Launch local Phoenix instance
+px.launch_app()
+
+# Auto-instrument all OpenAI calls
+OpenAIInstrumentor().instrument()
+
+# Now all calls are traced in the Phoenix UI at localhost:6006
+import openai
+client = openai.OpenAI()
+
+response = client.chat.completions.create(
+    model="gpt-4o-mini",
+    messages=[{"role": "user", "content": "What is observability?"}]
+)
+# View traces, latency, token counts at http://localhost:6006</code></pre>
+            </div>
+        </section>
+
+        <!-- Mini-project -->
+        <section>
+            <div class="project-box">
+                <h3>🛠️ Mini-Project: Observability Dashboard</h3>
+                <p>Instrument any AI app with the <code>LLMTracer</code> class and build a real-time terminal dashboard:</p>
+                <ol class="step-list">
+                    <li>Integrate <code>LLMTracer</code> into an existing AI app (or create a simple chatbot)</li>
+                    <li>Run at least 50 traced calls with varied inputs</li>
+                    <li>Build a terminal dashboard using the <code>rich</code> library showing:
+                        <ul>
+                            <li><strong>Live call log</strong> — most recent 10 calls with model, latency, cost</li>
+                            <li><strong>Cost/hour chart</strong> — ASCII bar chart of hourly spend</li>
+                            <li><strong>Quality score trend</strong> — rolling average from LLM-as-judge</li>
+                            <li><strong>Top slow calls</strong> — the 5 highest-latency spans</li>
+                        </ul>
+                    </li>
+                    <li>Add alerting: print colored warnings when error rate or latency exceeds thresholds</li>
+                    <li>Bonus: add drift detection using embeddings of your inputs</li>
+                </ol>
+            </div>
+        </section>
+
+        <!-- Course Complete -->
+        <section>
+            <div class="key-points">
+                <h2>🎉 Course Complete!</h2>
+                <p>Congratulations! Over 23 lessons, you've built a complete portfolio of AI engineering projects:</p>
+                <ol>
+                    <li>Token Counter &amp; Cost Estimator</li>
+                    <li>CLI Chatbot with streaming</li>
+                    <li>Model Comparison Benchmark</li>
+                    <li>Prompt Testing Harness</li>
+                    <li>Data Extraction Pipeline</li>
+                    <li>AI Database Assistant</li>
+                    <li>Prompt Evaluation Framework</li>
+                    <li>Semantic Search Over Notes</li>
+                    <li>Vector DB Setup</li>
+                    <li>Chunking Benchmark</li>
+                    <li>Documentation Q&amp;A System</li>
+                    <li>Advanced RAG with Reranking</li>
+                    <li>RAG Evaluation Dashboard</li>
+                    <li>ReAct Agent from Scratch</li>
+                    <li>Research Agent</li>
+                    <li>Multi-Agent Content Pipeline</li>
+                    <li>Agent with Persistent Memory</li>
+                    <li>Custom MCP Server</li>
+                    <li>Red-Team Chatbot</li>
+                    <li>Safety Layer Middleware</li>
+                    <li>Smart Model Router</li>
+                    <li>Observability Dashboard</li>
+                </ol>
+                <p><strong>You are now an AI engineer. Go build something real.</strong></p>
+            </div>
+        </section>
+
+    </main>
+
+    <nav class="nav-links">
+        <a href="0022-cost-latency-scaling.html" class="prev">← Previous: Cost, Latency &amp; Scaling</a>
+        <span class="next">🎓 Course Complete</span>
+    </nav>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            if (window.Diagrams) {
+                Diagrams.createFlowDiagram(
+                    document.getElementById('obs-pipeline'),
+                    [
+                        { label: 'LLM Call' },
+                        { label: 'Trace Collector', sublabel: 'latency, cost, tokens' },
+                        { label: 'Storage', sublabel: 'SQLite / Langfuse' },
+                        { label: 'Dashboard' },
+                        { label: 'Alerts', sublabel: 'on threshold breach' }
+                    ]
+                );
+
+                Diagrams.createLayerDiagram(
+                    document.getElementById('obs-stack'),
+                    [
+                        { label: 'Alerting', sublabel: 'PagerDuty / Slack webhooks', color: '#ef4444' },
+                        { label: 'Evaluation', sublabel: 'LLM-as-judge, quality scores', color: '#f59e0b' },
+                        { label: 'Metrics', sublabel: 'latency, cost, error rate', color: '#6366f1' },
+                        { label: 'Traces', sublabel: 'full request/response logs', color: '#22d3ee' }
+                    ]
+                );
+            }
+        });
+    </script>
+</body>
+</html>

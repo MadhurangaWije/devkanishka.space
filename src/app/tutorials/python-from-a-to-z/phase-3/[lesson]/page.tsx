@@ -39,6 +39,7 @@ export default async function LessonPage({ params }: Props) {
   }
 
   const prevPhase = PHASES.find((p) => p.number === 2)!;
+  const nextPhase = PHASES.find((p) => p.number === 4)!;
 
   return (
     <div className="lesson-page-wrapper">
@@ -87,10 +88,14 @@ export default async function LessonPage({ params }: Props) {
               <span className="lesson-nav-title">{data.next.title}</span>
             </Link>
           ) : (
-            <div className="lesson-nav-link lesson-nav-link--next lesson-nav-link--complete">
-              <span className="lesson-nav-dir">✓ Phase 3 (Advanced) in progress</span>
-              <span className="lesson-nav-title">FastAPI &amp; ML/AI phases coming soon</span>
-            </div>
+            // Last lesson in Phase 3 — link forward to first lesson of Phase 4
+            <Link
+              href={`${COURSE_BASE}/${nextPhase.urlSegment}/${nextPhase.lessons[0].slug}`}
+              className="lesson-nav-link lesson-nav-link--next"
+            >
+              <span className="lesson-nav-dir">Next → Phase 4</span>
+              <span className="lesson-nav-title">{nextPhase.lessons[0].title}</span>
+            </Link>
           )}
         </div>
       </nav>

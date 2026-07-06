@@ -1,0 +1,506 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lesson 18: Local Development with Containers</title>
+  <link rel="stylesheet" href="../assets/lesson-style.css">
+</head>
+<body>
+
+  <div class="lesson-meta">
+    <span>📦 Lesson 18 of 20</span>
+    <span>⏱️ 16–20 minutes</span>
+    <span>💻 Developer Experience</span>
+  </div>
+
+  <h1>Local Development with Containers</h1>
+  <p class="subtitle">Containers aren't just for production. Used correctly, they eliminate "works on my machine" bugs and give every developer an identical environment — without sacrificing the fast feedback loops you need while coding.</p>
+
+  <!-- ============================================================ -->
+  <h2>1. The Dev/Prod Parity Problem</h2>
+
+  <p>"Works on my machine" is the oldest excuse in software. It happens because developer laptops drift from production:</p>
+
+  <ul>
+    <li>Different OS, different library versions, different system packages</li>
+    <li>Node 18 on your Mac, Node 20 in CI, Node 16 on the intern's laptop</li>
+    <li>That one native dependency compiled differently on Linux vs macOS</li>
+  </ul>
+
+  <p>Containers solve this: <strong>same image, same dependencies, everywhere</strong>. But naive containerized development is painfully slow:</p>
+
+  <pre><code># The naive (slow) approach:
+# 1. Edit code on host
+# 2. Rebuild image (docker build ...)
+# 3. Restart container (docker run ...)
+# 4. Wait 30+ seconds
+# 5. See your change
+# 6. Repeat 😩</code></pre>
+
+  <p>The rest of this lesson shows how to get container consistency <em>without</em> sacrificing developer speed.</p>
+
+  <!-- ============================================================ -->
+  <h2>2. Bind Mounts for Hot Reload</h2>
+
+  <p>The key insight: don't bake source code into the dev image. Instead, <strong>mount it in</strong> so edits appear instantly inside the container:</p>
+
+  <pre><code># Mount local ./src into /app/src inside the container
+docker run -v ./src:/app/src -p 3000:3000 my-app-dev</code></pre>
+
+  <p>Combined with a file-watching tool, you get instant feedback:</p>
+
+  <table>
+    <thead><tr><th>Language</th><th>Watch Tool</th><th>What It Does</th></tr></thead>
+    <tbody>
+      <tr><td>Node.js</td><td><code>nodemon</code></td><td>Restarts server on file change</td></tr>
+      <tr><td>Node.js</td><td><code>webpack-dev-server</code> / <code>vite</code></td><td>Hot Module Replacement (HMR)</td></tr>
+      <tr><td>Go</td><td><code>air</code></td><td>Live-reload for Go apps</td></tr>
+      <tr><td>Python</td><td><code>uvicorn --reload</code></td><td>Auto-restart on change</td></tr>
+      <tr><td>Rust</td><td><code>cargo-watch</code></td><td>Re-compile on save</td></tr>
+    </tbody>
+  </table>
+
+  <pre><code># Dockerfile.dev — optimized for dev, not prod
+FROM node:20-alpine
+WORKDIR /app
+COPY package*.json ./
+RUN npm install
+# No COPY of source — it comes via bind mount
+EXPOSE 3000
+CMD ["npx", "nodemon", "src/index.js"]</code></pre>
+
+  <div class="callout tip">
+    <div class="callout-title">Separate Dev and Prod Dockerfiles</div>
+    <p>Many teams keep <code>Dockerfile</code> for production (multi-stage, minimal) and <code>Dockerfile.dev</code> for development (dev deps included, watch tools, debug ports). Alternatively, use multi-stage with a <code>dev</code> target: <code>docker build --target dev .</code></p>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>3. Dev Containers (VS Code)</h2>
+
+  <p>Dev Containers take the idea further: your <strong>entire development environment IS a container</strong>. VS Code (or any compatible editor) runs inside it — extensions, tools, and settings travel with the project.</p>
+
+  <pre><code>// .devcontainer/devcontainer.json
+{
+  "name": "My Project Dev",
+  "image": "mcr.microsoft.com/devcontainers/javascript-node:20",
+  "features": {
+    "ghcr.io/devcontainers/features/docker-in-docker:2": {}
+  },
+  "forwardPorts": [3000, 5432],
+  "postCreateCommand": "npm install",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "dbaeumer.vscode-eslint",
+        "esbenp.prettier-vscode",
+        "ms-azuretools.vscode-docker"
+      ],
+      "settings": {
+        "editor.formatOnSave": true
+      }
+    }
+  },
+  "mounts": [
+    "source=${localWorkspaceFolder},target=/workspace,type=bind"
+  ]
+}</code></pre>
+
+  <h3>Why Dev Containers?</h3>
+  <ul>
+    <li><strong>Team consistency</strong> — new hire opens project, gets the exact same environment</li>
+    <li><strong>No global installs</strong> — Node, Python, Go versions live in the container, not on host</li>
+    <li><strong>Reproducible</strong> — commit <code>.devcontainer/</code> to git; the environment is versioned</li>
+    <li><strong>Isolated</strong> — project A needs Node 18, project B needs Node 20 — no conflict</li>
+  </ul>
+
+  <!-- ============================================================ -->
+  <h2>4. Docker Compose for Dev</h2>
+
+  <p>Real apps need more than one container (app + database + cache + …). Docker Compose shines for local dev with its <code>compose.override.yaml</code> pattern:</p>
+
+  <pre><code># compose.yaml — base (shared between dev and prod)
+services:
+  app:
+    build: .
+    ports:
+      - "3000:3000"
+    depends_on:
+      - db
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_PASSWORD: secret
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+volumes:
+  pgdata:</code></pre>
+
+  <pre><code># compose.override.yaml — dev overrides (auto-loaded!)
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    volumes:
+      - ./src:/app/src          # bind mount for hot reload
+      - /app/node_modules       # anonymous volume — keep container's node_modules
+    environment:
+      - NODE_ENV=development
+      - DEBUG=app:*
+    ports:
+      - "9229:9229"             # Node.js debug port
+  db:
+    ports:
+      - "5432:5432"             # Expose DB for local tools</code></pre>
+
+  <p>Run <code>docker compose up</code> — it automatically merges <code>compose.yaml</code> + <code>compose.override.yaml</code>. For production, use <code>docker compose -f compose.yaml -f compose.prod.yaml up</code>.</p>
+
+  <div class="callout info">
+    <div class="callout-title">The Anonymous Volume Trick</div>
+    <p>Notice <code>/app/node_modules</code> as a volume with no host path. This prevents the bind mount from overwriting the container's <code>node_modules</code> (which were installed during build). The container keeps its own copy — essential for native modules compiled for Linux.</p>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>5. Debugging Inside Containers</h2>
+
+  <p>Remote debugging connects your IDE's debugger to the process running inside the container:</p>
+
+  <table>
+    <thead><tr><th>Runtime</th><th>Debug Port</th><th>Start Command</th></tr></thead>
+    <tbody>
+      <tr><td>Node.js</td><td>9229</td><td><code>node --inspect=0.0.0.0:9229 app.js</code></td></tr>
+      <tr><td>Java</td><td>5005</td><td><code>-agentlib:jdwp=transport=dt_socket,server=y,address=*:5005</code></td></tr>
+      <tr><td>Python</td><td>5678</td><td><code>python -m debugpy --listen 0.0.0.0:5678 app.py</code></td></tr>
+      <tr><td>Go (Delve)</td><td>2345</td><td><code>dlv debug --headless --listen=:2345</code></td></tr>
+    </tbody>
+  </table>
+
+  <pre><code># VS Code launch.json for Node.js in container
+{
+  "type": "node",
+  "request": "attach",
+  "name": "Docker: Attach",
+  "port": 9229,
+  "address": "localhost",
+  "localRoot": "${workspaceFolder}/src",
+  "remoteRoot": "/app/src"
+}</code></pre>
+
+  <p>For ad-hoc investigation, <code>docker exec</code> is your friend:</p>
+
+  <pre><code># Get a shell inside a running container
+docker exec -it my-app sh
+
+# Check environment variables
+docker exec my-app env
+
+# Tail logs in real-time
+docker exec my-app tail -f /var/log/app.log</code></pre>
+
+  <!-- ============================================================ -->
+  <h2>6. Performance Gotchas</h2>
+
+  <p>Bind mounts have a dirty secret: <strong>they're slow on macOS and Windows</strong>. Docker Desktop runs Linux in a VM, and file system operations cross the VM boundary:</p>
+
+  <table>
+    <thead><tr><th>Platform</th><th>Bind Mount Speed</th><th>Why</th></tr></thead>
+    <tbody>
+      <tr><td>Linux</td><td>Native speed</td><td>No VM — direct kernel access</td></tr>
+      <tr><td>macOS</td><td>2–10× slower</td><td>File events cross VM boundary (hypervisor framework)</td></tr>
+      <tr><td>Windows (WSL2)</td><td>Near-native*</td><td>*Only if files live inside WSL2 filesystem, not /mnt/c</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Solutions</h3>
+
+  <ul>
+    <li><strong>Named volumes for heavy dirs</strong> — keep <code>node_modules</code>, <code>vendor</code>, <code>.venv</code> in a Docker volume (not bind-mounted)</li>
+    <li><strong>VirtioFS</strong> — Docker Desktop's newer file sharing backend (default on macOS since Docker Desktop 4.15+); significantly faster than gRPC-FUSE</li>
+    <li><strong>Mutagen</strong> — real-time two-way file sync; avoids bind mounts entirely</li>
+    <li><strong>Keep source in WSL2</strong> — on Windows, clone repos inside the WSL2 filesystem (<code>~/projects/</code>), not on Windows drives</li>
+  </ul>
+
+  <div class="callout warning">
+    <div class="callout-title">Deprecated Flags</div>
+    <p>You may see <code>:cached</code> or <code>:delegated</code> mount flags in older tutorials. These were macOS-specific hints that are now <strong>ignored</strong> by Docker Desktop (VirtioFS handles consistency automatically). Don't rely on them.</p>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>7. When NOT to Use Containers for Dev</h2>
+
+  <p>Containers aren't always the answer. Skip them when:</p>
+
+  <ul>
+    <li><strong>Simple scripts</strong> — a standalone Python script or Bash tool doesn't need containerized dev</li>
+    <li><strong>Early prototyping</strong> — exploring an idea? The setup overhead slows you down</li>
+    <li><strong>Tight hardware access</strong> — GPU development, embedded systems, Bluetooth/USB devices</li>
+    <li><strong>The team already has parity</strong> — if everyone runs the same OS + versions and CI matches, the benefit is marginal</li>
+    <li><strong>Friction outweighs benefit</strong> — if you spend more time debugging Docker than writing code, step back</li>
+  </ul>
+
+  <div class="callout tip">
+    <div class="callout-title">Pragmatism Over Dogma</div>
+    <p>Use containers where they reduce friction — multi-service apps, complex dependency chains, onboarding new developers. Don't use them to prove a point.</p>
+  </div>
+
+  <!-- ============================================================ -->
+  <!-- SVG DIAGRAM: Dev Container Workflow -->
+  <h2>Dev Container Workflow</h2>
+
+  <svg viewBox="0 0 700 320" style="width:100%;max-width:700px;display:block;margin:2rem auto;" role="img" aria-label="Dev container workflow diagram showing host editor communicating via bind mount with a container that has runtime and dependencies">
+    <!-- Host box -->
+    <rect x="20" y="30" width="200" height="260" rx="12" fill="#eff6ff" stroke="#3b82f6" stroke-width="2"/>
+    <text x="120" y="58" text-anchor="middle" font-family="system-ui,sans-serif" font-size="14" font-weight="bold" fill="#1e40af">HOST MACHINE</text>
+
+    <!-- Editor -->
+    <rect x="45" y="80" width="150" height="50" rx="8" fill="#ffffff" stroke="#6366f1" stroke-width="2"/>
+    <text x="120" y="100" text-anchor="middle" font-family="system-ui,sans-serif" font-size="12" fill="#4338ca">VS Code / Editor</text>
+    <text x="120" y="118" text-anchor="middle" font-family="system-ui,sans-serif" font-size="11" fill="#6b7280">Edit source files</text>
+
+    <!-- Source files -->
+    <rect x="45" y="155" width="150" height="50" rx="8" fill="#ffffff" stroke="#6366f1" stroke-width="2"/>
+    <text x="120" y="175" text-anchor="middle" font-family="system-ui,sans-serif" font-size="12" fill="#4338ca">./src/</text>
+    <text x="120" y="193" text-anchor="middle" font-family="system-ui,sans-serif" font-size="11" fill="#6b7280">Project source code</text>
+
+    <!-- Arrow editor → source -->
+    <line x1="120" y1="130" x2="120" y2="155" stroke="#6366f1" stroke-width="2" marker-end="url(#arrowBlue18)"/>
+
+    <!-- Bind mount arrow -->
+    <line x1="195" y1="180" x2="360" y2="180" stroke="#f59e0b" stroke-width="3" stroke-dasharray="8,4"/>
+    <text x="278" y="170" text-anchor="middle" font-family="system-ui,sans-serif" font-size="11" font-weight="bold" fill="#d97706">BIND MOUNT</text>
+    <text x="278" y="195" text-anchor="middle" font-family="system-ui,sans-serif" font-size="10" fill="#92400e">./src:/app/src</text>
+
+    <!-- Container box -->
+    <rect x="360" y="30" width="310" height="260" rx="12" fill="#f0fdf4" stroke="#16a34a" stroke-width="2"/>
+    <text x="515" y="58" text-anchor="middle" font-family="system-ui,sans-serif" font-size="14" font-weight="bold" fill="#166534">CONTAINER</text>
+
+    <!-- Runtime -->
+    <rect x="385" y="80" width="130" height="50" rx="8" fill="#ffffff" stroke="#16a34a" stroke-width="2"/>
+    <text x="450" y="100" text-anchor="middle" font-family="system-ui,sans-serif" font-size="12" fill="#166534">Runtime</text>
+    <text x="450" y="118" text-anchor="middle" font-family="system-ui,sans-serif" font-size="11" fill="#6b7280">Node 20 / Python 3.12</text>
+
+    <!-- Dependencies -->
+    <rect x="535" y="80" width="115" height="50" rx="8" fill="#ffffff" stroke="#16a34a" stroke-width="2"/>
+    <text x="593" y="100" text-anchor="middle" font-family="system-ui,sans-serif" font-size="12" fill="#166534">Dependencies</text>
+    <text x="593" y="118" text-anchor="middle" font-family="system-ui,sans-serif" font-size="11" fill="#6b7280">node_modules/</text>
+
+    <!-- Mounted source -->
+    <rect x="385" y="155" width="130" height="50" rx="8" fill="#fef9c3" stroke="#f59e0b" stroke-width="2"/>
+    <text x="450" y="175" text-anchor="middle" font-family="system-ui,sans-serif" font-size="12" fill="#92400e">/app/src</text>
+    <text x="450" y="193" text-anchor="middle" font-family="system-ui,sans-serif" font-size="11" fill="#6b7280">Mounted from host</text>
+
+    <!-- Watch tool -->
+    <rect x="385" y="225" width="260" height="50" rx="8" fill="#ffffff" stroke="#16a34a" stroke-width="2"/>
+    <text x="515" y="245" text-anchor="middle" font-family="system-ui,sans-serif" font-size="12" fill="#166534">Watch Tool (nodemon / vite)</text>
+    <text x="515" y="263" text-anchor="middle" font-family="system-ui,sans-serif" font-size="11" fill="#6b7280">Detects changes → restarts/HMR</text>
+
+    <!-- Arrow mounted source → watch -->
+    <line x1="450" y1="205" x2="450" y2="225" stroke="#16a34a" stroke-width="2" marker-end="url(#arrowGreen18)"/>
+
+    <!-- Arrow runtime → watch -->
+    <line x1="450" y1="130" x2="450" y2="145" stroke="#16a34a" stroke-width="1.5" stroke-dasharray="4,3"/>
+
+    <!-- Port forwarding label -->
+    <rect x="45" y="230" width="150" height="40" rx="8" fill="#fef2f2" stroke="#dc2626" stroke-width="1.5"/>
+    <text x="120" y="250" text-anchor="middle" font-family="system-ui,sans-serif" font-size="11" fill="#991b1b">localhost:3000 → :3000</text>
+    <text x="120" y="264" text-anchor="middle" font-family="system-ui,sans-serif" font-size="10" fill="#6b7280">Port forwarding</text>
+
+    <!-- Arrow markers -->
+    <defs>
+      <marker id="arrowBlue18" markerWidth="8" markerHeight="8" refX="8" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="#6366f1"/>
+      </marker>
+      <marker id="arrowGreen18" markerWidth="8" markerHeight="8" refX="8" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="#16a34a"/>
+      </marker>
+    </defs>
+  </svg>
+
+  <!-- ============================================================ -->
+  <!-- QUIZ 1 -->
+  <div class="quiz" data-quiz="bind-mount-perf">
+    <h3>🧠 Quiz 1: Bind Mount Performance</h3>
+    <p>Why are bind mounts slower on macOS than on Linux?</p>
+    <div class="quiz-options">
+      <button onclick="checkAnswer(this, false)">macOS uses a slower file system (APFS vs ext4)</button>
+      <button onclick="checkAnswer(this, false)">Docker on macOS doesn't support bind mounts natively</button>
+      <button onclick="checkAnswer(this, true)">File operations must cross the Linux VM boundary inside Docker Desktop</button>
+      <button onclick="checkAnswer(this, false)">macOS limits the number of file watchers</button>
+    </div>
+    <div class="quiz-explanation hidden">
+      <p>Docker Desktop on macOS runs containers inside a Linux VM. Every file read/write through a bind mount must cross the VM boundary (host ↔ VM), adding latency. On Linux, Docker accesses the host filesystem directly through the kernel — no VM involved.</p>
+    </div>
+  </div>
+
+  <!-- QUIZ 2 -->
+  <div class="quiz" data-quiz="devcontainer-benefit">
+    <h3>🧠 Quiz 2: Dev Containers</h3>
+    <p>What is the PRIMARY benefit of committing a <code>.devcontainer/</code> folder to your repository?</p>
+    <div class="quiz-options">
+      <button onclick="checkAnswer(this, false)">It makes the production build faster</button>
+      <button onclick="checkAnswer(this, true)">Every developer gets an identical, reproducible dev environment</button>
+      <button onclick="checkAnswer(this, false)">It replaces the need for a CI/CD pipeline</button>
+      <button onclick="checkAnswer(this, false)">It automatically deploys the application</button>
+    </div>
+    <div class="quiz-explanation hidden">
+      <p>The <code>.devcontainer/</code> config defines the entire development environment — runtime, tools, extensions, settings. When committed to git, any developer (or cloud IDE) can reproduce the exact same setup, eliminating "works on my machine" problems during development.</p>
+    </div>
+  </div>
+
+  <!-- QUIZ 3 -->
+  <div class="quiz" data-quiz="when-skip-containers">
+    <h3>🧠 Quiz 3: When to Skip Containers</h3>
+    <p>Which scenario is the BEST candidate for skipping containerized development?</p>
+    <div class="quiz-options">
+      <button onclick="checkAnswer(this, false)">A microservices app with 5 interconnected services</button>
+      <button onclick="checkAnswer(this, false)">A team with developers on macOS, Windows, and Linux</button>
+      <button onclick="checkAnswer(this, true)">A quick prototype script to test an API endpoint</button>
+      <button onclick="checkAnswer(this, false)">A project with complex native dependencies (libvips, ffmpeg)</button>
+    </div>
+    <div class="quiz-explanation hidden">
+      <p>A quick prototype script has minimal dependencies and doesn't benefit from container isolation. The overhead of setting up Docker would slow you down more than it helps. Multi-service apps, cross-platform teams, and complex native dependencies are exactly where containers shine for development.</p>
+    </div>
+  </div>
+
+  <!-- ============================================================ -->
+  <!-- HANDS-ON TASKS -->
+  <h2>🛠️ Hands-On Tasks</h2>
+
+  <div class="callout task">
+    <div class="callout-title">Task 1: Node.js Hot-Reload with Compose</div>
+    <p>Set up a Node.js Express app with hot-reload using Docker Compose:</p>
+    <pre><code># 1. Create project structure
+mkdir hot-reload-demo && cd hot-reload-demo
+mkdir src
+
+# 2. Create src/index.js
+cat > src/index.js << 'EOF'
+const express = require('express');
+const app = express();
+app.get('/', (req, res) => res.json({ message: 'Hello from container!' }));
+app.listen(3000, () => console.log('Server on :3000'));
+EOF
+
+# 3. Create package.json
+cat > package.json << 'EOF'
+{
+  "name": "hot-reload-demo",
+  "dependencies": { "express": "^4.18.0" },
+  "devDependencies": { "nodemon": "^3.0.0" }
+}
+EOF
+
+# 4. Create Dockerfile.dev
+cat > Dockerfile.dev << 'EOF'
+FROM node:20-alpine
+WORKDIR /app
+COPY package*.json ./
+RUN npm install
+EXPOSE 3000
+CMD ["npx", "nodemon", "--watch", "src", "src/index.js"]
+EOF
+
+# 5. Create compose.yaml
+cat > compose.yaml << 'EOF'
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./src:/app/src
+      - /app/node_modules
+EOF
+
+# 6. Run it
+docker compose up --build
+
+# 7. Edit src/index.js — change the message
+#    Watch the container restart automatically!
+# 8. Visit http://localhost:3000 to see the change</code></pre>
+  </div>
+
+  <div class="callout task">
+    <div class="callout-title">Task 2: Create a Dev Container Configuration</div>
+    <p>Add a dev container to any existing project:</p>
+    <pre><code># 1. Create the devcontainer folder
+mkdir -p .devcontainer
+
+# 2. Create .devcontainer/devcontainer.json
+cat > .devcontainer/devcontainer.json << 'EOF'
+{
+  "name": "My Project",
+  "image": "mcr.microsoft.com/devcontainers/javascript-node:20",
+  "forwardPorts": [3000],
+  "postCreateCommand": "npm install",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "dbaeumer.vscode-eslint",
+        "esbenp.prettier-vscode"
+      ],
+      "settings": {
+        "editor.formatOnSave": true,
+        "editor.defaultFormatter": "esbenp.prettier-vscode"
+      }
+    }
+  }
+}
+EOF
+
+# 3. Open in VS Code and use:
+#    Cmd/Ctrl+Shift+P → "Dev Containers: Reopen in Container"
+
+# 4. Verify: open a terminal in VS Code
+node --version   # Should show v20.x
+npm --version    # Installed in the container
+
+# 5. Try adding a Dockerfile-based config instead:
+cat > .devcontainer/Dockerfile << 'EOF'
+FROM node:20-alpine
+RUN apk add --no-cache git curl
+RUN npm install -g typescript eslint
+EOF
+
+# Update devcontainer.json to use it:
+# "build": { "dockerfile": "Dockerfile" }  (instead of "image")</code></pre>
+  </div>
+
+  <!-- ============================================================ -->
+  <!-- INDUSTRY CALLOUT -->
+  <div class="callout info">
+    <div class="callout-title">🏢 Industry Insight: Cloud Dev Environments</div>
+    <p><strong>GitHub Codespaces</strong> and <strong>Gitpod</strong> take dev containers to the cloud. They read your <code>.devcontainer/</code> config, spin up a powerful cloud VM, build the container, and give you a full VS Code experience in your browser — or connect your local VS Code via SSH.</p>
+    <ul>
+      <li><strong>Codespaces</strong> — deep GitHub integration; prebuilds cache the container so it starts in seconds</li>
+      <li><strong>Gitpod</strong> — works with GitHub, GitLab, Bitbucket; uses <code>.gitpod.yml</code> (similar concept)</li>
+      <li><strong>Why?</strong> — onboard in minutes, not hours. No "clone → install → configure" dance. Especially powerful for open-source contributions.</li>
+    </ul>
+    <p>The dev container spec is now an <a href="https://containers.dev/" target="_blank">open standard</a> — not locked to any single tool.</p>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>Key Takeaways</h2>
+
+  <ul class="takeaways">
+    <li><strong>Bind mounts + watch tools</strong> give you hot reload inside containers — the best of both worlds</li>
+    <li><strong>Dev containers</strong> version your entire dev environment alongside your code</li>
+    <li><strong>compose.override.yaml</strong> separates dev concerns (debug ports, volumes) from the base config</li>
+    <li><strong>Performance matters</strong> — use named volumes for dependency dirs; enable VirtioFS on macOS</li>
+    <li><strong>Debug remotely</strong> — expose debug ports and attach your IDE's debugger to the container</li>
+    <li><strong>Be pragmatic</strong> — containers for dev are a tool, not a religion. Skip them when they add more friction than value.</li>
+  </ul>
+
+  <!-- ============================================================ -->
+  <nav class="lesson-nav">
+    <a href="0017-containers-in-ci-cd.html" class="prev">← Lesson 17: Containers in CI/CD</a>
+    <a href="0019-twelve-factor-app-and-containers.html" class="next">Lesson 19: Twelve-Factor App &amp; Containers →</a>
+  </nav>
+
+  <script src="../assets/quiz.js"></script>
+</body>
+</html>

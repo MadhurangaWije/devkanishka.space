@@ -1,5 +1,5 @@
 import { notFound } from 'next/navigation';
-import { PHASES, COMING_SOON_PHASES } from '@/lib/python-course';
+import { PHASES } from '@/lib/python-course';
 import { tutorials } from '@/lib/data/tutorials';
 import { Tag } from '@/components/ui/Tag';
 import Link from 'next/link';
@@ -24,7 +24,7 @@ export default function CourseOverviewPage() {
             beginner
           </span>
           <span className="font-mono text-xs text-text-muted">
-            {PHASES.reduce((s, p) => s + p.lessons.length, 0)} lessons available · 5 phases total
+            {PHASES.reduce((s, p) => s + p.lessons.length, 0)} lessons · {PHASES.length} phases
           </span>
         </div>
         <h1 className="font-sans text-3xl md:text-4xl font-black tracking-tighter text-text-primary mb-4">
@@ -87,13 +87,12 @@ export default function CourseOverviewPage() {
         </Link>
       </div>
 
-      {/* Coming soon */}
+      {/* Note on the remaining gap in Phase 3 */}
       <div className="mt-12 border-t border-site-border pt-10">
-        <p className="font-mono text-xs text-text-muted uppercase tracking-widest mb-3">Phases 4–5</p>
         <p className="font-mono text-sm text-text-muted leading-relaxed">
-          {COMING_SOON_PHASES.join(' and ')} are being written. The Advanced phase also has a
-          few gaps in the middle (dataclasses, metaclasses, memory management, and testing) that
-          aren&apos;t written yet — everything else in Phases 1–3 is complete and ready to go.
+          Phase 3 has a few gaps in the middle (dataclasses, memory management, and testing) that
+          aren&apos;t written yet — everything else, including the FastAPI, ML/AI, and CPython
+          Internals phases, is complete and ready to go.
         </p>
       </div>
     </div>

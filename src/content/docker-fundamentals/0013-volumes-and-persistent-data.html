@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lesson 13: Volumes & Persistent Data</title>
+  <link rel="stylesheet" href="../assets/lesson-style.css">
+</head>
+<body>
+
+  <div class="lesson-meta">
+    <span>💾 Lesson 13 of 20</span>
+    <span>⏱️ 14–18 minutes</span>
+    <span>🗄️ Storage & Persistence</span>
+  </div>
+
+  <h1>Volumes &amp; Persistent Data</h1>
+  <p class="subtitle">Containers are ephemeral by design — but your data shouldn't be. This lesson covers how Docker decouples storage from the container lifecycle so databases, uploads, and logs survive restarts and removals.</p>
+
+  <!-- ============================================================ -->
+  <h2>1. The Problem</h2>
+
+  <p>Every container gets a thin <strong>writable layer</strong> on top of its image layers. When the container is removed, that layer is deleted — and all data written inside the container vanishes with it.</p>
+
+  <ul>
+    <li><strong>Databases</strong> — PostgreSQL writes to <code>/var/lib/postgresql/data</code>. Remove the container? Gone.</li>
+    <li><strong>Uploads</strong> — User-uploaded files saved inside the container? Gone.</li>
+    <li><strong>Logs</strong> — Application logs written to <code>/var/log/app</code>? Gone.</li>
+  </ul>
+
+  <p>There's also a <em>performance</em> problem: the writable layer uses a <strong>copy-on-write</strong> (CoW) filesystem. Every first write to a file copies it up from the image layer — adding latency. For I/O-heavy workloads like databases, this overhead is unacceptable.</p>
+
+  <div class="callout warning">
+    <div class="callout-title">The Cardinal Rule</div>
+    <p>Never store valuable data in a container's writable layer. Treat containers as disposable; store state <em>outside</em> the container.</p>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>2. Three Storage Options</h2>
+
+  <p>Docker provides three mechanisms to persist or share data beyond the container lifecycle:</p>
+
+  <table>
+    <thead>
+      <tr><th>Type</th><th>Managed By</th><th>Location</th><th>Best For</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><strong>Volume</strong></td><td>Docker</td><td><code>/var/lib/docker/volumes/</code></td><td>Databases, persistent app data</td></tr>
+      <tr><td><strong>Bind Mount</strong></td><td>You (host path)</td><td>Anywhere on host</td><td>Dev hot-reload, config files</td></tr>
+      <tr><td><strong>tmpfs</strong></td><td>Kernel</td><td>RAM only</td><td>Secrets, temp processing</td></tr>
+    </tbody>
+  </table>
+
+  <!-- SVG: Three storage types -->
+  <svg viewBox="0 0 700 320" xmlns="http://www.w3.org/2000/svg" style="max-width:700px; width:100%; height:auto; margin:1.5rem auto; display:block;">
+    <!-- Host filesystem -->
+    <rect x="20" y="180" width="660" height="120" rx="8" fill="#e8f4fd" stroke="#2196F3" stroke-width="2"/>
+    <text x="40" y="210" font-size="14" font-weight="bold" fill="#1565C0">Host Filesystem</text>
+
+    <!-- Docker area -->
+    <rect x="40" y="225" width="180" height="60" rx="6" fill="#fff" stroke="#1976D2" stroke-width="1.5"/>
+    <text x="55" y="250" font-size="11" fill="#333">/var/lib/docker/volumes/</text>
+    <text x="55" y="268" font-size="12" font-weight="bold" fill="#1976D2">📦 Volumes</text>
+
+    <!-- Bind mount area -->
+    <rect x="250" y="225" width="180" height="60" rx="6" fill="#fff" stroke="#F57C00" stroke-width="1.5"/>
+    <text x="265" y="250" font-size="11" fill="#333">/home/user/project/</text>
+    <text x="265" y="268" font-size="12" font-weight="bold" fill="#F57C00">📁 Bind Mounts</text>
+
+    <!-- Memory area -->
+    <rect x="470" y="100" width="180" height="60" rx="6" fill="#FFF3E0" stroke="#E91E63" stroke-width="1.5"/>
+    <text x="485" y="125" font-size="11" fill="#333">RAM (never on disk)</text>
+    <text x="485" y="143" font-size="12" font-weight="bold" fill="#E91E63">🧠 tmpfs</text>
+
+    <!-- Container -->
+    <rect x="180" y="20" width="260" height="70" rx="8" fill="#E8F5E9" stroke="#4CAF50" stroke-width="2"/>
+    <text x="250" y="50" font-size="14" font-weight="bold" fill="#2E7D32">🐳 Container</text>
+    <text x="220" y="70" font-size="11" fill="#555">Writable layer (ephemeral)</text>
+
+    <!-- Arrows -->
+    <line x1="130" y1="225" x2="250" y2="90" stroke="#1976D2" stroke-width="2" marker-end="url(#arrow-blue)"/>
+    <line x1="340" y1="225" x2="350" y2="90" stroke="#F57C00" stroke-width="2" marker-end="url(#arrow-orange)"/>
+    <line x1="530" y1="160" x2="430" y2="90" stroke="#E91E63" stroke-width="2" marker-end="url(#arrow-pink)"/>
+
+    <defs>
+      <marker id="arrow-blue" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#1976D2"/></marker>
+      <marker id="arrow-orange" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#F57C00"/></marker>
+      <marker id="arrow-pink" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#E91E63"/></marker>
+    </defs>
+  </svg>
+
+  <!-- ============================================================ -->
+  <h2>3. Volumes (Docker-Managed)</h2>
+
+  <p>Volumes are the <strong>recommended</strong> way to persist data. Docker manages the storage directory — you reference volumes by name, not path.</p>
+
+  <pre><code># Create a named volume
+docker volume create mydata
+
+# Run a container with the volume mounted
+docker run -d --name app1 -v mydata:/app/data alpine sh -c "echo hello > /app/data/test.txt"
+
+# Another container can read the same data
+docker run --rm -v mydata:/app/data alpine cat /app/data/test.txt
+# Output: hello</code></pre>
+
+  <p><strong>Why volumes win:</strong></p>
+  <ul>
+    <li>Work identically on Linux, macOS, and Windows</li>
+    <li>Can be backed up, migrated, or pre-populated</li>
+    <li>Support <strong>volume drivers</strong> for remote/cloud storage</li>
+    <li>Safer — container can't accidentally traverse into host directories</li>
+  </ul>
+
+  <div class="callout tip">
+    <div class="callout-title">Short-form vs --mount</div>
+    <p><code>-v mydata:/app/data</code> is the short form. The explicit form is <code>--mount type=volume,source=mydata,target=/app/data</code>. Both do the same thing; <code>--mount</code> is more readable in scripts.</p>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>4. Bind Mounts</h2>
+
+  <p>Bind mounts map an <strong>exact host path</strong> into the container. The host directory must already exist.</p>
+
+  <pre><code># Mount current directory into container
+docker run -d -v $(pwd):/app -w /app node:20-alpine npm run dev
+
+# Changes on host instantly appear in container (hot-reload!)
+# Changes in container instantly appear on host</code></pre>
+
+  <p><strong>Use cases:</strong></p>
+  <ul>
+    <li><strong>Development</strong> — edit code on host, app hot-reloads inside container</li>
+    <li><strong>Config injection</strong> — mount a single config file into the container</li>
+    <li><strong>Build output</strong> — container writes artifacts to a host directory</li>
+  </ul>
+
+  <div class="callout warning">
+    <div class="callout-title">Security Risk</div>
+    <p>Bind mounts give the container direct access to host files. A container running as root with <code>-v /:/host</code> has full access to your entire filesystem. Always scope mounts to the minimum required path.</p>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>5. tmpfs Mounts</h2>
+
+  <p>A tmpfs mount stores data <strong>in memory only</strong>. It is never written to the host filesystem, and disappears when the container stops.</p>
+
+  <pre><code># Mount tmpfs at /app/tmp (max 64MB)
+docker run -d --tmpfs /app/tmp:size=64m myapp
+
+# Or with --mount syntax
+docker run -d --mount type=tmpfs,target=/app/tmp,tmpfs-size=67108864 myapp</code></pre>
+
+  <p><strong>Use cases:</strong></p>
+  <ul>
+    <li>Storing short-lived secrets (tokens, session keys) that must never hit disk</li>
+    <li>Scratch space for temporary processing (image manipulation, sorting)</li>
+    <li>Fast I/O for ephemeral data — RAM is orders of magnitude faster than disk</li>
+  </ul>
+
+  <!-- ============================================================ -->
+  <h2>6. Read-Only Mounts</h2>
+
+  <p>Append <code>:ro</code> to make any mount read-only inside the container:</p>
+
+  <pre><code># Container can read config but cannot modify it
+docker run -d -v ./nginx.conf:/etc/nginx/nginx.conf:ro nginx
+
+# Volume mounted read-only
+docker run -d -v mydata:/app/data:ro myapp</code></pre>
+
+  <p>A common pattern: mount config/code as <strong>read-only</strong>, then add a <strong>tmpfs</strong> for any directory the app needs to write to temporarily:</p>
+
+  <pre><code>docker run -d \
+  -v ./app:/app:ro \
+  --tmpfs /app/tmp \
+  --tmpfs /tmp \
+  myapp</code></pre>
+
+  <p>This gives you <strong>immutable infrastructure</strong> — the container cannot modify its own code or config, reducing the blast radius of a compromise.</p>
+
+  <!-- ============================================================ -->
+  <h2>7. Volume Lifecycle &amp; Cleanup</h2>
+
+  <p>Volumes <strong>persist after container removal</strong>. This is by design — but it means orphaned volumes accumulate silently.</p>
+
+  <pre><code># List all volumes
+docker volume ls
+
+# Inspect a volume
+docker volume inspect mydata
+
+# Remove a specific volume
+docker volume rm mydata
+
+# Remove ALL unused volumes (not attached to any container)
+docker volume prune
+
+# Nuclear option: prune everything
+docker system prune --volumes</code></pre>
+
+  <!-- SVG: Volume lifecycle -->
+  <svg viewBox="0 0 680 150" xmlns="http://www.w3.org/2000/svg" style="max-width:680px; width:100%; height:auto; margin:1.5rem auto; display:block;">
+    <!-- Steps -->
+    <rect x="10" y="50" width="100" height="50" rx="6" fill="#E3F2FD" stroke="#1976D2" stroke-width="1.5"/>
+    <text x="35" y="80" font-size="11" font-weight="bold" fill="#1565C0">Create</text>
+
+    <rect x="150" y="50" width="100" height="50" rx="6" fill="#E8F5E9" stroke="#388E3C" stroke-width="1.5"/>
+    <text x="172" y="80" font-size="11" font-weight="bold" fill="#2E7D32">Attach</text>
+
+    <rect x="290" y="50" width="100" height="50" rx="6" fill="#FFF3E0" stroke="#F57C00" stroke-width="1.5"/>
+    <text x="312" y="80" font-size="11" font-weight="bold" fill="#E65100">Detach</text>
+
+    <rect x="430" y="50" width="100" height="50" rx="6" fill="#FCE4EC" stroke="#E91E63" stroke-width="1.5"/>
+    <text x="452" y="80" font-size="11" font-weight="bold" fill="#C2185B">Orphan</text>
+
+    <rect x="570" y="50" width="100" height="50" rx="6" fill="#FFEBEE" stroke="#D32F2F" stroke-width="1.5"/>
+    <text x="595" y="80" font-size="11" font-weight="bold" fill="#B71C1C">Prune</text>
+
+    <!-- Arrows -->
+    <line x1="110" y1="75" x2="148" y2="75" stroke="#555" stroke-width="2" marker-end="url(#arrow-g)"/>
+    <line x1="250" y1="75" x2="288" y2="75" stroke="#555" stroke-width="2" marker-end="url(#arrow-g)"/>
+    <line x1="390" y1="75" x2="428" y2="75" stroke="#555" stroke-width="2" marker-end="url(#arrow-g)"/>
+    <line x1="530" y1="75" x2="568" y2="75" stroke="#555" stroke-width="2" marker-end="url(#arrow-g)"/>
+
+    <!-- Labels below -->
+    <text x="15" y="120" font-size="10" fill="#555">docker volume</text>
+    <text x="15" y="133" font-size="10" fill="#555">create</text>
+    <text x="155" y="120" font-size="10" fill="#555">docker run -v</text>
+    <text x="295" y="120" font-size="10" fill="#555">container</text>
+    <text x="295" y="133" font-size="10" fill="#555">stops/rm</text>
+    <text x="435" y="120" font-size="10" fill="#555">no container</text>
+    <text x="435" y="133" font-size="10" fill="#555">using it</text>
+    <text x="575" y="120" font-size="10" fill="#555">docker volume</text>
+    <text x="575" y="133" font-size="10" fill="#555">prune</text>
+
+    <defs>
+      <marker id="arrow-g" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#555"/></marker>
+    </defs>
+  </svg>
+
+  <p><strong>Named vs Anonymous volumes:</strong></p>
+  <ul>
+    <li><strong>Named</strong> — <code>-v mydata:/data</code> — easy to identify and reuse</li>
+    <li><strong>Anonymous</strong> — <code>-v /data</code> (no name) — gets a random hash ID, hard to track, easy to orphan</li>
+  </ul>
+
+  <div class="callout tip">
+    <div class="callout-title">Tip</div>
+    <p>Always use named volumes. Anonymous volumes are almost impossible to identify later and become disk-wasting orphans.</p>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>8. Volume Drivers &amp; Remote Storage</h2>
+
+  <p>By default, volumes use the <code>local</code> driver (files on the host). Volume drivers extend this to remote and cloud storage:</p>
+
+  <ul>
+    <li><strong>NFS</strong> — shared network filesystem for multi-host access</li>
+    <li><strong>AWS EBS</strong> — block storage in AWS (single-attach)</li>
+    <li><strong>Azure Files</strong> — SMB-based shared storage</li>
+    <li><strong>GlusterFS / Ceph</strong> — distributed storage clusters</li>
+  </ul>
+
+  <pre><code># Create a volume using NFS driver
+docker volume create --driver local \
+  --opt type=nfs \
+  --opt o=addr=192.168.1.100,rw \
+  --opt device=:/shared \
+  nfs-data</code></pre>
+
+  <p>In <strong>Kubernetes</strong>, this concept is abstracted further with <code>PersistentVolumes</code> (PV) and <code>PersistentVolumeClaims</code> (PVC). You declare "I need 10GB of fast storage" and the cluster provisions it — no driver configuration in your container spec.</p>
+
+  <!-- ============================================================ -->
+  <h2>Interactive Quizzes</h2>
+
+  <div class="quiz" data-question="You need to persist a PostgreSQL database across container restarts. Which storage option is best?" data-options="Bind mount to ~/pgdata|Docker named volume|tmpfs mount|Container's writable layer" data-answer="1" data-explanation="Named volumes are the recommended approach for database persistence. Docker manages the storage, it works across platforms, and it's isolated from accidental host modifications."></div>
+
+  <div class="quiz" data-question="You run: docker run --name db -v pgdata:/var/lib/postgresql/data postgres. Then: docker rm -f db. What happens to the data in pgdata?" data-options="Data is deleted with the container|Data persists in the volume|Data moves to a backup location|Data becomes read-only" data-answer="1" data-explanation="Volumes persist independently of containers. Removing a container does NOT remove its volumes. The data remains in the pgdata volume until you explicitly docker volume rm pgdata."></div>
+
+  <div class="quiz" data-question="Your app needs temporary scratch space for processing sensitive tokens that must NEVER be written to disk. Which mount type?" data-options="Named volume|Bind mount to /tmp|tmpfs mount|Anonymous volume" data-answer="2" data-explanation="tmpfs mounts exist only in memory (RAM). Data is never written to the host filesystem, making them ideal for sensitive ephemeral data."></div>
+
+  <!-- ============================================================ -->
+  <h2>Hands-On Tasks</h2>
+
+  <div class="callout task">
+    <div class="callout-title">Task 1: Share Data Between Containers via a Volume</div>
+    <ol>
+      <li>Create a named volume: <code>docker volume create shared-data</code></li>
+      <li>Write data from container A:
+        <pre><code>docker run --rm -v shared-data:/data alpine sh -c "echo 'Written by container A' > /data/message.txt"</code></pre>
+      </li>
+      <li>Read from container B:
+        <pre><code>docker run --rm -v shared-data:/data alpine cat /data/message.txt</code></pre>
+      </li>
+      <li>Verify output: <code>Written by container A</code></li>
+      <li>Clean up: <code>docker volume rm shared-data</code></li>
+    </ol>
+    <p><strong>What you proved:</strong> Volumes exist independently of any single container and can share data between them.</p>
+  </div>
+
+  <div class="callout task">
+    <div class="callout-title">Task 2: PostgreSQL Data Survives Container Destruction</div>
+    <ol>
+      <li>Start PostgreSQL with a named volume:
+        <pre><code>docker run -d --name pg1 \
+  -e POSTGRES_PASSWORD=secret \
+  -v pgdata:/var/lib/postgresql/data \
+  postgres:16-alpine</code></pre>
+      </li>
+      <li>Create a table and insert data:
+        <pre><code>docker exec pg1 psql -U postgres -c "CREATE TABLE test(id serial, msg text); INSERT INTO test(msg) VALUES ('I survive!');"</code></pre>
+      </li>
+      <li>Destroy the container: <code>docker rm -f pg1</code></li>
+      <li>Start a <em>new</em> container with the same volume:
+        <pre><code>docker run -d --name pg2 \
+  -e POSTGRES_PASSWORD=secret \
+  -v pgdata:/var/lib/postgresql/data \
+  postgres:16-alpine</code></pre>
+      </li>
+      <li>Query the data:
+        <pre><code>docker exec pg2 psql -U postgres -c "SELECT * FROM test;"</code></pre>
+      </li>
+      <li>Verify <code>I survive!</code> is still there.</li>
+      <li>Clean up: <code>docker rm -f pg2 && docker volume rm pgdata</code></li>
+    </ol>
+    <p><strong>What you proved:</strong> Database data in a named volume persists across container destruction and recreation.</p>
+  </div>
+
+  <!-- ============================================================ -->
+  <div class="callout info">
+    <div class="callout-title">🌐 Not Just Docker</div>
+    <p><strong>Podman</strong> volumes work identically — <code>podman volume create</code>, same <code>-v name:/path</code> syntax, same lifecycle. <strong>Kubernetes</strong> abstracts further with <code>PersistentVolumeClaims</code> (PVC): you declare storage needs declaratively, and the cluster provisions and binds the appropriate backend (EBS, NFS, local SSD) automatically.</p>
+  </div>
+
+  <div class="callout info">
+    <div class="callout-title">🏭 Industry Practice: Databases in Containers</div>
+    <p>Running databases in containers is now mainstream — PostgreSQL, MySQL, MongoDB all have official images. The pattern: <strong>named volume for data directory + container is disposable</strong>. In Kubernetes, <code>StatefulSets</code> manage this: each pod replica gets its own <code>PersistentVolumeClaim</code>, volumes follow pods across rescheduling, and storage classes handle provisioning. This is how companies run thousands of database instances on container platforms.</p>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>Key Takeaways</h2>
+
+  <ul>
+    <li><strong>Container writable layers are ephemeral</strong> — never store important data there</li>
+    <li><strong>Volumes</strong> are Docker-managed, portable, and the default choice for persistent data</li>
+    <li><strong>Bind mounts</strong> map host paths directly — great for development, risky for production</li>
+    <li><strong>tmpfs</strong> lives in RAM only — use for secrets and scratch data that must not persist</li>
+    <li><strong>:ro flag</strong> makes mounts read-only — defense in depth for config and code</li>
+    <li><strong>Volumes survive container removal</strong> — clean up with <code>docker volume prune</code></li>
+    <li><strong>Always use named volumes</strong> — anonymous volumes become untrackable orphans</li>
+    <li><strong>Volume drivers</strong> extend storage to NFS, cloud, and distributed systems</li>
+  </ul>
+
+  <!-- ============================================================ -->
+  <nav class="lesson-nav">
+    <a href="0012-environment-config-and-secrets.html">← Prev: Environment, Config &amp; Secrets</a>
+    <a href="0014-container-networking-fundamentals.html">Next: Container Networking Fundamentals →</a>
+  </nav>
+
+  <script src="../assets/quiz.js"></script>
+</body>
+</html>

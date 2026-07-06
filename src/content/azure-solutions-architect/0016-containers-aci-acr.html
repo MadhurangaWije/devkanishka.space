@@ -1,0 +1,371 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lesson 016 – Containers: ACI &amp; ACR | AZ-305 Study Guide</title>
+    <link rel="stylesheet" href="../assets/styles.css">
+    <script src="../assets/diagrams.js"></script>
+</head>
+<body>
+<div class="lesson-wrap">
+
+    <!-- Header -->
+    <header class="lesson-header fade-in">
+        <span class="lesson-number">Lesson 016 · 🟢 DEEP DIVE (~30 min)</span>
+        <h1>Containers: Azure Container Registry &amp; Container Instances</h1>
+        <p>You understand what containers are. Now architect registry strategies with ACR, burst serverless workloads with ACI, secure image pulls with managed identity, and position ACI vs Container Apps vs AKS for the right workload.</p>
+    </header>
+
+    <!-- Table of Contents -->
+    <nav class="toc fade-in">
+        <h2>In This Lesson</h2>
+        <ol>
+            <li><a href="#architecture">Container Architecture for Architects</a></li>
+            <li><a href="#acr">Azure Container Registry (ACR)</a></li>
+            <li><a href="#aci">Azure Container Instances (ACI)</a></li>
+            <li><a href="#aci-patterns">ACI Architecture Patterns</a></li>
+            <li><a href="#secure-pull">ACR + ACI + Managed Identity</a></li>
+            <li><a href="#positioning">Container Apps vs ACI vs AKS</a></li>
+            <li><a href="#real-world">Real-World: ACR Tasks + ACI Ephemeral Build Agents</a></li>
+            <li><a href="#quiz">Knowledge Check</a></li>
+        </ol>
+    </nav>
+
+    <!-- Section 1: Container Architecture -->
+    <section id="architecture" class="fade-in">
+        <h2>1. Container Architecture for Architects</h2>
+        <p>Containers package application code + dependencies into an immutable unit that runs identically everywhere. The architect's job: choose the right registry, runtime, and orchestration layer.</p>
+
+        <div class="box-diagram slide-in-left" id="diagram-container-lifecycle" data-diagram='{
+            "nodes": [
+                {"id": "code", "label": "Application Code", "x": 30, "y": 150, "w": 140, "h": 60, "shape": "box", "icon": "📝", "tooltip": "Source code + dependencies"},
+                {"id": "dockerfile", "label": "Dockerfile\n(Build Instructions)", "x": 200, "y": 150, "w": 150, "h": 60, "shape": "box", "icon": "🐳", "tooltip": "Declarative build steps: base image, copy, run"},
+                {"id": "acr", "label": "Azure Container\nRegistry (ACR)", "x": 390, "y": 150, "w": 150, "h": 60, "shape": "box", "icon": "📦", "tooltip": "Private registry for images"},
+                {"id": "aci", "label": "ACI", "x": 580, "y": 80, "w": 100, "h": 50, "shape": "box", "icon": "⚡", "tooltip": "Serverless container runtime"},
+                {"id": "aks", "label": "AKS", "x": 580, "y": 150, "w": 100, "h": 50, "shape": "box", "icon": "☸️", "tooltip": "Managed Kubernetes"},
+                {"id": "aca", "label": "Container Apps", "x": 580, "y": 220, "w": 100, "h": 50, "shape": "box", "icon": "🌐", "tooltip": "Managed serverless containers with scale"}
+            ],
+            "edges": [
+                {"from": "code", "to": "dockerfile", "label": "build"},
+                {"from": "dockerfile", "to": "acr", "label": "push"},
+                {"from": "acr", "to": "aci", "label": "pull"},
+                {"from": "acr", "to": "aks", "label": "pull"},
+                {"from": "acr", "to": "aca", "label": "pull"}
+            ],
+            "groups": [{"label": "Container Lifecycle: Code → Registry → Runtime", "x": 10, "y": 50, "w": 700, "h": 250}]
+        }'></div>
+
+        <h3>Key Concepts</h3>
+        <ul>
+            <li><strong>Image</strong> — Immutable artifact; a layered filesystem + run command. Tagged with version (e.g., <code>myapp:1.4.2</code>).</li>
+            <li><strong>Registry</strong> — Stores and distributes images. ACR is Azure's private OCI-compliant registry.</li>
+            <li><strong>Orchestration</strong> — Manages multiple container instances: scaling, healing, networking. AKS (full Kubernetes) or Container Apps (managed, simpler).</li>
+            <li><strong>Runtime</strong> — Executes containers. ACI is Azure's serverless runtime — no cluster to manage.</li>
+        </ul>
+
+        <div class="callout tip">
+            <strong>Architect mindset:</strong> Think of ACR as the "what" (images), ACI as the "quick run" (no infra), AKS as the "operate at scale" (full control), and Container Apps as "scale without Kubernetes expertise."
+        </div>
+    </section>
+
+    <!-- Section 2: ACR -->
+    <section id="acr" class="fade-in">
+        <h2>2. Azure Container Registry (ACR)</h2>
+
+        <h3>Tiers</h3>
+        <table class="compare-table">
+            <thead>
+                <tr>
+                    <th>Feature</th>
+                    <th>Basic</th>
+                    <th>Standard</th>
+                    <th>Premium</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr><td>Storage (GiB)</td><td>10</td><td>100</td><td>500</td></tr>
+                <tr><td>Throughput (MBps read)</td><td>30</td><td>60</td><td>100+</td></tr>
+                <tr><td>Webhooks</td><td>2</td><td>10</td><td>500</td></tr>
+                <tr><td>Geo-replication</td><td>❌</td><td>❌</td><td>✅</td></tr>
+                <tr><td>Private Link / VNet</td><td>❌</td><td>❌</td><td>✅</td></tr>
+                <tr><td>Content Trust (signing)</td><td>❌</td><td>❌</td><td>✅</td></tr>
+                <tr><td>Customer-managed keys</td><td>❌</td><td>❌</td><td>✅</td></tr>
+                <tr><td>ACR Tasks</td><td>✅</td><td>✅</td><td>✅</td></tr>
+                <tr><td>Monthly cost (approx.)</td><td>$5</td><td>$20</td><td>$50+ per replica</td></tr>
+            </tbody>
+        </table>
+
+        <h3>Geo-Replication (Premium)</h3>
+        <p>Replicate your registry to multiple Azure regions. Consumers pull from the nearest replica — lower latency, built-in HA. If one region is down, traffic routes to the next closest.</p>
+
+        <div class="box-diagram slide-in-right" id="diagram-acr-geo" data-diagram='{
+            "nodes": [
+                {"id": "acr-primary", "label": "ACR Primary\n(East US)", "x": 250, "y": 50, "w": 160, "h": 60, "shape": "box", "icon": "📦", "tooltip": "Primary registry endpoint"},
+                {"id": "replica-eu", "label": "Replica\n(West Europe)", "x": 80, "y": 200, "w": 150, "h": 60, "shape": "box", "icon": "🌍", "tooltip": "Geo-replica for EU consumers"},
+                {"id": "replica-asia", "label": "Replica\n(Southeast Asia)", "x": 420, "y": 200, "w": 150, "h": 60, "shape": "box", "icon": "🌏", "tooltip": "Geo-replica for APAC consumers"},
+                {"id": "aks-eu", "label": "AKS (EU)", "x": 80, "y": 330, "w": 120, "h": 50, "shape": "box", "icon": "☸️", "tooltip": "Pulls from local replica"},
+                {"id": "aci-asia", "label": "ACI (Asia)", "x": 440, "y": 330, "w": 120, "h": 50, "shape": "box", "icon": "⚡", "tooltip": "Pulls from local replica"}
+            ],
+            "edges": [
+                {"from": "acr-primary", "to": "replica-eu", "label": "sync", "style": "dashed"},
+                {"from": "acr-primary", "to": "replica-asia", "label": "sync", "style": "dashed"},
+                {"from": "replica-eu", "to": "aks-eu", "label": "pull"},
+                {"from": "replica-asia", "to": "aci-asia", "label": "pull"}
+            ],
+            "groups": [{"label": "ACR Geo-Replication — Multi-Region Pull", "x": 30, "y": 20, "w": 570, "h": 380}]
+        }'></div>
+
+        <h3>ACR Tasks — Automated Builds</h3>
+        <p>ACR Tasks run container builds in the cloud — no local Docker daemon required. Three trigger types:</p>
+        <ul>
+            <li><strong>Quick task</strong> — <code>az acr build</code> for one-off builds (like a cloud <code>docker build</code>).</li>
+            <li><strong>Automatically triggered</strong> — on source-code commit (GitHub/Azure Repos), base-image update, or scheduled timer.</li>
+            <li><strong>Multi-step task</strong> — YAML-defined pipeline: build → test → push multiple images.</li>
+        </ul>
+
+        <div class="callout info">
+            <strong>Base image update trigger:</strong> When your base image (<code>dotnet/aspnet:8.0</code>) gets a security patch, ACR Tasks auto-rebuilds your app image. This is a key security automation pattern.
+        </div>
+
+        <h3>Content Trust &amp; Security (Premium)</h3>
+        <ul>
+            <li><strong>Content Trust (Docker Notary v2)</strong> — Cryptographically sign images; consumers verify signatures before pulling.</li>
+            <li><strong>Private endpoints</strong> — Registry accessible only via private IP over VNet; no public exposure.</li>
+            <li><strong>Customer-managed keys</strong> — Encrypt image layers at rest with your own keys in Key Vault.</li>
+            <li><strong>Quarantine pattern</strong> — Images land in quarantine; pass vulnerability scan → promoted to available.</li>
+        </ul>
+    </section>
+
+    <!-- Section 3: ACI -->
+    <section id="aci" class="fade-in">
+        <h2>3. Azure Container Instances (ACI)</h2>
+        <p>ACI is <em>serverless containers</em> — deploy a container group in seconds with no cluster, no VM, no orchestrator. Pay per vCPU-second and GB-second.</p>
+
+        <h3>When to Use ACI</h3>
+        <ul>
+            <li>Quick batch jobs (data processing, report generation)</li>
+            <li>CI/CD build agents (spin up, run pipeline, destroy)</li>
+            <li>Sidecar containers for testing or support tasks</li>
+            <li>Burst capacity from AKS via Virtual Kubelet</li>
+            <li>Event-driven workloads that need fast cold start</li>
+        </ul>
+
+        <h3>Limitations — Know When NOT to Use ACI</h3>
+        <ul>
+            <li>❌ No built-in orchestration (no auto-scaling, no rolling deployments)</li>
+            <li>❌ No self-healing — if a container crashes, you must restart it externally</li>
+            <li>❌ Limited networking — no full VNet integration on all SKUs (Windows has constraints)</li>
+            <li>❌ Max 4 vCPUs / 16 GB RAM per container group (standard SKU); GPU SKUs available but limited</li>
+            <li>❌ No persistent storage by default — mount Azure Files for state</li>
+            <li>❌ Cold start can be 10-30s for large images</li>
+        </ul>
+
+        <h3>Container Groups</h3>
+        <p>ACI's deployment unit is a <em>container group</em> — one or more containers that share the same lifecycle, network (localhost), and storage volumes. Analogous to a Kubernetes Pod.</p>
+
+        <div class="callout warning">
+            <strong>Exam trap:</strong> ACI container groups are scheduled on the same host — containers within a group share <code>localhost</code> and mounted volumes, but NOT containers across different groups.
+        </div>
+    </section>
+
+    <!-- Section 4: ACI Patterns -->
+    <section id="aci-patterns" class="fade-in">
+        <h2>4. ACI Architecture Patterns</h2>
+
+        <h3>Pattern 1: CI/CD Build Agents</h3>
+        <p>Spin up an ACI container with your build tools, execute the pipeline, push artifacts, then delete the container. Zero idle cost.</p>
+
+        <h3>Pattern 2: Batch Processing</h3>
+        <p>Queue-driven: Azure Queue Storage triggers a Logic App or Function that spins up N ACI containers in parallel, each processing a chunk. Fan-out/fan-in without managing any infrastructure.</p>
+
+        <h3>Pattern 3: Sidecar Containers</h3>
+        <p>Deploy an app container + a logging/monitoring sidecar in the same container group. The sidecar ships logs to Log Analytics while the app focuses on business logic.</p>
+
+        <h3>Pattern 4: Virtual Kubelet Burst from AKS</h3>
+        <p>AKS installs the Virtual Kubelet (ACI connector). When the cluster runs out of node capacity, new pods burst to ACI — scaling to hundreds of instances in seconds without provisioning new VMs. Ideal for seasonal traffic spikes.</p>
+
+        <div class="callout tip">
+            <strong>Cost optimization:</strong> Virtual Kubelet burst means you keep a small, steady-state AKS cluster and only pay ACI per-second pricing during demand peaks. No over-provisioned nodes sitting idle.
+        </div>
+    </section>
+
+    <!-- Section 5: Secure Pull -->
+    <section id="secure-pull" class="fade-in">
+        <h2>5. ACR + ACI + Managed Identity</h2>
+        <p>Best practice: eliminate stored credentials entirely. Use managed identity for image pulls.</p>
+
+        <h3>How It Works</h3>
+        <ol>
+            <li>Create a <strong>user-assigned managed identity</strong>.</li>
+            <li>Grant it <code>AcrPull</code> role on the ACR.</li>
+            <li>Assign that identity to the ACI container group at deployment time.</li>
+            <li>ACI uses the identity's token to authenticate to ACR — no passwords, no service principals to rotate.</li>
+        </ol>
+
+        <pre><code># Create identity
+az identity create -g myRG -n acr-pull-id
+
+# Get identity resource ID & principal ID
+IDENTITY_ID=$(az identity show -g myRG -n acr-pull-id --query id -o tsv)
+PRINCIPAL_ID=$(az identity show -g myRG -n acr-pull-id --query principalId -o tsv)
+
+# Grant AcrPull on the registry
+ACR_ID=$(az acr show -n myregistry --query id -o tsv)
+az role assignment create --assignee $PRINCIPAL_ID --role AcrPull --scope $ACR_ID
+
+# Deploy ACI with managed identity
+az container create \
+  --resource-group myRG \
+  --name myapp \
+  --image myregistry.azurecr.io/myapp:latest \
+  --assign-identity $IDENTITY_ID \
+  --acr-identity $IDENTITY_ID</code></pre>
+
+        <div class="callout info">
+            <strong>System-assigned vs User-assigned:</strong> User-assigned is preferred for ACR pull because you can pre-create the role assignment before deployment. System-assigned creates a chicken-and-egg problem (identity doesn't exist until the resource is created).
+        </div>
+    </section>
+
+    <!-- Section 6: Positioning -->
+    <section id="positioning" class="fade-in">
+        <h2>6. Container Apps vs ACI vs AKS — When Each Fits</h2>
+
+        <table class="compare-table">
+            <thead>
+                <tr>
+                    <th>Dimension</th>
+                    <th>ACI</th>
+                    <th>Container Apps</th>
+                    <th>AKS</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr><td><strong>Complexity</strong></td><td>Lowest — no infra</td><td>Low — managed Envoy/KEDA</td><td>Highest — full K8s API</td></tr>
+                <tr><td><strong>Orchestration</strong></td><td>None</td><td>Built-in (Dapr, KEDA)</td><td>Full Kubernetes</td></tr>
+                <tr><td><strong>Auto-scaling</strong></td><td>Manual/external</td><td>HTTP/event-driven (0→N)</td><td>HPA, VPA, Cluster Autoscaler</td></tr>
+                <tr><td><strong>Scale to zero</strong></td><td>N/A (stop = no cost)</td><td>✅ built-in</td><td>Via KEDA add-on</td></tr>
+                <tr><td><strong>Networking</strong></td><td>Public IP or VNet inject</td><td>Managed VNet, ingress</td><td>Full CNI, Network Policies</td></tr>
+                <tr><td><strong>Persistent state</strong></td><td>Azure Files mount</td><td>Azure Files mount</td><td>PV/PVC (Disks, Files, Blob)</td></tr>
+                <tr><td><strong>Cost model</strong></td><td>Per-second (vCPU+RAM)</td><td>Per-second + requests</td><td>VM node cost + add-ons</td></tr>
+                <tr><td><strong>Best for</strong></td><td>Short jobs, burst, sidecar</td><td>Microservices, APIs, events</td><td>Complex apps, multi-team, full control</td></tr>
+            </tbody>
+        </table>
+
+        <div class="callout tip">
+            <strong>Decision heuristic:</strong><br>
+            • Need it for &lt;5 minutes, one-off? → <strong>ACI</strong><br>
+            • Microservice that scales on HTTP/events, team doesn't know K8s? → <strong>Container Apps</strong><br>
+            • Multi-team platform, need Network Policies, custom operators, Helm charts? → <strong>AKS</strong>
+        </div>
+
+        <div class="callout exam-tip">
+            <strong>🎯 Exam Tip:</strong> AZ-305 loves asking "which compute service" questions. ACI = simplest/fastest for isolated tasks. Container Apps = managed microservices without K8s expertise. AKS = full Kubernetes when you need complete control. Cost and operational complexity increase left→right.
+        </div>
+    </section>
+
+    <!-- Section 7: Real-World -->
+    <section id="real-world" class="fade-in">
+        <h2>7. Real-World: CI/CD Pipeline with ACR Tasks + ACI Ephemeral Agents</h2>
+
+        <div class="callout real-world">
+            <h3>📖 Scenario</h3>
+            <p>A fintech company builds 200+ microservices. They need secure, scalable CI/CD without long-lived build servers that accumulate vulnerabilities.</p>
+
+            <h4>Architecture</h4>
+            <ol>
+                <li><strong>Developer pushes code</strong> to GitHub → triggers ACR Task via webhook.</li>
+                <li><strong>ACR Task</strong> (multi-step YAML): builds image, runs unit tests in-container, pushes to ACR with content trust signature.</li>
+                <li><strong>Integration tests</strong>: ACR Task triggers an ACI container group — the app + a database sidecar — runs integration tests, then self-destructs.</li>
+                <li><strong>Promotion</strong>: On success, image is tagged <code>:release</code> and geo-replicated to production regions.</li>
+                <li><strong>Deployment</strong>: AKS clusters in each region pull from local ACR replica. Virtual Kubelet bursts overflow to ACI during peak deployment windows.</li>
+            </ol>
+
+            <h4>Why This Works</h4>
+            <ul>
+                <li>Zero persistent build infrastructure — each build is a fresh container (no "works on the build server" drift).</li>
+                <li>Cost: pay only for build seconds, not 24/7 VMs.</li>
+                <li>Security: managed identity throughout — no stored Docker credentials, no service principal secrets in pipelines.</li>
+                <li>Geo-replication: production pulls are fast and resilient regardless of region.</li>
+            </ul>
+        </div>
+    </section>
+
+    <!-- Quiz -->
+    <section id="quiz" class="fade-in">
+        <h2>8. Knowledge Check</h2>
+        <div id="quiz-container"></div>
+    </section>
+
+    <!-- Navigation -->
+    <nav class="lesson-nav fade-in">
+        <a href="0015-azure-functions-serverless.html" class="prev">← Lesson 015</a>
+        <a href="0017-aks-kubernetes.html" class="next">Lesson 017 →</a>
+    </nav>
+
+</div><!-- .lesson-wrap -->
+
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    // Render diagrams
+    if (window.AzureLessons && AzureLessons.BoxDiagram) {
+        document.querySelectorAll('.box-diagram[data-diagram]').forEach(el => {
+            AzureLessons.BoxDiagram(el, JSON.parse(el.dataset.diagram));
+        });
+    }
+
+    // Quiz
+    AzureLessons.Quiz('quiz-container', [
+        {
+            question: "Which ACR tier supports geo-replication and private endpoints?",
+            options: [
+                "Basic",
+                "Standard",
+                "Premium",
+                "All tiers support geo-replication"
+            ],
+            correct: 2,
+            explanation: "Geo-replication, private endpoints, content trust, and customer-managed keys are all Premium-only features. ACR Tasks are available on all tiers."
+        },
+        {
+            question: "A container in ACI crashes repeatedly. What happens by default?",
+            options: [
+                "ACI automatically restarts it with exponential backoff indefinitely",
+                "ACI restarts it based on the restart policy (Always/OnFailure/Never)",
+                "ACI auto-heals by redeploying to a new host",
+                "ACI sends an alert but takes no action"
+            ],
+            correct: 1,
+            explanation: "ACI respects the restart policy you set: Always (default), OnFailure, or Never. It does NOT auto-heal by redeploying or have orchestrator-level self-healing. If the underlying host fails, the container group is lost unless you have external monitoring/re-creation logic."
+        },
+        {
+            question: "You need ACI to pull images from ACR without storing credentials. What is the recommended approach?",
+            options: [
+                "Enable ACR admin account and pass username/password to ACI",
+                "Create a service principal with AcrPull role and store credentials in Key Vault",
+                "Assign a user-assigned managed identity with AcrPull role to the ACI container group",
+                "Make the ACR public and use anonymous pull"
+            ],
+            correct: 2,
+            explanation: "User-assigned managed identity with AcrPull is the recommended zero-credential approach. Admin accounts are not recommended for production. Service principals work but require secret rotation. Public/anonymous pull removes access control entirely."
+        },
+        {
+            question: "An AKS cluster experiences a sudden traffic spike. How does Virtual Kubelet help?",
+            options: [
+                "It adds more VM nodes to the AKS cluster via VMSS scale-out",
+                "It schedules overflow pods onto ACI without provisioning new VMs",
+                "It enables Horizontal Pod Autoscaler to scale beyond node limits",
+                "It redirects traffic to Azure Container Apps"
+            ],
+            correct: 1,
+            explanation: "Virtual Kubelet (ACI connector) presents ACI as a virtual node in the cluster. When real nodes are at capacity, new pods are scheduled on ACI — scaling to hundreds of instances in seconds without waiting for VM provisioning. This is per-second billing only during the burst."
+        }
+    ]);
+
+    // Initialize interactions
+    AzureLessons.ScrollReveal();
+    AzureLessons.Collapsible();
+});
+</script>
+</body>
+</html>

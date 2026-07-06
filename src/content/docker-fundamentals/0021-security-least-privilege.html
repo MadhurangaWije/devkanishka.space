@@ -1,0 +1,498 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lesson 21: Security — Least Privilege Containers</title>
+  <link rel="stylesheet" href="../assets/lesson-style.css">
+</head>
+<body>
+  <nav class="lesson-nav">
+    <a href="0020-logging-monitoring-and-observability.html">← Previous: Logging, Monitoring &amp; Observability</a>
+    <a href="0022-image-supply-chain-security.html">Next: Image Supply Chain Security →</a>
+  </nav>
+
+  <article>
+    <h1>Lesson 21: Security — Least Privilege Containers</h1>
+    <p class="subtitle">Reduce the blast radius of every container to the absolute minimum.</p>
+
+    <!-- ============================================================ -->
+    <h2 id="threat-model">1. The Threat Model</h2>
+
+    <p>Before applying controls, understand what you're defending against:</p>
+
+    <ul>
+      <li><strong>Container escape</strong> — attacker breaks out of container namespaces/cgroups into the host.</li>
+      <li><strong>Privilege escalation</strong> — process inside the container gains root or additional capabilities.</li>
+      <li><strong>Data exfiltration</strong> — sensitive data (secrets, databases) leaves the container via network or volume.</li>
+      <li><strong>Supply chain attack</strong> — compromised base image or dependency delivers malware at build time.</li>
+      <li><strong>Crypto mining / resource abuse</strong> — attacker hijacks compute for their own workload.</li>
+    </ul>
+
+    <div class="callout callout-warning">
+      <strong>Containers share a kernel.</strong> A kernel exploit inside <em>any</em> container breaks ALL isolation on that host. This is why defense in depth is not optional — every layer you add independently reduces risk.
+    </div>
+
+    <p>Defense in depth means: even if one layer fails (e.g., a zero-day kernel bug bypasses seccomp), other layers (non-root, read-only filesystem, dropped capabilities) still limit the damage.</p>
+
+    <!-- ============================================================ -->
+    <h2 id="non-root">2. Running as Non-Root</h2>
+
+    <p>By default, a container's main process runs as <code>root</code> (UID 0). If an attacker escapes the container while running as root, they may be root on the host (unless user namespaces remap UIDs).</p>
+
+    <h3>The Fix: USER Instruction</h3>
+
+    <pre><code># Dockerfile
+FROM node:20-slim
+
+# Create non-root user
+RUN groupadd -r appuser && useradd -r -g appuser -d /app -s /sbin/nologin appuser
+
+WORKDIR /app
+COPY --chown=appuser:appuser . .
+RUN npm ci --omit=dev
+
+# Switch to non-root BEFORE CMD
+USER 1000
+
+CMD ["node", "server.js"]</code></pre>
+
+    <h3>Best Practices</h3>
+    <ul>
+      <li><strong>Use numeric UIDs</strong> — <code>USER 1000</code> not <code>USER appuser</code>. Numeric IDs are unambiguous across images and registries.</li>
+      <li><strong>Fix file permissions</strong> — use <code>--chown</code> on COPY/ADD, or <code>RUN chown</code> before switching user.</li>
+      <li><strong>Don't bind to port &lt; 1024</strong> — non-root can't bind privileged ports. Use port 8080+ and remap externally.</li>
+      <li><strong>Verify at runtime</strong>: <code>docker run myimage id</code> should print <code>uid=1000</code>.</li>
+    </ul>
+
+    <pre><code># Override at runtime if image doesn't set USER
+docker run --user 1000:1000 myimage</code></pre>
+
+    <!-- ============================================================ -->
+    <h2 id="read-only-fs">3. Read-Only Filesystem</h2>
+
+    <p>A read-only root filesystem prevents an attacker from writing malware, modifying configs, or tampering with binaries inside the container.</p>
+
+    <pre><code># Run with read-only root filesystem
+docker run --read-only \
+  --tmpfs /tmp:rw,noexec,nosuid,size=64m \
+  --tmpfs /var/run:rw,noexec,nosuid \
+  myimage</code></pre>
+
+    <h3>What It Prevents</h3>
+    <ul>
+      <li>Installing additional tools (wget, curl payloads)</li>
+      <li>Modifying application configs or credentials files</li>
+      <li>Writing cron jobs or startup scripts for persistence</li>
+      <li>Dropping backdoor binaries</li>
+    </ul>
+
+    <h3>Handling Apps That Need Writes</h3>
+    <p>Add <code>--tmpfs</code> mounts for directories your app legitimately writes to (temp files, pid files, caches). These are in-memory and vanish when the container stops. For persistent data, use explicit named volumes mounted at specific paths.</p>
+
+    <!-- ============================================================ -->
+    <h2 id="capabilities">4. Dropping Capabilities</h2>
+
+    <p>Linux capabilities split the monolithic "root" power into ~40 fine-grained privileges. Docker drops many by default but keeps several that most containers don't need.</p>
+
+    <h3>The Minimal Approach</h3>
+    <pre><code># Drop ALL, then add back only what you need
+docker run \
+  --cap-drop=ALL \
+  --cap-add=NET_BIND_SERVICE \
+  myimage</code></pre>
+
+    <h3>Common Capabilities Reference</h3>
+
+    <table>
+      <thead>
+        <tr>
+          <th>Capability</th>
+          <th>What It Allows</th>
+          <th>Recommendation</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>NET_BIND_SERVICE</code></td>
+          <td>Bind to ports &lt; 1024</td>
+          <td>Keep only if needed</td>
+        </tr>
+        <tr>
+          <td><code>CHOWN</code></td>
+          <td>Change file ownership</td>
+          <td>Drop — set ownership at build time</td>
+        </tr>
+        <tr>
+          <td><code>DAC_OVERRIDE</code></td>
+          <td>Bypass file permission checks</td>
+          <td>Drop — fix permissions instead</td>
+        </tr>
+        <tr>
+          <td><code>SETUID / SETGID</code></td>
+          <td>Change process UID/GID</td>
+          <td>Drop — no reason in single-user container</td>
+        </tr>
+        <tr>
+          <td><code>NET_RAW</code></td>
+          <td>Raw sockets (ping, packet crafting)</td>
+          <td>Drop — used for ARP spoofing attacks</td>
+        </tr>
+        <tr>
+          <td><code>SYS_ADMIN</code></td>
+          <td>Mount filesystems, configure namespaces</td>
+          <td><strong>Always drop</strong> — almost equivalent to full root</td>
+        </tr>
+        <tr>
+          <td><code>SYS_PTRACE</code></td>
+          <td>Trace/debug other processes</td>
+          <td>Drop — enables process injection</td>
+        </tr>
+        <tr>
+          <td><code>NET_ADMIN</code></td>
+          <td>Network configuration, iptables</td>
+          <td>Drop unless building a network tool</td>
+        </tr>
+        <tr>
+          <td><code>SYS_TIME</code></td>
+          <td>Set system clock</td>
+          <td>Drop — can break logging/TLS</td>
+        </tr>
+        <tr>
+          <td><code>MKNOD</code></td>
+          <td>Create device files</td>
+          <td>Drop — container shouldn't create devices</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <!-- ============================================================ -->
+    <h2 id="seccomp">5. Seccomp Profiles</h2>
+
+    <p>Seccomp (Secure Computing Mode) restricts which <strong>system calls</strong> a process can make. Docker applies a default seccomp profile that blocks approximately 44 dangerous syscalls.</p>
+
+    <h3>What the Default Blocks</h3>
+    <ul>
+      <li><code>mount</code> / <code>umount2</code> — prevent filesystem manipulation</li>
+      <li><code>reboot</code> — can't restart the host</li>
+      <li><code>kexec_load</code> — can't load a new kernel</li>
+      <li><code>ptrace</code> — can't debug/inject into other processes</li>
+      <li><code>unshare</code> / <code>clone</code> (with new namespaces) — can't create nested containers easily</li>
+    </ul>
+
+    <h3>Custom Seccomp Profiles</h3>
+    <pre><code># Use a custom profile (JSON allowlist)
+docker run --security-opt seccomp=my-profile.json myimage
+
+# Verify default is active
+docker run --rm alpine grep Seccomp /proc/1/status
+# Output: Seccomp:  2  (means filter mode active)</code></pre>
+
+    <h3>What Happens When a Syscall Is Blocked</h3>
+    <p>The kernel returns <code>EPERM</code> (Operation not permitted) or kills the process with <code>SIGSYS</code>, depending on the profile's default action. The container sees a permission error — it does <em>not</em> crash silently.</p>
+
+    <div class="callout callout-info">
+      <strong>Debugging tip:</strong> Run with <code>--security-opt seccomp=unconfined</code> temporarily to confirm seccomp is causing an issue, then add only the needed syscalls to your custom profile.
+    </div>
+
+    <!-- ============================================================ -->
+    <h2 id="apparmor-selinux">6. AppArmor &amp; SELinux</h2>
+
+    <p>These are <strong>Mandatory Access Control</strong> (MAC) systems enforced by the kernel — they restrict what a process can do even if it's running as root.</p>
+
+    <h3>Docker's Default AppArmor Profile</h3>
+    <ul>
+      <li>Denies writing to <code>/proc</code> and <code>/sys</code> (prevents kernel parameter changes)</li>
+      <li>Denies mounting filesystems</li>
+      <li>Restricts signal sending to other containers</li>
+      <li>Limits access to sensitive <code>/proc</code> entries</li>
+    </ul>
+
+    <pre><code># Check active profile
+docker inspect --format='{{.AppArmorProfile}}' my_container
+
+# Use a custom AppArmor profile
+docker run --security-opt apparmor=my-custom-profile myimage
+
+# On SELinux systems
+docker run --security-opt label=type:my_container_t myimage</code></pre>
+
+    <h3>When to Write Custom Profiles</h3>
+    <ul>
+      <li>Your app needs to access specific paths outside the norm</li>
+      <li>You want to deny network access entirely for a batch-processing container</li>
+      <li>Compliance requires documented access control policies</li>
+    </ul>
+
+    <!-- ============================================================ -->
+    <h2 id="no-new-privileges">7. No New Privileges</h2>
+
+    <p>The <code>no-new-privileges</code> flag prevents any process inside the container from gaining additional privileges via setuid/setgid binaries, capability inheritance, or other mechanisms.</p>
+
+    <pre><code>docker run --security-opt=no-new-privileges myimage</code></pre>
+
+    <h3>Why It Matters</h3>
+    <p>Even if you run as non-root, a setuid binary (like <code>su</code>, <code>sudo</code>, or <code>ping</code>) inside the container could allow privilege escalation. With <code>no-new-privileges</code>:</p>
+    <ul>
+      <li>Setuid bits are ignored — <code>su</code> can't switch to root</li>
+      <li>Ambient capabilities can't be gained</li>
+      <li>Execve won't grant new privileges even if the binary has capabilities set</li>
+    </ul>
+
+    <div class="callout callout-warning">
+      <strong>Always enable this.</strong> There's rarely a legitimate reason for a container process to escalate privileges at runtime. If your app needs capabilities, grant them explicitly at container start.
+    </div>
+
+    <!-- ============================================================ -->
+    <h2 id="resource-limits">8. Resource Limits as Security</h2>
+
+    <p>Resource limits aren't just for performance — they're a security boundary that prevents denial-of-service attacks against the host.</p>
+
+    <pre><code># Comprehensive resource limits
+docker run \
+  --memory=256m \
+  --memory-swap=256m \
+  --cpus=0.5 \
+  --pids-limit=64 \
+  --ulimit nofile=1024:1024 \
+  --ulimit nproc=64:64 \
+  myimage</code></pre>
+
+    <table>
+      <thead>
+        <tr>
+          <th>Limit</th>
+          <th>Attack Prevented</th>
+          <th>Flag</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Memory</td>
+          <td>OOM-killing other containers/host</td>
+          <td><code>--memory=256m</code></td>
+        </tr>
+        <tr>
+          <td>CPU</td>
+          <td>Crypto mining consuming all cores</td>
+          <td><code>--cpus=0.5</code></td>
+        </tr>
+        <tr>
+          <td>PIDs</td>
+          <td>Fork bombs (exponential process creation)</td>
+          <td><code>--pids-limit=64</code></td>
+        </tr>
+        <tr>
+          <td>Open files</td>
+          <td>File descriptor exhaustion</td>
+          <td><code>--ulimit nofile=1024:1024</code></td>
+        </tr>
+        <tr>
+          <td>Swap disabled</td>
+          <td>Thrashing the host disk</td>
+          <td><code>--memory-swap=256m</code> (same as memory)</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <!-- ============================================================ -->
+    <h2 id="defense-in-depth-diagram">Defense-in-Depth Layers</h2>
+
+    <svg viewBox="0 0 600 380" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Defense in depth layers diagram" style="max-width:600px;width:100%;margin:1.5rem auto;display:block;">
+      <!-- Outermost layer -->
+      <rect x="20" y="10" width="560" height="360" rx="18" fill="#fee2e2" stroke="#dc2626" stroke-width="2"/>
+      <text x="300" y="36" text-anchor="middle" font-family="system-ui,sans-serif" font-size="12" fill="#dc2626" font-weight="bold">Resource Limits &amp; PID Limits</text>
+
+      <rect x="45" y="48" width="510" height="306" rx="15" fill="#fef3c7" stroke="#d97706" stroke-width="2"/>
+      <text x="300" y="70" text-anchor="middle" font-family="system-ui,sans-serif" font-size="12" fill="#d97706" font-weight="bold">AppArmor / SELinux (MAC)</text>
+
+      <rect x="70" y="82" width="460" height="260" rx="13" fill="#e0f2fe" stroke="#0369a1" stroke-width="2"/>
+      <text x="300" y="104" text-anchor="middle" font-family="system-ui,sans-serif" font-size="12" fill="#0369a1" font-weight="bold">Seccomp Profile (syscall filter)</text>
+
+      <rect x="95" y="116" width="410" height="214" rx="11" fill="#dcfce7" stroke="#16a34a" stroke-width="2"/>
+      <text x="300" y="138" text-anchor="middle" font-family="system-ui,sans-serif" font-size="12" fill="#16a34a" font-weight="bold">Dropped Capabilities (--cap-drop=ALL)</text>
+
+      <rect x="120" y="150" width="360" height="168" rx="9" fill="#f3e8ff" stroke="#7c3aed" stroke-width="2"/>
+      <text x="300" y="172" text-anchor="middle" font-family="system-ui,sans-serif" font-size="12" fill="#7c3aed" font-weight="bold">Read-Only Filesystem</text>
+
+      <rect x="145" y="184" width="310" height="122" rx="7" fill="#e0e7ff" stroke="#4338ca" stroke-width="2"/>
+      <text x="300" y="206" text-anchor="middle" font-family="system-ui,sans-serif" font-size="12" fill="#4338ca" font-weight="bold">Non-Root User (USER 1000)</text>
+
+      <!-- Innermost -->
+      <rect x="175" y="218" width="250" height="76" rx="6" fill="#f8fafc" stroke="#475569" stroke-width="2"/>
+      <text x="300" y="248" text-anchor="middle" font-family="system-ui,sans-serif" font-size="13" fill="#475569" font-weight="bold">Minimal Base Image</text>
+      <text x="300" y="268" text-anchor="middle" font-family="system-ui,sans-serif" font-size="11" fill="#6b7280">(distroless / scratch / alpine)</text>
+      <text x="300" y="285" text-anchor="middle" font-family="system-ui,sans-serif" font-size="11" fill="#6b7280">Your Application Code</text>
+    </svg>
+
+    <p class="caption">Each layer is independent — even if one layer is bypassed, the others still restrict the attacker.</p>
+
+    <!-- ============================================================ -->
+    <h2 id="quizzes">Knowledge Check</h2>
+
+    <div class="quiz" id="quiz-1">
+      <h3>Quiz 1: Why Non-Root?</h3>
+      <p class="quiz-question">Why is running as non-root critical even though containers have namespace isolation?</p>
+      <ul class="quiz-options">
+        <li data-correct="false">Non-root containers are faster because they skip permission checks</li>
+        <li data-correct="false">Docker requires non-root for network access</li>
+        <li data-correct="true">If an attacker escapes the container (kernel exploit), they'd be root on the host</li>
+        <li data-correct="false">Non-root prevents the container from using any Linux capabilities</li>
+      </ul>
+      <div class="quiz-feedback" data-correct="Container namespaces share the host kernel. A kernel exploit running as UID 0 inside maps to UID 0 on the host (without user namespace remapping)." data-incorrect="Think about what happens when isolation itself is breached — what UID does the attacker land on?"></div>
+    </div>
+
+    <div class="quiz" id="quiz-2">
+      <h3>Quiz 2: Capabilities</h3>
+      <p class="quiz-question">What does <code>--cap-drop=ALL --cap-add=NET_BIND_SERVICE</code> achieve?</p>
+      <ul class="quiz-options">
+        <li data-correct="false">Removes all network access except DNS</li>
+        <li data-correct="true">Removes all Linux capabilities except the ability to bind to ports below 1024</li>
+        <li data-correct="false">Drops all file permissions and adds network service discovery</li>
+        <li data-correct="false">Disables all security and re-enables only basic service functionality</li>
+      </ul>
+      <div class="quiz-feedback" data-correct="NET_BIND_SERVICE is the capability that allows binding to privileged ports (< 1024). All other root powers are removed." data-incorrect="Linux capabilities are specific kernel privileges. NET_BIND_SERVICE only controls binding to ports below 1024."></div>
+    </div>
+
+    <div class="quiz" id="quiz-3">
+      <h3>Quiz 3: Seccomp Behavior</h3>
+      <p class="quiz-question">What happens when a container process attempts a syscall that's blocked by the seccomp profile?</p>
+      <ul class="quiz-options">
+        <li data-correct="false">The syscall silently succeeds but does nothing</li>
+        <li data-correct="false">Docker automatically restarts the container</li>
+        <li data-correct="true">The kernel returns EPERM or kills the process with SIGSYS</li>
+        <li data-correct="false">The syscall is logged but allowed to proceed</li>
+      </ul>
+      <div class="quiz-feedback" data-correct="Seccomp operates at kernel level. The default action for blocked syscalls returns EPERM (permission denied). Some profiles use SIGSYS to terminate the offending process." data-incorrect="Seccomp is a kernel-level enforcement. The process receives an immediate error — it cannot proceed with the blocked operation."></div>
+    </div>
+
+    <!-- ============================================================ -->
+    <h2 id="hands-on">Hands-On Tasks</h2>
+
+    <h3>Task 1: Read-Only Container with Dropped Caps</h3>
+    <p>Run a container that's read-only with all capabilities dropped, and prove it can't do dangerous things:</p>
+
+    <pre><code># Run hardened Alpine
+docker run --rm -it \
+  --read-only \
+  --cap-drop=ALL \
+  --tmpfs /tmp:rw,noexec,size=32m \
+  alpine sh
+
+# Inside the container, try these:
+touch /etc/hacked          # FAILS: Read-only filesystem
+apk add curl               # FAILS: Can't write to package dirs
+ping 8.8.8.8               # FAILS: No NET_RAW capability
+mount -t tmpfs none /mnt   # FAILS: No SYS_ADMIN capability
+ip link set eth0 down      # FAILS: No NET_ADMIN capability
+
+# But this works:
+echo "hello" > /tmp/ok     # OK: tmpfs is writable
+ls /etc/passwd             # OK: reads still work
+wget --spider http://example.com  # OK: outbound TCP still works</code></pre>
+
+    <h3>Task 2: Default vs. Fully-Hardened Comparison</h3>
+    <p>Compare what's possible in a default container versus a fully-hardened one:</p>
+
+    <pre><code># DEFAULT (insecure) — see what's possible
+docker run --rm alpine sh -c '
+  echo "=== Default Container ==="
+  id
+  cat /proc/1/status | grep -i cap
+  touch /root/test && echo "Write: OK" || echo "Write: BLOCKED"
+  ping -c1 127.0.0.1 > /dev/null 2>&1 && echo "Ping: OK" || echo "Ping: BLOCKED"
+  mount -t tmpfs none /mnt 2>/dev/null && echo "Mount: OK" || echo "Mount: BLOCKED"
+'
+
+# HARDENED — all security options applied
+docker run --rm \
+  --user 1000:1000 \
+  --read-only \
+  --cap-drop=ALL \
+  --security-opt=no-new-privileges \
+  --security-opt seccomp=default \
+  --memory=128m \
+  --pids-limit=32 \
+  --tmpfs /tmp:rw,noexec,nosuid,size=16m \
+  alpine sh -c '
+  echo "=== Hardened Container ==="
+  id
+  cat /proc/1/status | grep -i cap
+  touch /root/test 2>/dev/null && echo "Write: OK" || echo "Write: BLOCKED"
+  ping -c1 127.0.0.1 > /dev/null 2>&1 && echo "Ping: OK" || echo "Ping: BLOCKED"
+  mount -t tmpfs none /mnt 2>/dev/null && echo "Mount: OK" || echo "Mount: BLOCKED"
+'</code></pre>
+
+    <p>Expected: the hardened container blocks writes, ping, and mount — while the default allows writes and ping.</p>
+
+    <!-- ============================================================ -->
+    <h2 id="industry">Industry Callout: Cloud Provider Enforcement</h2>
+
+    <div class="callout callout-info">
+      <strong>Kubernetes Pod Security Admission (PSA)</strong> enforces security at the namespace level with three profiles:
+      <ul>
+        <li><strong>Privileged</strong> — no restrictions (for system components only)</li>
+        <li><strong>Baseline</strong> — prevents known privilege escalations (no hostNetwork, no privileged containers)</li>
+        <li><strong>Restricted</strong> — full hardening (non-root, read-only root, dropped caps, no privilege escalation)</li>
+      </ul>
+      <p style="margin-top:0.5rem"><strong>AWS ECS</strong> enforces task-level IAM roles, preventing containers from accessing the instance metadata service directly. <strong>GCP Cloud Run</strong> runs containers as non-root in a gVisor sandbox by default.</p>
+    </div>
+
+    <!-- ============================================================ -->
+    <h2 id="not-just-docker">Not Just Docker</h2>
+
+    <div class="callout callout-info">
+      <strong>Alternative runtimes provide stronger isolation:</strong>
+      <ul>
+        <li><strong>Podman</strong> — rootless by default. Runs the entire container engine as a non-root user. No daemon. User namespace remapping is automatic.</li>
+        <li><strong>gVisor (runsc)</strong> — intercepts syscalls in a user-space kernel. Containers never directly touch the host kernel. Used by GCP Cloud Run.</li>
+        <li><strong>Kata Containers</strong> — runs each container in a lightweight VM with its own kernel. Full kernel isolation without sharing. Used in multi-tenant environments.</li>
+        <li><strong>Firecracker</strong> — microVM technology (powers AWS Lambda/Fargate). Sub-second boot, minimal attack surface.</li>
+      </ul>
+    </div>
+
+    <!-- ============================================================ -->
+    <h2 id="takeaways">Key Takeaways</h2>
+
+    <ul class="takeaways">
+      <li><strong>Containers share a kernel</strong> — namespace isolation is not a security boundary against kernel exploits. Defense in depth is mandatory.</li>
+      <li><strong>Always run non-root</strong> — use <code>USER 1000</code> in Dockerfiles. Verify with <code>docker run myimage id</code>.</li>
+      <li><strong>Make the filesystem read-only</strong> — add <code>--read-only</code> and explicit <code>--tmpfs</code> mounts only where needed.</li>
+      <li><strong>Drop all capabilities</strong> — start with <code>--cap-drop=ALL</code> and add back only what's proven necessary.</li>
+      <li><strong>Keep seccomp and AppArmor active</strong> — never run <code>--privileged</code> or <code>seccomp=unconfined</code> in production.</li>
+      <li><strong>Enable no-new-privileges</strong> — prevents setuid escalation inside containers.</li>
+      <li><strong>Set resource limits</strong> — memory, CPU, and PID limits are security boundaries, not just operational knobs.</li>
+      <li><strong>Combine all layers</strong> — no single mechanism is sufficient. Apply them all systematically.</li>
+    </ul>
+
+    <!-- ============================================================ -->
+    <h2 id="hardened-template">The Complete Hardened Command</h2>
+
+    <pre><code># Production-ready hardened container
+docker run -d \
+  --name my-secure-app \
+  --user 1000:1000 \
+  --read-only \
+  --cap-drop=ALL \
+  --cap-add=NET_BIND_SERVICE \
+  --security-opt=no-new-privileges \
+  --security-opt seccomp=default \
+  --memory=256m \
+  --memory-swap=256m \
+  --cpus=0.5 \
+  --pids-limit=64 \
+  --ulimit nofile=1024:1024 \
+  --tmpfs /tmp:rw,noexec,nosuid,size=64m \
+  --health-cmd="curl -f http://localhost:8080/health || exit 1" \
+  --restart=unless-stopped \
+  myimage:latest</code></pre>
+  </article>
+
+  <nav class="lesson-nav">
+    <a href="0020-logging-monitoring-and-observability.html">← Previous: Logging, Monitoring &amp; Observability</a>
+    <a href="0022-image-supply-chain-security.html">Next: Image Supply Chain Security →</a>
+  </nav>
+
+  <script src="../assets/quiz.js"></script>
+</body>
+</html>

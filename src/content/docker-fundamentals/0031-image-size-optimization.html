@@ -1,0 +1,514 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lesson 31: Image Size Optimization &amp; Build Performance</title>
+  <link rel="stylesheet" href="../assets/lesson-style.css">
+</head>
+<body>
+
+  <div class="lesson-meta">
+    <span>📦 Lesson 31 of 30+</span>
+    <span>⏱️ 25–35 minutes</span>
+    <span>⚡ Optimization</span>
+  </div>
+
+  <h1>Image Size Optimization &amp; Build Performance</h1>
+  <p class="subtitle">Every megabyte in your image multiplies across every node, every pull, every deploy. Learn to slash image sizes by 10x and cut build times in half.</p>
+
+  <!-- ============================================================ -->
+  <h2>1. Why Size Matters</h2>
+
+  <p>Image size isn't vanity — it's <strong>operational cost</strong> that compounds at scale:</p>
+
+  <ul>
+    <li><strong>Slower pulls</strong> — a 1GB image on a 1Gbps link takes ~8 seconds. On 100 nodes during a rollout, that's 100GB transferred.</li>
+    <li><strong>Slower CI/CD</strong> — every pipeline run pushes/pulls images. Smaller = faster feedback loops.</li>
+    <li><strong>Storage cost</strong> — registries charge per GB. 50 tags × 1GB = 50GB per service.</li>
+    <li><strong>Larger attack surface</strong> — more binaries = more CVEs. A shell in your image is a gift to attackers.</li>
+    <li><strong>Slower autoscaling</strong> — cold-start on a new node is dominated by image pull time. In Kubernetes, a pod can't start until its image is available.</li>
+  </ul>
+
+  <div class="callout callout-warning">
+    <strong>Real math:</strong> If your cluster autoscales from 10→50 nodes during peak traffic, each new node pulls your 900MB app image. That's 36GB of transfer <em>just for one service</em>. With a 100MB image, it's 4GB — and pods start 8× faster.
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>2. Measuring Image Size</h2>
+
+  <p>Before optimizing, measure. Several tools help you understand where the bytes are:</p>
+
+  <pre><code># List local images with sizes
+docker images
+# REPOSITORY          TAG       SIZE
+# myapp               latest    943MB
+
+# Show layer-by-layer breakdown
+docker history myapp:latest
+# IMAGE          CREATED BY                                      SIZE
+# a1b2c3d4       COPY . /app                                    245MB
+# e5f6g7h8       RUN apt-get install -y build-essential...      312MB
+# i9j0k1l2       FROM ubuntu:22.04                              77MB
+
+# Remote image size (without pulling)
+docker manifest inspect myapp:latest | jq '.config.size'
+
+# Deep exploration with dive
+dive myapp:latest
+# Interactive TUI — shows each layer, wasted space, efficiency score</code></pre>
+
+  <div class="callout callout-info">
+    <strong>Tool: dive</strong> — Install with <code>brew install dive</code> or download from GitHub. It shows a layer-by-layer filesystem diff and highlights wasted space (files added then removed in later layers).
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>3. Base Image Selection</h2>
+
+  <p>Your base image is the foundation. Choosing wisely gives you a massive head start:</p>
+
+  <table>
+    <thead>
+      <tr>
+        <th>Base Image</th>
+        <th>Size</th>
+        <th>Packages</th>
+        <th>Vuln Count*</th>
+        <th>Best For</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>ubuntu:22.04</code></td>
+        <td>77 MB</td>
+        <td>~90</td>
+        <td>42</td>
+        <td>Development, debugging</td>
+      </tr>
+      <tr>
+        <td><code>debian:bookworm-slim</code></td>
+        <td>52 MB</td>
+        <td>~60</td>
+        <td>28</td>
+        <td>General production</td>
+      </tr>
+      <tr>
+        <td><code>alpine:3.19</code></td>
+        <td>7 MB</td>
+        <td>~15</td>
+        <td>3</td>
+        <td>Small footprint apps</td>
+      </tr>
+      <tr>
+        <td><code>gcr.io/distroless/static</code></td>
+        <td>2 MB</td>
+        <td>0 (no shell)</td>
+        <td>0</td>
+        <td>Static binaries (Go, Rust)</td>
+      </tr>
+      <tr>
+        <td><code>scratch</code></td>
+        <td>0 MB</td>
+        <td>Nothing</td>
+        <td>0</td>
+        <td>Fully static binaries</td>
+      </tr>
+    </tbody>
+  </table>
+  <p class="caption">*Approximate CVE counts from Trivy scan at time of writing. Actual counts vary.</p>
+
+  <p>Same Go application on each base:</p>
+
+  <pre><code># Same "hello world" Go HTTP server compiled as static binary:
+# ubuntu:22.04    → 84 MB
+# debian-slim     → 59 MB
+# alpine          → 14 MB
+# distroless      → 9 MB
+# scratch         → 7 MB  ← just the binary!</code></pre>
+
+  <!-- ============================================================ -->
+  <h2>4. Reducing Layer Bloat</h2>
+
+  <h3>❌ Before: Bloated Dockerfile (943 MB)</h3>
+  <pre><code>FROM ubuntu:22.04
+
+RUN apt-get update
+RUN apt-get install -y python3 python3-pip build-essential curl wget git
+RUN apt-get install -y libpq-dev
+RUN pip3 install -r requirements.txt
+
+COPY . /app
+WORKDIR /app
+RUN pip3 install -r requirements.txt
+
+CMD ["python3", "app.py"]</code></pre>
+
+  <h3>✅ After: Optimized Dockerfile (89 MB)</h3>
+  <pre><code>FROM python:3.12-slim AS builder
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir --user -r requirements.txt
+
+FROM python:3.12-slim
+WORKDIR /app
+COPY --from=builder /root/.local /root/.local
+COPY app.py .
+ENV PATH=/root/.local/bin:$PATH
+CMD ["python3", "app.py"]</code></pre>
+
+  <h3>Key Techniques</h3>
+
+  <p><strong>Combine RUN commands</strong> — each RUN creates a layer. Combine related operations:</p>
+  <pre><code># Bad: 3 layers, intermediate cache stays in image
+RUN apt-get update
+RUN apt-get install -y curl
+RUN rm -rf /var/lib/apt/lists/*
+
+# Good: 1 layer, cache removed in same layer
+RUN apt-get update &amp;&amp; \
+    apt-get install -y --no-install-recommends curl &amp;&amp; \
+    rm -rf /var/lib/apt/lists/*</code></pre>
+
+  <p><strong>Skip recommended packages:</strong></p>
+  <pre><code># Saves 50-200MB depending on packages
+RUN apt-get install -y --no-install-recommends package-name</code></pre>
+
+  <p><strong>Use .dockerignore:</strong></p>
+  <pre><code># .dockerignore
+.git
+node_modules
+*.md
+tests/
+.env
+__pycache__
+.vscode</code></pre>
+
+  <p><strong>Remove build tools after use:</strong></p>
+  <pre><code>RUN apt-get update &amp;&amp; \
+    apt-get install -y --no-install-recommends gcc libpq-dev &amp;&amp; \
+    pip install --no-cache-dir psycopg2 &amp;&amp; \
+    apt-get purge -y gcc &amp;&amp; \
+    apt-get autoremove -y &amp;&amp; \
+    rm -rf /var/lib/apt/lists/*</code></pre>
+
+  <!-- ============================================================ -->
+  <h2>5. Multi-Stage Mastery</h2>
+
+  <p>Multi-stage builds are the single most impactful optimization. The build stage has all the tools; the final stage has only the artifact.</p>
+
+  <h3>Go: 800MB → 12MB</h3>
+  <pre><code># Build stage — full Go toolchain
+FROM golang:1.22 AS builder
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /app
+
+# Final stage — just the binary
+FROM scratch
+COPY --from=builder /app /app
+COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+ENTRYPOINT ["/app"]</code></pre>
+
+  <h3>Node.js: 1.2GB → 150MB</h3>
+  <pre><code># Build stage — dev dependencies for build
+FROM node:20 AS builder
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci
+COPY . .
+RUN npm run build
+RUN npm prune --production
+
+# Final stage — only production deps + built output
+FROM node:20-slim
+WORKDIR /app
+COPY --from=builder /app/dist ./dist
+COPY --from=builder /app/node_modules ./node_modules
+COPY --from=builder /app/package.json .
+USER node
+CMD ["node", "dist/index.js"]</code></pre>
+
+  <h3>Rust: 2GB → 8MB</h3>
+  <pre><code># Build stage — full Rust toolchain
+FROM rust:1.77 AS builder
+RUN rustup target add x86_64-unknown-linux-musl
+WORKDIR /src
+COPY Cargo.toml Cargo.lock ./
+RUN mkdir src &amp;&amp; echo "fn main(){}" > src/main.rs &amp;&amp; \
+    cargo build --release --target x86_64-unknown-linux-musl &amp;&amp; \
+    rm -rf src
+COPY src ./src
+RUN cargo build --release --target x86_64-unknown-linux-musl
+
+# Final stage — static binary only
+FROM scratch
+COPY --from=builder /src/target/x86_64-unknown-linux-musl/release/myapp /myapp
+ENTRYPOINT ["/myapp"]</code></pre>
+
+  <h3>Advanced: Named stages &amp; cherry-picking</h3>
+  <pre><code># Multiple named stages
+FROM node:20 AS frontend-build
+WORKDIR /frontend
+COPY frontend/package*.json ./
+RUN npm ci &amp;&amp; npm run build
+
+FROM golang:1.22 AS backend-build
+WORKDIR /backend
+COPY backend/ .
+RUN go build -o /server
+
+# Final: combine artifacts from both stages
+FROM gcr.io/distroless/static
+COPY --from=backend-build /server /server
+COPY --from=frontend-build /frontend/dist /static
+ENTRYPOINT ["/server"]</code></pre>
+
+  <!-- ============================================================ -->
+  <h2>6. Build Performance</h2>
+
+  <p>Optimization isn't just about image size — build <em>speed</em> matters for developer productivity.</p>
+
+  <!-- SVG: Build Performance Timeline -->
+  <svg viewBox="0 0 700 320" style="width:100%;max-width:700px;margin:1.5rem auto;display:block;" xmlns="http://www.w3.org/2000/svg">
+    <!-- Background -->
+    <rect width="700" height="320" fill="#f8fafc" rx="8"/>
+    
+    <!-- Title -->
+    <text x="350" y="25" text-anchor="middle" font-family="system-ui" font-size="14" font-weight="bold" fill="#1e293b">Build Performance: Cache Hits &amp; Parallel Stages</text>
+    
+    <!-- Timeline: Uncached Build -->
+    <text x="20" y="60" font-family="system-ui" font-size="11" fill="#64748b">Without Cache (45s total)</text>
+    <rect x="20" y="68" width="120" height="28" fill="#dc2626" rx="4"/>
+    <text x="80" y="86" text-anchor="middle" font-family="monospace" font-size="9" fill="white">apt install (12s)</text>
+    <rect x="142" y="68" width="150" height="28" fill="#ea580c" rx="4"/>
+    <text x="217" y="86" text-anchor="middle" font-family="monospace" font-size="9" fill="white">npm install (15s)</text>
+    <rect x="294" y="68" width="80" height="28" fill="#ca8a04" rx="4"/>
+    <text x="334" y="86" text-anchor="middle" font-family="monospace" font-size="9" fill="white">build (8s)</text>
+    <rect x="376" y="68" width="60" height="28" fill="#16a34a" rx="4"/>
+    <text x="406" y="86" text-anchor="middle" font-family="monospace" font-size="9" fill="white">copy (6s)</text>
+    <rect x="438" y="68" width="40" height="28" fill="#0369a1" rx="4"/>
+    <text x="458" y="86" text-anchor="middle" font-family="monospace" font-size="9" fill="white">4s</text>
+    
+    <!-- Timeline: With Cache -->
+    <text x="20" y="125" font-family="system-ui" font-size="11" fill="#64748b">With Layer Cache (12s total)</text>
+    <rect x="20" y="133" width="120" height="28" fill="#94a3b8" rx="4" opacity="0.4"/>
+    <text x="80" y="151" text-anchor="middle" font-family="monospace" font-size="9" fill="#475569">CACHED ✓</text>
+    <rect x="142" y="133" width="150" height="28" fill="#94a3b8" rx="4" opacity="0.4"/>
+    <text x="217" y="151" text-anchor="middle" font-family="monospace" font-size="9" fill="#475569">CACHED ✓</text>
+    <rect x="294" y="133" width="80" height="28" fill="#ca8a04" rx="4"/>
+    <text x="334" y="151" text-anchor="middle" font-family="monospace" font-size="9" fill="white">build (8s)</text>
+    <rect x="376" y="133" width="40" height="28" fill="#0369a1" rx="4"/>
+    <text x="396" y="151" text-anchor="middle" font-family="monospace" font-size="9" fill="white">4s</text>
+    
+    <!-- Arrow showing savings -->
+    <line x1="500" y1="82" x2="500" y2="147" stroke="#16a34a" stroke-width="2" marker-end="url(#arrowG)"/>
+    <text x="520" y="120" font-family="system-ui" font-size="11" font-weight="bold" fill="#16a34a">73% faster!</text>
+    
+    <!-- Timeline: Parallel Stages with BuildKit -->
+    <text x="20" y="195" font-family="system-ui" font-size="11" fill="#64748b">BuildKit Parallel Stages (8s total)</text>
+    <!-- Stage A -->
+    <rect x="20" y="203" width="100" height="24" fill="#7c3aed" rx="4"/>
+    <text x="70" y="219" text-anchor="middle" font-family="monospace" font-size="9" fill="white">frontend (7s)</text>
+    <!-- Stage B (parallel) -->
+    <rect x="20" y="230" width="80" height="24" fill="#0369a1" rx="4"/>
+    <text x="60" y="246" text-anchor="middle" font-family="monospace" font-size="9" fill="white">backend (6s)</text>
+    <!-- Merge -->
+    <line x1="120" y1="215" x2="140" y2="270" stroke="#475569" stroke-width="1.5"/>
+    <line x1="100" y1="242" x2="140" y2="270" stroke="#475569" stroke-width="1.5"/>
+    <rect x="140" y="258" width="50" height="24" fill="#16a34a" rx="4"/>
+    <text x="165" y="274" text-anchor="middle" font-family="monospace" font-size="9" fill="white">merge</text>
+    
+    <!-- Legend -->
+    <rect x="20" y="295" width="12" height="12" fill="#94a3b8" opacity="0.4" rx="2"/>
+    <text x="36" y="305" font-family="system-ui" font-size="10" fill="#475569">Cached (skipped)</text>
+    <rect x="150" y="295" width="12" height="12" fill="#ca8a04" rx="2"/>
+    <text x="166" y="305" font-family="system-ui" font-size="10" fill="#475569">Rebuilt</text>
+    <rect x="250" y="295" width="12" height="12" fill="#7c3aed" rx="2"/>
+    <text x="266" y="305" font-family="system-ui" font-size="10" fill="#475569">Parallel stage</text>
+    
+    <defs>
+      <marker id="arrowG" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+        <path d="M0,0 L8,3 L0,6 Z" fill="#16a34a"/>
+      </marker>
+    </defs>
+  </svg>
+
+  <h3>Maximize Layer Cache Hits</h3>
+  <p>The golden rule: <strong>copy dependency manifests before source code.</strong></p>
+  <pre><code># ✅ Dependencies cached until package.json changes
+COPY package.json package-lock.json ./
+RUN npm ci
+COPY . .    # Only this layer invalidates on code changes
+
+# ❌ Any source change busts the npm install cache
+COPY . .
+RUN npm ci</code></pre>
+
+  <h3>BuildKit Cache Mounts</h3>
+  <pre><code># syntax=docker/dockerfile:1
+FROM node:20-slim
+WORKDIR /app
+COPY package*.json ./
+
+# Cache persists across builds — npm doesn't re-download packages
+RUN --mount=type=cache,target=/root/.npm \
+    npm ci --prefer-offline
+
+COPY . .
+RUN npm run build</code></pre>
+
+  <h3>Remote Cache (CI/CD)</h3>
+  <pre><code># Push cache to registry
+docker buildx build \
+  --cache-to type=registry,ref=registry.io/myapp:cache \
+  --cache-from type=registry,ref=registry.io/myapp:cache \
+  -t myapp:latest .
+
+# First build on a fresh CI runner uses remote cache
+# Result: npm install step → CACHED (pulled from registry)</code></pre>
+
+  <h3>Monorepo Strategy</h3>
+  <pre><code># Only rebuild services whose deps changed
+# Use BuildKit's --filter or Turborepo/Nx to identify affected packages
+docker buildx build \
+  --target api-service \
+  --cache-from type=registry,ref=reg.io/api:cache \
+  .</code></pre>
+
+  <div class="callout callout-info">
+    <strong>Timing comparison:</strong> On a typical Node.js project, proper cache ordering + BuildKit mounts reduce rebuild time from 45s → 8s (source-only changes). Remote cache brings fresh-CI builds from 90s → 20s.
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>7. Advanced: Slim &amp; Minify Tools</h2>
+
+  <p><strong>DockerSlim (now Slim.AI)</strong> analyzes your running container and removes everything not used at runtime:</p>
+
+  <pre><code># Analyze and slim an image automatically
+docker-slim build --target myapp:latest
+
+# Result:
+# myapp:latest      → 943 MB
+# myapp.slim:latest → 37 MB  (96% reduction!)
+
+# How it works:
+# 1. Starts your container
+# 2. Monitors syscalls (files accessed, libraries loaded)
+# 3. Builds new image with ONLY those files
+# 4. Adds seccomp profile for the observed syscalls</code></pre>
+
+  <div class="callout callout-warning">
+    <strong>⚠️ Caution:</strong> Slim tools can break applications that lazy-load files, use reflection, or access resources only under specific conditions. Always test slimmed images thoroughly. Use <code>--include-path</code> to preserve directories the probe might miss.
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>Industry Spotlight</h2>
+
+  <div class="callout callout-info">
+    <strong>🏢 Google &amp; Cloudflare</strong> keep production images under 50MB for fast autoscaling. Google's distroless images contain only the application and its runtime dependencies — no shell, no package manager, no text editors. Cloudflare's edge workers use even smaller WASM modules (< 5MB) for sub-millisecond cold starts. The principle: <em>every byte you ship is a byte you must secure, store, and transfer — forever.</em>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>Interactive Quizzes</h2>
+
+  <div class="quiz" id="quiz1"
+       data-question="Why does multi-stage build reduce final image size?"
+       data-options="It compresses layers more efficiently|The final stage only contains what you COPY into it — build tools stay in earlier stages|It uses a different storage driver|Multi-stage images use less RAM"
+       data-answer="1"
+       data-explanation="Multi-stage builds work by discarding everything except what you explicitly COPY --from= into the final stage. The Go toolchain, gcc, npm devDependencies — all left behind in the builder stage. Only the compiled artifact makes it to production.">
+  </div>
+
+  <div class="quiz" id="quiz2"
+       data-question="What's the correct order for maximum Docker layer cache efficiency?"
+       data-options="COPY source → COPY package.json → RUN npm install|COPY package.json → COPY source → RUN npm install|COPY package.json → RUN npm install → COPY source|RUN npm install → COPY package.json → COPY source"
+       data-answer="2"
+       data-explanation="Copy the dependency manifest first, install dependencies, THEN copy source. This way, source code changes don't invalidate the expensive npm install layer. The install layer is only rebuilt when package.json changes.">
+  </div>
+
+  <div class="quiz" id="quiz3"
+       data-question="What is the main trade-off of using Alpine Linux as a base image?"
+       data-options="It doesn't support multi-stage builds|It uses musl libc instead of glibc, which can cause compatibility issues with some binaries|It has no package manager|It only works on ARM architectures"
+       data-answer="1"
+       data-explanation="Alpine uses musl libc instead of glibc. Most pre-compiled binaries (and some Python packages with C extensions) expect glibc. This can cause segfaults or mysterious failures. You may need to compile from source or use compatibility layers. The size savings (7MB vs 52MB+) must be weighed against potential debugging headaches.">
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>Hands-On Tasks</h2>
+
+  <div class="callout callout-warning">
+    <h3>🛠️ Task 1: Optimize a Bloated Dockerfile (900MB → &lt;100MB)</h3>
+    <p>Take this Dockerfile and optimize it. Target: under 100MB final image size.</p>
+    <pre><code># Bloated Dockerfile — your starting point
+FROM ubuntu:22.04
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update
+RUN apt-get install -y python3 python3-pip python3-dev
+RUN apt-get install -y build-essential gcc g++ make
+RUN apt-get install -y curl wget git vim nano
+RUN apt-get install -y libpq-dev libffi-dev libssl-dev
+RUN pip3 install --upgrade pip setuptools wheel
+
+COPY . /app
+WORKDIR /app
+RUN pip3 install -r requirements.txt
+
+# requirements.txt contains: flask, psycopg2-binary, gunicorn, requests
+EXPOSE 8000
+CMD ["gunicorn", "--bind", "0.0.0.0:8000", "app:app"]</code></pre>
+
+    <p><strong>Your goals:</strong></p>
+    <ol>
+      <li>Use multi-stage build</li>
+      <li>Choose a smaller base image</li>
+      <li>Eliminate unnecessary packages</li>
+      <li>Use <code>.dockerignore</code></li>
+      <li>Verify with <code>docker images</code> that the result is under 100MB</li>
+    </ol>
+  </div>
+
+  <div class="callout callout-warning">
+    <h3>🛠️ Task 2: BuildKit Cache Mounts &amp; Timing</h3>
+    <p>Measure build performance improvement with cache mounts:</p>
+    <pre><code># 1. Create a Node.js project with 10+ dependencies in package.json
+# 2. Write a Dockerfile WITHOUT cache mounts. Time it:
+time docker build --no-cache -t myapp-nocache .
+
+# 3. Rewrite with BuildKit cache mount:
+# syntax=docker/dockerfile:1
+# RUN --mount=type=cache,target=/root/.npm npm ci
+
+# 4. Build twice (second should be fast):
+time DOCKER_BUILDKIT=1 docker build -t myapp-cached .
+# Change source code only:
+time DOCKER_BUILDKIT=1 docker build -t myapp-cached .
+
+# 5. Compare times. Expected: 60-80% faster rebuild.</code></pre>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>Key Takeaways</h2>
+
+  <div class="callout callout-success">
+    <ul>
+      <li><strong>Measure first</strong> — use <code>docker history</code> and <code>dive</code> to find where the bytes are</li>
+      <li><strong>Choose the smallest viable base</strong> — scratch/distroless for compiled languages, slim variants for interpreted ones</li>
+      <li><strong>Multi-stage is non-negotiable</strong> — never ship build tools to production</li>
+      <li><strong>Layer order matters</strong> — dependencies before source code, always</li>
+      <li><strong>Cache mounts eliminate redundant downloads</strong> — BuildKit's <code>--mount=type=cache</code> persists package caches across builds</li>
+      <li><strong>Remote cache enables fast CI</strong> — fresh runners benefit from cached layers in the registry</li>
+      <li><strong>Size × scale = real cost</strong> — a 10× smaller image means 10× faster autoscaling cold starts</li>
+    </ul>
+  </div>
+
+  <!-- Navigation -->
+  <div style="display:flex;justify-content:space-between;margin-top:3rem;padding-top:1.5rem;border-top:1px solid var(--color-border);">
+    <a href="0030-the-future.html">← Prev: The Future</a>
+    <a href="0032-production-hardening-checklist.html">Next: Production Hardening Checklist →</a>
+  </div>
+
+  <script src="../assets/quiz.js"></script>
+</body>
+</html>

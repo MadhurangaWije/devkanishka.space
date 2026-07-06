@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lesson 037 – Azure Monitor & Log Analytics | AZ-305 Study Guide</title>
+    <link rel="stylesheet" href="../assets/styles.css">
+    <script src="../assets/diagrams.js"></script>
+</head>
+<body>
+<div class="lesson-wrap">
+
+    <header class="lesson-header fade-in">
+        <span class="lesson-number">Lesson 037 · 🟡 REVIEW (~20 min)</span>
+        <h1>Azure Monitor &amp; Log Analytics</h1>
+        <p>Design workspace topologies, craft KQL queries at architect depth, and build alert action group strategies for enterprise incident routing.</p>
+    </header>
+
+    <nav class="toc fade-in">
+        <h2>In This Lesson</h2>
+        <ol>
+            <li><a href="#architecture">Monitor Architecture: Metrics vs Logs</a></li>
+            <li><a href="#topology">Workspace Topology Design</a></li>
+            <li><a href="#workspace-decisions">Workspace Design Decisions</a></li>
+            <li><a href="#kql">KQL for Architects</a></li>
+            <li><a href="#alerts">Alert Architecture &amp; Action Groups</a></li>
+            <li><a href="#real-world">Real-World Scenario</a></li>
+            <li><a href="#exam-tip">Exam Tip</a></li>
+            <li><a href="#quiz">Knowledge Check</a></li>
+        </ol>
+    </nav>
+
+    <section id="architecture" class="fade-in">
+        <h2>1. Azure Monitor Architecture</h2>
+        <ul>
+            <li><strong>Metrics</strong> — Numeric time-series stored in a fast, 93-day retention store. Near real-time (1-min granularity). Ideal for autoscale and metric alerts.</li>
+            <li><strong>Logs</strong> — Rich structured/semi-structured data ingested into Log Analytics workspaces. Query with KQL; retention 30–730 days (or Archive up to 12 years).</li>
+            <li><strong>Data sources</strong> — Azure resources (platform metrics/logs), VMs (AMA agent), apps (Application Insights), custom (REST API, Event Hubs).</li>
+            <li><strong>Sinks</strong> — Workbooks, dashboards, alerts, Power BI, Sentinel, Event Hubs export, Storage Account archive.</li>
+        </ul>
+        <div class="box-diagram" data-title="Monitor Data Flow">
+            <div class="box-row">
+                <div class="box azure">VMs / Apps / PaaS / Custom</div>
+            </div>
+            <div class="box-arrow">↓ Data Collection Rules (DCR)</div>
+            <div class="box-row">
+                <div class="box purple">Log Analytics Workspace</div>
+                <div class="box green">Metrics Store</div>
+            </div>
+            <div class="box-arrow">↓ Consume</div>
+            <div class="box-row">
+                <div class="box orange">Alerts / Action Groups</div>
+                <div class="box blue">Workbooks / Dashboards</div>
+                <div class="box dark">Sentinel SIEM</div>
+            </div>
+        </div>
+    </section>
+
+    <section id="topology" class="fade-in">
+        <h2>2. Workspace Topology Design</h2>
+        <div class="compare-grid" data-columns="4">
+            <div class="compare-header">Topology</div>
+            <div class="compare-header">Pros</div>
+            <div class="compare-header">Cons</div>
+            <div class="compare-header">Best For</div>
+
+            <div class="compare-cell"><strong>Centralized (single)</strong></div>
+            <div class="compare-cell">Unified querying; volume discounts; simpler management</div>
+            <div class="compare-cell">Blast-radius risk; complex RBAC; data-sovereignty issues</div>
+            <div class="compare-cell">Single-region, single-compliance orgs</div>
+
+            <div class="compare-cell"><strong>Decentralized (per-team)</strong></div>
+            <div class="compare-cell">Team autonomy; natural access boundary; data isolation</div>
+            <div class="compare-cell">Cross-team correlation hard; cost duplication; no volume discounts</div>
+            <div class="compare-cell">Regulated teams with strict data isolation</div>
+
+            <div class="compare-cell"><strong>Hybrid (central + satellite)</strong></div>
+            <div class="compare-cell">Central SOC view + team ownership; Sentinel on central; cross-workspace queries</div>
+            <div class="compare-cell">More complex design; cross-workspace query cost</div>
+            <div class="compare-cell">Large enterprises (20+ teams), multi-region</div>
+        </div>
+    </section>
+
+    <section id="workspace-decisions" class="fade-in">
+        <h2>3. Workspace Design Decisions</h2>
+        <ul>
+            <li><strong>Retention</strong> — Default 30 days (free); interactive up to 730 days (pay per GB/month); Archive tier for compliance up to 12 years.</li>
+            <li><strong>Data Collection Rules (DCR)</strong> — Filter and transform data at ingestion; reduce cost by dropping verbose columns; route different tables to different workspaces.</li>
+            <li><strong>Table plans</strong> — Analytics (full KQL), Basic (limited queries, 8-day retention, lower cost), Archive (restore on demand).</li>
+            <li><strong>Sentinel integration</strong> — Sentinel sits atop a workspace; use a dedicated workspace or share with IT ops. Dedicated avoids noisy neighbor queries but adds cost.</li>
+            <li><strong>Access control</strong> — Workspace-level RBAC, resource-context RBAC (users see only logs from resources they own), or table-level RBAC for sensitive tables (e.g., SecurityEvent).</li>
+        </ul>
+    </section>
+
+    <section id="kql" class="fade-in">
+        <h2>4. KQL for Architects</h2>
+        <p>You won't write production queries daily, but you must design workbooks and alerts. Key patterns:</p>
+        <pre><code>// Summarize — aggregate for dashboards
+AzureActivity
+| where TimeGenerated > ago(7d)
+| summarize count() by ResourceGroup, OperationNameValue
+| order by count_ desc
+
+// Join — correlate across tables
+Heartbeat
+| where TimeGenerated > ago(1h)
+| summarize LastHeartbeat = max(TimeGenerated) by Computer
+| join kind=leftouter (
+    Perf | where CounterName == "% Processor Time"
+    | summarize AvgCPU = avg(CounterValue) by Computer
+) on Computer
+
+// Render — visualization for workbooks
+Perf
+| where CounterName == "Available MBytes"
+| summarize avg(CounterValue) by bin(TimeGenerated, 5m), Computer
+| render timechart</code></pre>
+        <ul>
+            <li><strong>Architect tip</strong>: Design alert KQL to return a numeric threshold (e.g., <code>| summarize AggregatedValue = count()</code>) for log alert rules.</li>
+            <li>Use <code>workspace('name').Table</code> for cross-workspace queries in hybrid topologies.</li>
+        </ul>
+    </section>
+
+    <section id="alerts" class="fade-in">
+        <h2>5. Alert Architecture &amp; Action Groups</h2>
+        <ul>
+            <li><strong>Metric alerts</strong> — Evaluate every 1–5 min; stateful (fire once, auto-resolve). Best for resource health (CPU, DTU, latency).</li>
+            <li><strong>Log alerts</strong> — KQL query on schedule (5–15 min). Best for complex conditions across tables/resources.</li>
+            <li><strong>Activity log alerts</strong> — Triggered by control-plane events (e.g., VM deallocated, policy non-compliant). Zero cost.</li>
+            <li><strong>Action groups</strong> — Bundle notification targets: email, SMS, push, voice, webhook, ITSM connector, Logic App, Azure Function, Event Hub.</li>
+            <li><strong>ITSM integration</strong> — Connect to ServiceNow/BMC via ITSM Connector or webhook; auto-create incidents with severity mapping.</li>
+            <li><strong>Design pattern</strong> — Tiered action groups: P1 (PagerDuty + phone), P2 (Teams channel + email), P3 (ticket only).</li>
+        </ul>
+    </section>
+
+    <section id="real-world" class="fade-in collapsible">
+        <h2>6. Real-World: 20-Team Enterprise Monitoring</h2>
+        <div class="collapsible-content">
+            <p><strong>Scenario:</strong> A financial services company with 20 product teams across 3 regions needs unified observability while maintaining team autonomy and regulatory compliance.</p>
+            <ul>
+                <li><strong>Topology:</strong> Hybrid — one central SOC workspace (Sentinel-enabled) + 4 regional workspaces for team data. Cross-workspace queries federate views.</li>
+                <li><strong>DCRs:</strong> All security logs route to SOC workspace; performance/app logs stay in regional workspaces. Transform rules strip PII before ingestion.</li>
+                <li><strong>Access:</strong> Resource-context RBAC lets developers see their own resource logs. SOC analysts get workspace-level read on central. Table-level RBAC restricts SecurityEvent to SecOps.</li>
+                <li><strong>Alerts:</strong> Central alert rules for security (P1 → PagerDuty). Team-owned alert rules for app health (P2 → Teams). Shared action groups for common ITSM ticketing.</li>
+                <li><strong>Cost control:</strong> Basic table plan for verbose diagnostic logs; commitment tier on central workspace (300 GB/day); archive for audit logs beyond 90 days.</li>
+            </ul>
+        </div>
+    </section>
+
+    <section id="exam-tip" class="fade-in exam-tip-box">
+        <h2>💡 Exam Tip</h2>
+        <p>AZ-305 loves workspace topology questions. Remember: choose <strong>centralized</strong> when cross-team correlation matters and costs must be optimized; choose <strong>decentralized</strong> when data sovereignty or strict isolation is required. <strong>Resource-context RBAC</strong> is the key to giving teams access in a shared workspace without exposing other teams' data.</p>
+    </section>
+
+    <section id="quiz" class="fade-in quiz-section">
+        <h2>🧪 Knowledge Check</h2>
+        <div class="quiz" data-questions='[
+            {"q":"A company needs developers to see only logs from resources they own in a shared workspace. Which access model should the architect use?","options":["Workspace-level Reader role","Resource-context RBAC","Table-level RBAC","Custom KQL permissions"],"answer":1,"explanation":"Resource-context RBAC restricts users to logs generated by resources they have Azure RBAC access to, without needing separate workspaces."},
+            {"q":"Which alert type is best for detecting a complex condition that spans multiple Log Analytics tables?","options":["Metric alert","Activity log alert","Log alert (KQL-based)","Smart detection alert"],"answer":2,"explanation":"Log alerts execute KQL queries that can join multiple tables and apply complex logic, making them ideal for multi-table conditions."},
+            {"q":"An organization wants to reduce Log Analytics costs for verbose diagnostic logs that are rarely queried. What should the architect recommend?","options":["Reduce retention to 7 days","Use the Basic table plan","Switch to metric alerts","Disable diagnostic settings"],"answer":1,"explanation":"The Basic table plan offers significantly lower ingestion cost for high-volume, rarely-queried tables with limited KQL support and 8-day interactive retention."},
+            {"q":"Which component controls filtering and transformation of telemetry BEFORE it reaches a Log Analytics workspace?","options":["Alert processing rules","Data Collection Rules (DCR)","Workbook parameters","Diagnostic settings"],"answer":1,"explanation":"Data Collection Rules (DCRs) can filter, transform, and route data at ingestion time, reducing workspace costs and enabling multi-workspace routing."}
+        ]'></div>
+    </section>
+
+    <nav class="lesson-nav fade-in">
+        <a href="0036-azure-arc-hybrid.html" class="prev-link">← Lesson 036</a>
+        <a href="0038-disaster-recovery-bcdr.html" class="next-link">Lesson 038 →</a>
+    </nav>
+</div>
+
+<script>
+    document.addEventListener('DOMContentLoaded', function() {
+        AzureLessons.Diagrams.renderAll();
+        AzureLessons.Quiz.init();
+        AzureLessons.ScrollReveal.init();
+        AzureLessons.Collapsible.init();
+    });
+</script>
+</body>
+</html>

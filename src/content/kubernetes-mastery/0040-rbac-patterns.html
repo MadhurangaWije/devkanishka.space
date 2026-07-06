@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lesson 40: RBAC Patterns</title>
+    <style>
+        :root {
+            --bg: #fafafa; --text: #1a1a1a; --accent: #326ce5;
+            --accent-light: #e8f0fe; --border: #e0e0e0; --code-bg: #f5f5f5;
+            --success: #2e7d32; --warn: #f57c00;
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: 'Georgia', serif; line-height: 1.7; color: var(--text); background: var(--bg); max-width: 780px; margin: 0 auto; padding: 2rem 1.5rem; }
+        h1 { font-size: 2rem; margin-bottom: 0.5rem; color: var(--accent); }
+        h2 { font-size: 1.4rem; margin-top: 2.5rem; margin-bottom: 0.8rem; border-bottom: 2px solid var(--accent); padding-bottom: 0.3rem; }
+        h3 { font-size: 1.1rem; margin-top: 1.5rem; margin-bottom: 0.5rem; }
+        p { margin-bottom: 1rem; }
+        .meta { color: #666; font-size: 0.9rem; margin-bottom: 2rem; }
+        .key-insight { background: var(--accent-light); border-left: 4px solid var(--accent); padding: 1rem 1.2rem; margin: 1.5rem 0; border-radius: 0 4px 4px 0; }
+        .key-insight strong { color: var(--accent); }
+        .production-note { background: #fff3e0; border-left: 4px solid var(--warn); padding: 1rem 1.2rem; margin: 1.5rem 0; border-radius: 0 4px 4px 0; }
+        .production-note::before { content: "🏭 Production: "; font-weight: bold; }
+        .exam-tip { background: #e8f5e9; border-left: 4px solid var(--success); padding: 1rem 1.2rem; margin: 1.5rem 0; border-radius: 0 4px 4px 0; }
+        .exam-tip::before { content: "🎯 Exam Tip: "; font-weight: bold; color: var(--success); }
+        .security-warn { background: #fce4ec; border-left: 4px solid #c62828; padding: 1rem 1.2rem; margin: 1.5rem 0; border-radius: 0 4px 4px 0; }
+        .security-warn::before { content: "🔒 Security: "; font-weight: bold; color: #c62828; }
+        code { font-family: 'Menlo', 'Consolas', monospace; font-size: 0.85em; background: var(--code-bg); padding: 0.15em 0.4em; border-radius: 3px; }
+        pre { background: var(--code-bg); padding: 1rem; border-radius: 4px; overflow-x: auto; margin: 1rem 0; font-size: 0.85rem; line-height: 1.5; }
+        ul, ol { margin: 0.5rem 0 1rem 1.5rem; }
+        li { margin-bottom: 0.4rem; }
+        table { width: 100%; border-collapse: collapse; margin: 1rem 0; font-size: 0.9rem; }
+        th, td { border: 1px solid var(--border); padding: 0.6rem 0.8rem; text-align: left; }
+        th { background: var(--accent-light); font-weight: bold; }
+        .cert-badge { display: inline-block; background: var(--accent); color: white; font-size: 0.7rem; padding: 0.15rem 0.5rem; border-radius: 10px; margin-left: 0.5rem; }
+        .quiz { background: #f9f9f9; border: 1px solid var(--border); border-radius: 8px; padding: 1.5rem; margin-top: 2rem; }
+        .quiz h2 { border-bottom: none; margin-top: 0; }
+        .quiz-q { margin-bottom: 1.2rem; }
+        .quiz-q p { font-weight: bold; margin-bottom: 0.3rem; }
+        .quiz-answer { display: none; background: #e8f5e9; padding: 0.5rem 0.8rem; border-radius: 4px; margin-top: 0.5rem; }
+        .reveal-btn { background: var(--accent); color: white; border: none; padding: 0.3rem 0.8rem; border-radius: 4px; cursor: pointer; font-size: 0.8rem; }
+        .reveal-btn:hover { opacity: 0.85; }
+    </style>
+</head>
+<body>
+
+<h1>Lesson 40: RBAC Patterns</h1>
+<p class="meta">Chapter 7: Security — RBAC & Identity · <span class="cert-badge">CKA</span> <span class="cert-badge">CKS</span> · ~18 min</p>
+
+<p>Knowing the RBAC primitives is step one. Applying them correctly — least privilege, preventing escalation, managing at scale — is where production security lives. This lesson covers the patterns that experienced K8s operators use.</p>
+
+<h2>1. Least Privilege Design</h2>
+
+<p>The principle: <strong>grant only the minimum permissions needed for the task, nothing more.</strong></p>
+
+<h3>Anti-Patterns to Avoid</h3>
+
+<table>
+    <tr><th>Anti-Pattern</th><th>Risk</th><th>Fix</th></tr>
+    <tr><td>Binding <code>cluster-admin</code> to developers</td><td>Full cluster compromise if credentials leak</td><td>Use <code>edit</code> or custom Role per namespace</td></tr>
+    <tr><td><code>resources: ["*"]</code> with <code>verbs: ["*"]</code></td><td>Wildcard = no restrictions at all</td><td>List exact resources and verbs needed</td></tr>
+    <tr><td>ClusterRoleBinding when RoleBinding suffices</td><td>Grants access to ALL namespaces</td><td>Use RoleBinding per namespace</td></tr>
+    <tr><td>Granting <code>create pods</code> to untrusted users</td><td>Pod creation = access to all namespace Secrets (via volume mounts)</td><td>Restrict pod creation or enforce Pod Security</td></tr>
+    <tr><td>Granting <code>list secrets</code></td><td>Exposes ALL secrets (worse than <code>get</code> which requires knowing the name)</td><td>Use <code>get</code> + <code>resourceNames</code> for specific secrets</td></tr>
+</table>
+
+<h3>Least Privilege Checklist</h3>
+
+<pre># For each role, ask:
+# 1. What SPECIFIC resources does this workload/user need?
+#    → List them explicitly (no wildcards)
+# 2. What SPECIFIC verbs are needed?
+#    → Read-only: get, list, watch
+#    → Deploy: get, list, create, update, patch
+#    → Full control: all verbs (rare)
+# 3. What SCOPE is needed?
+#    → Single namespace: Role + RoleBinding
+#    → All namespaces: ClusterRole + ClusterRoleBinding (justify this!)
+# 4. Can we restrict to SPECIFIC resource names?
+#    → resourceNames: ["specific-secret"] (narrow access)</pre>
+
+<h3>Example: Layered Access for One Team</h3>
+
+<pre># Developer — can deploy but not touch infrastructure:
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments", "replicasets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["pods", "pods/log", "services", "configmaps"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["services", "configmaps"]
+    verbs: ["create", "update", "patch"]
+# NO: secrets, pods/exec, RBAC roles, nodes, PVs
+
+# On-call engineer — read everything + exec for debugging:
+rules:
+  - apiGroups: ["", "apps", "batch"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods/exec", "pods/log"]
+    verbs: ["create", "get"]
+# NO: create/delete (read + debug only)
+
+# Platform admin — full namespace control (but not cluster-wide):
+# → Use built-in ClusterRole "admin" with RoleBinding per namespace</pre>
+
+<div class="key-insight">
+    <strong>Pod creation ≈ Secret access.</strong> Anyone who can create Pods in a namespace can mount any Secret in that namespace into their Pod and read it. This is why <code>create pods</code> is a powerful permission — treat it as implicitly granting Secret read access. Restrict it to trusted users/SAs, and enforce Pod Security Standards.
+</div>
+
+<h2>2. Aggregated ClusterRoles</h2>
+
+<p>Aggregation lets you compose ClusterRoles from smaller pieces using label selectors. When a new CRD is installed, it can add permissions to existing roles <em>without modifying them</em>.</p>
+
+<h3>How It Works</h3>
+
+<pre># Base ClusterRole with aggregation rule:
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: monitoring-view
+  labels:
+    rbac.example.com/aggregate-to-monitoring: "true"  # ← contributes rules
+rules:
+  - apiGroups: ["monitoring.coreos.com"]
+    resources: ["prometheuses", "alertmanagers"]
+    verbs: ["get", "list", "watch"]
+---
+# Aggregating ClusterRole (collects rules from labeled roles):
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: aggregate-monitoring
+aggregationRule:
+  clusterRoleSelectors:
+    - matchLabels:
+        rbac.example.com/aggregate-to-monitoring: "true"
+rules: []   # ← auto-populated from matched ClusterRoles!</pre>
+
+<h3>Built-in Aggregation (How K8s Does It)</h3>
+
+<p>The built-in <code>admin</code>, <code>edit</code>, and <code>view</code> ClusterRoles use aggregation:</p>
+
+<pre># The "edit" ClusterRole aggregates all roles labeled:
+#   rbac.authorization.k8s.io/aggregate-to-edit: "true"
+
+# When you install a CRD (e.g., cert-manager), it adds:
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: cert-manager-edit
+  labels:
+    rbac.authorization.k8s.io/aggregate-to-edit: "true"    # ← auto-added to "edit"
+    rbac.authorization.k8s.io/aggregate-to-admin: "true"   # ← auto-added to "admin"
+rules:
+  - apiGroups: ["cert-manager.io"]
+    resources: ["certificates", "issuers"]
+    verbs: ["create", "delete", "get", "list", "patch", "update"]
+
+# Now anyone with "edit" role automatically gets cert-manager permissions!
+# No need to update existing RoleBindings.</pre>
+
+<div class="key-insight">
+    <strong>Aggregation enables extensibility without rebinding.</strong> When a new operator/CRD is installed, it labels its RBAC rules to aggregate into the standard roles. Existing users with <code>edit</code> or <code>admin</code> bindings immediately get permissions for the new resources. This is how the K8s ecosystem stays composable.
+</div>
+
+<div class="production-note">
+    When building custom operators/CRDs, always provide aggregated ClusterRoles that plug into the standard <code>view</code>, <code>edit</code>, <code>admin</code> roles. Label them with <code>rbac.authorization.k8s.io/aggregate-to-view: "true"</code> etc. This gives your CRD "zero-config" RBAC integration — platform teams don't need to create new bindings.
+</div>
+
+<h2>3. Escalation Prevention</h2>
+
+<p>Kubernetes prevents privilege escalation: <strong>you cannot grant permissions you don't already have.</strong></p>
+
+<h3>The Escalation Check</h3>
+
+<pre># If user "jane" has only "get pods" permission:
+# She CANNOT create a RoleBinding that grants "delete pods"
+# → API server rejects: "user jane cannot grant verb 'delete' on resource 'pods'"
+
+# To create/update Roles and Bindings, you must ALREADY have:
+# 1. Permission to create/update roles/rolebindings (meta-permission)
+# 2. ALL the permissions contained in the role you're creating (escalation check)
+
+# Exception: the "escalate" verb bypasses this check:
+rules:
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles", "clusterroles"]
+    verbs: ["escalate"]     # ← Allows creating roles with more perms than you have
+# EXTREMELY DANGEROUS — equivalent to cluster-admin</pre>
+
+<h3>The "bind" Verb</h3>
+
+<pre># The "bind" verb allows creating bindings to ANY role:
+rules:
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["rolebindings", "clusterrolebindings"]
+    verbs: ["create"]       # Can create bindings...
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles", "clusterroles"]
+    verbs: ["bind"]         # ...to any role (bypasses escalation check)
+# ALSO DANGEROUS — can bind cluster-admin to themselves</pre>
+
+<div class="security-warn">
+    <strong>Never grant <code>escalate</code> or <code>bind</code> verbs to non-admin users.</strong> These bypass the escalation prevention mechanism. A user with <code>bind</code> can attach themselves to <code>cluster-admin</code>. A user with <code>escalate</code> can create a Role granting any permission. Both are equivalent to full cluster compromise.
+</div>
+
+<h2>4. Dangerous Permission Combinations</h2>
+
+<table>
+    <tr><th>Permission</th><th>Why It's Dangerous</th></tr>
+    <tr><td><code>create pods</code></td><td>Can mount any Secret in the namespace → read all secrets</td></tr>
+    <tr><td><code>create pods</code> + <code>hostPath volumes</code></td><td>Can mount node filesystem → container escape → node root</td></tr>
+    <tr><td><code>create pods/exec</code></td><td>Can exec into any Pod → access its SA token, env vars, mounted secrets</td></tr>
+    <tr><td><code>list secrets</code></td><td>See ALL secrets in namespace (vs <code>get</code> which requires knowing the name)</td></tr>
+    <tr><td><code>update/patch roles</code></td><td>Can expand their own permissions (if escalation check is bypassed)</td></tr>
+    <tr><td><code>impersonate users</code></td><td>Can act as any user/SA — effectively cluster-admin</td></tr>
+    <tr><td><code>create serviceaccounts</code> + <code>create rolebindings</code></td><td>Create a new SA, bind cluster-admin to it, use its token</td></tr>
+    <tr><td><code>create tokenrequests</code> (SA subresource)</td><td>Generate tokens for any SA → impersonate any workload</td></tr>
+</table>
+
+<div class="key-insight">
+    <strong>The escalation chain:</strong> <code>create pods</code> → mount Secrets → get SA token → if SA has more permissions than user → privilege escalation. This is why Pod Security Standards (restricting what Pods can do) are as important as RBAC (restricting who can create Pods). They're complementary layers.
+</div>
+
+<h2>5. Auditing & Debugging RBAC</h2>
+
+<pre># Who has access to what?
+kubectl auth can-i --list --as=jane -n production
+
+# Can this SA create deployments?
+kubectl auth can-i create deployments \
+  --as=system:serviceaccount:ci:deployer -n production
+
+# Find all RoleBindings in a namespace:
+kubectl get rolebindings -n production -o wide
+# NAME        ROLE                    SUBJECTS
+# dev-edit    ClusterRole/edit        User/jane, Group/developers
+
+# Find all ClusterRoleBindings for a specific user:
+kubectl get clusterrolebindings -o json | \
+  jq '.items[] | select(.subjects[]? | .name=="jane") | .metadata.name'
+
+# What permissions does a ClusterRole grant?
+kubectl describe clusterrole edit
+
+# Audit: find overly permissive bindings (cluster-admin):
+kubectl get clusterrolebindings -o json | \
+  jq '.items[] | select(.roleRef.name=="cluster-admin") | 
+      {name: .metadata.name, subjects: .subjects}'</pre>
+
+<h3>Tools for RBAC Analysis</h3>
+
+<table>
+    <tr><th>Tool</th><th>Purpose</th></tr>
+    <tr><td><code>kubectl auth can-i</code></td><td>Test specific permissions (built-in)</td></tr>
+    <tr><td><code>rakkess</code></td><td>Show access matrix for a user (all resources × all verbs)</td></tr>
+    <tr><td><code>kubectl-who-can</code></td><td>Find who can perform a specific action</td></tr>
+    <tr><td><code>rbac-tool</code></td><td>Visualize and analyze RBAC policies</td></tr>
+    <tr><td><code>kubescape</code></td><td>Security scanner that flags RBAC risks</td></tr>
+</table>
+
+<div class="production-note">
+    Run RBAC audits quarterly: (1) Find all cluster-admin bindings — are they all justified? (2) Find ServiceAccounts with wildcard permissions. (3) Check for stale bindings (users who left the company). (4) Verify no SA has both <code>create pods</code> and elevated permissions (escalation path). Tools like <code>kubescape</code> automate this.
+</div>
+
+<h2>Summary</h2>
+
+<table>
+    <tr><th>Pattern</th><th>Key Point</th></tr>
+    <tr><td>Least privilege</td><td>Explicit resources + verbs. No wildcards. Namespace-scoped where possible.</td></tr>
+    <tr><td>Aggregated ClusterRoles</td><td>Label-based composition. CRDs auto-extend view/edit/admin.</td></tr>
+    <tr><td>Escalation prevention</td><td>Can't grant perms you don't have. <code>escalate</code>/<code>bind</code> bypass this — never grant.</td></tr>
+    <tr><td>Pod creation = Secret access</td><td>Anyone who can create Pods can read all namespace Secrets.</td></tr>
+    <tr><td>Layered access</td><td>developer < on-call < namespace-admin < cluster-admin</td></tr>
+    <tr><td>Audit regularly</td><td>Find cluster-admin bindings, wildcard roles, stale access.</td></tr>
+</table>
+
+<!-- Quiz -->
+<div class="quiz">
+    <h2>📝 Quiz: RBAC Patterns</h2>
+    
+    <div class="quiz-q">
+        <p>Q1: A developer has <code>create pods</code> permission in a namespace. Can they read Secrets in that namespace (even without explicit Secret get permission)?</p>
+        <button class="reveal-btn" onclick="this.nextElementSibling.style.display='block'">Show Answer</button>
+        <div class="quiz-answer"><strong>Effectively yes.</strong> They can create a Pod that mounts any Secret as a volume, then exec into it (or read logs) to see the Secret content. This is why <code>create pods</code> is nearly equivalent to <code>get secrets</code> in the same namespace. Mitigate with Pod Security Standards (restrict volume types) or admission policies.</div>
+    </div>
+    
+    <div class="quiz-q">
+        <p>Q2: User jane has <code>get pods</code> permission. She tries to create a Role that grants <code>delete pods</code>. What happens?</p>
+        <button class="reveal-btn" onclick="this.nextElementSibling.style.display='block'">Show Answer</button>
+        <div class="quiz-answer"><strong>Rejected.</strong> The API server's escalation prevention check verifies that jane already has all permissions in the Role she's trying to create. Since she doesn't have <code>delete pods</code>, she can't create a Role granting it. This prevents users from escalating their own privileges through RBAC manipulation.</div>
+    </div>
+    
+    <div class="quiz-q">
+        <p>Q3: You install cert-manager which creates a ClusterRole labeled <code>aggregate-to-edit: "true"</code>. What happens to existing users with the "edit" ClusterRole?</p>
+        <button class="reveal-btn" onclick="this.nextElementSibling.style.display='block'">Show Answer</button>
+        <div class="quiz-answer">They <strong>automatically get cert-manager permissions</strong> (create/edit Certificates, Issuers, etc.) without any binding changes. The built-in "edit" ClusterRole aggregates rules from all ClusterRoles with that label. No rebinding needed — permissions extend dynamically via label-based aggregation.</div>
+    </div>
+    
+    <div class="quiz-q">
+        <p>Q4: What's the difference between granting <code>list secrets</code> vs <code>get secrets</code> with <code>resourceNames</code>?</p>
+        <button class="reveal-btn" onclick="this.nextElementSibling.style.display='block'">Show Answer</button>
+        <div class="quiz-answer"><code>list secrets</code>: User can see <strong>ALL</strong> Secrets in the namespace (names + content). Very broad exposure.<br><code>get secrets</code> + <code>resourceNames: ["db-creds"]</code>: User can only read ONE specific Secret by name. They can't discover what other Secrets exist. Much more restrictive — prefer this when a workload only needs one specific Secret.</div>
+    </div>
+    
+    <div class="quiz-q">
+        <p>Q5: Why is the <code>impersonate</code> verb considered equivalent to cluster-admin?</p>
+        <button class="reveal-btn" onclick="this.nextElementSibling.style.display='block'">Show Answer</button>
+        <div class="quiz-answer">The <code>impersonate</code> verb allows a user to act as ANY other user, group, or ServiceAccount — including <code>system:masters</code> (which has cluster-admin via a default ClusterRoleBinding). An attacker with impersonate can: <code>kubectl --as=system:admin get secrets -A</code> — full cluster access. Only grant impersonate to trusted automation that genuinely needs it (e.g., a multi-tenant proxy).</div>
+    </div>
+    
+    <div class="quiz-q">
+        <p>Q6: How do you find all subjects that have <code>cluster-admin</code> access in your cluster?</p>
+        <button class="reveal-btn" onclick="this.nextElementSibling.style.display='block'">Show Answer</button>
+        <div class="quiz-answer"><pre>kubectl get clusterrolebindings -o json | \
+  jq '.items[] | select(.roleRef.name=="cluster-admin") | .subjects[]'</pre>This lists all users, groups, and ServiceAccounts bound to the cluster-admin ClusterRole via ClusterRoleBindings. Also check RoleBindings in each namespace that reference cluster-admin (ClusterRole + RoleBinding = namespace-scoped cluster-admin).</div>
+    </div>
+</div>
+
+</body>
+</html>

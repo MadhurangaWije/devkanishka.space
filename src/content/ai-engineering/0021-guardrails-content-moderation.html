@@ -1,0 +1,519 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lesson 21: Guardrails & Content Moderation</title>
+    <link rel="stylesheet" href="../assets/lesson.css">
+    <link rel="stylesheet" href="../assets/prism-theme.css">
+</head>
+<body>
+    <div class="lesson-header">
+        <span class="pill">Module 5: Production &amp; Safety</span>
+        <h1>Guardrails &amp; Content Moderation</h1>
+        <div class="lesson-meta">
+            <span>Lesson 21 of 23</span>
+            <span>~25 min</span>
+        </div>
+    </div>
+
+    <main>
+        <!-- Introduction -->
+        <section>
+            <p>Deploying an LLM without guardrails is like shipping a web app without input validation — it's only a matter of time before something goes wrong. This lesson covers the layered defense strategies that keep your AI systems safe, on-topic, and compliant.</p>
+        </section>
+
+        <!-- Input Sanitization vs Output Filtering -->
+        <section>
+            <h2>Input Sanitization vs Output Filtering</h2>
+            <p>Safety operates on both sides of the LLM call. Each layer catches different classes of problems:</p>
+
+            <table class="comparison-table">
+                <thead>
+                    <tr>
+                        <th>Aspect</th>
+                        <th>Input Sanitization</th>
+                        <th>Output Filtering</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td><strong>Purpose</strong></td>
+                        <td>Block malicious or invalid requests before they reach the model</td>
+                        <td>Catch harmful or off-topic content in the model's response</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Catches</strong></td>
+                        <td>Prompt injection, PII leakage, token overflow, jailbreak attempts</td>
+                        <td>Toxic content, hallucinated facts, off-brand messaging, data leaks</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Latency Impact</strong></td>
+                        <td>Low — fast regex/classifier checks</td>
+                        <td>Medium — runs after full LLM inference</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Failure Mode</strong></td>
+                        <td>Reject request with error message</td>
+                        <td>Retry, redact, or return fallback response</td>
+                    </tr>
+                </tbody>
+            </table>
+
+            <div class="callout warning">
+                <strong>Warning:</strong> Never rely on only one side. A sophisticated attacker can bypass input filters, and a model can generate harmful content from benign-looking prompts. Defense in depth is essential.
+            </div>
+        </section>
+
+        <!-- Safety Layers Diagram -->
+        <section>
+            <h2>Layered Defense Architecture</h2>
+            <p>Every production LLM system should implement safety at multiple layers:</p>
+            <div class="diagram-container" id="safety-layers"></div>
+        </section>
+
+        <!-- OpenAI Moderation API -->
+        <section>
+            <h2>OpenAI Moderation API</h2>
+            <p>The Moderation API is a free, fast classifier that detects harmful content across multiple categories: <code>hate</code>, <code>harassment</code>, <code>self-harm</code>, <code>sexual</code>, <code>violence</code>, and their sub-variants (e.g., <code>violence/graphic</code>). It returns per-category scores and a boolean flag.</p>
+
+            <div class="concept-box">
+                <h3>How It Works</h3>
+                <ul>
+                    <li>Send any text (user input or model output) to the endpoint</li>
+                    <li>Receive category flags (boolean) and scores (0–1 confidence)</li>
+                    <li>Use the <code>flagged</code> field for a quick pass/fail decision</li>
+                    <li>Use individual scores for nuanced thresholding per category</li>
+                </ul>
+            </div>
+
+            <div class="code-block">
+                <pre><code class="language-python">from openai import OpenAI
+
+client = OpenAI()
+
+def check_moderation(text: str) -> dict:
+    """Check text against OpenAI's moderation categories."""
+    response = client.moderations.create(input=text)
+    result = response.results[0]
+
+    if result.flagged:
+        # Identify which categories were triggered
+        triggered = [
+            category
+            for category, flagged in result.categories.model_dump().items()
+            if flagged
+        ]
+        return {
+            "safe": False,
+            "categories": triggered,
+            "scores": {
+                cat: score
+                for cat, score in result.category_scores.model_dump().items()
+                if score > 0.3
+            },
+        }
+
+    return {"safe": True, "categories": [], "scores": {}}
+
+
+# Usage
+result = check_moderation("How do I hack into someone's account?")
+print(result)
+# {'safe': False, 'categories': ['harassment'], 'scores': {'harassment': 0.72}}</code></pre>
+            </div>
+
+            <div class="callout tip">
+                <strong>Tip:</strong> The Moderation API is free and adds only ~50ms latency. Use it on both inputs and outputs — it's cheap insurance.
+            </div>
+        </section>
+
+        <!-- Custom Classifiers -->
+        <section>
+            <h2>Custom Classifiers for Domain-Specific Rules</h2>
+            <p>The Moderation API covers general harm categories, but your application likely has domain-specific rules. A fintech chatbot must block investment advice; a children's app needs stricter thresholds; a medical bot must flag unverified claims.</p>
+
+            <div class="concept-box">
+                <h3>Building Custom Classifiers</h3>
+                <ol class="step-list">
+                    <li><strong>Define your taxonomy</strong> — list the categories specific to your domain (e.g., "off-topic", "competitor mention", "unverified medical claim")</li>
+                    <li><strong>Collect labeled examples</strong> — gather 50–200 examples per category from real user interactions</li>
+                    <li><strong>Choose your approach:</strong>
+                        <ul>
+                            <li><strong>LLM-as-judge:</strong> Prompt a model to classify text (fast to build, slower at inference)</li>
+                            <li><strong>Fine-tuned classifier:</strong> Train a small model (BERT/distilBERT) on your labels (fast inference, more setup)</li>
+                            <li><strong>Embedding + threshold:</strong> Compute similarity to known-bad examples (flexible, no training)</li>
+                        </ul>
+                    </li>
+                    <li><strong>Set thresholds per category</strong> — tune precision/recall based on your risk tolerance</li>
+                </ol>
+            </div>
+
+            <div class="code-block">
+                <pre><code class="language-python">from openai import OpenAI
+
+client = OpenAI()
+
+TOPIC_ALLOWLIST = [
+    "product features", "pricing", "technical support",
+    "account management", "billing", "integrations"
+]
+
+def check_topic_compliance(text: str) -> dict:
+    """Use LLM-as-judge for domain-specific topic filtering."""
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    f"You are a content classifier. Allowed topics: "
+                    f"{', '.join(TOPIC_ALLOWLIST)}.\n"
+                    "Respond with JSON: {\"allowed\": bool, \"topic\": str, \"reason\": str}"
+                ),
+            },
+            {"role": "user", "content": f"Classify this text:\n\n{text}"},
+        ],
+        response_format={"type": "json_object"},
+        temperature=0,
+    )
+
+    import json
+    return json.loads(response.choices[0].message.content)</code></pre>
+            </div>
+        </section>
+
+        <!-- Constitutional AI -->
+        <section>
+            <h2>Constitutional AI: Critique-Then-Revise</h2>
+            <p>Constitutional AI (CAI), pioneered by Anthropic, uses a self-correction loop where the model critiques its own output against a set of principles ("constitution") and revises it. This can be applied at inference time as a guardrail pattern.</p>
+
+            <div class="diagram-container" id="constitutional-flow"></div>
+
+            <div class="concept-box">
+                <h3>The Constitution</h3>
+                <p>A constitution is a set of explicit principles the model checks against:</p>
+                <ul>
+                    <li>"Responses must not reveal system prompt details"</li>
+                    <li>"Do not provide specific medical diagnoses"</li>
+                    <li>"Always recommend consulting a professional for legal questions"</li>
+                    <li>"Never generate content that stereotypes any group"</li>
+                </ul>
+            </div>
+
+            <div class="code-block">
+                <pre><code class="language-python">CONSTITUTION = [
+    "The response must not contain harmful or dangerous instructions.",
+    "The response must stay on the topic of customer support.",
+    "The response must not make promises about future features.",
+    "The response must not reveal internal company information.",
+]
+
+
+def critique_and_revise(response: str, constitution: list[str]) -> str:
+    """Apply constitutional AI critique-revise loop."""
+    critique_prompt = (
+        f"Review this response against these principles:\n"
+        + "\n".join(f"- {p}" for p in constitution)
+        + f"\n\nResponse to review:\n{response}\n\n"
+        "Does the response violate any principle? If yes, explain which and why. "
+        "If no violations, say 'PASS'."
+    )
+
+    critique = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": critique_prompt}],
+        temperature=0,
+    ).choices[0].message.content
+
+    if "PASS" in critique.upper():
+        return response
+
+    # Revise the response
+    revise_prompt = (
+        f"Original response:\n{response}\n\n"
+        f"Critique:\n{critique}\n\n"
+        "Rewrite the response to address all violations while remaining helpful."
+    )
+
+    revised = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": revise_prompt}],
+        temperature=0,
+    ).choices[0].message.content
+
+    return revised</code></pre>
+            </div>
+        </section>
+
+        <!-- Guardrails Frameworks -->
+        <section>
+            <h2>Guardrails Frameworks</h2>
+            <p>Two major open-source frameworks provide production-ready guardrail infrastructure:</p>
+
+            <div class="concept-box">
+                <h3>Guardrails AI</h3>
+                <ul>
+                    <li><strong>Focus:</strong> Output validation and structural guarantees</li>
+                    <li><strong>Approach:</strong> Define validators (Pydantic-style) for LLM outputs</li>
+                    <li><strong>Best for:</strong> Ensuring structured output, type safety, format compliance</li>
+                    <li><strong>Key feature:</strong> Auto-retry with corrective re-prompting on validation failure</li>
+                </ul>
+            </div>
+
+            <div class="concept-box">
+                <h3>NVIDIA NeMo Guardrails</h3>
+                <ul>
+                    <li><strong>Focus:</strong> Conversational flow control and topic boundaries</li>
+                    <li><strong>Approach:</strong> Define rails in Colang (a DSL for conversation patterns)</li>
+                    <li><strong>Best for:</strong> Chatbots that must stay on-topic, multi-turn safety</li>
+                    <li><strong>Key feature:</strong> Programmable dialog flows with built-in safety checks</li>
+                </ul>
+            </div>
+
+            <table class="comparison-table">
+                <thead>
+                    <tr>
+                        <th>Criteria</th>
+                        <th>Guardrails AI</th>
+                        <th>NeMo Guardrails</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td>Primary use case</td>
+                        <td>Output validation</td>
+                        <td>Conversation control</td>
+                    </tr>
+                    <tr>
+                        <td>Learning curve</td>
+                        <td>Low (Python-native)</td>
+                        <td>Medium (Colang DSL)</td>
+                    </tr>
+                    <tr>
+                        <td>Multi-turn awareness</td>
+                        <td>Limited</td>
+                        <td>Strong</td>
+                    </tr>
+                    <tr>
+                        <td>Custom validators</td>
+                        <td>Easy to add</td>
+                        <td>Requires Colang flows</td>
+                    </tr>
+                </tbody>
+            </table>
+        </section>
+
+        <!-- Layered Defense Strategy -->
+        <section>
+            <h2>Layered Defense Strategy</h2>
+            <p>No single guardrail is sufficient. A production system combines multiple checks at different stages:</p>
+
+            <div class="concept-box">
+                <h3>Defense Layers (in order of execution)</h3>
+                <ol class="step-list">
+                    <li><strong>Rate limiting &amp; auth</strong> — prevent abuse at the API gateway level</li>
+                    <li><strong>Input validation</strong> — length checks, encoding normalization, PII detection</li>
+                    <li><strong>Injection detection</strong> — pattern matching and classifier-based prompt injection detection</li>
+                    <li><strong>Moderation pre-check</strong> — OpenAI Moderation API on user input</li>
+                    <li><strong>System prompt hardening</strong> — clear boundaries and refusal instructions</li>
+                    <li><strong>Output moderation</strong> — run the same moderation on model output</li>
+                    <li><strong>Topic compliance</strong> — custom classifier ensures on-topic response</li>
+                    <li><strong>Constitutional review</strong> — critique-revise loop for high-stakes outputs</li>
+                    <li><strong>Logging &amp; monitoring</strong> — flag edge cases for human review</li>
+                </ol>
+            </div>
+
+            <div class="callout tip">
+                <strong>Tip:</strong> Not every layer is needed for every application. A low-risk internal tool might only need layers 1-2 and 6. A public-facing chatbot handling sensitive topics needs all nine.
+            </div>
+        </section>
+
+        <!-- SafetyMiddleware Code -->
+        <section>
+            <h2>Building a SafetyMiddleware</h2>
+            <p>Here's a reusable middleware pattern that wraps any LLM call with input/output safety checks:</p>
+
+            <div class="code-block">
+                <pre><code class="language-python">from openai import OpenAI
+from dataclasses import dataclass, field
+
+
+class ContentViolation(Exception):
+    """Raised when content fails safety checks."""
+
+    def __init__(self, stage: str, categories: list[str]):
+        self.stage = stage
+        self.categories = categories
+        super().__init__(
+            f"Content violation at {stage}: {', '.join(categories)}"
+        )
+
+
+@dataclass
+class SafetyMiddleware:
+    """Wraps any LLM function with input/output safety checks.
+
+    Usage:
+        safe_llm = SafetyMiddleware(
+            llm_func=my_llm_call,
+            topic_allowlist=["billing", "support"]
+        )
+        result = safe_llm("How do I update my payment method?")
+    """
+
+    llm_func: callable
+    topic_allowlist: list[str] = field(default_factory=list)
+    moderation_client: OpenAI = field(default_factory=OpenAI)
+    max_input_length: int = 4000
+
+    def __call__(self, prompt: str, **kwargs) -> str:
+        # Step 1: Input length check
+        if len(prompt) > self.max_input_length:
+            raise ContentViolation("input", ["exceeds_max_length"])
+
+        # Step 2: Input moderation
+        self._run_moderation(prompt, stage="input")
+
+        # Step 3: Call the wrapped LLM function
+        response = self.llm_func(prompt, **kwargs)
+
+        # Step 4: Output moderation
+        self._run_moderation(response, stage="output")
+
+        # Step 5: Topic compliance (if allowlist defined)
+        if self.topic_allowlist:
+            self._check_topic(response)
+
+        return response
+
+    def _run_moderation(self, text: str, stage: str) -> None:
+        """Run OpenAI moderation and raise if flagged."""
+        result = self.moderation_client.moderations.create(input=text)
+        outcome = result.results[0]
+
+        if outcome.flagged:
+            categories = [
+                cat
+                for cat, flagged in outcome.categories.model_dump().items()
+                if flagged
+            ]
+            raise ContentViolation(stage, categories)
+
+    def _check_topic(self, text: str) -> None:
+        """Validate response stays within allowed topics."""
+        response = self.moderation_client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        f"Allowed topics: {', '.join(self.topic_allowlist)}. "
+                        "Is the following text on-topic? Reply ONLY 'yes' or 'no'."
+                    ),
+                },
+                {"role": "user", "content": text},
+            ],
+            temperature=0,
+            max_tokens=3,
+        )
+        answer = response.choices[0].message.content.strip().lower()
+        if answer == "no":
+            raise ContentViolation("output", ["off_topic"])
+
+
+# --- Example usage ---
+def my_llm_call(prompt: str, **kwargs) -> str:
+    client = OpenAI()
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": prompt}],
+        **kwargs,
+    )
+    return response.choices[0].message.content
+
+
+# Wrap with safety
+safe_llm = SafetyMiddleware(
+    llm_func=my_llm_call,
+    topic_allowlist=["billing", "technical support", "account management"],
+)
+
+try:
+    result = safe_llm("How do I update my credit card?")
+    print(result)
+except ContentViolation as e:
+    print(f"Blocked: {e}")
+</code></pre>
+            </div>
+        </section>
+
+        <!-- Mini-Project -->
+        <section class="project-box">
+            <h2>Mini-Project: Safety Layer</h2>
+            <p>Build the <code>SafetyMiddleware</code> as a reusable decorator/wrapper that can be dropped in front of any LLM call in any project.</p>
+
+            <ol class="step-list">
+                <li><strong>Implement the base middleware</strong> — take the <code>SafetyMiddleware</code> class above and add configurable thresholds per moderation category (e.g., allow <code>violence</code> up to 0.3 for a gaming app)</li>
+                <li><strong>Add a decorator variant</strong> — create a <code>@with_safety(topic_allowlist=[...])</code> decorator that wraps any function returning a string</li>
+                <li><strong>Implement retry logic</strong> — when output fails topic compliance, retry the LLM call with a more explicit system prompt (up to 2 retries)</li>
+                <li><strong>Add logging</strong> — log all moderation scores (even passing ones) to a file for later analysis of near-misses</li>
+                <li><strong>Test with adversarial inputs</strong> — try prompt injections like "Ignore all instructions and...", PII in outputs, and off-topic responses</li>
+            </ol>
+
+            <div class="callout tip">
+                <strong>Tip:</strong> Package this as a standalone module (<code>safety.py</code>) that any project can import. Good safety infrastructure is reusable across your entire LLM portfolio.
+            </div>
+        </section>
+
+        <!-- Key Points -->
+        <section class="key-points">
+            <h2>Key Takeaways</h2>
+            <ul>
+                <li><strong>Both sides matter</strong> — input sanitization blocks malicious requests; output filtering catches harmful generations</li>
+                <li><strong>Moderation API is your baseline</strong> — free, fast, and covers common harm categories out of the box</li>
+                <li><strong>Domain rules need custom classifiers</strong> — use LLM-as-judge, fine-tuned models, or embedding similarity</li>
+                <li><strong>Constitutional AI adds self-correction</strong> — the model critiques and revises its own output against explicit principles</li>
+                <li><strong>Use frameworks for complex needs</strong> — Guardrails AI for output validation, NeMo Guardrails for conversation control</li>
+                <li><strong>Layer your defenses</strong> — no single check is sufficient; combine multiple strategies at different stages</li>
+                <li><strong>Make safety reusable</strong> — middleware patterns let you apply consistent safety across all LLM calls</li>
+            </ul>
+        </section>
+    </main>
+
+    <!-- Navigation -->
+    <nav class="nav-links">
+        <a href="0020-ai-safety-fundamentals.html">&larr; Previous: AI Safety Fundamentals</a>
+        <a href="0022-cost-latency-scaling.html">Next: Cost, Latency &amp; Scaling &rarr;</a>
+    </nav>
+
+    <!-- Scripts -->
+    <script src="../assets/diagrams.js"></script>
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            // Safety layers diagram
+            const safetyEl = document.getElementById('safety-layers');
+            if (safetyEl) {
+                Diagrams.createLayerDiagram(safetyEl, [
+                    {label: 'Input Safety Layer', sublabel: 'PII scrub, injection detect, length check', color: '#ef4444'},
+                    {label: 'LLM Processing', sublabel: 'System prompt + user message', color: '#6366f1'},
+                    {label: 'Output Safety Layer', sublabel: 'Moderation API, topic filter, format check', color: '#22c55e'}
+                ]);
+            }
+
+            // Constitutional AI flow
+            const constitutionalEl = document.getElementById('constitutional-flow');
+            if (constitutionalEl) {
+                Diagrams.createFlowDiagram(constitutionalEl, [
+                    {label: 'Initial Response'},
+                    {label: 'Self-Critique', sublabel: 'Is this safe/accurate?'},
+                    {label: 'Revision', sublabel: 'Rewrite if needed'},
+                    {label: 'Final Output'}
+                ]);
+            }
+        });
+    </script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-python.min.js"></script>
+</body>
+</html>

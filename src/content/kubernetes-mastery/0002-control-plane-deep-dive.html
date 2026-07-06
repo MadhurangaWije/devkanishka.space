@@ -1,0 +1,436 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lesson 2: Control Plane Deep-Dive</title>
+    <style>
+        :root {
+            --bg: #fafafa; --text: #1a1a1a; --accent: #326ce5;
+            --accent-light: #e8f0fe; --border: #e0e0e0; --code-bg: #f5f5f5;
+            --success: #2e7d32; --warn: #f57c00;
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: 'Georgia', serif; line-height: 1.7; color: var(--text); background: var(--bg); max-width: 780px; margin: 0 auto; padding: 2rem 1.5rem; }
+        h1 { font-size: 2rem; margin-bottom: 0.5rem; color: var(--accent); }
+        h2 { font-size: 1.4rem; margin-top: 2.5rem; margin-bottom: 0.8rem; border-bottom: 2px solid var(--accent); padding-bottom: 0.3rem; }
+        h3 { font-size: 1.1rem; margin-top: 1.5rem; margin-bottom: 0.5rem; }
+        p { margin-bottom: 1rem; }
+        .meta { color: #666; font-size: 0.9rem; margin-bottom: 2rem; }
+        .key-insight { background: var(--accent-light); border-left: 4px solid var(--accent); padding: 1rem 1.2rem; margin: 1.5rem 0; border-radius: 0 4px 4px 0; }
+        .key-insight strong { color: var(--accent); }
+        .production-note { background: #fff3e0; border-left: 4px solid var(--warn); padding: 1rem 1.2rem; margin: 1.5rem 0; border-radius: 0 4px 4px 0; }
+        .production-note::before { content: "🏭 Production: "; font-weight: bold; }
+        code { font-family: 'Menlo', 'Consolas', monospace; font-size: 0.85em; background: var(--code-bg); padding: 0.15em 0.4em; border-radius: 3px; }
+        pre { background: var(--code-bg); padding: 1rem; border-radius: 4px; overflow-x: auto; margin: 1rem 0; font-size: 0.85rem; line-height: 1.5; }
+        ul, ol { margin: 0.5rem 0 1rem 1.5rem; }
+        li { margin-bottom: 0.4rem; }
+        table { width: 100%; border-collapse: collapse; margin: 1rem 0; font-size: 0.9rem; }
+        th, td { border: 1px solid var(--border); padding: 0.6rem 0.8rem; text-align: left; }
+        th { background: var(--accent-light); font-weight: bold; }
+        .diagram { background: white; border: 1px solid var(--border); border-radius: 8px; padding: 1.5rem; margin: 1.5rem 0; text-align: center; }
+        .cert-badge { display: inline-block; background: var(--accent); color: white; font-size: 0.7rem; padding: 0.15rem 0.5rem; border-radius: 10px; margin-left: 0.5rem; }
+        .quiz { background: #f9f9f9; border: 1px solid var(--border); border-radius: 8px; padding: 1.5rem; margin-top: 2rem; }
+        .quiz h2 { border-bottom: none; margin-top: 0; }
+        .quiz-q { margin-bottom: 1.2rem; }
+        .quiz-q p { font-weight: bold; margin-bottom: 0.3rem; }
+        .quiz-answer { display: none; background: #e8f5e9; padding: 0.5rem 0.8rem; border-radius: 4px; margin-top: 0.5rem; }
+        .reveal-btn { background: var(--accent); color: white; border: none; padding: 0.3rem 0.8rem; border-radius: 4px; cursor: pointer; font-size: 0.8rem; }
+        .reveal-btn:hover { opacity: 0.85; }
+    </style>
+</head>
+<body>
+
+<h1>Lesson 2: Control Plane Deep-Dive</h1>
+<p class="meta">Chapter 1: Foundations & Architecture · <span class="cert-badge">CKA</span> · ~20 min</p>
+
+<p>In Lesson 1, you saw the big picture. Now we go deep into each control plane component — what it actually does, how it's configured, and what breaks in production.</p>
+
+<h2>1. kube-apiserver — The Heart of the Cluster</h2>
+
+<p>The API server is the <strong>only</strong> component that reads and writes to etcd. Every other component — scheduler, controllers, kubelet, even <code>kubectl</code> — talks exclusively to the API server. It is the cluster's central nervous system.</p>
+
+<h3>What It Actually Does</h3>
+
+<p>When a request arrives at the API server, it passes through a strict pipeline:</p>
+
+<div class="diagram">
+<svg viewBox="0 0 700 120" xmlns="http://www.w3.org/2000/svg" font-family="Menlo, monospace" font-size="10">
+    <defs><marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0 L10 5 L0 10z" fill="#326ce5"/></marker></defs>
+    
+    <rect x="5" y="40" width="85" height="40" rx="4" fill="#e8f0fe" stroke="#326ce5" stroke-width="1.5"/>
+    <text x="47" y="63" text-anchor="middle" font-size="9" font-weight="bold">AuthN</text>
+    
+    <line x1="90" y1="60" x2="110" y2="60" stroke="#326ce5" stroke-width="1.5" marker-end="url(#arr)"/>
+    
+    <rect x="110" y="40" width="85" height="40" rx="4" fill="#e8f0fe" stroke="#326ce5" stroke-width="1.5"/>
+    <text x="152" y="63" text-anchor="middle" font-size="9" font-weight="bold">AuthZ</text>
+    
+    <line x1="195" y1="60" x2="215" y2="60" stroke="#326ce5" stroke-width="1.5" marker-end="url(#arr)"/>
+    
+    <rect x="215" y="40" width="85" height="40" rx="4" fill="#e8f0fe" stroke="#326ce5" stroke-width="1.5"/>
+    <text x="257" y="58" text-anchor="middle" font-size="9" font-weight="bold">Mutating</text>
+    <text x="257" y="70" text-anchor="middle" font-size="9" font-weight="bold">Admission</text>
+    
+    <line x1="300" y1="60" x2="320" y2="60" stroke="#326ce5" stroke-width="1.5" marker-end="url(#arr)"/>
+    
+    <rect x="320" y="40" width="85" height="40" rx="4" fill="#e8f0fe" stroke="#326ce5" stroke-width="1.5"/>
+    <text x="362" y="63" text-anchor="middle" font-size="9" font-weight="bold">Validation</text>
+    
+    <line x1="405" y1="60" x2="425" y2="60" stroke="#326ce5" stroke-width="1.5" marker-end="url(#arr)"/>
+    
+    <rect x="425" y="40" width="85" height="40" rx="4" fill="#e8f0fe" stroke="#326ce5" stroke-width="1.5"/>
+    <text x="467" y="58" text-anchor="middle" font-size="9" font-weight="bold">Validating</text>
+    <text x="467" y="70" text-anchor="middle" font-size="9" font-weight="bold">Admission</text>
+    
+    <line x1="510" y1="60" x2="530" y2="60" stroke="#326ce5" stroke-width="1.5" marker-end="url(#arr)"/>
+    
+    <rect x="530" y="40" width="85" height="40" rx="4" fill="#fff3e0" stroke="#f57c00" stroke-width="1.5"/>
+    <text x="572" y="58" text-anchor="middle" font-size="9" font-weight="bold">Persist</text>
+    <text x="572" y="70" text-anchor="middle" font-size="9" font-weight="bold">→ etcd</text>
+    
+    <line x1="615" y1="60" x2="635" y2="60" stroke="#326ce5" stroke-width="1.5" marker-end="url(#arr)"/>
+    
+    <rect x="635" y="40" width="60" height="40" rx="4" fill="#e8f5e9" stroke="#2e7d32" stroke-width="1.5"/>
+    <text x="665" y="63" text-anchor="middle" font-size="9" font-weight="bold">Response</text>
+    
+    <text x="350" y="105" text-anchor="middle" font-size="9" fill="#666">← Request rejected at any failing stage →</text>
+</svg>
+</div>
+
+<table>
+    <tr><th>Stage</th><th>What Happens</th><th>Example</th></tr>
+    <tr><td><strong>Authentication</strong></td><td>Identifies the caller</td><td>Client cert CN=admin, ServiceAccount token</td></tr>
+    <tr><td><strong>Authorization</strong></td><td>Checks if this identity can do this action</td><td>RBAC: can user X create pods in ns Y?</td></tr>
+    <tr><td><strong>Mutating Admission</strong></td><td>Webhooks can modify the request</td><td>Inject sidecar container, add labels</td></tr>
+    <tr><td><strong>Schema Validation</strong></td><td>Is the object well-formed?</td><td>Reject if <code>replicas: -1</code></td></tr>
+    <tr><td><strong>Validating Admission</strong></td><td>Webhooks can reject (not modify)</td><td>Deny images not from approved registry</td></tr>
+    <tr><td><strong>Persist</strong></td><td>Write to etcd</td><td>Object stored, resourceVersion assigned</td></tr>
+</table>
+
+<div class="key-insight">
+    <strong>Key:</strong> Mutating admission runs <em>before</em> validation. This means a webhook can inject fields that then pass validation. Validating admission runs <em>after</em> validation — it sees the final, valid object and can only accept or reject.
+</div>
+
+<h3>API Server as a Watch Hub</h3>
+
+<p>Beyond CRUD, the API server's most critical function is <strong>watch notifications</strong>. Controllers and kubelets open long-lived watch connections:</p>
+
+<pre>GET /api/v1/pods?watch=true&resourceVersion=12345</pre>
+
+<p>The API server streams change events (ADDED, MODIFIED, DELETED) for any objects matching the watch. This is how the entire system stays reactive without polling.</p>
+
+<div class="production-note">
+    A large cluster may have thousands of simultaneous watch connections. The API server maintains an in-memory watch cache to avoid hitting etcd for every watch notification. This cache is why the API server is memory-hungry in large clusters (often 4-16GB RAM).
+</div>
+
+<h3>Running Multiple API Servers</h3>
+
+<p>In HA setups, you run 3+ API server instances behind a load balancer. They are <strong>stateless</strong> — all state lives in etcd. Any instance can serve any request. The load balancer just needs to health-check <code>/healthz</code>.</p>
+
+<h2>2. etcd — The Cluster's Memory</h2>
+
+<p>etcd is a distributed, consistent key-value store that uses the <strong>Raft consensus algorithm</strong>. It's where every Kubernetes object lives — Pods, Services, Secrets, ConfigMaps, everything.</p>
+
+<h3>How Data is Organized</h3>
+
+<pre>/registry/pods/default/nginx-7d9fc44b6c-x2k4j
+/registry/deployments/default/nginx
+/registry/services/specs/default/kubernetes
+/registry/secrets/kube-system/bootstrap-token-abcdef
+/registry/nodes/worker-1</pre>
+
+<p>Each key stores the full serialized object (protobuf by default, JSON if configured).</p>
+
+<h3>Raft Consensus — Why 3 or 5 Nodes?</h3>
+
+<p>Raft requires a <strong>quorum</strong> (majority) to accept writes:</p>
+
+<table>
+    <tr><th>Cluster Size</th><th>Quorum Needed</th><th>Tolerates Failures</th></tr>
+    <tr><td>1</td><td>1</td><td>0 (no HA)</td></tr>
+    <tr><td>3</td><td>2</td><td>1 node failure</td></tr>
+    <tr><td>5</td><td>3</td><td>2 node failures</td></tr>
+    <tr><td>7</td><td>4</td><td>3 node failures (rarely worth the write latency cost)</td></tr>
+</table>
+
+<div class="key-insight">
+    <strong>Why odd numbers?</strong> Even numbers (e.g., 4) give the same fault tolerance as the odd number below them (3), but with higher write latency because more nodes must acknowledge. 3 and 5 are the sweet spots.
+</div>
+
+<h3>Key Operational Concepts</h3>
+
+<ul>
+    <li><strong>resourceVersion</strong>: Every K8s object has one — it maps to etcd's <code>ModRevision</code>. Used for optimistic concurrency (conflict detection) and watch resumption.</li>
+    <li><strong>Compaction</strong>: etcd keeps history of all revisions. Compaction removes old revisions to reclaim space. K8s triggers this automatically.</li>
+    <li><strong>Defragmentation</strong>: After compaction, disk space isn't freed until defrag runs. Must be done per-member, sequentially.</li>
+    <li><strong>Quota</strong>: Default 2GB. If etcd exceeds quota, it goes read-only (alarm state). Your cluster effectively freezes for writes.</li>
+</ul>
+
+<div class="production-note">
+    The #1 etcd production incident: quota exceeded. Large clusters with many Events or frequently-updated objects (e.g., Endpoints) can hit this. Monitor <code>etcd_mvcc_db_total_size_in_bytes</code> and set alerts at 80% of quota. Increasing quota beyond 8GB is not recommended — if you need more, reduce object churn instead.
+</div>
+
+<h3>Backup and Restore</h3>
+
+<pre># Take a snapshot
+etcdctl snapshot save /backup/etcd-$(date +%Y%m%d).db \
+  --endpoints=https://127.0.0.1:2379 \
+  --cacert=/etc/etcd/ca.crt \
+  --cert=/etc/etcd/server.crt \
+  --key=/etc/etcd/server.key
+
+# Restore (stops the cluster!)
+etcdctl snapshot restore /backup/etcd-20240101.db \
+  --data-dir=/var/lib/etcd-restored</pre>
+
+<div class="key-insight">
+    <strong>CKA Exam:</strong> etcd backup and restore is a guaranteed exam topic. Know the flags, know that restore creates a new data directory, and know that you must update the etcd static pod manifest to point to the new directory.
+</div>
+
+<h2>3. kube-scheduler — The Placement Engine</h2>
+
+<p>The scheduler's job is deceptively simple: for each unscheduled Pod, pick the best node. But "best" involves a complex scoring algorithm.</p>
+
+<h3>The Scheduling Cycle</h3>
+
+<div class="diagram">
+<svg viewBox="0 0 600 160" xmlns="http://www.w3.org/2000/svg" font-family="Menlo, monospace" font-size="10">
+    <defs><marker id="arr3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0 L10 5 L0 10z" fill="#326ce5"/></marker></defs>
+    
+    <rect x="10" y="50" width="100" height="50" rx="5" fill="#e8f0fe" stroke="#326ce5" stroke-width="1.5"/>
+    <text x="60" y="72" text-anchor="middle" font-weight="bold">Filter</text>
+    <text x="60" y="88" text-anchor="middle" font-size="8" fill="#666">Remove unfit nodes</text>
+    
+    <line x1="110" y1="75" x2="140" y2="75" stroke="#326ce5" stroke-width="1.5" marker-end="url(#arr3)"/>
+    
+    <rect x="140" y="50" width="100" height="50" rx="5" fill="#e8f0fe" stroke="#326ce5" stroke-width="1.5"/>
+    <text x="190" y="72" text-anchor="middle" font-weight="bold">Score</text>
+    <text x="190" y="88" text-anchor="middle" font-size="8" fill="#666">Rank remaining</text>
+    
+    <line x1="240" y1="75" x2="270" y2="75" stroke="#326ce5" stroke-width="1.5" marker-end="url(#arr3)"/>
+    
+    <rect x="270" y="50" width="100" height="50" rx="5" fill="#e8f0fe" stroke="#326ce5" stroke-width="1.5"/>
+    <text x="320" y="72" text-anchor="middle" font-weight="bold">Reserve</text>
+    <text x="320" y="88" text-anchor="middle" font-size="8" fill="#666">Optimistic lock</text>
+    
+    <line x1="370" y1="75" x2="400" y2="75" stroke="#326ce5" stroke-width="1.5" marker-end="url(#arr3)"/>
+    
+    <rect x="400" y="50" width="100" height="50" rx="5" fill="#fff3e0" stroke="#f57c00" stroke-width="1.5"/>
+    <text x="450" y="72" text-anchor="middle" font-weight="bold">Bind</text>
+    <text x="450" y="88" text-anchor="middle" font-size="8" fill="#666">Assign nodeName</text>
+    
+    <text x="60" y="130" text-anchor="middle" font-size="8" fill="#666">100 nodes → 30</text>
+    <text x="190" y="130" text-anchor="middle" font-size="8" fill="#666">30 nodes → top 1</text>
+    <text x="320" y="130" text-anchor="middle" font-size="8" fill="#666">Claim resources</text>
+    <text x="450" y="130" text-anchor="middle" font-size="8" fill="#666">Write to API server</text>
+</svg>
+</div>
+
+<h3>Filter Plugins (Must Pass)</h3>
+
+<table>
+    <tr><th>Plugin</th><th>Rejects Node If...</th></tr>
+    <tr><td>NodeResourcesFit</td><td>Not enough CPU/memory for Pod's requests</td></tr>
+    <tr><td>NodeAffinity</td><td>Node labels don't match required affinity</td></tr>
+    <tr><td>TaintToleration</td><td>Node has taint the Pod doesn't tolerate</td></tr>
+    <tr><td>PodTopologySpread</td><td>Would violate maxSkew constraint</td></tr>
+    <tr><td>VolumeBinding</td><td>Required PV not available in that zone</td></tr>
+</table>
+
+<h3>Score Plugins (Rank Nodes 0-100)</h3>
+
+<table>
+    <tr><th>Plugin</th><th>Prefers Nodes With...</th></tr>
+    <tr><td>LeastAllocated</td><td>Most free resources (spread workload)</td></tr>
+    <tr><td>MostAllocated</td><td>Least free resources (bin-pack for cost)</td></tr>
+    <tr><td>ImageLocality</td><td>Container image already pulled</td></tr>
+    <tr><td>InterPodAffinity</td><td>Matching Pod affinity rules</td></tr>
+    <tr><td>NodeAffinity</td><td>Preferred (soft) node affinity matches</td></tr>
+</table>
+
+<div class="production-note">
+    In large clusters (5000+ nodes), the scheduler uses a <code>percentageOfNodesToScore</code> parameter (default: adapts based on cluster size) to avoid scoring all nodes. It stops once it finds enough feasible nodes. This is why scheduling decisions can vary between identical clusters.
+</div>
+
+<h3>What Happens When No Node Fits?</h3>
+
+<p>The Pod stays <code>Pending</code>. The scheduler emits an event explaining why:</p>
+
+<pre>Events:
+  Type     Reason            Message
+  ----     ------            -------
+  Warning  FailedScheduling  0/3 nodes are available:
+                             1 Insufficient cpu,
+                             2 node(s) had taint {key=dedicated:NoSchedule}</pre>
+
+<p>This is the first thing to check for stuck Pods: <code>kubectl describe pod &lt;name&gt;</code> and read the Events.</p>
+
+<h2>4. kube-controller-manager — The Reconciliation Engine</h2>
+
+<p>A single binary containing ~30 independent controllers, each running its own reconciliation loop. Think of it as 30 microservices compiled into one process for convenience.</p>
+
+<h3>The Controller Pattern</h3>
+
+<pre>while true:
+    desired = read_spec_from_api_server()
+    actual  = observe_current_state()
+    if actual != desired:
+        take_action_to_converge(actual → desired)
+    sleep(resync_interval)  # or react to watch events</pre>
+
+<h3>Key Controllers and What They Do</h3>
+
+<table>
+    <tr><th>Controller</th><th>Watches</th><th>Acts On</th><th>Production Impact</th></tr>
+    <tr><td><strong>Deployment</strong></td><td>Deployments</td><td>Creates/scales ReplicaSets</td><td>Drives all rolling updates</td></tr>
+    <tr><td><strong>ReplicaSet</strong></td><td>ReplicaSets + Pods</td><td>Creates/deletes Pods</td><td>Maintains desired replica count</td></tr>
+    <tr><td><strong>Node Lifecycle</strong></td><td>Node heartbeats</td><td>Taints/evicts from dead nodes</td><td>40s default timeout → NotReady</td></tr>
+    <tr><td><strong>EndpointSlice</strong></td><td>Services + Pods</td><td>Updates EndpointSlices</td><td>Drives service discovery</td></tr>
+    <tr><td><strong>ServiceAccount</strong></td><td>Namespaces</td><td>Creates default SA per namespace</td><td>Ensures Pods can authenticate</td></tr>
+    <tr><td><strong>PV Binder</strong></td><td>PVCs + PVs</td><td>Binds claims to volumes</td><td>Storage provisioning</td></tr>
+    <tr><td><strong>Job</strong></td><td>Jobs + Pods</td><td>Creates Pods, tracks completions</td><td>Batch workloads</td></tr>
+    <tr><td><strong>CronJob</strong></td><td>CronJobs</td><td>Creates Jobs on schedule</td><td>Scheduled batch work</td></tr>
+    <tr><td><strong>Garbage Collector</strong></td><td>ownerReferences</td><td>Cascading deletes</td><td>Cleans up orphaned objects</td></tr>
+</table>
+
+<h3>Leader Election</h3>
+
+<p>Only <strong>one</strong> controller-manager instance is active at a time (the leader). Others are hot standbys. Leader election uses a Lease object in the <code>kube-system</code> namespace:</p>
+
+<pre>kubectl get lease -n kube-system kube-controller-manager
+# holderIdentity: master-1_xxxx
+# leaseDurationSeconds: 15
+# renewTime: 2024-01-15T10:30:45Z</pre>
+
+<p>If the leader fails to renew within the lease duration, another instance takes over.</p>
+
+<div class="key-insight">
+    <strong>Key:</strong> The controller manager and scheduler both use leader election. Only ONE instance of each is reconciling at any time. This avoids conflicts. The API server does NOT need leader election — it's stateless and all instances can serve simultaneously.
+</div>
+
+<div class="production-note">
+    Node lifecycle controller timings matter enormously. Default: a node is marked NotReady after 40s of missed heartbeats, then pods are evicted after 5min. In cloud environments with flaky networking, these timeouts are often tuned to avoid false evictions. Flags: <code>--node-monitor-grace-period</code> and <code>--pod-eviction-timeout</code>.
+</div>
+
+<h2>5. cloud-controller-manager — The Cloud Bridge</h2>
+
+<p>Introduced to decouple cloud-specific logic from the core Kubernetes codebase. It runs controllers that interact with your cloud provider's API:</p>
+
+<table>
+    <tr><th>Controller</th><th>What It Does</th><th>Cloud API Used</th></tr>
+    <tr><td><strong>Node</strong></td><td>Detects node deletion in cloud, updates Node objects</td><td>EC2/Compute Engine</td></tr>
+    <tr><td><strong>Route</strong></td><td>Configures network routes between nodes</td><td>VPC routing</td></tr>
+    <tr><td><strong>Service (LB)</strong></td><td>Provisions cloud load balancers for <code>type: LoadBalancer</code></td><td>ELB/ALB/Cloud LB</td></tr>
+</table>
+
+<p>In self-managed (bare-metal) clusters, there is no cloud-controller-manager. You either use MetalLB for LoadBalancer services or go without.</p>
+
+<div class="production-note">
+    In managed Kubernetes (EKS, GKE, AKS), the cloud-controller-manager is run by the provider and you never interact with it directly. But understanding it explains why <code>type: LoadBalancer</code> "just works" on cloud but not on bare metal.
+</div>
+
+<h2>Control Plane Communication Map</h2>
+
+<div class="diagram">
+<svg viewBox="0 0 500 250" xmlns="http://www.w3.org/2000/svg" font-family="Menlo, monospace" font-size="10">
+    <defs><marker id="arr4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto"><path d="M0 0 L10 5 L0 10z" fill="#326ce5"/></marker></defs>
+    
+    <!-- API Server (center) -->
+    <rect x="180" y="90" width="140" height="50" rx="6" fill="#326ce5" stroke="#1a237e" stroke-width="1.5"/>
+    <text x="250" y="118" text-anchor="middle" fill="white" font-weight="bold" font-size="11">kube-apiserver</text>
+    
+    <!-- etcd -->
+    <rect x="380" y="90" width="100" height="50" rx="6" fill="#fff3e0" stroke="#f57c00" stroke-width="1.5"/>
+    <text x="430" y="118" text-anchor="middle" font-weight="bold">etcd</text>
+    <line x1="320" y1="115" x2="380" y2="115" stroke="#f57c00" stroke-width="2" marker-end="url(#arr4)"/>
+    <text x="350" y="108" text-anchor="middle" font-size="8" fill="#666">R/W</text>
+    
+    <!-- Scheduler -->
+    <rect x="30" y="10" width="120" height="40" rx="5" fill="#e8f0fe" stroke="#326ce5" stroke-width="1"/>
+    <text x="90" y="34" text-anchor="middle" font-size="9">kube-scheduler</text>
+    <line x1="150" y1="40" x2="200" y2="90" stroke="#326ce5" stroke-width="1" marker-end="url(#arr4)"/>
+    
+    <!-- Controller Manager -->
+    <rect x="30" y="90" width="120" height="40" rx="5" fill="#e8f0fe" stroke="#326ce5" stroke-width="1"/>
+    <text x="90" y="113" text-anchor="middle" font-size="9">controller-mgr</text>
+    <line x1="150" y1="110" x2="180" y2="112" stroke="#326ce5" stroke-width="1" marker-end="url(#arr4)"/>
+    
+    <!-- Cloud Controller -->
+    <rect x="30" y="170" width="120" height="40" rx="5" fill="#e8f0fe" stroke="#326ce5" stroke-width="1"/>
+    <text x="90" y="193" text-anchor="middle" font-size="9">cloud-ctrl-mgr</text>
+    <line x1="150" y1="185" x2="200" y2="140" stroke="#326ce5" stroke-width="1" marker-end="url(#arr4)"/>
+    
+    <!-- kubelet -->
+    <rect x="220" y="190" width="80" height="40" rx="5" fill="#e8f5e9" stroke="#2e7d32" stroke-width="1"/>
+    <text x="260" y="213" text-anchor="middle" font-size="9">kubelet</text>
+    <line x1="255" y1="190" x2="252" y2="140" stroke="#2e7d32" stroke-width="1" marker-end="url(#arr4)"/>
+    
+    <!-- kubectl -->
+    <rect x="350" y="10" width="80" height="40" rx="5" fill="#f3e5f5" stroke="#7b1fa2" stroke-width="1"/>
+    <text x="390" y="34" text-anchor="middle" font-size="9">kubectl</text>
+    <line x1="360" y1="50" x2="290" y2="90" stroke="#7b1fa2" stroke-width="1" marker-end="url(#arr4)"/>
+    
+    <!-- Legend -->
+    <text x="250" y="248" text-anchor="middle" font-size="9" fill="#666">All arrows point TO the API server (except API server → etcd)</text>
+</svg>
+</div>
+
+<div class="key-insight">
+    <strong>The Star Topology:</strong> Notice every component talks to the API server, and <em>only</em> the API server talks to etcd. Components never talk directly to each other. This simplifies security (you only need to secure one endpoint) and makes the system more resilient (components can restart independently).
+</div>
+
+<h2>Summary: What to Remember</h2>
+
+<table>
+    <tr><th>Component</th><th>Stateless?</th><th>Leader-Elected?</th><th>Talks to etcd?</th><th>Key Metric to Monitor</th></tr>
+    <tr><td>API Server</td><td>✅ Yes</td><td>No (all active)</td><td>✅ Only one</td><td>Request latency, watch count</td></tr>
+    <tr><td>etcd</td><td>❌ Stateful</td><td>Raft leader</td><td>Is etcd</td><td>DB size, fsync latency, leader changes</td></tr>
+    <tr><td>Scheduler</td><td>✅ Yes</td><td>✅ Yes</td><td>No</td><td>Scheduling latency, pending pods</td></tr>
+    <tr><td>Controller Mgr</td><td>✅ Yes</td><td>✅ Yes</td><td>No</td><td>Work queue depth, reconcile errors</td></tr>
+    <tr><td>Cloud Ctrl Mgr</td><td>✅ Yes</td><td>✅ Yes</td><td>No</td><td>Cloud API errors, LB provision time</td></tr>
+</table>
+
+<!-- Quiz Section -->
+<div class="quiz">
+    <h2>📝 Quiz: Control Plane Deep-Dive</h2>
+    
+    <div class="quiz-q">
+        <p>Q1: In the API server request pipeline, can a validating admission webhook modify the object?</p>
+        <button class="reveal-btn" onclick="this.nextElementSibling.style.display='block'">Show Answer</button>
+        <div class="quiz-answer"><strong>No.</strong> Validating webhooks can only accept or reject. Only <em>mutating</em> admission webhooks can modify the object. Validating webhooks see the final form after all mutations.</div>
+    </div>
+    
+    <div class="quiz-q">
+        <p>Q2: You have a 5-node etcd cluster. How many nodes can fail simultaneously while the cluster still accepts writes?</p>
+        <button class="reveal-btn" onclick="this.nextElementSibling.style.display='block'">Show Answer</button>
+        <div class="quiz-answer"><strong>2 nodes.</strong> A 5-node cluster needs a quorum of 3. With 3 remaining alive, it can still form quorum and accept writes.</div>
+    </div>
+    
+    <div class="quiz-q">
+        <p>Q3: The scheduler has 50 feasible nodes after filtering. What does it do next?</p>
+        <button class="reveal-btn" onclick="this.nextElementSibling.style.display='block'">Show Answer</button>
+        <div class="quiz-answer">It runs <strong>scoring plugins</strong> on each feasible node (0-100 per plugin), sums the weighted scores, and picks the node with the highest total score. It then enters the Reserve phase and finally Binds the Pod.</div>
+    </div>
+    
+    <div class="quiz-q">
+        <p>Q4: If the kube-controller-manager leader dies, how long before another instance takes over?</p>
+        <button class="reveal-btn" onclick="this.nextElementSibling.style.display='block'">Show Answer</button>
+        <div class="quiz-answer">Approximately <strong>15 seconds</strong> (the default lease duration). When the leader fails to renew its Lease object, another instance acquires the lease and becomes the new leader.</div>
+    </div>
+    
+    <div class="quiz-q">
+        <p>Q5: Why does Kubernetes use a star topology (everything → API server) instead of letting components talk directly?</p>
+        <button class="reveal-btn" onclick="this.nextElementSibling.style.display='block'">Show Answer</button>
+        <div class="quiz-answer">Three reasons: <strong>(1) Security</strong> — only one endpoint to authenticate/authorize against. <strong>(2) Consistency</strong> — all state goes through one gatekeeper (serialized writes to etcd). <strong>(3) Decoupling</strong> — components can be restarted/replaced independently without breaking communication between others.</div>
+    </div>
+    
+    <div class="quiz-q">
+        <p>Q6: Your etcd monitoring shows db_total_size approaching 2GB. What's about to happen, and how do you fix it?</p>
+        <button class="reveal-btn" onclick="this.nextElementSibling.style.display='block'">Show Answer</button>
+        <div class="quiz-answer">etcd will trigger a <strong>quota alarm</strong> and refuse all writes — your cluster freezes for mutations. Fix: <strong>(1)</strong> Compact old revisions: <code>etcdctl compact</code>. <strong>(2)</strong> Defrag: <code>etcdctl defrag</code>. <strong>(3)</strong> Disarm the alarm: <code>etcdctl alarm disarm</code>. Long-term: reduce object churn (e.g., reduce Event TTL, use EndpointSlices instead of Endpoints).</div>
+    </div>
+</div>
+
+</body>
+</html>

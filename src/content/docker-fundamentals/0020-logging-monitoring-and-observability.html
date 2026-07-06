@@ -1,0 +1,436 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lesson 20: Logging, Monitoring &amp; Observability</title>
+  <link rel="stylesheet" href="../assets/lesson-style.css">
+</head>
+<body>
+
+  <div class="lesson-meta">
+    <span>📋 Lesson 20 of 22</span>
+    <span>⏱️ 18–22 minutes</span>
+    <span>🔭 Observability</span>
+  </div>
+
+  <h1>Logging, Monitoring &amp; Observability</h1>
+  <p class="subtitle">Containers are ephemeral. When one exits, its filesystem — including any log files — disappears. Observability means capturing logs, metrics, and traces <em>outside</em> the container, before it's gone.</p>
+
+  <!-- ============================================================ -->
+  <h2>1. The Observability Challenge</h2>
+
+  <p>Traditional servers are long-lived. You SSH in, tail a log file, and the data is always there. Containers throw that model away: a container can be replaced in seconds, scaled to dozens of replicas, or killed by a health-check failure. Any data written <em>inside</em> the container is gone with it.</p>
+
+  <p>This forces a discipline shift. Instead of checking one server, you need:</p>
+  <ul>
+    <li><strong>Centralised log aggregation</strong> — all container output flows to one place</li>
+    <li><strong>Time-series metrics</strong> — numeric snapshots scraped from every replica</li>
+    <li><strong>Distributed traces</strong> — a request fingerprint that follows work across many containers</li>
+  </ul>
+
+  <!-- Three pillars SVG -->
+  <svg viewBox="0 0 540 160" xmlns="http://www.w3.org/2000/svg"
+       style="width:100%;max-width:560px;display:block;margin:1.4rem auto;font-family:inherit">
+    <!-- Pillar boxes -->
+    <rect x="10"  y="20" width="130" height="52" rx="7" fill="#dbeafe" stroke="#3b82f6" stroke-width="1.5"/>
+    <text x="75"  y="42" text-anchor="middle" font-size="12" font-weight="bold" fill="#1e40af">Logs</text>
+    <text x="75"  y="58" text-anchor="middle" font-size="10" fill="#1e40af">What happened?</text>
+    <text x="75"  y="72" text-anchor="middle" font-size="9"  fill="#3b82f6">stdout / stderr</text>
+
+    <rect x="200" y="20" width="130" height="52" rx="7" fill="#dcfce7" stroke="#16a34a" stroke-width="1.5"/>
+    <text x="265" y="42" text-anchor="middle" font-size="12" font-weight="bold" fill="#15803d">Metrics</text>
+    <text x="265" y="58" text-anchor="middle" font-size="10" fill="#15803d">How much / how fast?</text>
+    <text x="265" y="72" text-anchor="middle" font-size="9"  fill="#16a34a">counters / gauges</text>
+
+    <rect x="390" y="20" width="130" height="52" rx="7" fill="#fef9c3" stroke="#ca8a04" stroke-width="1.5"/>
+    <text x="455" y="42" text-anchor="middle" font-size="12" font-weight="bold" fill="#92400e">Traces</text>
+    <text x="455" y="58" text-anchor="middle" font-size="10" fill="#92400e">Where did it go?</text>
+    <text x="455" y="72" text-anchor="middle" font-size="9"  fill="#ca8a04">spans / context</text>
+
+    <!-- Arrows down -->
+    <line x1="75"  y1="72" x2="75"  y2="105" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arr)"/>
+    <line x1="265" y1="72" x2="265" y2="105" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arr)"/>
+    <line x1="455" y1="72" x2="455" y2="105" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arr)"/>
+
+    <!-- Platform box -->
+    <rect x="130" y="105" width="260" height="40" rx="7" fill="#f1f5f9" stroke="#64748b" stroke-width="1.5"/>
+    <text x="260" y="121" text-anchor="middle" font-size="12" font-weight="bold" fill="#334155">Observability Platform</text>
+    <text x="260" y="137" text-anchor="middle" font-size="10" fill="#64748b">Grafana / Datadog / EFK / Jaeger</text>
+
+    <!-- Arrow heads -->
+    <defs>
+      <marker id="arr" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+        <path d="M0,0 L0,6 L8,3 z" fill="#94a3b8"/>
+      </marker>
+    </defs>
+  </svg>
+
+  <!-- ============================================================ -->
+  <h2>2. Logging: stdout/stderr Is the Contract</h2>
+
+  <p>The Twelve-Factor App (Factor XI) is unambiguous: <strong>write logs to stdout</strong>. Docker captures every byte written to stdout and stderr, stores it via the configured log driver, and makes it accessible with <code>docker logs</code>. Writing to a file inside the container breaks this chain.</p>
+
+  <pre><code># ✅ View live logs from a container
+docker logs -f my-api
+
+# ✅ Last 100 lines with timestamps
+docker logs --tail 100 --timestamps my-api
+
+# ❌ Don't do this inside your container
+echo "error" >> /var/log/app/error.log   # lost on container removal</code></pre>
+
+  <div class="callout">
+    <div class="callout-title">Why stdout?</div>
+    <p>stdout is the universal, language-agnostic, driver-agnostic log sink. Your app doesn't need to know whether logs are going to a file, Splunk, CloudWatch, or nowhere. Docker — or the container runtime — handles routing. This decouples the app from its operational environment.</p>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>3. Log Drivers</h2>
+
+  <p>Docker's <strong>log driver</strong> controls where stdout/stderr goes after Docker captures it. The default is <code>json-file</code> — fine for development, not for production at scale.</p>
+
+  <table>
+    <thead>
+      <tr><th>Driver</th><th>Destination</th><th>Best For</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>json-file</code></td><td>Local JSON file on host</td><td>Dev / single-host testing</td></tr>
+      <tr><td><code>syslog</code></td><td>System syslog daemon</td><td>Traditional Linux infra</td></tr>
+      <tr><td><code>journald</code></td><td>systemd journal</td><td>systemd hosts, Podman</td></tr>
+      <tr><td><code>fluentd</code></td><td>Fluentd / Fluent Bit</td><td>EFK stack, Kubernetes</td></tr>
+      <tr><td><code>awslogs</code></td><td>AWS CloudWatch Logs</td><td>ECS / EC2 on AWS</td></tr>
+      <tr><td><code>gcplogs</code></td><td>Google Cloud Logging</td><td>GKE / Cloud Run</td></tr>
+      <tr><td><code>splunk</code></td><td>Splunk HTTP Event Collector</td><td>Enterprise Splunk deployments</td></tr>
+    </tbody>
+  </table>
+
+  <p>Configure the driver per container in Compose or globally in <code>/etc/docker/daemon.json</code>:</p>
+
+  <pre><code># docker-compose.yml — per service
+services:
+  api:
+    image: my-api:latest
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"    # rotate at 10 MB
+        max-file: "5"      # keep 5 rotated files
+
+# /etc/docker/daemon.json — global default
+{
+  "log-driver": "json-file",
+  "log-opts": {
+    "max-size": "10m",
+    "max-file": "5"
+  }
+}</code></pre>
+
+  <!-- Log flow SVG -->
+  <svg viewBox="0 0 560 80" xmlns="http://www.w3.org/2000/svg"
+       style="width:100%;max-width:580px;display:block;margin:1.4rem auto;font-family:inherit">
+    <defs>
+      <marker id="arr2" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+        <path d="M0,0 L0,6 L8,3 z" fill="#94a3b8"/>
+      </marker>
+    </defs>
+    <rect x="5"   y="18" width="90"  height="38" rx="6" fill="#dbeafe" stroke="#3b82f6" stroke-width="1.5"/>
+    <text x="50"  y="33" text-anchor="middle" font-size="10" font-weight="bold" fill="#1e40af">Container</text>
+    <text x="50"  y="48" text-anchor="middle" font-size="9"  fill="#3b82f6">stdout/stderr</text>
+
+    <line x1="95" y1="37" x2="120" y2="37" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arr2)"/>
+
+    <rect x="120" y="18" width="80"  height="38" rx="6" fill="#f1f5f9" stroke="#64748b" stroke-width="1.5"/>
+    <text x="160" y="33" text-anchor="middle" font-size="10" font-weight="bold" fill="#334155">Log Driver</text>
+    <text x="160" y="48" text-anchor="middle" font-size="9"  fill="#64748b">fluentd / awslogs</text>
+
+    <line x1="200" y1="37" x2="225" y2="37" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arr2)"/>
+
+    <rect x="225" y="18" width="90"  height="38" rx="6" fill="#f1f5f9" stroke="#64748b" stroke-width="1.5"/>
+    <text x="270" y="33" text-anchor="middle" font-size="10" font-weight="bold" fill="#334155">Aggregator</text>
+    <text x="270" y="48" text-anchor="middle" font-size="9"  fill="#64748b">Fluent Bit / Logstash</text>
+
+    <line x1="315" y1="37" x2="340" y2="37" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arr2)"/>
+
+    <rect x="340" y="18" width="80"  height="38" rx="6" fill="#f1f5f9" stroke="#64748b" stroke-width="1.5"/>
+    <text x="380" y="33" text-anchor="middle" font-size="10" font-weight="bold" fill="#334155">Storage</text>
+    <text x="380" y="48" text-anchor="middle" font-size="9"  fill="#64748b">Elasticsearch / S3</text>
+
+    <line x1="420" y1="37" x2="445" y2="37" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arr2)"/>
+
+    <rect x="445" y="18" width="100" height="38" rx="6" fill="#dcfce7" stroke="#16a34a" stroke-width="1.5"/>
+    <text x="495" y="33" text-anchor="middle" font-size="10" font-weight="bold" fill="#15803d">Dashboard</text>
+    <text x="495" y="48" text-anchor="middle" font-size="9"  fill="#16a34a">Kibana / Grafana</text>
+  </svg>
+
+  <!-- ============================================================ -->
+  <h2>4. Structured Logging</h2>
+
+  <p>Plain text logs are hard to query at scale. <strong>Structured logging</strong> means emitting JSON objects so every log line is machine-parseable. An aggregator can then index individual fields without regex.</p>
+
+  <pre><code># Unstructured — hard to query
+2024-01-15T10:23:01Z ERROR payment service: charge failed for user 4892 amount=99.99
+
+# Structured JSON — indexable, filterable
+{
+  "timestamp": "2024-01-15T10:23:01Z",
+  "level":     "error",
+  "service":   "payment",
+  "event":     "charge_failed",
+  "user_id":   4892,
+  "amount":    99.99,
+  "trace_id":  "abc123def456"
+}</code></pre>
+
+  <p>Key fields every log line should carry:</p>
+  <ul>
+    <li><strong>timestamp</strong> — ISO 8601, always UTC</li>
+    <li><strong>level</strong> — debug / info / warn / error</li>
+    <li><strong>service</strong> — which container / microservice emitted it</li>
+    <li><strong>trace_id</strong> — links logs to the distributed trace for that request</li>
+    <li><strong>message</strong> — human-readable description</li>
+  </ul>
+
+  <p>The <strong>EFK stack</strong> (Elasticsearch + Fluent Bit + Kibana) is a popular open-source choice: Fluent Bit ships logs from each container to Elasticsearch, and Kibana provides a search and visualisation UI.</p>
+
+  <!-- ============================================================ -->
+  <h2>5. Container Metrics</h2>
+
+  <p>Metrics answer "how is the container behaving right now?" Docker exposes real-time stats via the kernel's <strong>cgroups</strong> interface, which limits and tracks resource usage per container.</p>
+
+  <pre><code># Live stats for all running containers
+docker stats
+
+# One-shot snapshot (no streaming)
+docker stats --no-stream
+
+# Output
+CONTAINER ID   NAME       CPU %   MEM USAGE / LIMIT    NET I/O        BLOCK I/O
+a1b2c3d4e5f6   api        1.23%   128MiB / 512MiB      10MB / 2MB     0B / 4MB</code></pre>
+
+  <p>Key metrics to watch in production:</p>
+  <ul>
+    <li><strong>CPU %</strong> — sustained &gt;80% → scale out or profile</li>
+    <li><strong>Memory usage / limit</strong> — approaching the limit triggers OOM kills</li>
+    <li><strong>Network I/O</strong> — unexpected spikes may indicate a loop or attack</li>
+    <li><strong>Block I/O</strong> — high write volume may mean you need a volume, not the container layer</li>
+    <li><strong>Restart count</strong> — a container that keeps restarting is a red flag</li>
+  </ul>
+
+  <p><strong>cAdvisor</strong> (Container Advisor) is a Google-maintained daemon that scrapes cgroup metrics from every container on a host and exposes them in Prometheus format — the standard bridge between Docker and the Prometheus ecosystem.</p>
+
+  <!-- ============================================================ -->
+  <h2>6. Prometheus &amp; Grafana Pattern</h2>
+
+  <p>The most common open-source metrics stack for containers is <strong>Prometheus + Grafana</strong>:</p>
+
+  <ol>
+    <li>Your app (or cAdvisor) exposes a <code>/metrics</code> HTTP endpoint in Prometheus text format</li>
+    <li>Prometheus scrapes that endpoint on a configured interval (e.g. every 15 s)</li>
+    <li>Grafana queries Prometheus and renders dashboards, graphs, and alerts</li>
+  </ol>
+
+  <pre><code># prometheus.yml — minimal scrape config
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  - job_name: "cadvisor"
+    static_configs:
+      - targets: ["cadvisor:8080"]
+
+  - job_name: "my-api"
+    static_configs:
+      - targets: ["api:9090"]  # app exposes /metrics here</code></pre>
+
+  <!-- ============================================================ -->
+  <h2>7. Distributed Tracing</h2>
+
+  <p>In a microservices architecture, a single user request may pass through a gateway, three services, a cache, and a database — each in a different container. <strong>Distributed tracing</strong> links all that work into a single timeline called a <strong>trace</strong>, made of <strong>spans</strong>.</p>
+
+  <p><strong>OpenTelemetry</strong> (OTel) is the CNCF-standard SDK for instrumenting apps. It produces traces (and metrics, and logs) in a vendor-neutral format that backends like <strong>Jaeger</strong> and <strong>Zipkin</strong> can store and display.</p>
+
+  <pre><code># docker-compose.yml — Jaeger all-in-one for dev tracing
+services:
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    ports:
+      - "16686:16686"   # Jaeger UI
+      - "4317:4317"     # OTLP gRPC receiver
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+
+  api:
+    image: my-api:latest
+    environment:
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4317
+      - OTEL_SERVICE_NAME=my-api</code></pre>
+
+  <p>The key mechanism is <strong>context propagation</strong>: when service A calls service B, it injects a <code>traceparent</code> HTTP header. Service B reads it and creates a child span under the same trace ID. The result is a waterfall view in the Jaeger UI showing exactly where latency lives.</p>
+
+  <!-- ============================================================ -->
+  <h2>8. The Three Pillars</h2>
+
+  <p>Logs, metrics, and traces are complementary, not redundant. Use them together:</p>
+
+  <table>
+    <thead>
+      <tr><th>Pillar</th><th>Question Answered</th><th>Example Tool</th><th>Retention</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>Logs</strong></td>
+        <td>What happened and why did it fail?</td>
+        <td>EFK, Loki, CloudWatch</td>
+        <td>Days–weeks (can be large)</td>
+      </tr>
+      <tr>
+        <td><strong>Metrics</strong></td>
+        <td>Is the system healthy right now?</td>
+        <td>Prometheus, Datadog</td>
+        <td>Months (compact numbers)</td>
+      </tr>
+      <tr>
+        <td><strong>Traces</strong></td>
+        <td>Where did this request spend its time?</td>
+        <td>Jaeger, Zipkin, Tempo</td>
+        <td>Hours–days (sampled)</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="callout callout-warn">
+    <div class="callout-title">🏭 Industry: Managed Observability Platforms</div>
+    <p><strong>Datadog</strong>, <strong>New Relic</strong>, and <strong>Grafana Cloud</strong> unify all three pillars with a single agent. Install the agent as a DaemonSet (Kubernetes) or sidecar, and logs, metrics, and traces all flow to a SaaS backend with pre-built container dashboards. The tradeoff is cost — these platforms charge on ingestion volume, so structured logging and metric cardinality discipline pays off directly in your bill.</p>
+  </div>
+
+  <div class="callout">
+    <div class="callout-title">🔁 Not Just Docker</div>
+    <p><strong>Kubernetes</strong> runs a <em>logging DaemonSet</em> (Fluent Bit or Fluentd) on every node, scraping container stdout from the node's log directory — same principle, automated at cluster scale. <strong>Podman</strong> on systemd hosts defaults to the <code>journald</code> log driver; use <code>journalctl CONTAINER_NAME=my-app</code> to query it. The stdout contract holds across all runtimes.</p>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>Hands-On Task: Prometheus + Grafana + Sample App</h2>
+
+  <div class="task">
+    <div class="task-title">🛠 Observe a running app with Prometheus and Grafana</div>
+
+    <p><strong>Goal:</strong> Stand up a sample app, cAdvisor, Prometheus, and Grafana in one Compose file, then explore container metrics in a live dashboard.</p>
+
+    <p><strong>Step 1 — Create the Compose file:</strong></p>
+    <pre><code># compose.yml
+services:
+  app:
+    image: nginx:alpine          # sample workload
+    ports: ["8080:80"]
+
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:latest
+    privileged: true
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+    ports: ["8081:8080"]
+
+  prometheus:
+    image: prom/prometheus:latest
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+    ports: ["9090:9090"]
+
+  grafana:
+    image: grafana/grafana:latest
+    ports: ["3000:3000"]
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin</code></pre>
+
+    <p><strong>Step 2 — Create <code>prometheus.yml</code>:</strong></p>
+    <pre><code>global:
+  scrape_interval: 10s
+scrape_configs:
+  - job_name: cadvisor
+    static_configs:
+      - targets: ["cadvisor:8080"]</code></pre>
+
+    <p><strong>Step 3 — Start everything:</strong></p>
+    <pre><code>docker compose up -d</code></pre>
+
+    <p><strong>Step 4 — Explore:</strong></p>
+    <ul>
+      <li><strong>Prometheus</strong> at <code>http://localhost:9090</code> → query <code>container_cpu_usage_seconds_total</code></li>
+      <li><strong>Grafana</strong> at <code>http://localhost:3000</code> (admin / admin) → add Prometheus data source (<code>http://prometheus:9090</code>) → import dashboard ID <strong>14282</strong> (cAdvisor)</li>
+      <li>Generate load: <code>for i in $(seq 50); do curl -s http://localhost:8080 &gt;/dev/null; done</code></li>
+      <li>Watch CPU and network metrics climb in real time</li>
+    </ul>
+
+    <p><strong>Tear down:</strong> <code>docker compose down</code></p>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>Interactive Quizzes</h2>
+
+  <div class="quiz" data-quiz="q1">
+    <p class="quiz-question">Why should containers write logs to stdout rather than to a file inside the container?</p>
+    <ul class="quiz-options">
+      <li data-correct="false">Files inside containers are encrypted and can't be read by Docker</li>
+      <li data-correct="true">The container filesystem is ephemeral — files are lost when the container is removed, and Docker log drivers can only capture stdout/stderr</li>
+      <li data-correct="false">stdout is faster than disk I/O on all platforms</li>
+      <li data-correct="false">Log files inside containers cause port conflicts</li>
+    </ul>
+    <div class="quiz-feedback"
+      data-correct="Correct! stdout/stderr is the universal contract: Docker captures it, routes it through the configured log driver, and makes it available via 'docker logs'. Files inside the container disappear with the container and are invisible to log aggregators."
+      data-incorrect="Think about what happens to local files when a container is removed — and how Docker log drivers actually work."></div>
+  </div>
+
+  <div class="quiz" data-quiz="q2">
+    <p class="quiz-question">Your team deploys to AWS ECS and wants container logs in CloudWatch for alerting. Which log driver should you configure?</p>
+    <ul class="quiz-options">
+      <li data-correct="false"><code>json-file</code> — the default driver stores JSON locally</li>
+      <li data-correct="false"><code>fluentd</code> — the standard Kubernetes log driver</li>
+      <li data-correct="false"><code>journald</code> — systemd journal integration</li>
+      <li data-correct="true"><code>awslogs</code> — sends container output directly to AWS CloudWatch Logs</li>
+    </ul>
+    <div class="quiz-feedback"
+      data-correct="Correct! The awslogs driver ships stdout/stderr directly to CloudWatch Logs, where you can set metric filters and alarms without any extra sidecar or aggregator."
+      data-incorrect="json-file writes locally (lost on container removal), journald is for systemd hosts, and fluentd requires a separate Fluentd deployment. For ECS → CloudWatch, the native choice is awslogs."></div>
+  </div>
+
+  <div class="quiz" data-quiz="q3">
+    <p class="quiz-question">An engineer sees high latency in their microservices system. Metrics show everything looks fine. Which observability pillar should they reach for next to pinpoint the slow component?</p>
+    <ul class="quiz-options">
+      <li data-correct="false">Logs — search for ERROR entries in all services</li>
+      <li data-correct="false">Metrics — add more dashboards and wait</li>
+      <li data-correct="true">Traces — a distributed trace shows a waterfall of spans and reveals which service or database call is slow</li>
+      <li data-correct="false">Restart the containers — metrics will reset and the latency will resolve</li>
+    </ul>
+    <div class="quiz-feedback"
+      data-correct="Correct! Traces are purpose-built for latency attribution across multiple services. A Jaeger or Zipkin trace shows each span's duration, making it trivial to identify the slow hop in a request chain."
+      data-incorrect="Logs tell you what happened (errors/events). Metrics confirm overall health. When you need to see *where* in a multi-service call chain latency is occurring, distributed traces are the right tool."></div>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>Key Takeaways</h2>
+
+  <ul class="takeaways">
+    <li><strong>Containers are ephemeral</strong> — capture logs and metrics externally or lose them forever</li>
+    <li><strong>stdout is the contract</strong> — write all log output to stdout; Docker log drivers handle the rest</li>
+    <li><strong>Log drivers</strong> (json-file, fluentd, awslogs, gcplogs) route output to the right sink; always configure rotation in production</li>
+    <li><strong>Structured (JSON) logs</strong> are indexable — include timestamp, level, service, and trace_id on every line</li>
+    <li><strong>docker stats</strong> gives instant metrics; cAdvisor exposes them in Prometheus format for persistent collection</li>
+    <li><strong>Prometheus + Grafana</strong> is the dominant open-source pattern: scrape <code>/metrics</code>, store time-series, visualise dashboards</li>
+    <li><strong>Distributed tracing</strong> (OpenTelemetry + Jaeger/Zipkin) links work across containers via a shared trace ID — essential for debugging microservices latency</li>
+    <li><strong>Three pillars</strong>: Logs (what), Metrics (how much), Traces (where) — use all three; they answer different questions</li>
+    <li><strong>Managed platforms</strong> (Datadog, New Relic, Grafana Cloud) unify all three pillars — worth the cost for teams that want to skip operating the stack themselves</li>
+  </ul>
+
+  <!-- ============================================================ -->
+  <nav class="prev-next">
+    <a href="0019-twelve-factor-app-and-containers.html">← Prev: The Twelve-Factor App &amp; Containers</a>
+    <a href="0021-security-least-privilege.html">Next: Security &amp; Least Privilege →</a>
+  </nav>
+
+  <script src="../assets/quiz.js"></script>
+</body>
+</html>

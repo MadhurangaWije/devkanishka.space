@@ -1,0 +1,673 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lesson 18: Agent Memory & State | AI Engineering</title>
+    <link rel="stylesheet" href="../assets/lesson.css">
+    <link rel="stylesheet" href="../assets/prism-theme.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-python.min.js"></script>
+    <script src="../assets/diagrams.js"></script>
+</head>
+<body>
+    <div class="lesson-header">
+        <div class="module-badge">Module 4: AI Agents & Tools</div>
+        <h1>Agent Memory & State</h1>
+        <p class="lesson-subtitle">Implement short-term and long-term memory, build persistent vector stores for agent recall, manage context windows intelligently, and create agents that learn from past sessions.</p>
+    </div>
+
+    <div class="lesson-meta">
+        <span class="pill">Lesson 18</span>
+        <span class="pill">~25 min</span>
+        <span class="pill">Advanced</span>
+    </div>
+
+    <main class="lesson-content">
+        <!-- Section 1: The Memory Problem -->
+        <section>
+            <h2>The Memory Problem</h2>
+            <div class="concept-box">
+                <h3>Why Agents Need Memory</h3>
+                <p>LLMs are stateless — every API call starts from nothing. Without memory, your agent can't remember what it did 5 minutes ago, what the user said yesterday, or what it learned from past mistakes. Memory transforms a forgetful chatbot into a persistent, learning assistant.</p>
+            </div>
+
+            <p>The four levels of agent memory, from volatile to permanent:</p>
+
+            <div class="diagram-container" id="memory-layers"></div>
+        </section>
+
+        <!-- Section 2: Memory Types Deep Dive -->
+        <section>
+            <h2>Memory Types in Detail</h2>
+            <div class="comparison-table">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Memory Type</th>
+                            <th>Storage</th>
+                            <th>Capacity</th>
+                            <th>Access Pattern</th>
+                            <th>Use Case</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><strong>In-Context</strong></td>
+                            <td>Current prompt</td>
+                            <td>Context window (128K tokens)</td>
+                            <td>Always present</td>
+                            <td>Current conversation turn</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Buffer (Short-term)</strong></td>
+                            <td>Message list in memory</td>
+                            <td>Last N messages</td>
+                            <td>FIFO, sliding window</td>
+                            <td>Multi-turn conversation</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Vector (Long-term)</strong></td>
+                            <td>Vector database</td>
+                            <td>Unlimited</td>
+                            <td>Semantic similarity search</td>
+                            <td>Past conversations, facts, experiences</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Parametric</strong></td>
+                            <td>Fine-tuned model weights</td>
+                            <td>Unlimited</td>
+                            <td>Implicit (in generation)</td>
+                            <td>Learned behaviors, domain knowledge</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <!-- Section 3: Short-term Memory -->
+        <section>
+            <h2>Short-term Memory: Conversation Buffers</h2>
+            <div class="code-block">
+                <pre><code class="language-python">"""Short-term memory implementations."""
+from collections import deque
+from typing import Optional
+import tiktoken
+
+class ConversationBuffer:
+    """Simple sliding window memory."""
+    
+    def __init__(self, max_messages: int = 20):
+        self.messages: deque = deque(maxlen=max_messages)
+        self.system_prompt: str = ""
+    
+    def add(self, role: str, content: str):
+        self.messages.append({"role": role, "content": content})
+    
+    def get_messages(self) -> list[dict]:
+        """Get messages for API call."""
+        msgs = [{"role": "system", "content": self.system_prompt}]
+        msgs.extend(list(self.messages))
+        return msgs
+
+class TokenBudgetBuffer:
+    """Memory that manages token budget intelligently."""
+    
+    def __init__(self, max_tokens: int = 8000, model: str = "gpt-4o"):
+        self.max_tokens = max_tokens
+        self.encoder = tiktoken.encoding_for_model(model)
+        self.messages: list[dict] = []
+        self.system_prompt: str = ""
+    
+    def _count_tokens(self, messages: list[dict]) -> int:
+        return sum(len(self.encoder.encode(m["content"])) for m in messages)
+    
+    def add(self, role: str, content: str):
+        self.messages.append({"role": role, "content": content})
+        self._trim()
+    
+    def _trim(self):
+        """Remove oldest messages until under budget."""
+        while (self._count_tokens(self.messages) > self.max_tokens 
+               and len(self.messages) > 2):
+            # Always keep the most recent exchange
+            self.messages.pop(0)
+    
+    def get_messages(self) -> list[dict]:
+        msgs = [{"role": "system", "content": self.system_prompt}]
+        msgs.extend(self.messages)
+        return msgs
+
+class SummarizingBuffer:
+    """Summarizes old messages to compress history."""
+    
+    def __init__(self, max_recent: int = 10, summarize_fn=None):
+        self.recent: deque = deque(maxlen=max_recent)
+        self.summary: str = ""
+        self.summarize_fn = summarize_fn  # LLM-based summarization
+        self._overflow_buffer: list = []
+    
+    def add(self, role: str, content: str):
+        # When recent buffer is full, overflow triggers summarization
+        if len(self.recent) == self.recent.maxlen:
+            self._overflow_buffer.append(self.recent[0])
+            if len(self._overflow_buffer) >= 5:
+                self._summarize_overflow()
+        self.recent.append({"role": role, "content": content})
+    
+    def _summarize_overflow(self):
+        """Summarize old messages into a compressed summary."""
+        old_text = "\n".join(f"{m['role']}: {m['content']}" for m in self._overflow_buffer)
+        if self.summarize_fn:
+            new_summary = self.summarize_fn(self.summary, old_text)
+            self.summary = new_summary
+        self._overflow_buffer = []
+    
+    def get_messages(self) -> list[dict]:
+        msgs = [{"role": "system", "content": self.system_prompt}]
+        if self.summary:
+            msgs.append({"role": "system", "content": f"Conversation history summary:\n{self.summary}"})
+        msgs.extend(list(self.recent))
+        return msgs
+    
+    @property
+    def system_prompt(self):
+        return self._system_prompt
+    
+    @system_prompt.setter
+    def system_prompt(self, value):
+        self._system_prompt = value</code></pre>
+            </div>
+        </section>
+
+        <!-- Section 4: Long-term Vector Memory -->
+        <section>
+            <h2>Long-term Memory: Vector Store</h2>
+            <div class="diagram-container" id="memory-retrieval"></div>
+
+            <div class="concept-box">
+                <h3>How Vector Memory Works</h3>
+                <p>Every interaction gets embedded and stored in a vector database. When the agent needs past context, it searches semantically — "what do I know about the user's preferences?" retrieves relevant past conversations even if the exact words differ. This gives agents <strong>unlimited, searchable memory</strong>.</p>
+            </div>
+
+            <div class="code-block">
+                <pre><code class="language-python">"""Long-term vector memory for persistent agents."""
+import json
+import hashlib
+from datetime import datetime
+from typing import Optional
+import openai
+import chromadb
+
+client = openai.OpenAI()
+
+class VectorMemory:
+    """Persistent long-term memory backed by ChromaDB."""
+    
+    def __init__(self, agent_id: str, collection_name: str = None):
+        self.agent_id = agent_id
+        self.chroma = chromadb.PersistentClient(path=f"./memory/{agent_id}")
+        self.collection = self.chroma.get_or_create_collection(
+            name=collection_name or f"{agent_id}_memory",
+            metadata={"hnsw:space": "cosine"}
+        )
+    
+    def store(self, content: str, metadata: dict = None) -> str:
+        """Store a memory with embedding."""
+        memory_id = hashlib.md5(content.encode()).hexdigest()[:12]
+        
+        meta = {
+            "timestamp": datetime.now().isoformat(),
+            "agent_id": self.agent_id,
+            **(metadata or {}),
+        }
+        
+        # ChromaDB handles embedding automatically, or we can provide our own
+        self.collection.upsert(
+            ids=[memory_id],
+            documents=[content],
+            metadatas=[meta],
+        )
+        return memory_id
+    
+    def retrieve(self, query: str, n_results: int = 5, 
+                 filter_metadata: dict = None) -> list[dict]:
+        """Retrieve relevant memories by semantic similarity."""
+        kwargs = {
+            "query_texts": [query],
+            "n_results": n_results,
+        }
+        if filter_metadata:
+            kwargs["where"] = filter_metadata
+        
+        results = self.collection.query(**kwargs)
+        
+        memories = []
+        for i in range(len(results["ids"][0])):
+            memories.append({
+                "id": results["ids"][0][i],
+                "content": results["documents"][0][i],
+                "metadata": results["metadatas"][0][i],
+                "distance": results["distances"][0][i] if results.get("distances") else None,
+            })
+        return memories
+    
+    def store_conversation(self, messages: list[dict], summary: str = None):
+        """Store an entire conversation as a memory."""
+        # Store the summary for quick retrieval
+        if summary:
+            self.store(summary, metadata={"type": "conversation_summary"})
+        
+        # Store individual important exchanges
+        for msg in messages:
+            if msg["role"] == "assistant" and len(msg["content"]) > 100:
+                self.store(msg["content"], metadata={
+                    "type": "assistant_response",
+                    "role": msg["role"],
+                })
+    
+    def get_relevant_context(self, current_input: str, max_tokens: int = 2000) -> str:
+        """Get relevant past context for the current conversation."""
+        memories = self.retrieve(current_input, n_results=5)
+        
+        context_parts = []
+        token_count = 0
+        
+        for memory in memories:
+            content = memory["content"]
+            # Rough token estimate
+            est_tokens = len(content.split()) * 1.3
+            if token_count + est_tokens > max_tokens:
+                break
+            context_parts.append(f"[{memory['metadata'].get('timestamp', 'unknown')}] {content}")
+            token_count += est_tokens
+        
+        if context_parts:
+            return "Relevant memories from past interactions:\n" + "\n---\n".join(context_parts)
+        return ""</code></pre>
+            </div>
+        </section>
+
+        <!-- Section 5: Agent with Persistent Memory -->
+        <section>
+            <h2>Complete Agent with Persistent Memory</h2>
+            <div class="code-block">
+                <pre><code class="language-python">"""Agent that remembers across sessions using vector memory."""
+
+class MemoryAgent:
+    """Agent with short-term buffer + long-term vector memory."""
+    
+    def __init__(self, agent_id: str, system_prompt: str):
+        self.agent_id = agent_id
+        self.system_prompt = system_prompt
+        self.short_term = SummarizingBuffer(max_recent=10, summarize_fn=self._summarize)
+        self.long_term = VectorMemory(agent_id)
+        self.short_term.system_prompt = system_prompt
+        self.session_messages: list[dict] = []
+    
+    def _summarize(self, existing_summary: str, new_text: str) -> str:
+        """Use LLM to create a running summary."""
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{
+                "role": "user",
+                "content": f"Summarize this conversation history into key facts and context:\n\n"
+                          f"Previous summary: {existing_summary or 'None'}\n\n"
+                          f"New messages:\n{new_text}\n\n"
+                          f"Output a concise summary (max 200 words) of important facts, "
+                          f"user preferences, and key decisions."
+            }],
+            max_tokens=300,
+        )
+        return response.choices[0].message.content
+    
+    def chat(self, user_input: str) -> str:
+        """Process user input with memory-enhanced context."""
+        
+        # 1. Retrieve relevant long-term memories
+        memory_context = self.long_term.get_relevant_context(user_input)
+        
+        # 2. Build messages with memory context
+        self.short_term.add("user", user_input)
+        messages = self.short_term.get_messages()
+        
+        # Inject memory context after system prompt
+        if memory_context:
+            messages.insert(1, {
+                "role": "system",
+                "content": memory_context
+            })
+        
+        # 3. Generate response
+        response = client.chat.completions.create(
+            model="gpt-4o",
+            messages=messages,
+            temperature=0.7,
+        )
+        
+        assistant_reply = response.choices[0].message.content
+        self.short_term.add("assistant", assistant_reply)
+        
+        # 4. Store important interactions in long-term memory
+        self.session_messages.append({"role": "user", "content": user_input})
+        self.session_messages.append({"role": "assistant", "content": assistant_reply})
+        
+        # Store if the exchange seems important (heuristic: length or keywords)
+        if len(user_input) > 50 or any(kw in user_input.lower() 
+            for kw in ["remember", "preference", "always", "never", "important"]):
+            self.long_term.store(
+                f"User said: {user_input}\nAssistant replied: {assistant_reply[:200]}",
+                metadata={"type": "important_exchange"}
+            )
+        
+        return assistant_reply
+    
+    def end_session(self):
+        """Summarize and store the session for future retrieval."""
+        if len(self.session_messages) > 2:
+            summary = self._summarize("", 
+                "\n".join(f"{m['role']}: {m['content']}" for m in self.session_messages[-10:]))
+            self.long_term.store_conversation(self.session_messages, summary=summary)
+        self.session_messages = []
+
+# ─── Usage ────────────────────────────────────────────────────
+
+agent = MemoryAgent(
+    agent_id="assistant_001",
+    system_prompt="You are a helpful personal assistant. You remember past conversations "
+                  "and user preferences. Reference relevant memories when appropriate."
+)
+
+# Session 1
+print(agent.chat("My name is Alex and I'm a Python developer"))
+print(agent.chat("I prefer concise, code-heavy explanations"))
+agent.end_session()
+
+# Session 2 (days later — agent still remembers!)
+print(agent.chat("Can you help me with a coding problem?"))
+# Agent will recall: user is Alex, prefers concise/code-heavy style</code></pre>
+            </div>
+        </section>
+
+        <!-- Section 6: Context Window Management -->
+        <section>
+            <h2>Context Window Management</h2>
+            <div class="concept-box">
+                <h3>The Context Budget Problem</h3>
+                <p>Even with 128K token windows, agents eat through context fast: system prompt + tools + memory + conversation + tool results. You need a <strong>budget strategy</strong> that allocates tokens across these competing needs.</p>
+            </div>
+
+            <div class="code-block">
+                <pre><code class="language-python">"""Context window budget management."""
+
+class ContextBudget:
+    """Allocate context window across competing needs."""
+    
+    def __init__(self, total_tokens: int = 128000, model: str = "gpt-4o"):
+        self.total = total_tokens
+        self.reserved_for_output = 4000  # Leave room for response
+        self.available = total_tokens - self.reserved_for_output
+        
+        # Budget allocation (percentages)
+        self.allocations = {
+            "system_prompt": 0.05,     # 5% — ~6K tokens
+            "tools": 0.10,             # 10% — tool schemas
+            "long_term_memory": 0.15,  # 15% — retrieved memories
+            "short_term_memory": 0.20, # 20% — conversation summary
+            "recent_messages": 0.40,   # 40% — recent exchanges
+            "current_input": 0.10,     # 10% — user's current message
+        }
+    
+    def get_budget(self, category: str) -> int:
+        """Get token budget for a category."""
+        return int(self.available * self.allocations.get(category, 0))
+    
+    def build_context(self, system_prompt: str, tools: list,
+                      long_term: str, short_term: list[dict],
+                      recent: list[dict], current: str) -> list[dict]:
+        """Build the final message list within budget."""
+        import tiktoken
+        enc = tiktoken.encoding_for_model("gpt-4o")
+        
+        messages = []
+        
+        # 1. System prompt (always included)
+        messages.append({"role": "system", "content": system_prompt})
+        
+        # 2. Long-term memory (trimmed to budget)
+        if long_term:
+            budget = self.get_budget("long_term_memory")
+            tokens = enc.encode(long_term)
+            if len(tokens) > budget:
+                long_term = enc.decode(tokens[:budget])
+            messages.append({"role": "system", "content": f"Memories:\n{long_term}"})
+        
+        # 3. Short-term summary
+        if short_term:
+            messages.append({"role": "system", "content": f"Session context:\n{short_term}"})
+        
+        # 4. Recent messages (most recent first, trim from oldest)
+        budget = self.get_budget("recent_messages")
+        recent_tokens = 0
+        kept_recent = []
+        for msg in reversed(recent):
+            msg_tokens = len(enc.encode(msg["content"]))
+            if recent_tokens + msg_tokens > budget:
+                break
+            kept_recent.insert(0, msg)
+            recent_tokens += msg_tokens
+        messages.extend(kept_recent)
+        
+        # 5. Current input
+        messages.append({"role": "user", "content": current})
+        
+        return messages</code></pre>
+            </div>
+
+            <div class="comparison-table">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Strategy</th>
+                            <th>Approach</th>
+                            <th>Pro</th>
+                            <th>Con</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><strong>Sliding Window</strong></td>
+                            <td>Keep last N messages</td>
+                            <td>Simple, fast</td>
+                            <td>Loses early context entirely</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Summarization</strong></td>
+                            <td>LLM summarizes old messages</td>
+                            <td>Preserves key info</td>
+                            <td>Extra LLM call, lossy</td>
+                        </tr>
+                        <tr>
+                            <td><strong>RAG on History</strong></td>
+                            <td>Embed + retrieve relevant past</td>
+                            <td>Only includes what's relevant</td>
+                            <td>May miss important context</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Hybrid</strong></td>
+                            <td>Summary + RAG + recent window</td>
+                            <td>Best coverage</td>
+                            <td>Complex, multiple systems</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <!-- Section 7: State Machines -->
+        <section>
+            <h2>State Machines for Agent Control</h2>
+            <div class="code-block">
+                <pre><code class="language-python">"""State machine for complex agent workflows."""
+from enum import Enum
+
+class AgentState(Enum):
+    IDLE = "idle"
+    GATHERING_INFO = "gathering_info"
+    PLANNING = "planning"
+    EXECUTING = "executing"
+    REVIEWING = "reviewing"
+    COMPLETE = "complete"
+    ERROR = "error"
+
+class StatefulAgent:
+    """Agent with explicit state tracking."""
+    
+    def __init__(self):
+        self.state = AgentState.IDLE
+        self.context: dict = {}
+        self.transitions = {
+            AgentState.IDLE: [AgentState.GATHERING_INFO, AgentState.PLANNING],
+            AgentState.GATHERING_INFO: [AgentState.PLANNING, AgentState.GATHERING_INFO],
+            AgentState.PLANNING: [AgentState.EXECUTING],
+            AgentState.EXECUTING: [AgentState.REVIEWING, AgentState.ERROR],
+            AgentState.REVIEWING: [AgentState.COMPLETE, AgentState.EXECUTING],
+            AgentState.ERROR: [AgentState.GATHERING_INFO, AgentState.IDLE],
+        }
+    
+    def transition(self, new_state: AgentState):
+        """Validate and perform state transition."""
+        if new_state not in self.transitions.get(self.state, []):
+            raise ValueError(
+                f"Invalid transition: {self.state.value} → {new_state.value}. "
+                f"Allowed: {[s.value for s in self.transitions[self.state]]}"
+            )
+        print(f"  State: {self.state.value} → {new_state.value}")
+        self.state = new_state
+    
+    def run(self, goal: str) -> str:
+        """Run agent with state machine control."""
+        self.context["goal"] = goal
+        self.transition(AgentState.GATHERING_INFO)
+        
+        # Gather phase
+        info = self._gather(goal)
+        self.context["info"] = info
+        
+        self.transition(AgentState.PLANNING)
+        plan = self._plan(goal, info)
+        self.context["plan"] = plan
+        
+        self.transition(AgentState.EXECUTING)
+        try:
+            result = self._execute(plan)
+            self.context["result"] = result
+        except Exception as e:
+            self.transition(AgentState.ERROR)
+            return f"Error during execution: {e}"
+        
+        self.transition(AgentState.REVIEWING)
+        if self._quality_check(result):
+            self.transition(AgentState.COMPLETE)
+            return result
+        else:
+            # Re-execute with feedback
+            self.transition(AgentState.EXECUTING)
+            result = self._execute(plan, feedback="Improve quality")
+            self.transition(AgentState.REVIEWING)
+            self.transition(AgentState.COMPLETE)
+            return result</code></pre>
+            </div>
+        </section>
+
+        <!-- Section 8: Mini-Project -->
+        <section>
+            <h2>Mini-Project: Agent with Persistent Memory</h2>
+            <div class="project-box">
+                <h3>🛠️ Build a Personal Assistant That Remembers Everything</h3>
+                <p>Create an agent that maintains persistent memory across sessions, recalls relevant past interactions, and adapts to user preferences over time.</p>
+
+                <div class="step-list">
+                    <ol>
+                        <li>Implement <code>VectorMemory</code> class with ChromaDB for persistent storage</li>
+                        <li>Build <code>SummarizingBuffer</code> for short-term context management</li>
+                        <li>Create <code>MemoryAgent</code> that combines both memory types</li>
+                        <li>Add automatic memory storage triggers:
+                            <ul>
+                                <li>User states a preference → store as "preference" type</li>
+                                <li>User provides personal info → store as "personal" type</li>
+                                <li>Agent makes a commitment → store as "commitment" type</li>
+                            </ul>
+                        </li>
+                        <li>Implement session end: summarize and store the full conversation</li>
+                        <li>Build <code>ContextBudget</code> to manage token allocation across memory types</li>
+                        <li>Test across multiple sessions:
+                            <ul>
+                                <li>Session 1: User shares name, role, preferences</li>
+                                <li>Session 2: Ask "what do you remember about me?" — verify recall</li>
+                                <li>Session 3: Reference earlier preferences in new responses</li>
+                            </ul>
+                        </li>
+                    </ol>
+                </div>
+
+                <h4>Stretch Goals</h4>
+                <ul>
+                    <li>Add memory decay: older memories get lower relevance scores over time</li>
+                    <li>Implement "memory consolidation": periodically merge similar memories into summaries</li>
+                    <li>Add user controls: "forget this", "remember that", "what do you know about X?"</li>
+                    <li>Build a memory dashboard showing stored memories, categories, and access patterns</li>
+                </ul>
+            </div>
+        </section>
+
+        <!-- Key Points -->
+        <section>
+            <div class="key-points">
+                <h3>Key Takeaways</h3>
+                <ul>
+                    <li>Agent memory has 4 layers: in-context, buffer (short-term), vector (long-term), and parametric (fine-tuning)</li>
+                    <li>Short-term memory uses sliding windows or summarization to compress conversation history</li>
+                    <li>Long-term memory uses vector stores for semantic retrieval across sessions</li>
+                    <li>Context budget management is essential — allocate tokens across system prompt, memory, history, and current input</li>
+                    <li>Hybrid approaches (summary + RAG + recent window) give the best coverage</li>
+                    <li>State machines provide explicit control over agent behavior and valid transitions</li>
+                </ul>
+            </div>
+        </section>
+    </main>
+
+    <nav class="nav-links">
+        <a href="0017-multi-agent-systems.html" class="prev">← Lesson 17: Multi-Agent Systems</a>
+        <a href="0019-mcp-model-context-protocol.html" class="next">Lesson 19: MCP - Model Context Protocol →</a>
+    </nav>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            if (window.Diagrams) {
+                Diagrams.createLayerDiagram(
+                    document.getElementById('memory-layers'),
+                    [
+                        { label: '🧠 In-Context Memory', sublabel: 'Current prompt window — always present, limited', color: '#ef4444' },
+                        { label: '💬 Buffer Memory', sublabel: 'Recent messages — sliding window or summarized', color: '#f59e0b' },
+                        { label: '🗄️ Vector Memory', sublabel: 'Embedded past interactions — semantic search retrieval', color: '#22d3ee' },
+                        { label: '⚙️ Parametric Memory', sublabel: 'Fine-tuned model weights — implicit knowledge', color: '#6366f1' }
+                    ]
+                );
+
+                Diagrams.createFlowDiagram(
+                    document.getElementById('memory-retrieval'),
+                    [
+                        { label: '💬 User Input', sublabel: 'New message arrives', color: '#6366f1' },
+                        { label: '🔍 Embed Query', sublabel: 'Convert to vector', color: '#22d3ee' },
+                        { label: '🗄️ Search Memory', sublabel: 'Find similar past interactions', color: '#f59e0b' },
+                        { label: '📋 Rank & Filter', sublabel: 'Select most relevant memories', color: '#22c55e' },
+                        { label: '🧩 Inject Context', sublabel: 'Add memories to prompt', color: '#6366f1' },
+                        { label: '🤖 Generate Response', sublabel: 'LLM uses memory-enriched context', color: '#22c55e' }
+                    ]
+                );
+            }
+        });
+    </script>
+</body>
+</html>

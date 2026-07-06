@@ -9,7 +9,7 @@ export default function PythonCourseLayout({ children }: { children: React.React
         comingSoonPhases={COMING_SOON_PHASES}
         courseBase="/tutorials/python-from-a-to-z"
         courseTitle="Python: Print to Production"
-        totalPhaseCount={5}
+        totalPhaseCount={6}
       />
       <main className="flex-1 min-w-0">
         {children}

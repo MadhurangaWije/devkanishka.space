@@ -1,0 +1,475 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lesson 011 – Virtual Machines & Scale Sets | AZ-305 Study Guide</title>
+    <link rel="stylesheet" href="../assets/styles.css">
+    <script src="../assets/diagrams.js"></script>
+</head>
+<body>
+<div class="lesson-wrap">
+
+    <header class="lesson-header fade-in">
+        <span class="lesson-number">Lesson 011 · 🟡 REVIEW</span>
+        <h1>Virtual Machines &amp; Scale Sets</h1>
+        <p>You can create a VM from AZ-104. Now focus on architecture decisions: SLA tiers, orchestration modes, spot instance patterns, and custom image pipelines that keep fleets consistent at scale.</p>
+    </header>
+
+    <nav class="toc fade-in">
+        <h2>In This Lesson</h2>
+        <ol>
+            <li><a href="#sla-ladder">SLA Ladder: Single VM → AS → AZ</a></li>
+            <li><a href="#vmss">VMSS: Uniform vs Flexible Orchestration</a></li>
+            <li><a href="#spot-vms">Spot VMs: Patterns &amp; Eviction Handling</a></li>
+            <li><a href="#sizing">VM Sizing Strategy</a></li>
+            <li><a href="#image-pipeline">Custom Image Pipelines</a></li>
+            <li><a href="#ephemeral-disks">Ephemeral OS Disks</a></li>
+            <li><a href="#placement">Proximity Placement Groups &amp; Dedicated Hosts</a></li>
+            <li><a href="#real-world">Real-World: Rendering Farm</a></li>
+            <li><a href="#quiz">Knowledge Check</a></li>
+        </ol>
+    </nav>
+
+    <!-- Section 1: SLA Ladder -->
+    <section id="sla-ladder" class="fade-in">
+        <h2>1. SLA Ladder: Single VM → Availability Set → Availability Zone</h2>
+        <p>Azure offers progressively higher SLAs depending on how you deploy VMs. This is a core AZ-305 decision — match SLA to business criticality and cost tolerance.</p>
+
+        <div class="box-diagram" data-diagram='{
+            "nodes": [
+                {"id": "single", "label": "Single VM\n(Premium SSD)\n99.9%", "x": 80, "y": 200, "w": 160, "h": 80, "shape": "box", "icon": "vm", "tooltip": "Single VM with Premium SSD or Ultra Disk — 99.9% SLA"},
+                {"id": "as", "label": "Availability Set\n2+ VMs\n99.95%", "x": 320, "y": 200, "w": 160, "h": 80, "shape": "box", "icon": "vm", "tooltip": "2+ VMs spread across fault/update domains — 99.95% SLA"},
+                {"id": "az", "label": "Availability Zones\n2+ VMs\n99.99%", "x": 560, "y": 200, "w": 160, "h": 80, "shape": "box", "icon": "vm", "tooltip": "VMs in 2+ zones — 99.99% SLA (highest for IaaS)"},
+                {"id": "cost", "label": "Cost & Complexity →", "x": 320, "y": 330, "w": 160, "h": 40, "shape": "label"}
+            ],
+            "edges": [
+                {"from": "single", "to": "as", "label": "+redundancy", "style": "arrow"},
+                {"from": "as", "to": "az", "label": "+zone isolation", "style": "arrow"}
+            ],
+            "groups": [
+                {"label": "SLA Ladder — Higher Availability →", "x": 40, "y": 150, "w": 720, "h": 250}
+            ]
+        }'></div>
+
+        <div class="compare-grid">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Deployment</th>
+                        <th>SLA</th>
+                        <th>Protection Against</th>
+                        <th>When to Use</th>
+                        <th>Limitations</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td><strong>Single VM</strong> (Premium SSD)</td>
+                        <td>99.9%</td>
+                        <td>Host hardware failure (live migration)</td>
+                        <td>Dev/test, non-critical, single-instance workloads (e.g., domain controller)</td>
+                        <td>~8.7 hr downtime/year; no protection against rack/zone failure</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Availability Set</strong></td>
+                        <td>99.95%</td>
+                        <td>Rack failure (fault domains), planned maintenance (update domains)</td>
+                        <td>Legacy apps that can't span zones; same-rack latency requirements</td>
+                        <td>Max 3 FDs, 20 UDs; single datacenter; can't mix with zones</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Availability Zones</strong></td>
+                        <td>99.99%</td>
+                        <td>Entire datacenter failure (independent power, cooling, networking)</td>
+                        <td>Production workloads; anything needing &lt;4.3 min downtime/month</td>
+                        <td>~2ms cross-zone latency; not available in all regions; zone-redundant LB needed</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+
+        <div class="exam-tip fade-in">
+            <strong>💡 Exam Tip:</strong> A single VM with Premium SSD gets 99.9%, but ONLY if ALL disks (OS + data) are Premium SSD or Ultra. Mixing Standard HDD drops the SLA to 0%. Availability Sets require at least 2 VMs — one VM in an AS gets no SLA benefit.
+        </div>
+    </section>
+
+    <!-- Section 2: VMSS -->
+    <section id="vmss" class="fade-in">
+        <h2>2. VMSS: Uniform vs Flexible Orchestration</h2>
+        <p>Virtual Machine Scale Sets automate fleet management. AZ-305 focuses on choosing the orchestration mode.</p>
+
+        <div class="compare-grid">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Aspect</th>
+                        <th>Uniform Orchestration</th>
+                        <th>Flexible Orchestration</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td><strong>VM Model</strong></td>
+                        <td>Identical instances from one profile</td>
+                        <td>Mix VM sizes, images, disk types</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Scaling</strong></td>
+                        <td>Autoscale built-in (metric/schedule)</td>
+                        <td>Autoscale supported; manual add of existing VMs</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Zone Spread</strong></td>
+                        <td>Automatic zone balancing</td>
+                        <td>Automatic zone balancing</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Individual VM Access</strong></td>
+                        <td>Limited (no direct ARM resource per VM)</td>
+                        <td>Full ARM API per VM; SSH/RDP directly</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Best For</strong></td>
+                        <td>Homogeneous stateless workloads (web tier, batch)</td>
+                        <td>Mixed workloads, lift-and-shift, when you need per-VM control</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Max Instances</strong></td>
+                        <td>1,000 (custom image) / 600 (marketplace)</td>
+                        <td>1,000</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Availability Sets</strong></td>
+                        <td>Not applicable (uses placement groups)</td>
+                        <td>Replaces Availability Sets (spread across FDs)</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+
+        <div class="info-box">
+            <strong>Architecture Guidance:</strong> Microsoft recommends Flexible orchestration for new deployments. Uniform is still preferred for large-scale stateless tiers (>100 identical instances) where you never need per-VM control.
+        </div>
+    </section>
+
+    <!-- Section 3: Spot VMs -->
+    <section id="spot-vms" class="fade-in">
+        <h2>3. Spot VMs: Patterns &amp; Eviction Handling</h2>
+        <p>Spot VMs use Azure's spare capacity at up to 90% discount. The trade-off: Azure can evict them with 30 seconds notice.</p>
+
+        <h3>When to Use Spot</h3>
+        <ul>
+            <li><strong>Batch processing</strong> — rendering, transcoding, genomics (checkpoint-able)</li>
+            <li><strong>Dev/test environments</strong> — non-critical, recreatable</li>
+            <li><strong>Stateless workers</strong> — behind a queue, idempotent processing</li>
+            <li><strong>CI/CD build agents</strong> — ephemeral, job-based</li>
+            <li><strong>Training ML models</strong> — with checkpointing to Blob Storage</li>
+        </ul>
+
+        <h3>Eviction Policies</h3>
+        <div class="compare-grid">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Policy</th>
+                        <th>Behavior</th>
+                        <th>Use Case</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td><strong>Deallocate</strong></td>
+                        <td>VM stopped; disk/IP preserved; resume later</td>
+                        <td>Workloads that can pause and resume (still charged for disk)</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Delete</strong></td>
+                        <td>VM + disk deleted; no further charges</td>
+                        <td>Ephemeral/stateless; data in external store</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+
+        <h3>Spot in VMSS — Architecture Pattern</h3>
+        <div class="collapsible">
+            <button class="collapsible-toggle">Spot + On-Demand Mix Pattern ▸</button>
+            <div class="collapsible-content">
+                <p><strong>Strategy:</strong> Run a baseline of on-demand VMs for guaranteed capacity, then add spot instances for burst. Configure VMSS with:</p>
+                <ul>
+                    <li><code>priority: Spot</code> with <code>evictionPolicy: Delete</code></li>
+                    <li><code>maxPrice: -1</code> (pay up to on-demand price — maximizes availability)</li>
+                    <li>Autoscale rules based on queue depth</li>
+                    <li>Application health extension for automatic repair</li>
+                </ul>
+                <p>If evicted, VMSS autoscale re-provisions when capacity returns. Combine with multiple VM sizes (<code>skuProfile</code>) for higher spot availability.</p>
+            </div>
+        </div>
+    </section>
+
+    <!-- Section 4: VM Sizing -->
+    <section id="sizing" class="fade-in">
+        <h2>4. VM Sizing Strategy</h2>
+        <p>Match the VM series to workload profile — don't over-provision or under-spec.</p>
+
+        <div class="compare-grid">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Series</th>
+                        <th>Optimized For</th>
+                        <th>Example Workloads</th>
+                        <th>Key Feature</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td><strong>B-series</strong></td>
+                        <td>Burstable</td>
+                        <td>Dev/test, low-traffic web, small DBs</td>
+                        <td>CPU credits; cheapest; variable performance</td>
+                    </tr>
+                    <tr>
+                        <td><strong>D/Ds-series</strong></td>
+                        <td>General purpose</td>
+                        <td>Most production workloads, app servers</td>
+                        <td>Balanced CPU:memory (1:4 ratio)</td>
+                    </tr>
+                    <tr>
+                        <td><strong>E/Es-series</strong></td>
+                        <td>Memory</td>
+                        <td>SAP HANA, in-memory caches, large DBs</td>
+                        <td>High memory:CPU (1:8 ratio)</td>
+                    </tr>
+                    <tr>
+                        <td><strong>F/Fs-series</strong></td>
+                        <td>Compute</td>
+                        <td>Batch, gaming, analytics, CI/CD agents</td>
+                        <td>High CPU:memory (1:2 ratio)</td>
+                    </tr>
+                    <tr>
+                        <td><strong>N-series</strong></td>
+                        <td>GPU</td>
+                        <td>ML training/inference, rendering, HPC</td>
+                        <td>NVIDIA GPUs (T4, A100, H100)</td>
+                    </tr>
+                    <tr>
+                        <td><strong>L-series</strong></td>
+                        <td>Storage</td>
+                        <td>Big data, NoSQL (Cassandra), data warehouses</td>
+                        <td>High local NVMe throughput</td>
+                    </tr>
+                    <tr>
+                        <td><strong>M-series</strong></td>
+                        <td>Memory-intensive</td>
+                        <td>SAP HANA (up to 4 TB RAM)</td>
+                        <td>Largest memory VMs in Azure</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+
+        <div class="exam-tip fade-in">
+            <strong>💡 Exam Tip:</strong> AZ-305 won't ask you to memorize exact SKU specs. Focus on matching the SERIES to the workload pattern. If the scenario says "in-memory database with 512 GB RAM" → E or M series. "Batch rendering" → F-series (CPU) or N-series (GPU).
+        </div>
+    </section>
+
+    <!-- Section 5: Custom Image Pipelines -->
+    <section id="image-pipeline" class="fade-in">
+        <h2>5. Custom Image Pipelines</h2>
+        <p>Golden images ensure consistency across fleets. Azure Image Builder (AIB) automates creation; Azure Compute Gallery (formerly Shared Image Gallery) handles distribution.</p>
+
+        <div class="box-diagram" data-diagram='{
+            "nodes": [
+                {"id": "source", "label": "Source Image\n(Marketplace/\nCustom VHD)", "x": 50, "y": 180, "w": 140, "h": 80, "shape": "box", "icon": "storage", "tooltip": "Base image: marketplace, managed image, or existing VHD"},
+                {"id": "aib", "label": "Azure Image\nBuilder", "x": 240, "y": 180, "w": 130, "h": 80, "shape": "box", "icon": "gear", "tooltip": "Packer-based service: runs customizers (scripts, Windows Update, file injection)"},
+                {"id": "gallery", "label": "Compute\nGallery", "x": 430, "y": 180, "w": 130, "h": 80, "shape": "box", "icon": "gallery", "tooltip": "Versioned image definitions; replication across regions; RBAC sharing"},
+                {"id": "vmss", "label": "VMSS\nAuto-Update", "x": 620, "y": 140, "w": 130, "h": 70, "shape": "box", "icon": "vm", "tooltip": "VMSS references gallery image version; rolling upgrade on new version"},
+                {"id": "vms", "label": "Standalone\nVMs", "x": 620, "y": 240, "w": 130, "h": 70, "shape": "box", "icon": "vm", "tooltip": "Individual VMs deployed from gallery image"}
+            ],
+            "edges": [
+                {"from": "source", "to": "aib", "label": "customize", "style": "arrow"},
+                {"from": "aib", "to": "gallery", "label": "publish", "style": "arrow"},
+                {"from": "gallery", "to": "vmss", "label": "deploy", "style": "arrow"},
+                {"from": "gallery", "to": "vms", "label": "deploy", "style": "arrow"}
+            ],
+            "groups": [
+                {"label": "Image Pipeline Flow", "x": 20, "y": 120, "w": 760, "h": 230}
+            ]
+        }'></div>
+
+        <h3>Pipeline Stages</h3>
+        <ol>
+            <li><strong>Source:</strong> Start from a Marketplace image (e.g., Ubuntu 22.04) or existing VHD</li>
+            <li><strong>Customize:</strong> Image Builder runs inline scripts, PowerShell/Shell, Windows Update, file copies, restart handlers</li>
+            <li><strong>Validate:</strong> Run tests (e.g., Pester/InSpec) inside the build VM</li>
+            <li><strong>Distribute:</strong> Publish to Compute Gallery with version (1.0.0 → 1.1.0); replicate to target regions</li>
+            <li><strong>Consume:</strong> VMSS references <code>imageReference</code> to gallery version; rolling upgrade replaces old instances</li>
+        </ol>
+
+        <h3>Compute Gallery Features</h3>
+        <ul>
+            <li><strong>Versioning:</strong> Semantic versions; retain old versions for rollback</li>
+            <li><strong>Replication:</strong> Replicate images to multiple regions before deployment (reduces first-boot latency)</li>
+            <li><strong>RBAC:</strong> Share across subscriptions/tenants via Reader role on gallery</li>
+            <li><strong>Community Gallery:</strong> Public sharing (preview) for ISV scenarios</li>
+        </ul>
+    </section>
+
+    <!-- Section 6: Ephemeral OS Disks -->
+    <section id="ephemeral-disks" class="fade-in">
+        <h2>6. Ephemeral OS Disks</h2>
+        <p>Ephemeral OS disks use the VM's local (temp) storage or cache disk for the OS — no Azure Storage cost, faster reimage, and lower read/write latency.</p>
+
+        <h3>When to Use</h3>
+        <ul>
+            <li>Stateless workloads (web servers, containers, batch workers)</li>
+            <li>VMSS with frequent reimage/scale operations</li>
+            <li>VMs that store all state externally (DB, Blob, file share)</li>
+        </ul>
+
+        <h3>When NOT to Use</h3>
+        <ul>
+            <li>VMs that write persistent data to OS disk</li>
+            <li>VMs that need OS disk resize</li>
+            <li>VMs where you need to capture/generalize the OS disk later</li>
+        </ul>
+
+        <div class="info-box">
+            <strong>Key Constraint:</strong> Ephemeral OS disk size must fit within the VM's cache or temp disk size. Check the VM SKU's <code>CachedDiskBytes</code> or <code>ResourceDiskSizeInMB</code> before selecting.
+        </div>
+    </section>
+
+    <!-- Section 7: Proximity Placement Groups & Dedicated Hosts -->
+    <section id="placement" class="fade-in">
+        <h2>7. Proximity Placement Groups &amp; Dedicated Hosts</h2>
+
+        <h3>Proximity Placement Groups (PPG)</h3>
+        <p>Co-locate VMs in the same datacenter network spine for lowest inter-VM latency (&lt;0.3ms).</p>
+        <ul>
+            <li><strong>Use:</strong> HPC, financial trading, tightly coupled multi-tier apps</li>
+            <li><strong>Trade-off:</strong> Limits available capacity (all VMs must fit in one cluster); harder to scale</li>
+            <li><strong>Pattern:</strong> Deploy the largest/rarest VM first (anchor VM) to pin the PPG to a cluster with sufficient capacity</li>
+        </ul>
+
+        <h3>Dedicated Hosts</h3>
+        <p>A physical server dedicated to your org — no other tenants share hardware.</p>
+        <ul>
+            <li><strong>Use:</strong> Regulatory compliance (HIPAA, PCI), software licensing (per-core), isolation requirements</li>
+            <li><strong>Pricing:</strong> Per-host (not per-VM); fill the host to maximize value</li>
+            <li><strong>Maintenance control:</strong> Opt into maintenance windows; avoid unexpected reboots</li>
+            <li><strong>Automatic placement:</strong> Azure places VMs on available hosts in your host group</li>
+        </ul>
+
+        <div class="exam-tip fade-in">
+            <strong>💡 Exam Tip:</strong> Dedicated Hosts satisfy "no shared hardware" requirements. Don't confuse with Isolated VM sizes (e.g., Standard_E64is_v3) which guarantee single-tenant hardware without managing host infrastructure.
+        </div>
+    </section>
+
+    <!-- Section 8: Real-World -->
+    <section id="real-world" class="fade-in">
+        <h2>8. Real-World: Rendering Farm with Spot VMs + VMSS + Custom Images</h2>
+
+        <div class="real-world-scenario">
+            <h3>Scenario</h3>
+            <p>A visual effects studio needs to render 10,000 frames for a film. Each frame takes ~15 minutes on an F72s_v2 VM. Budget is tight, deadline is 48 hours.</p>
+
+            <h3>Architecture</h3>
+            <ul>
+                <li><strong>Compute:</strong> VMSS (Uniform) with Spot priority, F72s_v2 instances, eviction policy = Delete</li>
+                <li><strong>Image:</strong> Custom golden image via Image Builder — pre-installed render engine, scene cache, GPU drivers</li>
+                <li><strong>Distribution:</strong> Image replicated to 3 regions via Compute Gallery for multi-region spot availability</li>
+                <li><strong>Queue:</strong> Azure Queue Storage holds frame numbers; workers pull atomically</li>
+                <li><strong>Output:</strong> Rendered frames → Blob Storage (Hot tier)</li>
+                <li><strong>Scaling:</strong> Autoscale on queue depth; target 500 concurrent VMs across 3 regions</li>
+                <li><strong>Eviction handling:</strong> Worker checks Scheduled Events API every 5s; on eviction notice, re-queues current frame, shuts down gracefully</li>
+                <li><strong>Fallback:</strong> If spot capacity drops below 200 VMs for >30 min, scale policy adds on-demand VMs (capped at 50) to meet deadline</li>
+                <li><strong>OS Disk:</strong> Ephemeral — no persistent state on VM; 30-second reimage time</li>
+            </ul>
+
+            <h3>Cost Outcome</h3>
+            <p>~70% savings vs on-demand. Total: ~$4,200 for 10,000 frames (vs $14,000 on-demand). Delivered in 36 hours with 3 brief spot interruptions (auto-recovered).</p>
+        </div>
+    </section>
+
+    <!-- Quiz -->
+    <section id="quiz" class="fade-in">
+        <h2>Knowledge Check</h2>
+        <div class="quiz-container" id="lesson-quiz"></div>
+    </section>
+
+    <!-- Navigation -->
+    <nav class="lesson-nav fade-in">
+        <a href="0010-load-balancing-traffic-management.html" class="prev">← Lesson 010: Load Balancing &amp; Traffic Management</a>
+        <a href="0012-storage-accounts-deep-dive.html" class="next">Lesson 012: Storage Accounts Deep Dive →</a>
+    </nav>
+
+</div>
+
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+
+    // Render diagrams
+    if (window.AzureLessons && window.AzureLessons.BoxDiagram) {
+        document.querySelectorAll('.box-diagram').forEach(el => {
+            const config = JSON.parse(el.getAttribute('data-diagram'));
+            AzureLessons.BoxDiagram(el, config);
+        });
+    }
+
+    // Quiz
+    AzureLessons.Quiz('lesson-quiz', [
+        {
+            question: "A company runs a production web app on two VMs and needs the highest IaaS SLA available. They're in a region with 3 Availability Zones. What deployment gives the best SLA?",
+            options: [
+                "Two VMs in an Availability Set with Premium SSD",
+                "Two VMs in separate Availability Zones with a zone-redundant Load Balancer",
+                "A single VM with Ultra Disk in Zone 1",
+                "A VMSS with Uniform orchestration in a single zone"
+            ],
+            correct: 1,
+            explanation: "Two VMs across Availability Zones provide 99.99% SLA — the highest for IaaS VMs. An Availability Set only gives 99.95%. A single VM maxes out at 99.9%. A VMSS in one zone has no zone-level protection."
+        },
+        {
+            question: "You're designing a VMSS for a stateless API tier. Requirements: per-VM SSH access for debugging, mix of Standard_D4s_v5 and Standard_D8s_v5 sizes, and zone spread. Which orchestration mode?",
+            options: [
+                "Uniform orchestration with placement groups",
+                "Flexible orchestration",
+                "Manual VM deployment in an Availability Set",
+                "Uniform orchestration with multiple scale sets"
+            ],
+            correct: 1,
+            explanation: "Flexible orchestration supports mixed VM sizes, direct per-VM ARM access (SSH), and zone spread — all requirements. Uniform requires identical instances and offers limited per-VM access."
+        },
+        {
+            question: "A batch processing system uses Spot VMs in a VMSS. The workload is idempotent and pulls jobs from a queue. Which eviction policy and max price combination maximizes cost savings while ensuring job completion?",
+            options: [
+                "Eviction: Deallocate, maxPrice: $0.05 (fixed low bid)",
+                "Eviction: Delete, maxPrice: -1 (up to on-demand price)",
+                "Eviction: Delete, maxPrice: $0.01 (minimum bid)",
+                "Eviction: Deallocate, maxPrice: -1 (up to on-demand price)"
+            ],
+            correct: 1,
+            explanation: "Delete policy avoids paying for stopped disks (stateless workload stores nothing on VM). maxPrice: -1 means 'pay up to on-demand price' — maximizing spot availability while still getting discount. Fixed low bids cause frequent evictions. Deallocate wastes money on disks for stateless workers."
+        },
+        {
+            question: "You need to distribute a custom VM image to 5 Azure regions for a global VMSS deployment. The image must support versioning and rollback. What's the correct pipeline?",
+            options: [
+                "Create a managed image in each region manually",
+                "Use Azure Image Builder → publish to Azure Compute Gallery with multi-region replication",
+                "Upload VHD to Blob Storage in each region and reference directly",
+                "Use Azure Site Recovery to replicate a generalized VM to each region"
+            ],
+            correct: 1,
+            explanation: "Azure Image Builder automates image creation; Compute Gallery provides versioning, RBAC, and built-in multi-region replication — purpose-built for this scenario. Managed images don't support cross-region replication or versioning. VHD uploads are manual and unversioned."
+        }
+    ]);
+
+    // Initialize interactions
+    AzureLessons.ScrollReveal();
+    AzureLessons.Collapsible();
+});
+</script>
+</body>
+</html>

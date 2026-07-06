@@ -1,0 +1,919 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>L49 · Performance Engineering: Profiling, __slots__, C Extensions &amp; Free-Threaded Python — Python A→Z</title>
+<link rel="stylesheet" href="../assets/style.css" />
+</head>
+<body>
+<div id="sidebar-placeholder"></div>
+<div id="main">
+  <div id="lesson-header">
+    <div class="lesson-track track-internals">🟠 Python Internals</div>
+    <h1>Performance Engineering: Profiling, <code>__slots__</code>, C Extensions &amp; Free-Threaded Python</h1>
+    <div class="lesson-meta">
+      <span>📖 Lesson 49</span>
+      <span>⏱ 70 min</span>
+      <span>🧪 5 questions</span>
+      <span>💻 3 exercises</span>
+    </div>
+  </div>
+  <div id="content">
+
+    <div class="objectives"><h4>🎯 Learning Objectives</h4><ul>
+      <li>Profile Python code with <code>cProfile</code>, <code>line_profiler</code>, <code>memory_profiler</code>, and <code>py-spy</code> to find real bottlenecks</li>
+      <li>Apply micro-optimisations: <code>__slots__</code>, local variable caching, avoiding globals in hot loops, <code>functools.lru_cache</code></li>
+      <li>Use <code>timeit</code> and <code>perf_counter</code> correctly for benchmarking</li>
+      <li>Accelerate numeric code with NumPy vectorisation and <code>functools.reduce</code> vs loops</li>
+      <li>Write a C extension module using the CPython C API (<code>PyArg_ParseTuple</code>, <code>PyLong_FromLong</code>)</li>
+      <li>Use Cython for zero-boilerplate C-speed Python functions</li>
+      <li>Understand Python 3.13's free-threaded (no-GIL) mode and what it means for CPU-bound parallelism</li>
+    </ul></div>
+
+    <!-- ═══════════════════════════════════════════════════════════════ -->
+    <h2 id="performance-mindset">Section 1 — The Performance Mindset: Measure First</h2>
+
+    <p>Golden rule: <strong>never optimise without profiling first</strong>. The bottleneck is almost never where you think it is. Developers routinely spend hours optimising code that accounts for 0.1% of total runtime while the real culprit — an O(n²) loop buried in a helper function — goes untouched.</p>
+
+    <p>The performance hierarchy, ordered from highest-impact to lowest:</p>
+    <ol>
+      <li><strong>Algorithm improvement</strong> (O(n²) → O(n log n)) — always try first</li>
+      <li><strong>Data structure choice</strong> (list lookup O(n) → set lookup O(1))</li>
+      <li><strong>Vectorisation</strong> (NumPy instead of Python loops)</li>
+      <li><strong>Micro-optimisations</strong> (slots, local vars, avoiding globals)</li>
+      <li><strong>C extensions / Cython</strong> (for truly hot numeric loops)</li>
+      <li><strong>Parallelism</strong> (multiprocessing, free-threaded Python 3.13)</li>
+    </ol>
+
+    <p>The full profiling toolkit — <code>cProfile</code> gives you call-count and time per function with minimal overhead:</p>
+
+    <div style="position:relative"><pre><code class="language-python">import cProfile
+import pstats
+import io
+
+# ── cProfile: call-count + time per function ──
+def slow_function():
+    total = 0
+    for i in range(100_000):
+        total += i * i
+    return total
+
+# Method 1: enable/disable
+pr = cProfile.Profile()
+pr.enable()
+result = slow_function()
+pr.disable()
+
+stream = io.StringIO()
+ps = pstats.Stats(pr, stream=stream).sort_stats("cumulative")
+ps.print_stats(10)   # top 10 functions by cumulative time
+print(stream.getvalue())
+
+# Method 2: context manager
+with cProfile.Profile() as pr:
+    slow_function()
+pstats.Stats(pr).sort_stats("tottime").print_stats(5)
+
+# Method 3: command line (most convenient)
+# python -m cProfile -s cumulative my_script.py
+# python -m cProfile -o output.prof my_script.py
+# python -m pstats output.prof   → interactive browser</code></pre><span class="code-label">profiling_basics.py</span></div>
+
+    <p>Visualise profiling data with <code>snakeviz</code> — it renders a sunburst diagram in your browser showing where time is spent:</p>
+
+    <div style="position:relative"><pre><code class="language-bash">pip install snakeviz
+python -m cProfile -o profile.prof my_script.py
+snakeviz profile.prof   # opens a sunburst diagram in the browser</code></pre><span class="code-label">terminal</span></div>
+
+    <div class="callout callout-concept"><strong>Concept:</strong> <code>cProfile</code> uses C-level hooks with very low overhead. It measures wall-clock time per function call. For finding which <em>function</em> is slow it is perfect. For finding which <em>line</em> inside a function is slow, use <code>line_profiler</code>.</div>
+
+    <!-- ═══════════════════════════════════════════════════════════════ -->
+    <h2 id="line-memory-profiling">Section 2 — Line-Level &amp; Memory Profiling</h2>
+
+    <p>When <code>cProfile</code> tells you a function is slow, the next step is finding <em>which lines</em> inside it are the bottleneck. <code>line_profiler</code> times every line individually. <code>memory_profiler</code> shows memory allocations per line — essential for debugging memory leaks and reducing peak RSS.</p>
+
+    <div style="position:relative"><pre><code class="language-bash">pip install line_profiler memory_profiler</code></pre><span class="code-label">terminal</span></div>
+
+    <div style="position:relative"><pre><code class="language-python"># ── line_profiler: time per line ──
+# Run: kernprof -l -v script.py  (from the command line)
+# The @profile decorator is injected automatically by kernprof
+
+@profile   # noqa — injected by kernprof
+def process_data(data: list[int]) -> int:
+    result = 0
+    for item in data:          # line 1
+        if item % 2 == 0:      # line 2
+            result += item     # line 3
+        else:
+            result -= item     # line 4
+    return result
+
+data = list(range(1_000_000))
+process_data(data)</code></pre><span class="code-label">line_profiler_demo.py</span></div>
+
+    <div style="position:relative"><pre><code class="language-python"># ── memory_profiler: memory per line ──
+from memory_profiler import profile as mprofile
+
+@mprofile
+def build_large_dict(n: int) -> dict:
+    d = {}
+    for i in range(n):
+        d[i] = f"value_{i}"
+    return d
+
+build_large_dict(100_000)
+# Output shows memory increment per line</code></pre><span class="code-label">memory_profiler_demo.py</span></div>
+
+    <div style="position:relative"><pre><code class="language-python"># ── tracemalloc: built-in allocation tracking ──
+import tracemalloc
+
+tracemalloc.start()
+data = [{"id": i, "val": str(i)} for i in range(10_000)]
+snapshot = tracemalloc.take_snapshot()
+for stat in snapshot.statistics("lineno")[:5]:
+    print(stat)
+tracemalloc.stop()</code></pre><span class="code-label">tracemalloc_demo.py</span></div>
+
+    <p>For production profiling of running services, <code>py-spy</code> attaches to a live process without restarting it — zero code changes needed:</p>
+
+    <div style="position:relative"><pre><code class="language-bash"># Record a flamegraph of a running process
+py-spy record --pid $(pgrep -f my_server.py) -o flamegraph.svg --duration 30</code></pre><span class="code-label">terminal</span></div>
+
+    <!-- ═══════════════════════════════════════════════════════════════ -->
+    <h2 id="micro-optimisations">Section 3 — Micro-Optimisations</h2>
+
+    <p>Once you have profiling data pointing at a specific function, these micro-level techniques can squeeze out 2–10× speedups without leaving pure Python. The key insight: CPython's bytecode interpreter has different costs for <code>LOAD_FAST</code> (local), <code>LOAD_GLOBAL</code> (module-level), and <code>LOAD_ATTR</code> (attribute access). Minimising the expensive opcodes in tight loops pays off.</p>
+
+    <div style="position:relative"><pre><code class="language-python">import timeit
+
+# ── 1. Cache globals as locals in hot loops ──
+import math
+
+def slow_sqrt_sum(n: int) -> float:
+    total = 0.0
+    for i in range(n):
+        total += math.sqrt(i)   # LOAD_GLOBAL math, LOAD_ATTR sqrt every iteration
+    return total
+
+def fast_sqrt_sum(n: int) -> float:
+    total = 0.0
+    sqrt = math.sqrt            # cached as local — LOAD_FAST is faster than LOAD_GLOBAL
+    for i in range(n):
+        total += sqrt(i)
+    return total
+
+n = 1_000_000
+print(timeit.timeit(lambda: slow_sqrt_sum(n), number=3))
+print(timeit.timeit(lambda: fast_sqrt_sum(n), number=3))
+
+# ── 2. __slots__ (covered in Lesson 45 but benchmarked here) ──
+import sys
+
+class WithDict:
+    def __init__(self, x, y, z): self.x, self.y, self.z = x, y, z
+
+class WithSlots:
+    __slots__ = ("x", "y", "z")
+    def __init__(self, x, y, z): self.x, self.y, self.z = x, y, z
+
+print(f"WithDict : {sys.getsizeof(WithDict(1,2,3))} B")
+print(f"WithSlots: {sys.getsizeof(WithSlots(1,2,3))} B")
+
+# ── 3. List vs set membership ──
+needle = 999_999
+large_list = list(range(1_000_000))
+large_set  = set(large_list)
+
+t_list = timeit.timeit(lambda: needle in large_list, number=100)
+t_set  = timeit.timeit(lambda: needle in large_set,  number=100)
+print(f"list: {t_list:.4f}s  set: {t_set:.6f}s  speedup: {t_list/t_set:.0f}x")
+
+# ── 4. String joining ──
+parts = ["a"] * 10_000
+
+slow = timeit.timeit(lambda: "".join(str(p) for p in parts), number=1000)
+fast = timeit.timeit(lambda: "".join(parts), number=1000)
+print(f"generator join: {slow:.3f}s  list join: {fast:.3f}s")
+
+# ── 5. functools.lru_cache for memoisation ──
+from functools import lru_cache
+
+@lru_cache(maxsize=None)
+def fib(n: int) -> int:
+    if n < 2: return n
+    return fib(n - 1) + fib(n - 2)
+
+print(fib(50))   # instantaneous; without cache: 2^50 calls
+
+# ── 6. Avoid repeated attribute lookup ──
+class Processor:
+    def run_slow(self, data):
+        result = []
+        for x in data:
+            result.append(x * 2)   # result.append looked up N times
+        return result
+
+    def run_fast(self, data):
+        append = list.append       # cache the method
+        result = []
+        for x in data:
+            append(result, x * 2)
+        return result</code></pre><span class="code-label">micro_optimisations.py</span></div>
+
+    <!-- ═══════════════════════════════════════════════════════════════ -->
+    <h2 id="numpy-vectorisation">Section 4 — NumPy Vectorisation vs Pure Python</h2>
+
+    <p>For numeric workloads, the single most impactful optimisation is replacing Python loops with NumPy vectorised operations. The performance gap is typically 50–200× for array operations because NumPy operates on contiguous C memory with SIMD instructions and avoids per-element Python object overhead.</p>
+
+    <div style="position:relative"><pre><code class="language-python">import numpy as np
+import timeit
+
+N = 1_000_000
+
+# ── Dot product ──
+a_list = list(range(N))
+b_list = list(range(N))
+a_arr  = np.arange(N, dtype=np.float64)
+b_arr  = np.arange(N, dtype=np.float64)
+
+t_py  = timeit.timeit(lambda: sum(x*y for x, y in zip(a_list, b_list)), number=3)
+t_np  = timeit.timeit(lambda: np.dot(a_arr, b_arr), number=3)
+print(f"Python dot: {t_py:.3f}s  NumPy dot: {t_np:.5f}s  speedup: {t_py/t_np:.0f}x")
+
+# ── Avoiding temporary arrays with in-place ops ──
+rng  = np.random.default_rng(42)
+data = rng.random((1000, 1000))
+
+# Creates 3 intermediate arrays:
+slow_result = (data * 2 + 1) ** 2
+
+# No intermediate arrays — modify in-place:
+fast_result = data.copy()
+fast_result *= 2
+fast_result += 1
+fast_result **= 2
+
+# ── numexpr for multi-array expressions ──
+# pip install numexpr
+try:
+    import numexpr as ne
+    expr = "(data * 2 + 1) ** 2"
+    ne_result = ne.evaluate(expr)   # compiles to C, uses multiple threads
+except ImportError:
+    pass
+
+# ── When NOT to use NumPy ──
+# Small arrays (&lt; ~100 elements): Python overhead &gt; NumPy benefit
+# Non-numeric data: strings, objects, mixed types
+# Single-element operations: scalar math is faster in pure Python</code></pre><span class="code-label">numpy_vectorisation.py</span></div>
+
+    <div class="callout callout-tip"><strong>Tip:</strong> The NumPy speedup comes from: (1) contiguous C memory (no pointer chasing), (2) BLAS/LAPACK optimised routines (SIMD, multi-core), (3) avoiding Python's per-element <code>ob_refcnt</code> / <code>ob_type</code> overhead. The crossover point where NumPy is faster than Python is roughly N &gt; 100 elements.</div>
+
+    <!-- ═══════════════════════════════════════════════════════════════ -->
+    <h2 id="c-extensions">Section 5 — Writing a C Extension</h2>
+
+    <p>C extensions let you write performance-critical code in C and call it from Python. The CPython C API is the standard interface — every built-in module (<code>math</code>, <code>json</code>, <code>re</code>) is written this way. When NumPy vectorisation isn't applicable (custom algorithms, branching logic, pointer manipulation), a C extension gives you bare-metal speed.</p>
+
+    <div style="position:relative"><pre><code class="language-c">/* fast_math.c — a simple C extension */
+#define PY_SSIZE_T_CLEAN
+#include &lt;Python.h&gt;
+#include &lt;math.h&gt;
+
+/* C function: sum of squares */
+static PyObject *
+sum_of_squares(PyObject *self, PyObject *args)
+{
+    long n;
+    if (!PyArg_ParseTuple(args, "l", &amp;n))   /* parse one long integer arg */
+        return NULL;
+
+    double total = 0.0;
+    for (long i = 0; i &lt; n; i++)
+        total += (double)i * (double)i;
+
+    return PyFloat_FromDouble(total);
+}
+
+/* Module method table */
+static PyMethodDef FastMathMethods[] = {
+    {"sum_of_squares", sum_of_squares, METH_VARARGS,
+     "Compute sum of squares 0..n-1 (fast C implementation)."},
+    {NULL, NULL, 0, NULL}   /* sentinel */
+};
+
+/* Module definition */
+static struct PyModuleDef fastmathmodule = {
+    PyModuleDef_HEAD_INIT,
+    "fast_math",           /* module name */
+    NULL,                  /* module docstring */
+    -1,                    /* per-interpreter state (-1 = global) */
+    FastMathMethods
+};
+
+/* Module init function — must be named PyInit_&lt;modulename&gt; */
+PyMODINIT_FUNC
+PyInit_fast_math(void)
+{
+    return PyModule_Create(&amp;fastmathmodule);
+}</code></pre><span class="code-label">fast_math.c</span></div>
+
+    <p>Build it with <code>setuptools</code>:</p>
+
+    <div style="position:relative"><pre><code class="language-python"># setup.py
+from setuptools import setup, Extension
+
+module = Extension(
+    "fast_math",
+    sources=["fast_math.c"],
+    extra_compile_args=["-O3", "-march=native"],
+)
+
+setup(
+    name="fast_math",
+    ext_modules=[module],
+)</code></pre><span class="code-label">setup.py</span></div>
+
+    <div style="position:relative"><pre><code class="language-bash">python setup.py build_ext --inplace
+python -c "import fast_math; print(fast_math.sum_of_squares(1_000_000))"</code></pre><span class="code-label">terminal</span></div>
+
+    <p>Modern alternative using <code>pyproject.toml</code>:</p>
+
+    <div style="position:relative"><pre><code class="language-toml">[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "fast_math"</code></pre><span class="code-label">pyproject.toml</span></div>
+
+    <div class="callout callout-concept"><strong>Concept:</strong> The CPython C API is powerful but verbose. For each operation you must: parse arguments with <code>PyArg_ParseTuple</code>, check for NULL return (error indicator), convert results to Python objects with <code>PyLong_FromLong</code> / <code>PyFloat_FromDouble</code> / <code>PyUnicode_FromString</code>, and manage reference counts with <code>Py_INCREF</code> / <code>Py_DECREF</code>. Libraries like <code>cffi</code>, <code>ctypes</code>, and <code>pybind11</code> (for C++) provide higher-level alternatives.</div>
+
+    <!-- ═══════════════════════════════════════════════════════════════ -->
+    <h2 id="cython">Section 6 — Cython: Python → C at Zero Boilerplate</h2>
+
+    <p>Cython compiles a superset of Python (with optional C type annotations) to C, then to a <code>.so</code> / <code>.pyd</code> extension module. You get C-level performance without writing C directly — just annotate your Python with types and Cython handles memory management, error checking, and the module boilerplate.</p>
+
+    <div style="position:relative"><pre><code class="language-bash">pip install cython</code></pre><span class="code-label">terminal</span></div>
+
+    <div style="position:relative"><pre><code class="language-python"># fast_sum.pyx — Cython source
+# Type annotations compile to C stack variables (no PyObject overhead)
+def sum_squares_py(int n) -> float:
+    """Pure Python fallback — no type annotations."""
+    total = 0.0
+    for i in range(n):
+        total += i * i
+    return total
+
+def sum_squares_typed(int n) -> double:
+    """Typed Cython — compiles to efficient C loop."""
+    cdef int i
+    cdef double total = 0.0
+    for i in range(n):
+        total += &lt;double&gt;i * i
+    return total
+
+# ── Cython with NumPy arrays (typed memoryviews) ──
+import numpy as np
+cimport numpy as cnp
+
+def dot_product(cnp.ndarray[double, ndim=1] a,
+                cnp.ndarray[double, ndim=1] b) -> double:
+    cdef int n = a.shape[0]
+    cdef int i
+    cdef double result = 0.0
+    for i in range(n):
+        result += a[i] * b[i]
+    return result</code></pre><span class="code-label">fast_sum.pyx</span></div>
+
+    <div style="position:relative"><pre><code class="language-python"># setup_cython.py
+from setuptools import setup
+from Cython.Build import cythonize
+import numpy as np
+
+setup(
+    ext_modules=cythonize("fast_sum.pyx", annotate=True),
+    include_dirs=[np.get_include()],
+)</code></pre><span class="code-label">setup_cython.py</span></div>
+
+    <div style="position:relative"><pre><code class="language-bash">python setup_cython.py build_ext --inplace
+python -c "import fast_sum; print(fast_sum.sum_squares_typed(1_000_000))"
+
+# Generate annotation HTML to see Python vs C lines:
+cython -a fast_sum.pyx</code></pre><span class="code-label">terminal</span></div>
+
+    <div class="callout callout-tip"><strong>Tip:</strong> The <code>annotate=True</code> flag in <code>cythonize</code> generates an HTML report. Lines highlighted in yellow still call the Python C API; the goal is to make hot loops entirely white (pure C). A <code>cdef double</code> variable becomes a C <code>double</code> on the stack — zero Python overhead.</div>
+
+    <!-- ═══════════════════════════════════════════════════════════════ -->
+    <h2 id="free-threaded-python">Section 7 — Free-Threaded Python (3.13 No-GIL Mode)</h2>
+
+    <p>Python 3.13 ships an experimental <strong>free-threaded</strong> build (no-GIL) as an opt-in. This is the most significant change to CPython's architecture since the GIL was introduced in 1992 — it allows CPU-bound Python threads to run truly in parallel on multiple cores.</p>
+
+    <div style="position:relative"><pre><code class="language-bash"># Install free-threaded Python (e.g. via pyenv)
+pyenv install 3.13t   # 't' suffix = free-threaded
+
+# Verify GIL status
+python -c "import sys; print(sys._is_gil_enabled())"   # False in free-threaded build</code></pre><span class="code-label">terminal</span></div>
+
+    <div style="position:relative"><pre><code class="language-python"># Traditional GIL limitation — threads cannot run CPU-bound code in parallel
+import threading, time
+
+def cpu_work(n: int) -> int:
+    total = 0
+    for i in range(n): total += i
+    return total
+
+N = 5_000_000
+
+# Single thread
+t0 = time.perf_counter()
+cpu_work(N); cpu_work(N)
+print(f"Sequential:  {time.perf_counter()-t0:.3f}s")
+
+# Two threads (with GIL: no speedup for CPU-bound)
+t0 = time.perf_counter()
+t1 = threading.Thread(target=cpu_work, args=(N,))
+t2 = threading.Thread(target=cpu_work, args=(N,))
+t1.start(); t2.start(); t1.join(); t2.join()
+print(f"2 threads (GIL):    {time.perf_counter()-t0:.3f}s")  # roughly same as sequential
+
+# In free-threaded Python 3.13 (no GIL):
+# The two threads run on separate CPU cores simultaneously
+# → ~2x speedup for CPU-bound workloads</code></pre><span class="code-label">free_threaded_demo.py</span></div>
+
+    <p>Key architectural changes in free-threaded Python:</p>
+    <ul>
+      <li><strong>Per-object locking</strong> replaces the GIL — each object has its own lock</li>
+      <li><strong>Atomic reference counting</strong> (using C11 atomics) — no GIL needed for refcount</li>
+      <li><strong>Thread-safe</strong> dict, list, and set operations</li>
+      <li>C extensions compiled for the GIL build still work but are single-threaded (compatibility shim)</li>
+      <li>Extensions must be recompiled with the free-threaded build to get full parallelism</li>
+    </ul>
+
+    <p>Performance model comparison:</p>
+
+    <table>
+      <thead>
+        <tr>
+          <th>Workload</th>
+          <th>GIL (3.12)</th>
+          <th>Free-threaded (3.13)</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>CPU-bound, threads</td>
+          <td>No speedup</td>
+          <td>Near-linear scaling</td>
+        </tr>
+        <tr>
+          <td>I/O-bound, threads</td>
+          <td>✅ Full speedup</td>
+          <td>✅ Full speedup</td>
+        </tr>
+        <tr>
+          <td>CPU-bound, multiprocessing</td>
+          <td>✅ Full speedup</td>
+          <td>✅ Full speedup</td>
+        </tr>
+        <tr>
+          <td>Single-threaded</td>
+          <td>Baseline</td>
+          <td>~5% slower (per-object lock overhead)</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <div class="callout callout-concept"><strong>Concept:</strong> Free-threaded Python does not remove the need for thread-safe programming — race conditions in Python code are still possible. What changes: CPU-bound threads can now use multiple cores without <code>multiprocessing</code> overhead. You still need locks, queues, or atomics to protect shared mutable state from data races.</div>
+
+    <!-- ── 8. cffi & ctypes: Calling C from Python Without a Compile Step ── -->
+    <h2 id="cffi-ctypes">cffi &amp; ctypes: Calling C Without Compiling</h2>
+    <p>
+      When you need to call an existing C library — or prototype a fast routine —
+      <code>ctypes</code> (stdlib) and <code>cffi</code> (third-party) let you do it
+      without writing a full C extension.
+    </p>
+    <div style="position:relative">
+      <pre><code class="language-python">import ctypes, os
+
+# ── ctypes: load a shared library and call C functions ──
+# Load libc (Linux/macOS)
+libc = ctypes.CDLL("libc.so.6" if os.name != "nt" else "msvcrt.dll")
+
+# Call strlen — tell ctypes the argument and return types
+libc.strlen.argtypes = [ctypes.c_char_p]
+libc.strlen.restype  = ctypes.c_size_t
+print(libc.strlen(b"hello"))   # 5
+
+# Create a C array and sum it
+ArrayType = ctypes.c_double * 5
+arr = ArrayType(1.0, 2.0, 3.0, 4.0, 5.0)
+print(sum(arr))   # 15.0
+
+# ── ctypes with a custom shared library ──
+# Compile: gcc -O3 -shared -fPIC -o libfast.so fast_math.c
+# lib = ctypes.CDLL("./libfast.so")
+# lib.sum_of_squares.argtypes = [ctypes.c_long]
+# lib.sum_of_squares.restype  = ctypes.c_double
+# print(lib.sum_of_squares(1_000_000))</code></pre>
+      <span class="code-label">ctypes_demo.py</span>
+    </div>
+    <div style="position:relative">
+      <pre><code class="language-python"># ── cffi (C Foreign Function Interface) — more Pythonic than ctypes ──
+# pip install cffi
+from cffi import FFI
+
+ffi = FFI()
+
+# Declare the C function signature
+ffi.cdef("""
+    double sum_squares(long n);
+    size_t strlen(const char *s);
+""")
+
+# Load the library (ABI mode — no compilation needed for existing .so)
+lib = ffi.dlopen("libc.so.6")   # or your custom .so
+
+# Call strlen
+s = ffi.new("char[]", b"hello world")
+print(lib.strlen(s))   # 11
+
+# ── cffi in-line mode: embed C code directly in Python ──
+ffi2 = FFI()
+ffi2.cdef("int add(int a, int b);")
+
+lib2 = ffi2.verify("""
+    int add(int a, int b) { return a + b; }
+""")
+print(lib2.add(3, 4))   # 7  — compiled and loaded on the fly</code></pre>
+      <span class="code-label">cffi_demo.py</span>
+    </div>
+    <div class="callout callout-tip">
+      <strong>When to use what:</strong>
+      <ul style="margin:8px 0 0;">
+        <li><strong>ctypes</strong> — stdlib, no install, good for simple calls to existing C libraries</li>
+        <li><strong>cffi</strong> — cleaner API, better ABI mode, recommended for new code</li>
+        <li><strong>C extension</strong> — full control, best performance, but most boilerplate</li>
+        <li><strong>Cython</strong> — best for accelerating existing Python code; generates C extension automatically</li>
+        <li><strong>pybind11</strong> — C++ bindings with minimal boilerplate; integrates with CMake</li>
+      </ul>
+    </div>
+
+    <!-- ── 9. Numba: JIT Compilation for Numeric Python ── -->
+    <h2 id="numba">Numba: JIT Compilation for Numeric Python</h2>
+    <p>
+      Numba compiles Python functions to native machine code using LLVM at first call.
+      No C code, no compilation step — just a decorator.
+    </p>
+    <div style="position:relative">
+      <pre><code class="language-bash">pip install numba</code></pre>
+      <span class="code-label">terminal</span>
+    </div>
+    <div style="position:relative">
+      <pre><code class="language-python">from numba import njit, prange
+import numpy as np
+import timeit
+
+# ── @njit: compile to native machine code (no Python overhead) ──
+@njit
+def sum_squares_numba(n: int) -> float:
+    total = 0.0
+    for i in range(n):
+        total += i * i
+    return total
+
+# First call triggers compilation (~0.5s)
+sum_squares_numba(10)
+
+N = 1_000_000
+t_py    = timeit.timeit(lambda: sum(i*i for i in range(N)), number=5)
+t_numba = timeit.timeit(lambda: sum_squares_numba(N), number=5)
+print(f"Python: {t_py:.3f}s   Numba: {t_numba:.5f}s   speedup: {t_py/t_numba:.0f}x")
+
+# ── Parallel loops with prange ──
+@njit(parallel=True)
+def parallel_sum(arr: np.ndarray) -> float:
+    total = 0.0
+    for i in prange(len(arr)):   # prange → OpenMP parallel loop
+        total += arr[i] * arr[i]
+    return total
+
+data = np.arange(10_000_000, dtype=np.float64)
+print(parallel_sum(data))
+
+# ── GPU acceleration with @cuda.jit ──
+# from numba import cuda
+# @cuda.jit
+# def gpu_kernel(arr, out): ...   # runs on NVIDIA GPU
+
+# ── What Numba can and cannot do ──
+# ✅ Works with: NumPy arrays, numeric Python (int, float), loops, conditionals
+# ❌ Fails with: arbitrary Python objects, dicts (mostly), strings, class instances</code></pre>
+      <span class="code-label">numba_demo.py</span>
+    </div>
+    <div class="callout callout-concept">
+      Numba's <code>@njit</code> ("no Python" JIT) compiles the function to native code that
+      bypasses the CPython interpreter entirely. Unlike Cython, you do not write C — Numba
+      infers types from the first call's arguments and generates LLVM IR.
+      The compiled code is cached on disk so the compilation overhead only occurs once.
+      Use Numba when your bottleneck is a pure numeric loop that NumPy cannot vectorise.
+    </div>
+
+    <!-- ── 10. Performance Cookbook: Patterns & Anti-Patterns ── -->
+    <h2 id="cookbook">Performance Cookbook</h2>
+
+    <h3>Anti-Patterns (Things That Silently Slow You Down)</h3>
+    <div style="position:relative">
+      <pre><code class="language-python">import dis, timeit
+
+# ❌ Anti-pattern 1: Repeated attribute lookup in hot loops
+class Processor:
+    results = []
+    def slow(self, data):
+        for x in data:
+            self.results.append(x)   # self.results AND .append looked up every iteration
+
+    def fast(self, data):
+        append = self.results.append  # cache the bound method
+        for x in data:
+            append(x)
+
+# ❌ Anti-pattern 2: Building a string by concatenation
+def slow_join(parts):
+    result = ""
+    for p in parts:
+        result += p   # creates a NEW string object every iteration O(n²)
+    return result
+
+def fast_join(parts):
+    return "".join(parts)   # single allocation
+
+# ❌ Anti-pattern 3: Using a list where a deque is needed for popleft
+from collections import deque
+data = list(range(100_000))
+dq   = deque(range(100_000))
+
+t_list  = timeit.timeit(lambda: data.pop(0), number=1000)   # O(n) shift
+t_deque = timeit.timeit(lambda: dq.popleft(), number=1000)  # O(1)
+print(f"list.pop(0): {t_list:.4f}s  deque.popleft: {t_deque:.6f}s")
+
+# ❌ Anti-pattern 4: Checking type with type() instead of isinstance()
+def slow_check(x):
+    return type(x) == int   # does not handle subclasses; slightly slower
+
+def fast_check(x):
+    return isinstance(x, int)   # handles subclasses; JIT-friendly
+
+# ❌ Anti-pattern 5: Creating lambdas / partials in a tight loop
+import functools
+fn = functools.partial(pow, 2)   # create ONCE outside the loop
+for _ in range(1_000_000):
+    fn(10)   # reuse the same partial object</code></pre>
+      <span class="code-label">anti_patterns.py</span>
+    </div>
+
+    <h3>Quick-Reference Performance Decision Table</h3>
+    <table>
+      <thead>
+        <tr><th>Problem</th><th>Solution</th><th>Typical speedup</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Slow algorithm (O(n²))</td><td>Better algorithm / data structure</td><td>10–1000×</td></tr>
+        <tr><td>List membership check</td><td>Convert to <code>set</code></td><td>100–10000×</td></tr>
+        <tr><td>Python loop over numbers</td><td>NumPy vectorisation</td><td>50–200×</td></tr>
+        <tr><td>Repeated expensive call</td><td><code>functools.lru_cache</code></td><td>10–1000×</td></tr>
+        <tr><td>Millions of small objects</td><td><code>__slots__</code></td><td>2–3× memory, 10–20% speed</td></tr>
+        <tr><td>Hot numeric loop</td><td>Numba <code>@njit</code></td><td>50–200×</td></tr>
+        <tr><td>Calling C library</td><td><code>ctypes</code> / <code>cffi</code></td><td>Near-C speed</td></tr>
+        <tr><td>Accelerating Python module</td><td>Cython typed annotations</td><td>10–100×</td></tr>
+        <tr><td>CPU-bound multi-core</td><td><code>multiprocessing</code> or Python 3.13 free-threaded</td><td>N×cores</td></tr>
+        <tr><td>I/O-bound concurrent</td><td><code>asyncio</code> or threads</td><td>N×connections</td></tr>
+      </tbody>
+    </table>
+
+    <!-- ── Best Practices ── -->
+    <h2 id="best-practices">Best Practices</h2>
+    <ul>
+      <li><strong>Profile before optimising</strong> — always. Use <code>cProfile</code> to find the slow function, then <code>line_profiler</code> to find the slow line. Optimising the wrong place wastes time and adds complexity.</li>
+      <li><strong>Fix the algorithm first</strong> — a 100× algorithmic improvement beats a 2× micro-optimisation. Replace O(n²) with O(n log n) before reaching for NumPy or C.</li>
+      <li><strong>Benchmark with <code>timeit</code>, not wall-clock time</strong> — <code>timeit</code> runs the code many times and accounts for JIT warm-up and system noise. A single <code>perf_counter</code> call is unreliable for short-running code.</li>
+      <li><strong>Cache global lookups as locals in hot loops</strong> — <code>LOAD_FAST</code> is faster than <code>LOAD_GLOBAL</code> + <code>LOAD_ATTR</code>. Assign <code>sqrt = math.sqrt</code> before a tight loop.</li>
+      <li><strong>Use <code>__slots__</code> for classes with millions of instances</strong> — eliminates per-instance <code>__dict__</code>, saving 40–60% memory and improving attribute access speed.</li>
+      <li><strong>Prefer in-place NumPy operations for large arrays</strong> — <code>a += b</code> instead of <code>a = a + b</code> avoids allocating a temporary array, halving peak memory usage.</li>
+      <li><strong>Use Numba for loops NumPy can't vectorise</strong> — recursive algorithms, variable-length inner loops, custom reduction logic. Add <code>@njit(cache=True)</code> to persist compiled code across runs.</li>
+      <li><strong>Treat free-threaded Python 3.13 as experimental for now</strong> — ecosystem packages (NumPy, pandas) are still adding free-threaded support. Test thoroughly before deploying GIL-free builds in production.</li>
+    </ul>
+
+    <!-- ── Exercises ── -->
+    <h2 id="exercises">Exercises</h2>
+    <div class="exercise-section">
+
+      <div class="exercise">
+        <h3>Exercise 1 — Profile &amp; Optimise a Data Pipeline</h3>
+        <p>
+          Given the following slow data processing function, use <code>cProfile</code>
+          and <code>timeit</code> to identify the bottleneck and then fix it:
+        </p>
+        <div style="position:relative">
+          <pre><code class="language-python">import random
+
+def generate_data(n=100_000):
+    return [{"id": i, "value": random.random(), "tag": str(i % 10)} for i in range(n)]
+
+def process_slow(records):
+    # Find records where tag is "5" and value > 0.5, return sorted by value desc
+    result = []
+    for r in records:
+        if r["tag"] == "5":
+            if r["value"] > 0.5:
+                result.append(r)
+    result = sorted(result, key=lambda x: x["value"], reverse=True)
+    return result</code></pre>
+          <span class="code-label">pipeline.py</span>
+        </div>
+        <ul>
+          <li>Profile <code>process_slow</code> with <code>cProfile</code>; identify top time consumers.</li>
+          <li>Rewrite <code>process_fast</code> using: list comprehension, direct dict access, and <code>sorted</code> with a key function.</li>
+          <li>Benchmark both with <code>timeit</code> on 100k records; print the speedup ratio.</li>
+          <li>As a stretch goal: implement <code>process_numpy</code> that converts the records to NumPy structured arrays and filters/sorts in NumPy.</li>
+        </ul>
+        <details>
+          <summary>💡 Hint</summary>
+          <pre><code class="language-python">def process_fast(records):
+    return sorted(
+        (r for r in records if r["tag"] == "5" and r["value"] > 0.5),
+        key=lambda x: x["value"],
+        reverse=True,
+    )
+
+# Benchmark
+import timeit
+data = generate_data()
+t_slow = timeit.timeit(lambda: process_slow(data), number=10)
+t_fast = timeit.timeit(lambda: process_fast(data), number=10)
+print(f"slow={t_slow:.3f}s  fast={t_fast:.3f}s  speedup={t_slow/t_fast:.1f}x")</code></pre>
+        </details>
+      </div>
+
+      <div class="exercise">
+        <h3>Exercise 2 — Benchmark <code>__slots__</code> at Scale</h3>
+        <p>
+          Quantify the real-world impact of <code>__slots__</code> on a class that
+          models a financial tick (high-frequency trading data):
+        </p>
+        <ul>
+          <li>Define <code>TickDict</code> (no slots) and <code>TickSlots</code> (<code>__slots__</code>) both with: <code>symbol: str</code>, <code>price: float</code>, <code>volume: int</code>, <code>timestamp: float</code>.</li>
+          <li>Create 5 000 000 instances of each; measure: peak memory with <code>tracemalloc</code>, construction time with <code>timeit</code>, attribute read time (<code>t.price</code> × 10M reads).</li>
+          <li>Print a formatted comparison table.</li>
+          <li>Confirm that <code>TickSlots.__dict__["price"]</code> is a <code>member_descriptor</code>.</li>
+        </ul>
+        <details>
+          <summary>💡 Hint</summary>
+          <pre><code class="language-python">import sys, tracemalloc, timeit
+
+class TickDict:
+    def __init__(self, sym, price, vol, ts):
+        self.symbol, self.price, self.volume, self.timestamp = sym, price, vol, ts
+
+class TickSlots:
+    __slots__ = ("symbol", "price", "volume", "timestamp")
+    def __init__(self, sym, price, vol, ts):
+        self.symbol, self.price, self.volume, self.timestamp = sym, price, vol, ts
+
+N = 5_000_000
+for cls in (TickDict, TickSlots):
+    tracemalloc.start()
+    objs = [cls("AAPL", 175.0 + i*0.0001, 100, 1700000000.0 + i) for i in range(N)]
+    _, peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+    read_t = timeit.timeit(lambda: objs[0].price, number=10_000_000)
+    print(f"{cls.__name__:12s}  size={sys.getsizeof(objs[0])}B  "
+          f"peak={peak/1e9:.2f}GB  read={read_t:.3f}s")</code></pre>
+        </details>
+      </div>
+
+      <div class="exercise">
+        <h3>Exercise 3 — Write and Benchmark a C Extension</h3>
+        <p>
+          Write a C extension that implements a fast prime sieve and benchmark it
+          against a pure-Python equivalent:
+        </p>
+        <ul>
+          <li>Implement the Sieve of Eratosthenes in C (<code>sieve.c</code>): <code>sieve(int n)</code> returns a Python list of all primes up to n.</li>
+          <li>Write <code>setup.py</code> to compile it as a Python extension module.</li>
+          <li>Implement the same algorithm in pure Python (<code>sieve_py(n)</code>).</li>
+          <li>Benchmark both for n=1_000_000 using <code>timeit</code>; print the speedup.</li>
+          <li>Stretch: also implement in NumPy (<code>sieve_numpy(n)</code>) using boolean array masking.</li>
+        </ul>
+        <details>
+          <summary>💡 Hint — sieve.c skeleton</summary>
+          <pre><code class="language-c">#include &lt;Python.h&gt;
+#include &lt;stdlib.h&gt;
+#include &lt;string.h&gt;
+
+static PyObject *sieve(PyObject *self, PyObject *args) {
+    int n;
+    if (!PyArg_ParseTuple(args, "i", &n)) return NULL;
+
+    char *composite = calloc(n + 1, 1);  /* 0 = prime, 1 = composite */
+    composite[0] = composite[1] = 1;
+    for (int i = 2; (long)i*i &lt;= n; i++) {
+        if (!composite[i]) {
+            for (int j = i*i; j &lt;= n; j += i)
+                composite[j] = 1;
+        }
+    }
+    PyObject *list = PyList_New(0);
+    for (int i = 2; i &lt;= n; i++) {
+        if (!composite[i])
+            PyList_Append(list, PyLong_FromLong(i));
+    }
+    free(composite);
+    return list;
+}
+
+static PyMethodDef SieveMethods[] = {
+    {"sieve", sieve, METH_VARARGS, "Sieve of Eratosthenes"},
+    {NULL, NULL, 0, NULL}
+};
+static struct PyModuleDef sievermodule = {
+    PyModuleDef_HEAD_INIT, "sieve_c", NULL, -1, SieveMethods
+};
+PyMODINIT_FUNC PyInit_sieve_c(void) { return PyModule_Create(&sievermodule); }</code></pre>
+        </details>
+      </div>
+
+    </div><!-- /exercise-section -->
+
+    <div id="quiz-section"></div>
+    <div id="lesson-nav-footer"></div>
+  </div><!-- /content -->
+</div><!-- /main -->
+
+<script src="../assets/nav-data.js"></script>
+<script src="../assets/nav.js"></script>
+<script src="../assets/quiz.js"></script>
+<script src="../assets/highlight.js"></script>
+
+<script>
+buildLessonFooter();
+
+QuizWidget.render("quiz-section", [
+  {
+    question: "Why is caching a global as a local variable faster in a tight Python loop?",
+    options: [
+      "Local variables are stored in a faster memory tier (L1 cache) while globals are in RAM",
+      "LOAD_FAST uses an integer index into the frame's fast-locals array (O(1), no dict lookup); LOAD_GLOBAL + LOAD_ATTR requires a dict lookup in the module's __dict__ followed by another dict/descriptor lookup for the attribute — two hash table lookups vs one array access per iteration",
+      "The Python compiler automatically inlines local variables at compile time",
+      "Global lookups acquire the GIL on every access; local lookups do not"
+    ],
+    correct: 1,
+    explanation: "LOAD_FAST retrieves a variable by integer index from the frame's fastlocals C array — effectively a single pointer dereference. LOAD_GLOBAL looks up the name in the module's __dict__ (a hash table lookup) and LOAD_ATTR then looks up the attribute on the resulting object (another hash table or descriptor lookup). In a loop running millions of iterations, the difference between one array access and two hash lookups accumulates to a measurable speedup. For math.sqrt called 1M times, caching it as a local variable typically saves 20–40% of loop time."
+  },
+  {
+    question: "What does `@njit` in Numba do, and how is it different from `@jit`?",
+    options: [
+      "@njit is for NumPy arrays only; @jit works with any Python type",
+      "@njit stands for 'no-Python JIT' — it compiles the function to native machine code using LLVM and raises an error if any part of the function cannot be compiled without the Python interpreter; @jit falls back to object mode (using Python objects) for unsupported constructs",
+      "@njit uses multiple CPU cores automatically; @jit is always single-threaded",
+      "@njit caches the compiled code to disk; @jit recompiles on every interpreter restart"
+    ],
+    correct: 1,
+    explanation: "@njit is equivalent to @jit(nopython=True) — it forces Numba into 'nopython mode' where the entire function is compiled to native machine code with no calls back to the Python interpreter. If Numba cannot infer the types or encounters an unsupported construct (like an arbitrary Python object), it raises a TypingError immediately instead of silently falling back to slow Python execution. This makes @njit failures loud and obvious. Use @njit for all new numeric code; only use @jit if you need to handle mixed Python/numeric code in the same function."
+  },
+  {
+    question: "What is the key limitation of Python 3.13's free-threaded (no-GIL) mode for typical Python applications?",
+    options: [
+      "Free-threaded Python cannot use asyncio — it only supports threading",
+      "Most C extensions (NumPy, pandas, PIL, etc.) were compiled against the GIL-enabled build and still use a compatibility shim that serialises their execution; true multi-core parallelism requires extensions to be recompiled and updated for the free-threaded ABI",
+      "Free-threaded Python is 5-10x slower than GIL Python for all workloads because per-object locking is expensive",
+      "Free-threaded Python only works on Linux; macOS and Windows still require the GIL"
+    ],
+    correct: 1,
+    explanation: "The free-threaded build removes the GIL from the interpreter, but the ecosystem is not yet fully ready. Extensions compiled for the GIL-enabled build (the default) are loaded with a compatibility shim that re-acquires a per-extension lock, effectively serialising that extension's code. NumPy, pandas, and other popular packages are actively adding free-threaded support but it takes time. Additionally, C extension authors must audit their code for thread-safety bugs that the GIL previously masked. Free-threaded Python 3.13 is a major step forward but requires ecosystem maturity to realise its full potential."
+  },
+  {
+    question: "Why does string concatenation in a loop (`result += s`) have O(n²) complexity, and what is the fix?",
+    options: [
+      "String += does not modify in place — it creates a new string object of length (len(result) + len(s)) for every iteration, so total bytes allocated = 1+2+3+...+n = O(n²); the fix is str.join() which allocates the output exactly once",
+      "String concatenation is O(n²) because Python searches the string for the insertion point each time",
+      "The += operator on strings triggers a hash recomputation for interning purposes, making it O(n) per call",
+      "Python's garbage collector must trace all intermediate string objects making each += O(n) due to GC overhead"
+    ],
+    correct: 1,
+    explanation: "Python strings are immutable — result += s cannot extend result in place. It allocates a brand-new string of length len(result)+len(s) and copies both strings into it. After n iterations, the total bytes copied are 1+2+3+...+n = n*(n+1)/2 = O(n²). For 10,000 100-byte strings, that is ~5 billion bytes of copying. str.join(parts) pre-computes the total length, makes one allocation, then copies each part once — O(n) total. Always collect parts in a list and join once at the end."
+  },
+  {
+    question: "What is the fundamental difference between `cProfile` and `line_profiler`, and when should you use each?",
+    options: [
+      "cProfile measures memory usage; line_profiler measures time",
+      "cProfile instruments at the function call level — measuring calls, total time, and cumulative time per function with very low overhead; line_profiler instruments at the line level — showing time spent on each line inside a function, but with higher overhead requiring explicit @profile decoration",
+      "cProfile is only for synchronous code; line_profiler supports async functions",
+      "They measure the same thing but cProfile is more accurate for short functions while line_profiler is more accurate for long functions"
+    ],
+    correct: 1,
+    explanation: "cProfile uses C-level function call hooks (set_profile) with minimal overhead — it is safe to run against full programs and production-like workloads. It tells you WHICH functions are slow (by cumulative time) and HOW OFTEN they are called. Once cProfile points you to a slow function, line_profiler (kernprof -l -v) tells you WHICH LINE inside that function is slow. line_profiler has higher overhead (it times every line) so you decorate only the specific functions you want to inspect. The workflow is: cProfile first to find the bottleneck function, line_profiler second to find the bottleneck line."
+  }
+]);
+</script>
+</body>
+</html>

@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lesson 17 — Composite Actions & Mono-Repo Pipelines</title>
+  <link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+
+  <div class="lesson-meta">
+    <span class="number">LESSON 17</span> &middot; Pattern + Hands-On &middot; ~15 minutes
+  </div>
+
+  <h1>Composite Actions & Mono-Repo Pipelines</h1>
+  <p>Two remaining patterns before we enter GitOps territory: composite actions (step-level reuse) and mono-repo path filtering (build only what changed).</p>
+
+  <div class="progress">
+    <span>Lesson 17 of 33</span>
+    <div class="progress-bar"><div class="progress-fill" style="width: 51%"></div></div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>Composite Actions: Reuse at the Step Level</h2>
+
+  <p>Every job starts the same: checkout → setup-node → npm ci. That's 3 steps repeated in every job. A composite action collapses them into one:</p>
+
+  <div class="diagram">
+    <svg viewBox="0 0 650 100" xmlns="http://www.w3.org/2000/svg">
+      <!-- Before -->
+      <rect x="20" y="15" width="280" height="70" rx="4" fill="#ffebee" stroke="#c62828"/>
+      <text x="160" y="32" text-anchor="middle" font-size="9" font-weight="bold" fill="#c62828">Before: 3 steps per job × 4 jobs = 12 steps</text>
+      <text x="160" y="50" text-anchor="middle" font-family="monospace" font-size="7" fill="#555">- uses: actions/checkout@v4</text>
+      <text x="160" y="62" text-anchor="middle" font-family="monospace" font-size="7" fill="#555">- uses: actions/setup-node@v4</text>
+      <text x="160" y="74" text-anchor="middle" font-family="monospace" font-size="7" fill="#555">- run: npm ci</text>
+      
+      <!-- After -->
+      <rect x="340" y="15" width="290" height="70" rx="4" fill="#e8f5e9" stroke="#388e3c"/>
+      <text x="485" y="32" text-anchor="middle" font-size="9" font-weight="bold" fill="#388e3c">After: 1 step per job × 4 jobs = 4 steps</text>
+      <text x="485" y="55" text-anchor="middle" font-family="monospace" font-size="8" fill="#555">- uses: ./.github/actions/setup</text>
+      <text x="485" y="72" text-anchor="middle" font-size="8" fill="#388e3c">Encapsulates all three ✓</text>
+    </svg>
+  </div>
+
+  <div class="exercise">
+    <h3>Create <code>.github/actions/setup/action.yml</code></h3>
+<pre><code><span style="color:#89b4fa">name:</span> <span style="color:#a6e3a1">'Setup Project'</span>
+<span style="color:#89b4fa">description:</span> <span style="color:#a6e3a1">'Checkout + Node + install deps'</span>
+
+<span style="color:#89b4fa">inputs:</span>
+  <span style="color:#89b4fa">node-version:</span>
+    <span style="color:#89b4fa">default:</span> <span style="color:#a6e3a1">'20'</span>
+  <span style="color:#89b4fa">working-directory:</span>
+    <span style="color:#89b4fa">default:</span> <span style="color:#a6e3a1">'.'</span>
+
+<span style="color:#89b4fa">runs:</span>
+  <span style="color:#89b4fa">using:</span> <span style="color:#a6e3a1">'composite'</span>
+  <span style="color:#89b4fa">steps:</span>
+    - <span style="color:#89b4fa">uses:</span> <span style="color:#a6e3a1">actions/checkout@v4</span>
+    - <span style="color:#89b4fa">uses:</span> <span style="color:#a6e3a1">actions/setup-node@v4</span>
+      <span style="color:#89b4fa">with:</span>
+        <span style="color:#89b4fa">node-version:</span> <span style="color:#a6e3a1">${{ inputs.node-version }}</span>
+        <span style="color:#89b4fa">cache:</span> <span style="color:#a6e3a1">'npm'</span>
+        <span style="color:#89b4fa">cache-dependency-path:</span> <span style="color:#a6e3a1">${{ inputs.working-directory }}/package-lock.json</span>
+    - <span style="color:#89b4fa">shell:</span> <span style="color:#a6e3a1">bash</span>
+      <span style="color:#89b4fa">working-directory:</span> <span style="color:#a6e3a1">${{ inputs.working-directory }}</span>
+      <span style="color:#89b4fa">run:</span> <span style="color:#a6e3a1">npm ci</span>
+</code></pre>
+
+    <h3>Use it</h3>
+<pre><code><span style="color:#89b4fa">jobs:</span>
+  <span style="color:#89b4fa">test:</span>
+    <span style="color:#89b4fa">runs-on:</span> <span style="color:#a6e3a1">ubuntu-latest</span>
+    <span style="color:#89b4fa">steps:</span>
+      - <span style="color:#89b4fa">uses:</span> <span style="color:#a6e3a1">./.github/actions/setup</span>  <span style="color:#6c7086"># Replaces 3 steps!</span>
+      - <span style="color:#89b4fa">run:</span> <span style="color:#a6e3a1">npm test</span>
+</code></pre>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>Mono-Repo Pipelines: Build Only What Changed</h2>
+
+  <div class="diagram">
+    <svg viewBox="0 0 700 150" xmlns="http://www.w3.org/2000/svg">
+      <!-- Repo structure -->
+      <rect x="20" y="10" width="200" height="130" rx="6" fill="#f5f5f5" stroke="#bdbdbd"/>
+      <text x="120" y="30" text-anchor="middle" font-size="10" font-weight="bold">Mono-Repo</text>
+      <text x="40" y="50" font-family="monospace" font-size="9">services/</text>
+      <text x="55" y="67" font-family="monospace" font-size="9" fill="#1976d2">├── api/</text>
+      <text x="55" y="84" font-family="monospace" font-size="9" fill="#388e3c">├── web/</text>
+      <text x="55" y="101" font-family="monospace" font-size="9" fill="#f57c00">├── worker/</text>
+      <text x="40" y="118" font-family="monospace" font-size="9">packages/</text>
+      <text x="55" y="135" font-family="monospace" font-size="9" fill="#7b1fa2">└── shared/</text>
+      
+      <!-- Change detection -->
+      <rect x="260" y="30" width="180" height="90" rx="6" fill="#e3f2fd" stroke="#1976d2"/>
+      <text x="350" y="52" text-anchor="middle" font-size="9" font-weight="bold" fill="#1976d2">Change Detection</text>
+      <text x="350" y="72" text-anchor="middle" font-size="8" fill="#555">Commit changes:</text>
+      <text x="350" y="87" text-anchor="middle" font-size="8" fill="#1976d2" font-weight="bold">services/api/src/index.js</text>
+      <text x="350" y="102" text-anchor="middle" font-size="8" fill="#555">→ Only api changed</text>
+      
+      <!-- Results -->
+      <rect x="480" y="20" width="200" height="110" rx="6" fill="#e8f5e9" stroke="#388e3c"/>
+      <text x="580" y="40" text-anchor="middle" font-size="9" font-weight="bold" fill="#388e3c">Pipelines Triggered</text>
+      <rect x="495" y="50" width="170" height="20" rx="3" fill="#c8e6c9" stroke="#388e3c"/>
+      <text x="580" y="64" text-anchor="middle" font-size="8" fill="#2e7d32">✓ API pipeline runs</text>
+      <rect x="495" y="75" width="170" height="20" rx="3" fill="#e0e0e0" stroke="#bdbdbd"/>
+      <text x="580" y="89" text-anchor="middle" font-size="8" fill="#999">— Web skipped</text>
+      <rect x="495" y="100" width="170" height="20" rx="3" fill="#e0e0e0" stroke="#bdbdbd"/>
+      <text x="580" y="114" text-anchor="middle" font-size="8" fill="#999">— Worker skipped</text>
+    </svg>
+  </div>
+
+  <h3>Path-Based Triggering</h3>
+<pre><code><span style="color:#6c7086"># .github/workflows/ci-api.yml</span>
+<span style="color:#89b4fa">name:</span> <span style="color:#a6e3a1">API CI</span>
+<span style="color:#89b4fa">on:</span>
+  <span style="color:#89b4fa">push:</span>
+    <span style="color:#89b4fa">paths:</span>
+      - <span style="color:#a6e3a1">'services/api/**'</span>
+      - <span style="color:#a6e3a1">'packages/shared/**'</span>  <span style="color:#6c7086"># Rebuild if shared code changes too!</span>
+      - <span style="color:#a6e3a1">'.github/workflows/ci-api.yml'</span>
+<span style="color:#89b4fa">jobs:</span>
+  <span style="color:#89b4fa">ci:</span>
+    <span style="color:#89b4fa">uses:</span> <span style="color:#a6e3a1">./.github/workflows/reusable-ci.yml</span>
+    <span style="color:#89b4fa">with:</span>
+      <span style="color:#89b4fa">working-directory:</span> <span style="color:#a6e3a1">services/api</span>
+</code></pre>
+
+  <h3>Dynamic Detection with dorny/paths-filter</h3>
+<pre><code><span style="color:#89b4fa">jobs:</span>
+  <span style="color:#89b4fa">changes:</span>
+    <span style="color:#89b4fa">runs-on:</span> <span style="color:#a6e3a1">ubuntu-latest</span>
+    <span style="color:#89b4fa">outputs:</span>
+      <span style="color:#89b4fa">api:</span> <span style="color:#a6e3a1">${{ steps.filter.outputs.api }}</span>
+      <span style="color:#89b4fa">web:</span> <span style="color:#a6e3a1">${{ steps.filter.outputs.web }}</span>
+    <span style="color:#89b4fa">steps:</span>
+      - <span style="color:#89b4fa">uses:</span> <span style="color:#a6e3a1">actions/checkout@v4</span>
+      - <span style="color:#89b4fa">uses:</span> <span style="color:#a6e3a1">dorny/paths-filter@v3</span>
+        <span style="color:#89b4fa">id:</span> <span style="color:#a6e3a1">filter</span>
+        <span style="color:#89b4fa">with:</span>
+          <span style="color:#89b4fa">filters:</span> <span style="color:#a6e3a1">|</span>
+            <span style="color:#a6e3a1">api:</span>
+              <span style="color:#a6e3a1">- 'services/api/**'</span>
+              <span style="color:#a6e3a1">- 'packages/shared/**'</span>
+            <span style="color:#a6e3a1">web:</span>
+              <span style="color:#a6e3a1">- 'services/web/**'</span>
+              <span style="color:#a6e3a1">- 'packages/shared/**'</span>
+
+  <span style="color:#89b4fa">ci-api:</span>
+    <span style="color:#89b4fa">needs:</span> <span style="color:#a6e3a1">changes</span>
+    <span style="color:#89b4fa">if:</span> <span style="color:#a6e3a1">needs.changes.outputs.api == 'true'</span>
+    <span style="color:#89b4fa">uses:</span> <span style="color:#a6e3a1">./.github/workflows/reusable-ci.yml</span>
+    <span style="color:#89b4fa">with:</span> { <span style="color:#89b4fa">working-directory:</span> <span style="color:#a6e3a1">services/api</span> }
+
+  <span style="color:#89b4fa">ci-web:</span>
+    <span style="color:#89b4fa">needs:</span> <span style="color:#a6e3a1">changes</span>
+    <span style="color:#89b4fa">if:</span> <span style="color:#a6e3a1">needs.changes.outputs.web == 'true'</span>
+    <span style="color:#89b4fa">uses:</span> <span style="color:#a6e3a1">./.github/workflows/reusable-ci.yml</span>
+    <span style="color:#89b4fa">with:</span> { <span style="color:#89b4fa">working-directory:</span> <span style="color:#a6e3a1">services/web</span> }
+</code></pre>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>Architect Decision: Mono-Repo vs Multi-Repo Pipelines</h2>
+
+  <table>
+    <thead><tr><th></th><th>Mono-Repo</th><th>Multi-Repo</th></tr></thead>
+    <tbody>
+      <tr><td><strong>Pipeline per service</strong></td><td>Path-filtered in one repo</td><td>Each repo has its own workflows</td></tr>
+      <tr><td><strong>Shared code</strong></td><td>packages/ — path triggers dependents</td><td>Published as npm packages</td></tr>
+      <tr><td><strong>Reusable workflows</strong></td><td><code>./.github/workflows/reusable-*.yml</code></td><td>Separate repo or org-level</td></tr>
+      <tr><td><strong>Complexity</strong></td><td>Higher (change detection logic)</td><td>Lower per repo, more repos to manage</td></tr>
+      <tr><td><strong>Best for</strong></td><td>Tightly coupled services, small teams</td><td>Independent services, larger orgs</td></tr>
+    </tbody>
+  </table>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>🧠 Recall Check</h2>
+
+  <div class="recall">
+    <ol>
+      <li>What's the file extension and key property that makes a composite action?</li>
+      <li>In a mono-repo, what happens when you change <code>packages/shared/</code>?</li>
+      <li>What's the difference between <code>uses: ./.github/actions/setup</code> and <code>uses: ./.github/workflows/reusable-ci.yml</code>?</li>
+    </ol>
+    <details>
+      <summary>Reveal answers</summary>
+      <ol>
+        <li><code>action.yml</code> with <code>runs: using: 'composite'</code>. It defines reusable steps (not jobs).</li>
+        <li>All services that depend on shared should rebuild. Include <code>'packages/shared/**'</code> in each service's path filter to trigger their pipelines.</li>
+        <li>The first is a <strong>composite action</strong> (a set of steps, used within a job). The second is a <strong>reusable workflow</strong> (a complete workflow with its own jobs, used as a top-level job in the caller).</li>
+      </ol>
+    </details>
+  </div>
+
+  <div class="key-insight">
+    <strong>You've now completed the push-based CI/CD toolkit.</strong> You can build, test, containerize, deploy, and scale pipelines across services. Next: we enter <strong>GitOps territory</strong> — a fundamentally different (and better) delivery model for Kubernetes.
+  </div>
+
+  <p><strong>Next lesson:</strong> GitOps Principles — the mental model shift from push to pull.</p>
+
+</body>
+</html>

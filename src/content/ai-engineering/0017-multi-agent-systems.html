@@ -1,0 +1,562 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lesson 17: Multi-Agent Systems | AI Engineering</title>
+    <link rel="stylesheet" href="../assets/lesson.css">
+    <link rel="stylesheet" href="../assets/prism-theme.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-python.min.js"></script>
+    <script src="../assets/diagrams.js"></script>
+</head>
+<body>
+    <div class="lesson-header">
+        <div class="module-badge">Module 4: AI Agents & Tools</div>
+        <h1>Multi-Agent Systems</h1>
+        <p class="lesson-subtitle">Design agent teams with specialized roles, implement delegation patterns, build message-passing pipelines, and orchestrate multi-agent workflows for complex tasks.</p>
+    </div>
+
+    <div class="lesson-meta">
+        <span class="pill">Lesson 17</span>
+        <span class="pill">~30 min</span>
+        <span class="pill">Advanced</span>
+    </div>
+
+    <main class="lesson-content">
+        <!-- Section 1: Why Multi-Agent? -->
+        <section>
+            <h2>Why Multiple Agents?</h2>
+            <div class="concept-box">
+                <h3>The Case for Specialization</h3>
+                <p>A single agent with 20 tools and a complex goal tends to get confused. Multi-agent systems split complex tasks across <strong>specialized agents</strong> — each with a focused role, limited tools, and a clear responsibility. This mirrors how human teams work: researcher, writer, editor, reviewer.</p>
+            </div>
+
+            <p>Benefits of multi-agent architectures:</p>
+            <ul>
+                <li><strong>Separation of concerns:</strong> Each agent has a focused system prompt and limited tools</li>
+                <li><strong>Scalability:</strong> Add new agents without changing existing ones</li>
+                <li><strong>Quality:</strong> Specialized prompts outperform generalist "do everything" prompts</li>
+                <li><strong>Debuggability:</strong> Trace failures to a specific agent in the pipeline</li>
+                <li><strong>Parallelism:</strong> Independent agents can run concurrently</li>
+            </ul>
+        </section>
+
+        <!-- Section 2: Agent Hierarchy -->
+        <section>
+            <h2>Manager/Worker Pattern</h2>
+            <div class="diagram-container" id="agent-hierarchy"></div>
+
+            <div class="concept-box">
+                <h3>Delegation Patterns</h3>
+                <p>The <strong>manager agent</strong> receives the user request, breaks it into subtasks, delegates to specialized workers, and synthesizes results. Workers never talk to each other directly — all coordination flows through the manager. This prevents circular dependencies and makes the system predictable.</p>
+            </div>
+
+            <div class="comparison-table">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Pattern</th>
+                            <th>Topology</th>
+                            <th>Best For</th>
+                            <th>Limitation</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><strong>Sequential Pipeline</strong></td>
+                            <td>A → B → C</td>
+                            <td>Content creation, data processing</td>
+                            <td>No parallelism, each step blocks</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Manager/Worker</strong></td>
+                            <td>Manager → {W1, W2, W3}</td>
+                            <td>Research, analysis, complex queries</td>
+                            <td>Manager is a bottleneck</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Debate/Consensus</strong></td>
+                            <td>A ↔ B ↔ C → Vote</td>
+                            <td>Decision-making, quality assurance</td>
+                            <td>Expensive (many LLM calls)</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Broadcast</strong></td>
+                            <td>Input → {A, B, C} → Merge</td>
+                            <td>Multi-perspective analysis</td>
+                            <td>Results may conflict</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <!-- Section 3: Message Passing -->
+        <section>
+            <h2>Agent Communication</h2>
+            <div class="diagram-container" id="message-flow"></div>
+
+            <div class="code-block">
+                <pre><code class="language-python">"""Message passing infrastructure for multi-agent systems."""
+from dataclasses import dataclass, field
+from typing import Optional
+from enum import Enum
+import uuid
+from datetime import datetime
+
+class MessageType(Enum):
+    TASK = "task"           # Assignment from manager
+    RESULT = "result"       # Completed work
+    FEEDBACK = "feedback"   # Revision request
+    QUERY = "query"         # Question to another agent
+    STATUS = "status"       # Progress update
+
+@dataclass
+class AgentMessage:
+    """Structured message between agents."""
+    id: str = field(default_factory=lambda: str(uuid.uuid4())[:8])
+    sender: str = ""
+    receiver: str = ""
+    type: MessageType = MessageType.TASK
+    content: str = ""
+    metadata: dict = field(default_factory=dict)
+    timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
+    parent_id: Optional[str] = None  # For threading conversations
+
+class MessageBus:
+    """Central message router for agent communication."""
+    
+    def __init__(self):
+        self.queues: dict[str, list[AgentMessage]] = {}
+        self.history: list[AgentMessage] = []
+    
+    def register_agent(self, agent_name: str):
+        self.queues[agent_name] = []
+    
+    def send(self, message: AgentMessage):
+        """Route message to receiver's queue."""
+        self.history.append(message)
+        if message.receiver in self.queues:
+            self.queues[message.receiver].append(message)
+        else:
+            raise ValueError(f"Unknown agent: {message.receiver}")
+    
+    def receive(self, agent_name: str) -> list[AgentMessage]:
+        """Get and clear pending messages for an agent."""
+        messages = self.queues.get(agent_name, [])
+        self.queues[agent_name] = []
+        return messages
+    
+    def get_conversation(self, agent_a: str, agent_b: str) -> list[AgentMessage]:
+        """Get all messages between two agents."""
+        return [m for m in self.history 
+                if (m.sender == agent_a and m.receiver == agent_b) or
+                   (m.sender == agent_b and m.receiver == agent_a)]</code></pre>
+            </div>
+        </section>
+
+        <!-- Section 4: Building the Pipeline -->
+        <section>
+            <h2>3-Agent Content Pipeline</h2>
+            <div class="concept-box">
+                <h3>Researcher → Writer → Editor</h3>
+                <p>Each agent has a single responsibility. The Researcher gathers information, the Writer creates a draft, and the Editor polishes and fact-checks. Messages flow sequentially, with the Editor able to send feedback back to the Writer for revisions.</p>
+            </div>
+
+            <div class="code-block">
+                <pre><code class="language-python">"""Multi-Agent Content Pipeline — Researcher → Writer → Editor."""
+import openai
+
+client = openai.OpenAI()
+
+class Agent:
+    """Base agent with role, tools, and message handling."""
+    
+    def __init__(self, name: str, system_prompt: str, model: str = "gpt-4o"):
+        self.name = name
+        self.system_prompt = system_prompt
+        self.model = model
+        self.conversation: list[dict] = []
+    
+    def process(self, task: str, context: str = "") -> str:
+        """Process a task and return the result."""
+        messages = [
+            {"role": "system", "content": self.system_prompt},
+        ]
+        if context:
+            messages.append({"role": "user", "content": f"Context from previous agents:\n{context}"})
+        messages.append({"role": "user", "content": task})
+        
+        response = client.chat.completions.create(
+            model=self.model,
+            messages=messages,
+            temperature=0.7,
+        )
+        
+        result = response.choices[0].message.content
+        self.conversation.append({"task": task, "result": result})
+        return result
+
+# ─── Define Specialized Agents ────────────────────────────────
+
+researcher = Agent(
+    name="Researcher",
+    system_prompt="""You are a research specialist. Your job is to:
+1. Identify key topics and subtopics to investigate
+2. Find relevant facts, statistics, and examples
+3. Organize findings into structured notes
+4. Flag areas that need more investigation
+
+Output FORMAT: structured research notes with headers, bullet points, and source attribution.
+Be thorough but concise. Focus on facts, not opinions."""
+)
+
+writer = Agent(
+    name="Writer",
+    system_prompt="""You are a professional technical writer. Your job is to:
+1. Take research notes and transform them into clear, engaging prose
+2. Structure content with logical flow (intro → body → conclusion)
+3. Use concrete examples and analogies
+4. Maintain a professional but accessible tone
+
+Output FORMAT: well-structured article with headers, paragraphs, and code examples where relevant.
+Never fabricate facts — only use what's in the research notes."""
+)
+
+editor = Agent(
+    name="Editor",
+    system_prompt="""You are a senior editor. Your job is to:
+1. Check factual accuracy against the research notes
+2. Improve clarity, conciseness, and flow
+3. Fix grammatical issues and awkward phrasing
+4. Ensure consistent tone and style
+5. Rate the final quality (1-10) and list remaining issues
+
+Output FORMAT: 
+- EDITED_CONTENT: [the improved text]
+- QUALITY_SCORE: [1-10]
+- ISSUES: [any remaining problems]
+- VERDICT: PUBLISH or NEEDS_REVISION"""
+)
+
+# ─── Pipeline Orchestrator ────────────────────────────────────
+
+class ContentPipeline:
+    """Orchestrates the Researcher → Writer → Editor flow."""
+    
+    def __init__(self, max_revisions: int = 2):
+        self.max_revisions = max_revisions
+        self.bus = MessageBus()
+        self.bus.register_agent("Researcher")
+        self.bus.register_agent("Writer")
+        self.bus.register_agent("Editor")
+    
+    def run(self, topic: str) -> dict:
+        """Run the full pipeline."""
+        print(f"📋 Topic: {topic}\n")
+        
+        # Step 1: Research
+        print("🔍 Researcher working...")
+        research_notes = researcher.process(
+            f"Research the following topic thoroughly: {topic}"
+        )
+        print(f"   ✓ Research complete ({len(research_notes)} chars)\n")
+        
+        # Step 2: Writing (with possible revisions)
+        draft = None
+        for revision in range(self.max_revisions + 1):
+            if revision == 0:
+                print("✍️  Writer working on first draft...")
+                draft = writer.process(
+                    f"Write a comprehensive article about: {topic}",
+                    context=research_notes
+                )
+            else:
+                print(f"✍️  Writer working on revision {revision}...")
+                draft = writer.process(
+                    f"Revise the article based on this editorial feedback:\n{feedback}",
+                    context=f"Original research:\n{research_notes}\n\nCurrent draft:\n{draft}"
+                )
+            
+            print(f"   ✓ Draft complete ({len(draft)} chars)\n")
+            
+            # Step 3: Editing
+            print("📝 Editor reviewing...")
+            edit_result = editor.process(
+                "Review this article for quality, accuracy, and clarity.",
+                context=f"Research notes:\n{research_notes}\n\nDraft:\n{draft}"
+            )
+            
+            # Parse editor verdict
+            if "PUBLISH" in edit_result or revision == self.max_revisions:
+                print("   ✓ Editor approved!\n")
+                break
+            else:
+                feedback = edit_result
+                print(f"   ↩ Editor requested revision\n")
+        
+        return {
+            "topic": topic,
+            "research": research_notes,
+            "final_draft": draft,
+            "editor_notes": edit_result,
+            "revisions": revision,
+        }
+
+# ─── Run the Pipeline ────────────────────────────────────────
+
+pipeline = ContentPipeline(max_revisions=2)
+result = pipeline.run("The impact of transformer architecture on modern NLP")
+print(f"\n{'='*60}")
+print(f"Final article ({len(result['final_draft'])} chars, {result['revisions']} revisions)")
+print(result['final_draft'][:500] + "...")</code></pre>
+            </div>
+        </section>
+
+        <!-- Section 5: Framework Comparison -->
+        <section>
+            <h2>Framework Comparison</h2>
+            <div class="comparison-table">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Framework</th>
+                            <th>Architecture</th>
+                            <th>Strengths</th>
+                            <th>Weaknesses</th>
+                            <th>Best For</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><strong>CrewAI</strong></td>
+                            <td>Role-based crews with delegation</td>
+                            <td>Simple API, good defaults, role focus</td>
+                            <td>Limited control flow, opinionated</td>
+                            <td>Content pipelines, research teams</td>
+                        </tr>
+                        <tr>
+                            <td><strong>AutoGen</strong></td>
+                            <td>Conversational agents with group chat</td>
+                            <td>Flexible communication, code execution</td>
+                            <td>Complex setup, verbose conversations</td>
+                            <td>Coding tasks, collaborative problem-solving</td>
+                        </tr>
+                        <tr>
+                            <td><strong>LangGraph</strong></td>
+                            <td>State machine with typed state</td>
+                            <td>Precise control flow, persistence, streaming</td>
+                            <td>Steep learning curve, boilerplate</td>
+                            <td>Production workflows, complex state logic</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Custom (this lesson)</strong></td>
+                            <td>Whatever you design</td>
+                            <td>Full control, no dependencies, minimal</td>
+                            <td>Must build everything yourself</td>
+                            <td>Learning, specific requirements, lightweight</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <div class="code-block">
+                <pre><code class="language-python">"""Framework comparison — same task in CrewAI vs custom."""
+
+# ─── CrewAI Version (for reference) ──────────────────────────
+# pip install crewai
+
+from crewai import Agent as CrewAgent, Task, Crew
+
+crew_researcher = CrewAgent(
+    role="Research Analyst",
+    goal="Find comprehensive information about {topic}",
+    backstory="You are an expert researcher with access to the internet.",
+    tools=[search_tool, read_tool],
+)
+
+crew_writer = CrewAgent(
+    role="Technical Writer",
+    goal="Write clear, engaging articles from research notes",
+    backstory="You are a seasoned tech writer for a top publication.",
+)
+
+research_task = Task(
+    description="Research {topic} thoroughly",
+    agent=crew_researcher,
+    expected_output="Structured research notes",
+)
+
+writing_task = Task(
+    description="Write a comprehensive article from the research",
+    agent=crew_writer,
+    expected_output="Polished article",
+    context=[research_task],  # Depends on research
+)
+
+crew = Crew(agents=[crew_researcher, crew_writer], tasks=[research_task, writing_task])
+result = crew.kickoff(inputs={"topic": "quantum computing advances 2024"})</code></pre>
+            </div>
+        </section>
+
+        <!-- Section 6: Advanced Patterns -->
+        <section>
+            <h2>Advanced Patterns</h2>
+
+            <h3>Consensus Pattern</h3>
+            <div class="code-block">
+                <pre><code class="language-python">"""Consensus: Multiple agents vote on an answer."""
+
+def consensus_answer(question: str, num_agents: int = 3) -> str:
+    """Get multiple perspectives and find consensus."""
+    perspectives = [
+        "You are a conservative analyst who values caution and proven approaches.",
+        "You are an innovative thinker who values novel solutions and experimentation.",
+        "You are a pragmatic engineer who values simplicity and practicality.",
+    ]
+    
+    answers = []
+    for i in range(num_agents):
+        agent = Agent(f"Agent_{i}", perspectives[i % len(perspectives)])
+        answer = agent.process(question)
+        answers.append(answer)
+    
+    # Synthesizer combines the answers
+    synthesizer = Agent("Synthesizer", 
+        "You synthesize multiple expert opinions into a balanced conclusion. "
+        "Note where experts agree and where they disagree.")
+    
+    combined = "\n\n".join(f"Expert {i+1}: {a}" for i, a in enumerate(answers))
+    return synthesizer.process(
+        f"Question: {question}\n\nSynthesize these expert opinions:\n{combined}"
+    )</code></pre>
+            </div>
+
+            <h3>Dynamic Agent Spawning</h3>
+            <div class="code-block">
+                <pre><code class="language-python">"""Manager that dynamically creates specialized agents."""
+
+class DynamicManager:
+    """Creates agents on-the-fly based on task requirements."""
+    
+    def __init__(self):
+        self.planner = Agent("Planner",
+            "You are a project planner. Given a complex task, break it into subtasks "
+            "and specify what kind of specialist is needed for each. Output JSON:\n"
+            '[{"task": "...", "specialist": "...", "skills": "..."}]')
+    
+    def execute(self, goal: str) -> str:
+        # Step 1: Plan and identify needed specialists
+        plan_json = self.planner.process(f"Break this into subtasks: {goal}")
+        subtasks = json.loads(plan_json)
+        
+        # Step 2: Dynamically create agents for each subtask
+        results = []
+        for subtask in subtasks:
+            specialist = Agent(
+                name=subtask["specialist"],
+                system_prompt=f"You are a {subtask['specialist']} with expertise in: "
+                             f"{subtask['skills']}. Complete the assigned task thoroughly."
+            )
+            result = specialist.process(subtask["task"])
+            results.append({"task": subtask["task"], "result": result})
+        
+        # Step 3: Synthesize results
+        synthesizer = Agent("Synthesizer", "Combine these results into a coherent final output.")
+        context = "\n\n".join(f"Task: {r['task']}\nResult: {r['result']}" for r in results)
+        return synthesizer.process(f"Goal: {goal}\n\nResults:\n{context}")</code></pre>
+            </div>
+        </section>
+
+        <!-- Section 7: Mini-Project -->
+        <section>
+            <h2>Mini-Project: Multi-Agent Content Pipeline</h2>
+            <div class="project-box">
+                <h3>🛠️ Build a Full Content Creation Pipeline</h3>
+                <p>Create a multi-agent system that takes a topic and produces a polished, fact-checked article through specialized agent collaboration.</p>
+
+                <div class="step-list">
+                    <ol>
+                        <li>Implement the <code>MessageBus</code> for structured agent communication</li>
+                        <li>Create 3 specialized agents:
+                            <ul>
+                                <li><strong>Researcher:</strong> Gathers information (has web search tool)</li>
+                                <li><strong>Writer:</strong> Creates engaging content from research</li>
+                                <li><strong>Editor:</strong> Reviews, scores quality, requests revisions</li>
+                            </ul>
+                        </li>
+                        <li>Implement the sequential pipeline with revision loop (max 2 revisions)</li>
+                        <li>Add the Editor's ability to send content back to Writer with specific feedback</li>
+                        <li>Log all messages through the MessageBus for observability</li>
+                        <li>Test with varied topics:
+                            <ul>
+                                <li>"Explain how CRISPR gene editing works" (science)</li>
+                                <li>"The rise of Rust in systems programming" (tech)</li>
+                                <li>"How to build a personal investment portfolio" (finance)</li>
+                            </ul>
+                        </li>
+                        <li>Display execution trace: show all messages, agent decisions, revision count</li>
+                    </ol>
+                </div>
+
+                <h4>Stretch Goals</h4>
+                <ul>
+                    <li>Add a 4th agent: Fact-Checker that verifies claims against the research notes</li>
+                    <li>Implement parallel research: spawn 3 Researchers for different subtopics, merge results</li>
+                    <li>Add a consensus vote between Editor and Fact-Checker on whether to publish</li>
+                </ul>
+            </div>
+        </section>
+
+        <!-- Key Points -->
+        <section>
+            <div class="key-points">
+                <h3>Key Takeaways</h3>
+                <ul>
+                    <li>Multi-agent systems beat single agents on complex tasks through <strong>specialization</strong></li>
+                    <li>The Manager/Worker pattern is the most common: one agent plans, others execute</li>
+                    <li>Structured message passing enables tracing, debugging, and replay</li>
+                    <li>Sequential pipelines (A → B → C) are simple and effective for content/data workflows</li>
+                    <li>Revision loops with quality gates prevent low-quality output from reaching users</li>
+                    <li>Start with custom code to understand the patterns, then adopt frameworks when needed</li>
+                </ul>
+            </div>
+        </section>
+    </main>
+
+    <nav class="nav-links">
+        <a href="0016-tool-using-agents.html" class="prev">← Lesson 16: Tool-Using Agents</a>
+        <a href="0018-agent-memory-state.html" class="next">Lesson 18: Agent Memory & State →</a>
+    </nav>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            if (window.Diagrams) {
+                Diagrams.createLayerDiagram(
+                    document.getElementById('agent-hierarchy'),
+                    [
+                        { label: '👔 Manager Agent', sublabel: 'Plans, delegates, synthesizes', color: '#6366f1' },
+                        { label: '🔍 Researcher Agent', sublabel: 'Web search, data gathering', color: '#22d3ee' },
+                        { label: '✍️ Writer Agent', sublabel: 'Content creation, drafting', color: '#22c55e' },
+                        { label: '📝 Editor Agent', sublabel: 'Review, quality control', color: '#f59e0b' }
+                    ]
+                );
+
+                Diagrams.createFlowDiagram(
+                    document.getElementById('message-flow'),
+                    [
+                        { label: '📥 User Request', sublabel: 'Topic or goal', color: '#6366f1' },
+                        { label: '📋 Manager Plans', sublabel: 'Breaks into subtasks', color: '#22d3ee' },
+                        { label: '📨 Delegate to Workers', sublabel: 'Send task messages', color: '#f59e0b' },
+                        { label: '⚙️ Workers Execute', sublabel: 'Each does their specialty', color: '#22c55e' },
+                        { label: '📤 Results Return', sublabel: 'Workers send results back', color: '#22d3ee' },
+                        { label: '🔄 Quality Check', sublabel: 'Revise or approve', color: '#f59e0b' },
+                        { label: '✅ Final Output', sublabel: 'Synthesized result', color: '#22c55e' }
+                    ]
+                );
+            }
+        });
+    </script>
+</body>
+</html>

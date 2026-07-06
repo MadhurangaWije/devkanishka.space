@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lesson 31: Quality of Service Classes</title>
+    <style>
+        :root {
+            --bg: #fafafa; --text: #1a1a1a; --accent: #326ce5;
+            --accent-light: #e8f0fe; --border: #e0e0e0; --code-bg: #f5f5f5;
+            --success: #2e7d32; --warn: #f57c00;
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: 'Georgia', serif; line-height: 1.7; color: var(--text); background: var(--bg); max-width: 780px; margin: 0 auto; padding: 2rem 1.5rem; }
+        h1 { font-size: 2rem; margin-bottom: 0.5rem; color: var(--accent); }
+        h2 { font-size: 1.4rem; margin-top: 2.5rem; margin-bottom: 0.8rem; border-bottom: 2px solid var(--accent); padding-bottom: 0.3rem; }
+        h3 { font-size: 1.1rem; margin-top: 1.5rem; margin-bottom: 0.5rem; }
+        p { margin-bottom: 1rem; }
+        .meta { color: #666; font-size: 0.9rem; margin-bottom: 2rem; }
+        .key-insight { background: var(--accent-light); border-left: 4px solid var(--accent); padding: 1rem 1.2rem; margin: 1.5rem 0; border-radius: 0 4px 4px 0; }
+        .key-insight strong { color: var(--accent); }
+        .production-note { background: #fff3e0; border-left: 4px solid var(--warn); padding: 1rem 1.2rem; margin: 1.5rem 0; border-radius: 0 4px 4px 0; }
+        .production-note::before { content: "🏭 Production: "; font-weight: bold; }
+        .exam-tip { background: #e8f5e9; border-left: 4px solid var(--success); padding: 1rem 1.2rem; margin: 1.5rem 0; border-radius: 0 4px 4px 0; }
+        .exam-tip::before { content: "🎯 Exam Tip: "; font-weight: bold; color: var(--success); }
+        code { font-family: 'Menlo', 'Consolas', monospace; font-size: 0.85em; background: var(--code-bg); padding: 0.15em 0.4em; border-radius: 3px; }
+        pre { background: var(--code-bg); padding: 1rem; border-radius: 4px; overflow-x: auto; margin: 1rem 0; font-size: 0.85rem; line-height: 1.5; }
+        ul, ol { margin: 0.5rem 0 1rem 1.5rem; }
+        li { margin-bottom: 0.4rem; }
+        table { width: 100%; border-collapse: collapse; margin: 1rem 0; font-size: 0.9rem; }
+        th, td { border: 1px solid var(--border); padding: 0.6rem 0.8rem; text-align: left; }
+        th { background: var(--accent-light); font-weight: bold; }
+        .diagram { background: white; border: 1px solid var(--border); border-radius: 8px; padding: 1.5rem; margin: 1.5rem 0; text-align: center; }
+        .cert-badge { display: inline-block; background: var(--accent); color: white; font-size: 0.7rem; padding: 0.15rem 0.5rem; border-radius: 10px; margin-left: 0.5rem; }
+        .quiz { background: #f9f9f9; border: 1px solid var(--border); border-radius: 8px; padding: 1.5rem; margin-top: 2rem; }
+        .quiz h2 { border-bottom: none; margin-top: 0; }
+        .quiz-q { margin-bottom: 1.2rem; }
+        .quiz-q p { font-weight: bold; margin-bottom: 0.3rem; }
+        .quiz-answer { display: none; background: #e8f5e9; padding: 0.5rem 0.8rem; border-radius: 4px; margin-top: 0.5rem; }
+        .reveal-btn { background: var(--accent); color: white; border: none; padding: 0.3rem 0.8rem; border-radius: 4px; cursor: pointer; font-size: 0.8rem; }
+        .reveal-btn:hover { opacity: 0.85; }
+    </style>
+</head>
+<body>
+
+<h1>Lesson 31: Quality of Service Classes</h1>
+<p class="meta">Chapter 6: Scheduling & Resource Management · <span class="cert-badge">CKA</span> <span class="cert-badge">CKAD</span> · ~15 min</p>
+
+<p>Kubernetes assigns every Pod a <strong>QoS class</strong> based on its resource configuration. This class determines the <strong>order in which Pods are killed</strong> when a node runs out of memory. Understanding QoS is essential for protecting critical workloads from eviction.</p>
+
+<h2>1. The Three QoS Classes</h2>
+
+<p>QoS is <strong>automatically assigned</strong> — you don't set it directly. It's derived from how you configure requests and limits:</p>
+
+<table>
+    <tr><th>QoS Class</th><th>Condition</th><th>Eviction Priority</th></tr>
+    <tr><td><strong>Guaranteed</strong></td><td>Every container has requests = limits (CPU and memory)</td><td>Last to be evicted (most protected)</td></tr>
+    <tr><td><strong>Burstable</strong></td><td>At least one container has a request or limit, but not all equal</td><td>Middle — evicted after BestEffort</td></tr>
+    <tr><td><strong>BestEffort</strong></td><td>No requests or limits set on any container</td><td>First to be evicted (least protected)</td></tr>
+</table>
+
+<h3>Guaranteed</h3>
+
+<pre># Every container must have requests = limits for BOTH CPU and memory:
+spec:
+  containers:
+    - name: db
+      resources:
+        requests:
+          cpu: 1000m
+          memory: 2Gi
+        limits:
+          cpu: 1000m         # ← must equal request
+          memory: 2Gi        # ← must equal request
+    - name: sidecar
+      resources:
+        requests:
+          cpu: 100m
+          memory: 128Mi
+        limits:
+          cpu: 100m          # ← every container must match
+          memory: 128Mi</pre>
+
+<pre># Check QoS:
+kubectl get pod db-0 -o jsonpath='{.status.qosClass}'
+# Guaranteed</pre>
+
+<h3>Burstable</h3>
+
+<pre># At least one container has a request OR limit, but not all requests = limits:
+spec:
+  containers:
+    - name: app
+      resources:
+        requests:
+          cpu: 100m
+          memory: 256Mi
+        limits:
+          cpu: 500m          # ← limit ≠ request → Burstable
+          memory: 512Mi      # ← limit ≠ request</pre>
+
+<h3>BestEffort</h3>
+
+<pre># No resources specified on ANY container:
+spec:
+  containers:
+    - name: batch
+      image: busybox
+      # No resources block at all → BestEffort</pre>
+
+<div class="key-insight">
+    <strong>The rules are strict for Guaranteed:</strong> ALL containers in the Pod must have BOTH CPU and memory requests AND limits, and requests must EQUAL limits. If even one container is missing a memory limit or has request ≠ limit, the Pod drops to Burstable.
+</div>
+
+<h2>2. Eviction Order Under Memory Pressure</h2>
+
+<p>When a node's available memory drops below the eviction threshold, the kubelet must choose which Pods to kill. QoS class determines the order:</p>
+
+<div class="diagram">
+<svg viewBox="0 0 600 150" xmlns="http://www.w3.org/2000/svg" font-family="Menlo, monospace" font-size="9">
+    <text x="300" y="15" text-anchor="middle" font-weight="bold" font-size="10">Eviction Order (first killed → last killed)</text>
+    
+    <!-- BestEffort -->
+    <rect x="30" y="35" width="160" height="55" rx="5" fill="#ffcdd2" stroke="#c62828" stroke-width="2"/>
+    <text x="110" y="55" text-anchor="middle" font-weight="bold" font-size="11" fill="#c62828">BestEffort</text>
+    <text x="110" y="72" text-anchor="middle" font-size="8">Killed FIRST</text>
+    <text x="110" y="84" text-anchor="middle" font-size="7" fill="#666">No guarantees</text>
+    
+    <!-- Arrow -->
+    <text x="210" y="65" text-anchor="middle" font-size="14">→</text>
+    
+    <!-- Burstable -->
+    <rect x="225" y="35" width="160" height="55" rx="5" fill="#fff3e0" stroke="#f57c00" stroke-width="2"/>
+    <text x="305" y="55" text-anchor="middle" font-weight="bold" font-size="11" fill="#f57c00">Burstable</text>
+    <text x="305" y="72" text-anchor="middle" font-size="8">Killed second</text>
+    <text x="305" y="84" text-anchor="middle" font-size="7" fill="#666">If exceeding requests</text>
+    
+    <!-- Arrow -->
+    <text x="405" y="65" text-anchor="middle" font-size="14">→</text>
+    
+    <!-- Guaranteed -->
+    <rect x="420" y="35" width="160" height="55" rx="5" fill="#c8e6c9" stroke="#2e7d32" stroke-width="2"/>
+    <text x="500" y="55" text-anchor="middle" font-weight="bold" font-size="11" fill="#2e7d32">Guaranteed</text>
+    <text x="500" y="72" text-anchor="middle" font-size="8">Killed LAST</text>
+    <text x="500" y="84" text-anchor="middle" font-size="7" fill="#666">Only in extreme pressure</text>
+    
+    <!-- Bottom note -->
+    <text x="300" y="120" text-anchor="middle" font-size="9" fill="#666">Within same QoS class: Pod using the most memory ABOVE its request is killed first</text>
+    <text x="300" y="135" text-anchor="middle" font-size="9" fill="#666">Guaranteed Pods only evicted when system processes need memory (very rare)</text>
+</svg>
+</div>
+
+<h3>Detailed Eviction Logic</h3>
+
+<ol>
+    <li><strong>BestEffort Pods</strong> — evicted first (sorted by memory usage, highest first)</li>
+    <li><strong>Burstable Pods exceeding their memory request</strong> — evicted next (sorted by how much they exceed their request, as a percentage)</li>
+    <li><strong>Burstable Pods within their memory request</strong> — evicted only if pressure continues</li>
+    <li><strong>Guaranteed Pods</strong> — evicted only as a last resort (only if system processes need memory)</li>
+</ol>
+
+<h3>OOM Score Adjustment</h3>
+
+<p>Kubernetes sets the Linux <code>oom_score_adj</code> based on QoS class:</p>
+
+<table>
+    <tr><th>QoS Class</th><th>oom_score_adj</th><th>Meaning</th></tr>
+    <tr><td>Guaranteed</td><td><code>-997</code></td><td>Almost never killed by kernel OOM (lowest score)</td></tr>
+    <tr><td>Burstable</td><td><code>2 to 999</code> (calculated)</td><td>Score based on memory request/limit ratio</td></tr>
+    <tr><td>BestEffort</td><td><code>1000</code></td><td>First killed by kernel OOM (highest score)</td></tr>
+</table>
+
+<pre># The formula for Burstable:
+# oom_score_adj = 1000 - 10 * (memory_request / memory_limit * 100)
+# Example: request=256Mi, limit=512Mi → 1000 - 10*(50) = 500</pre>
+
+<div class="key-insight">
+    <strong>Two levels of eviction:</strong><br>
+    1. <strong>kubelet eviction</strong> — proactive, graceful (SIGTERM → wait → SIGKILL). Uses QoS class order. Triggered at configurable thresholds (default: <100Mi free).<br>
+    2. <strong>Kernel OOM killer</strong> — reactive, immediate (SIGKILL). Uses oom_score. Triggered when the node is completely out of memory and kubelet eviction wasn't fast enough.
+</div>
+
+<h2>3. Choosing the Right QoS for Your Workloads</h2>
+
+<table>
+    <tr><th>Workload Type</th><th>Recommended QoS</th><th>Why</th></tr>
+    <tr><td>Databases, stateful systems</td><td><strong>Guaranteed</strong></td><td>Must never be evicted — data corruption risk</td></tr>
+    <tr><td>Core microservices (API, auth)</td><td><strong>Guaranteed</strong> or tight Burstable</td><td>Downtime directly impacts users</td></tr>
+    <tr><td>Web frontends, general services</td><td><strong>Burstable</strong></td><td>Can tolerate brief evictions, benefit from burst capacity</td></tr>
+    <tr><td>Batch jobs, cron tasks</td><td><strong>BestEffort</strong> or Burstable</td><td>Can be rescheduled without user impact</td></tr>
+    <tr><td>Dev/test workloads</td><td><strong>BestEffort</strong></td><td>Lowest priority, uses leftover resources</td></tr>
+</table>
+
+<h3>The Trade-Off</h3>
+
+<pre># Guaranteed:
+# ✅ Maximum protection from eviction
+# ✅ Predictable performance (no burst, no throttling if request=limit at right level)
+# ❌ Cannot burst above request — wastes unused capacity
+# ❌ Must know exact resource needs upfront
+
+# Burstable:
+# ✅ Can burst when spare capacity exists
+# ✅ Flexible — only needs approximate sizing
+# ❌ Can be evicted under pressure
+# ❌ Performance varies based on node load
+
+# BestEffort:
+# ✅ Uses free resources without any reservation
+# ❌ First to be killed — no guarantees whatsoever
+# ❌ Can starve when node is busy</pre>
+
+<div class="production-note">
+    In production, most Pods are <strong>Burstable</strong> (requests < limits). Critical Pods (databases, control plane) are <strong>Guaranteed</strong>. Pure BestEffort is rare in production — even batch jobs should have requests (to prevent scheduling on overcommitted nodes). A common pattern: set memory request=limit (prevent OOMKill surprises) but CPU request < limit (allow burst).
+</div>
+
+<h3>Checking QoS Class</h3>
+
+<pre># Check all Pods' QoS:
+kubectl get pods -o custom-columns=\
+NAME:.metadata.name,\
+QOS:.status.qosClass,\
+CPU_REQ:.spec.containers[0].resources.requests.cpu,\
+MEM_REQ:.spec.containers[0].resources.requests.memory,\
+CPU_LIM:.spec.containers[0].resources.limits.cpu,\
+MEM_LIM:.spec.containers[0].resources.limits.memory</pre>
+
+<h2>4. QoS and Node Allocatable</h2>
+
+<p>Understanding how QoS interacts with the node's resource accounting:</p>
+
+<pre># Node capacity:         16Gi memory
+# kube-reserved:         1Gi
+# system-reserved:       1Gi
+# eviction-threshold:    100Mi
+# ─────────────────────────────
+# Allocatable:           13.9Gi  ← what scheduler sees
+
+# Sum of all Pod requests must fit within Allocatable
+# A Guaranteed Pod with 4Gi request takes exactly 4Gi from Allocatable
+# A BestEffort Pod takes 0 from Allocatable (scheduler thinks node has more room)
+
+# This is why BestEffort can cause overcommit:
+# Node may have 13.9Gi Allocatable but 16Gi of actual usage if BestEffort Pods burst</pre>
+
+<div class="key-insight">
+    <strong>BestEffort Pods enable overcommitment.</strong> Since they have no requests, the scheduler doesn't account for them. A node with 13.9Gi allocatable might actually be using 15Gi if BestEffort Pods are actively consuming memory. This overcommit is why eviction exists — the kubelet cleans up when reality exceeds capacity.
+</div>
+
+<h2>Summary</h2>
+
+<table>
+    <tr><th>Concept</th><th>Key Point</th></tr>
+    <tr><td>Guaranteed</td><td>requests = limits for all containers (both CPU and memory). Last evicted.</td></tr>
+    <tr><td>Burstable</td><td>Has some requests/limits but not all equal. Middle eviction priority.</td></tr>
+    <tr><td>BestEffort</td><td>No requests or limits. First evicted. Uses spare resources.</td></tr>
+    <tr><td>Eviction order</td><td>BestEffort → Burstable (exceeding requests) → Guaranteed</td></tr>
+    <tr><td>oom_score_adj</td><td>Guaranteed: -997, BestEffort: 1000, Burstable: calculated</td></tr>
+    <tr><td>kubelet vs kernel OOM</td><td>kubelet: graceful, proactive. Kernel: immediate SIGKILL, reactive.</td></tr>
+    <tr><td>Production rule</td><td>Critical = Guaranteed, general = Burstable, disposable = BestEffort</td></tr>
+</table>
+
+<!-- Quiz -->
+<div class="quiz">
+    <h2>📝 Quiz: Quality of Service Classes</h2>
+    
+    <div class="quiz-q">
+        <p>Q1: A Pod has <code>requests.cpu: 500m, limits.cpu: 500m, requests.memory: 256Mi, limits.memory: 512Mi</code>. What QoS class?</p>
+        <button class="reveal-btn" onclick="this.nextElementSibling.style.display='block'">Show Answer</button>
+        <div class="quiz-answer"><strong>Burstable.</strong> For Guaranteed, ALL requests must equal ALL limits. Here memory request (256Mi) ≠ memory limit (512Mi). Even though CPU request = CPU limit, the mismatch in memory makes it Burstable.</div>
+    </div>
+    
+    <div class="quiz-q">
+        <p>Q2: A Pod has two containers. Container A has <code>requests=limits</code> for both CPU and memory. Container B has no resources set. What QoS?</p>
+        <button class="reveal-btn" onclick="this.nextElementSibling.style.display='block'">Show Answer</button>
+        <div class="quiz-answer"><strong>Burstable.</strong> For Guaranteed, EVERY container must have requests = limits for both CPU and memory. Container B has nothing set, so the Pod drops from Guaranteed to Burstable. (If Container A also had nothing, it would be BestEffort.)</div>
+    </div>
+    
+    <div class="quiz-q">
+        <p>Q3: A node has memory pressure. It has three Pods: Pod A (Guaranteed, using 2Gi), Pod B (Burstable, using 1.5Gi with request 1Gi), Pod C (BestEffort, using 500Mi). Which is evicted first?</p>
+        <button class="reveal-btn" onclick="this.nextElementSibling.style.display='block'">Show Answer</button>
+        <div class="quiz-answer"><strong>Pod C (BestEffort)</strong> is evicted first — always. If pressure continues after that, <strong>Pod B (Burstable)</strong> is next because it's using 500Mi above its 1Gi request. <strong>Pod A (Guaranteed)</strong> is evicted only as an absolute last resort.</div>
+    </div>
+    
+    <div class="quiz-q">
+        <p>Q4: You want a database Pod to never be evicted before web server Pods. What resource configuration achieves this?</p>
+        <button class="reveal-btn" onclick="this.nextElementSibling.style.display='block'">Show Answer</button>
+        <div class="quiz-answer">Set the database Pod to <strong>Guaranteed QoS</strong>: requests = limits for both CPU and memory. Set web server Pods to <strong>Burstable</strong> (requests < limits). Under memory pressure, Burstable web Pods are evicted first; Guaranteed database Pod survives.</div>
+    </div>
+    
+    <div class="quiz-q">
+        <p>Q5: Two Burstable Pods are on the same node under pressure. Pod A: request=1Gi, using=2Gi. Pod B: request=512Mi, using=768Mi. Which is evicted first?</p>
+        <button class="reveal-btn" onclick="this.nextElementSibling.style.display='block'">Show Answer</button>
+        <div class="quiz-answer"><strong>Pod A.</strong> Within the same QoS class, Pods are ranked by how much they exceed their request as a proportion. Pod A exceeds by 1Gi (100% over request). Pod B exceeds by 256Mi (50% over request). Pod A is evicted first because it's proportionally more over its guaranteed allocation.</div>
+    </div>
+    
+    <div class="quiz-q">
+        <p>Q6: A Pod only sets <code>limits.memory: 512Mi</code> (no requests). What QoS class and what memory request does it get?</p>
+        <button class="reveal-btn" onclick="this.nextElementSibling.style.display='block'">Show Answer</button>
+        <div class="quiz-answer">When you set a limit without a request, Kubernetes <strong>auto-sets request = limit</strong>. So the Pod gets <code>requests.memory: 512Mi</code> automatically. If CPU is not set at all, the Pod is <strong>Burstable</strong> (has memory req/limit but no CPU). If you also set <code>limits.cpu</code> (and it auto-sets CPU request to match), it becomes <strong>Guaranteed</strong>.</div>
+    </div>
+</div>
+
+</body>
+</html>

@@ -1,0 +1,864 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>L42 · Background Tasks &amp; WebSockets — Python A→Z</title>
+<link rel="stylesheet" href="../assets/style.css" />
+</head>
+<body>
+<div id="sidebar-placeholder"></div>
+<div id="main">
+  <div id="lesson-header">
+    <div class="lesson-track track-fastapi">🟩 FastAPI</div>
+    <h1>Background Tasks &amp; WebSockets</h1>
+    <div class="lesson-meta">
+      <span>📖 Lesson 42</span>
+      <span>⏱ 50 min</span>
+      <span>🧪 5 questions</span>
+      <span>💻 3 exercises</span>
+    </div>
+  </div>
+  <div id="content">
+
+    <div class="objectives">
+      <h4>🎯 Learning Objectives</h4>
+      <ul>
+        <li>Use FastAPI's <code>BackgroundTasks</code> for lightweight fire-and-forget work</li>
+        <li>Understand when to use <code>BackgroundTasks</code> vs a real task queue (Celery / ARQ)</li>
+        <li>Implement task queues with ARQ and Redis for durable, retriable background jobs</li>
+        <li>Understand the WebSocket protocol and how it differs from HTTP</li>
+        <li>Accept and manage WebSocket connections in FastAPI with <code>websockets</code></li>
+        <li>Build a real-time broadcast system using a connection manager</li>
+        <li>Handle WebSocket authentication, disconnections, and error recovery</li>
+      </ul>
+    </div>
+
+    <!-- ═══════════════════════════════════════════════════════════ -->
+    <h2 id="why-background-tasks">1 · Why Background Tasks?</h2>
+
+    <p>
+      HTTP is a request-response protocol — the client waits for the full response before
+      continuing. Slow work such as sending emails, generating PDFs, transcoding video, or
+      fanning out to webhook subscribers should <strong>not</strong> block that response.
+      Moving it off the hot path keeps endpoints fast and the user experience snappy.
+    </p>
+
+    <p>Background work falls into two broad tiers:</p>
+    <ul>
+      <li>
+        <strong>In-process</strong> (<code>BackgroundTasks</code>) — lightweight,
+        fire-and-forget, runs inside the same process and memory space as the web server.
+        No persistence: if the server restarts, queued tasks are lost.
+      </li>
+      <li>
+        <strong>Out-of-process</strong> (Celery / ARQ / RQ) — jobs are serialised into a
+        durable queue backed by Redis or RabbitMQ, picked up by separate worker processes,
+        and automatically retried on failure. Horizontally scalable.
+      </li>
+    </ul>
+
+    <p>Use this decision table to pick the right tool:</p>
+
+    <table>
+      <thead>
+        <tr>
+          <th>Use case</th>
+          <th>Solution</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td>Send a welcome email after signup</td><td><code>BackgroundTasks</code> or ARQ</td></tr>
+        <tr><td>Resize an uploaded image</td><td>ARQ / Celery</td></tr>
+        <tr><td>Write an audit log entry</td><td><code>BackgroundTasks</code></td></tr>
+        <tr><td>Process a 500 MB video</td><td>Celery + dedicated worker</td></tr>
+        <tr><td>Scheduled (cron) jobs</td><td>APScheduler / Celery Beat</td></tr>
+        <tr><td>Fan-out to 10k webhook subscribers</td><td>ARQ / Celery</td></tr>
+      </tbody>
+    </table>
+
+    <div class="callout callout-concept">
+      <strong>Concept:</strong> <code>BackgroundTasks</code> runs in the same async event
+      loop as the web server. If a task blocks the event loop (e.g. heavy CPU work) it
+      degrades request throughput for every other client. Use it only for fast, I/O-bound
+      fire-and-forget work.
+    </div>
+
+    <!-- ═══════════════════════════════════════════════════════════ -->
+    <h2 id="fastapi-background-tasks">2 · FastAPI <code>BackgroundTasks</code></h2>
+
+    <p>
+      Inject the <code>BackgroundTasks</code> parameter into any route function and call
+      <code>tasks.add_task(fn, *args, **kwargs)</code> to queue work. The tasks execute
+      <em>after</em> the response has been sent to the client — the client never waits.
+    </p>
+
+    <div style="position:relative"><pre><code class="language-python">import logging
+import httpx
+from fastapi import FastAPI, BackgroundTasks, Depends
+from pydantic import BaseModel, EmailStr
+
+app = FastAPI()
+logger = logging.getLogger(__name__)
+
+# ── Task functions ──
+async def send_welcome_email(email: str, username: str) -> None:
+    """Async task — runs after response is sent."""
+    async with httpx.AsyncClient() as client:
+        await client.post("https://api.emailprovider.com/send", json={
+            "to": email,
+            "subject": "Welcome!",
+            "body": f"Hi {username}, welcome aboard!",
+        })
+    logger.info("Welcome email sent to %s", email)
+
+def write_audit_log(user_id: int, action: str) -> None:
+    """Sync task — runs in threadpool so it doesn't block the loop."""
+    logger.info("AUDIT user=%d action=%s", user_id, action)
+
+# ── Route ──
+class SignupBody(BaseModel):
+    username: str
+    email: EmailStr
+
+@app.post("/signup", status_code=201)
+async def signup(body: SignupBody, tasks: BackgroundTasks):
+    user = {"id": 42, "username": body.username, "email": body.email}
+
+    # Queue tasks — they run AFTER the response is returned to the client
+    tasks.add_task(send_welcome_email, body.email, body.username)
+    tasks.add_task(write_audit_log, user["id"], "signup")
+
+    return {"user": user, "message": "Account created"}
+</code></pre><span class="code-label">main.py</span></div>
+
+    <p>
+      <code>tasks.add_task(fn, *args, **kwargs)</code> accepts both sync and async
+      functions. Async tasks run directly on the event loop; sync tasks are dispatched to a
+      threadpool via <code>asyncio.run_in_executor</code> so they cannot block the loop.
+      Multiple tasks run <strong>sequentially</strong> in the order they were added.
+    </p>
+
+    <div class="callout callout-tip">
+      <strong>Tip:</strong> You can inject <code>BackgroundTasks</code> into a dependency
+      and add tasks there — useful for audit logging shared across many routes:
+      <pre><code class="language-python">async def log_request(request: Request, tasks: BackgroundTasks):
+    tasks.add_task(write_audit_log, request.url.path)</code></pre>
+      FastAPI merges background tasks queued inside dependencies with those queued in the
+      route handler automatically.
+    </div>
+
+    <!-- ═══════════════════════════════════════════════════════════ -->
+    <h2 id="arq-task-queues">3 · ARQ: Durable Task Queues with Redis</h2>
+
+    <p>
+      When jobs must survive server restarts, be retried on failure, or be distributed
+      across many workers, reach for a proper task queue. <strong>ARQ</strong> is a
+      lightweight async-first queue built on Redis — a natural fit for FastAPI's async
+      ecosystem.
+    </p>
+
+    <div style="position:relative"><pre><code class="language-bash">pip install arq redis
+</code></pre><span class="code-label">shell</span></div>
+
+    <p>Define your task functions and a <code>WorkerSettings</code> class in a dedicated module:</p>
+
+    <div style="position:relative"><pre><code class="language-python"># worker.py
+import asyncio
+from arq import create_pool
+from arq.connections import RedisSettings
+
+REDIS_SETTINGS = RedisSettings(host="localhost", port=6379)
+
+# ── Task functions (must be async) ──
+async def send_email(ctx, email: str, subject: str, body: str) -> dict:
+    """ctx is the ARQ worker context (contains redis, job_id, etc.)"""
+    print(f"Sending email to {email}: {subject}")
+    await asyncio.sleep(0.5)   # simulate SMTP
+    return {"sent": True, "to": email}
+
+async def generate_report(ctx, report_id: int) -> dict:
+    print(f"Generating report {report_id}...")
+    await asyncio.sleep(2.0)   # simulate heavy work
+    return {"report_id": report_id, "status": "done"}
+
+# ── Worker class — defines which tasks this worker handles ──
+class WorkerSettings:
+    functions = [send_email, generate_report]
+    redis_settings = REDIS_SETTINGS
+    max_jobs = 10           # concurrent jobs
+    job_timeout = 60        # seconds before a job is considered failed
+</code></pre><span class="code-label">worker.py</span></div>
+
+    <p>Enqueue jobs from your FastAPI application using the ARQ connection pool:</p>
+
+    <div style="position:relative"><pre><code class="language-python"># main.py — enqueue jobs from FastAPI
+from fastapi import FastAPI, Request
+from arq import create_pool
+from arq.connections import RedisSettings
+from contextlib import asynccontextmanager
+
+REDIS_SETTINGS = RedisSettings()
+
+@asynccontextmanager
+async def lifespan(app):
+    app.state.arq = await create_pool(REDIS_SETTINGS)
+    yield
+    await app.state.arq.aclose()
+
+app = FastAPI(lifespan=lifespan)
+
+@app.post("/reports")
+async def request_report(report_id: int, request: Request):
+    job = await request.app.state.arq.enqueue_job(
+        "generate_report",   # function name as string
+        report_id,
+    )
+    return {"job_id": job.job_id, "status": "queued"}
+
+@app.get("/reports/{job_id}")
+async def check_report(job_id: str, request: Request):
+    job = await request.app.state.arq.jobs(job_id)
+    return {"job_id": job_id, "status": job[0].status if job else "not_found"}
+</code></pre><span class="code-label">main.py</span></div>
+
+    <p>Start the worker process separately from your API server:</p>
+
+    <div style="position:relative"><pre><code class="language-bash">arq worker.WorkerSettings
+</code></pre><span class="code-label">shell</span></div>
+
+    <div class="callout callout-concept">
+      <strong>Concept:</strong> ARQ jobs are persisted in Redis. If the web server restarts
+      before a job is processed, the job survives and will be picked up when the worker
+      comes back online. Every enqueued job receives a unique <code>job_id</code> that you
+      can poll to check its current status (<code>queued</code>, <code>in_progress</code>,
+      <code>complete</code>, <code>failed</code>).
+    </div>
+
+    <!-- ═══════════════════════════════════════════════════════════ -->
+    <h2 id="websocket-protocol">4 · WebSockets: Protocol Overview</h2>
+
+    <p>
+      Standard HTTP is half-duplex and connection-oriented per request: the client sends a
+      request, the server returns a response, and the exchange is complete. To receive new
+      data the client must poll again. <strong>WebSocket</strong> solves this with a
+      persistent, full-duplex channel where either side can push messages at any time.
+    </p>
+
+    <ul>
+      <li><strong>HTTP</strong>: client sends request → server sends response → connection closes (or keep-alive for reuse)</li>
+      <li><strong>WebSocket</strong>: client upgrades HTTP connection → persistent full-duplex channel → either side can send at any time</li>
+    </ul>
+
+    <p>Typical use cases: live chat, real-time dashboards, collaborative editing, multiplayer gaming, live notifications, stock tickers.</p>
+
+    <p>The WebSocket lifecycle looks like this:</p>
+
+    <pre style="background:#1a1a2e;padding:16px;border-radius:8px;overflow-x:auto;font-size:0.82rem;">Client                    Server
+  │  GET /ws               │
+  │  Upgrade: websocket    │
+  │ ─────────────────────▶ │
+  │  101 Switching Proto   │
+  │ ◀───────────────────── │
+  │                        │ ← connection open
+  │  {"msg": "hello"}      │
+  │ ─────────────────────▶ │
+  │  {"msg": "world"}      │
+  │ ◀───────────────────── │
+  │  [close frame]         │
+  │ ─────────────────────▶ │
+  │  [close frame]         │
+  │ ◀───────────────────── │</pre>
+
+    <p>
+      Three message types flow over the wire: <strong>text</strong> (UTF-8 strings, most
+      commonly JSON), <strong>binary</strong> (raw bytes for files or images), and
+      <strong>ping/pong</strong> control frames used for keep-alive heartbeats (handled
+      automatically by the server).
+    </p>
+
+    <div class="callout callout-concept">
+      <strong>Concept:</strong> FastAPI uses <code>starlette.websockets.WebSocket</code>
+      — no extra install is needed. The <code>websockets</code> library that powers the
+      transport is already pulled in as a dependency of <code>uvicorn[standard]</code>.
+    </div>
+
+    <!-- ═══════════════════════════════════════════════════════════ -->
+    <h2 id="basic-websocket-endpoint">5 · Basic WebSocket Endpoint</h2>
+
+    <p>
+      Declare a WebSocket route with the <code>@app.websocket()</code> decorator. The
+      handler receives a <code>WebSocket</code> instance and must call
+      <code>await websocket.accept()</code> to complete the handshake before sending or
+      receiving any data.
+    </p>
+
+    <div style="position:relative"><pre><code class="language-python">from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+
+app = FastAPI()
+
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    await websocket.accept()            # complete the handshake
+    try:
+        while True:
+            data = await websocket.receive_text()
+            await websocket.send_text(f"Echo: {data}")
+    except WebSocketDisconnect:
+        print("Client disconnected")
+
+# ── Receiving different message types ──
+@app.websocket("/ws/typed")
+async def typed_ws(websocket: WebSocket):
+    await websocket.accept()
+    try:
+        while True:
+            # receive_text(), receive_bytes(), receive_json()
+            msg = await websocket.receive_json()
+            event = msg.get("event")
+            if event == "ping":
+                await websocket.send_json({"event": "pong"})
+            elif event == "message":
+                await websocket.send_json({"event": "ack", "data": msg.get("data")})
+    except WebSocketDisconnect:
+        pass
+</code></pre><span class="code-label">main.py</span></div>
+
+    <p>
+      <code>WebSocketDisconnect</code> is raised automatically when the client closes the
+      connection — catch it to perform any cleanup. The full set of send/receive methods
+      available on a <code>WebSocket</code> instance:
+    </p>
+
+    <table>
+      <thead>
+        <tr>
+          <th>Method</th>
+          <th>Direction</th>
+          <th>Payload</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td><code>receive_text()</code></td><td>← client</td><td><code>str</code></td></tr>
+        <tr><td><code>receive_bytes()</code></td><td>← client</td><td><code>bytes</code></td></tr>
+        <tr><td><code>receive_json()</code></td><td>← client</td><td><code>dict / list</code></td></tr>
+        <tr><td><code>send_text(data)</code></td><td>→ client</td><td><code>str</code></td></tr>
+        <tr><td><code>send_bytes(data)</code></td><td>→ client</td><td><code>bytes</code></td></tr>
+        <tr><td><code>send_json(data)</code></td><td>→ client</td><td><code>dict / list</code></td></tr>
+        <tr><td><code>close(code)</code></td><td>→ client</td><td>close frame</td></tr>
+      </tbody>
+    </table>
+
+    <!-- ═══════════════════════════════════════════════════════════ -->
+    <h2 id="connection-manager">6 · Connection Manager: Broadcasting</h2>
+
+    <p>
+      Real-world apps need to track every active connection so they can broadcast a message
+      to all of them — for example, a chat room where one client's message goes to
+      everyone. Encapsulate this logic in a <code>ConnectionManager</code> class.
+    </p>
+
+    <div style="position:relative"><pre><code class="language-python">from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from typing import Optional
+import json
+
+app = FastAPI()
+
+class ConnectionManager:
+    def __init__(self):
+        self.active: list[WebSocket] = []
+
+    async def connect(self, ws: WebSocket) -> None:
+        await ws.accept()
+        self.active.append(ws)
+
+    def disconnect(self, ws: WebSocket) -> None:
+        self.active.remove(ws)
+
+    async def send_personal(self, message: str, ws: WebSocket) -> None:
+        await ws.send_text(message)
+
+    async def broadcast(self, message: str) -> None:
+        dead: list[WebSocket] = []
+        for ws in self.active:
+            try:
+                await ws.send_text(message)
+            except Exception:
+                dead.append(ws)
+        for ws in dead:
+            self.active.remove(ws)
+
+    async def broadcast_json(self, data: dict) -> None:
+        await self.broadcast(json.dumps(data))
+
+manager = ConnectionManager()
+
+@app.websocket("/ws/{client_id}")
+async def chat(websocket: WebSocket, client_id: str):
+    await manager.connect(websocket)
+    await manager.broadcast_json({"event": "join", "client": client_id})
+    try:
+        while True:
+            text = await websocket.receive_text()
+            await manager.broadcast_json({
+                "event": "message",
+                "client": client_id,
+                "text": text,
+            })
+    except WebSocketDisconnect:
+        manager.disconnect(websocket)
+        await manager.broadcast_json({"event": "leave", "client": client_id})
+</code></pre><span class="code-label">main.py</span></div>
+
+    <p>
+      The <code>broadcast</code> method handles stale connections gracefully: any socket
+      that raises an exception during send is collected and removed from <code>active</code>
+      after the loop completes, avoiding mutation-during-iteration bugs.
+    </p>
+
+    <div class="callout callout-warn">
+      <strong>Warning:</strong> This in-memory manager only works for a
+      <strong>single server process</strong>. With multiple Uvicorn workers or horizontal
+      scaling, connections on different processes cannot see each other's
+      <code>active</code> list. For multi-process broadcast, use <strong>Redis
+      Pub/Sub</strong> — publish messages to a Redis channel from any process and have each
+      worker subscribe and forward to its local connections.
+    </div>
+
+    <!-- ═══════════════════════════════════════════════════════════ -->
+    <h2 id="websocket-authentication">7 · WebSocket Authentication</h2>
+
+    <p>
+      Browser WebSocket clients cannot attach arbitrary HTTP headers (the
+      <code>Authorization</code> header is not available via the <code>WebSocket</code>
+      browser API). Authentication must therefore arrive via one of two channels:
+    </p>
+    <ul>
+      <li><strong>Query parameter</strong> — append the token to the URL: <code>wss://example.com/ws/secure?token=&lt;jwt&gt;</code></li>
+      <li><strong>First message</strong> — accept the connection, then require the client to send an auth payload as its very first message</li>
+    </ul>
+
+    <p>The query-parameter approach is the simplest to implement:</p>
+
+    <div style="position:relative"><pre><code class="language-python">from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, status
+import jwt
+
+app = FastAPI()
+SECRET_KEY = "change-me"
+ALGORITHM  = "HS256"
+
+def decode_token(token: str) -> dict:
+    try:
+        return jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+    except jwt.InvalidTokenError:
+        return {}
+
+@app.websocket("/ws/secure")
+async def secure_ws(
+    websocket: WebSocket,
+    token: str = Query(...),           # ?token=&lt;jwt&gt;
+):
+    payload = decode_token(token)
+    if not payload:
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
+
+    user_id = payload.get("sub")
+    await websocket.accept()
+    try:
+        while True:
+            data = await websocket.receive_text()
+            await websocket.send_json({"user": user_id, "echo": data})
+    except WebSocketDisconnect:
+        pass
+</code></pre><span class="code-label">main.py</span></div>
+
+    <p>
+      Close code <code>1008 Policy Violation</code> signals to the client that the
+      connection was rejected due to a policy (authentication) failure rather than a
+      network error.
+    </p>
+
+    <div class="callout callout-warn">
+      <strong>Warning:</strong> Passing tokens in query parameters risks them appearing in
+      server access logs, browser history, and proxy logs. For production systems prefer
+      the <em>first-message</em> pattern: call <code>await websocket.accept()</code>
+      immediately (the handshake must complete before you can close gracefully), then wait
+      for the client to send <code>{"event": "auth", "token": "…"}</code> as its first
+      payload. Validate the token and close with code <code>1008</code> if it is absent or
+      invalid; otherwise proceed with the main message loop.
+    </div>
+
+    <!-- ── 8. Redis Pub/Sub for Multi-Process Broadcasting ── -->
+    <h2 id="redis-pubsub">Redis Pub/Sub for Multi-Process Broadcasting</h2>
+    <p>
+      When you run multiple Uvicorn workers (or scale horizontally), an in-memory
+      <code>ConnectionManager</code> only reaches connections on the same process.
+      Redis Pub/Sub routes messages across all processes.
+    </p>
+    <div style="position:relative">
+      <pre><code class="language-bash">pip install redis asyncio-redis</code></pre>
+      <span class="code-label">terminal</span>
+    </div>
+    <div style="position:relative">
+      <pre><code class="language-python"># broadcast.py — Redis Pub/Sub connection manager
+import asyncio, json, redis.asyncio as aioredis
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from contextlib import asynccontextmanager
+
+CHANNEL = "chat"
+
+class RedisBroadcastManager:
+    def __init__(self):
+        self.local: list[WebSocket] = []
+        self.redis: aioredis.Redis | None = None
+        self.pubsub = None
+
+    async def startup(self):
+        self.redis  = aioredis.from_url("redis://localhost")
+        self.pubsub = self.redis.pubsub()
+        await self.pubsub.subscribe(CHANNEL)
+        asyncio.create_task(self._listener())
+
+    async def _listener(self):
+        """Forward every Redis message to all local connections."""
+        async for msg in self.pubsub.listen():
+            if msg["type"] == "message":
+                text = msg["data"].decode()
+                dead = []
+                for ws in self.local:
+                    try:
+                        await ws.send_text(text)
+                    except Exception:
+                        dead.append(ws)
+                for ws in dead:
+                    self.local.remove(ws)
+
+    async def connect(self, ws: WebSocket):
+        await ws.accept()
+        self.local.append(ws)
+
+    def disconnect(self, ws: WebSocket):
+        self.local.remove(ws)
+
+    async def publish(self, data: dict):
+        """Publish to Redis — reaches all workers."""
+        await self.redis.publish(CHANNEL, json.dumps(data))
+
+manager = RedisBroadcastManager()
+
+@asynccontextmanager
+async def lifespan(app):
+    await manager.startup()
+    yield
+
+app = FastAPI(lifespan=lifespan)
+
+@app.websocket("/ws/{client_id}")
+async def chat(websocket: WebSocket, client_id: str):
+    await manager.connect(websocket)
+    await manager.publish({"event": "join", "client": client_id})
+    try:
+        while True:
+            text = await websocket.receive_text()
+            await manager.publish({"event": "message", "client": client_id, "text": text})
+    except WebSocketDisconnect:
+        manager.disconnect(websocket)
+        await manager.publish({"event": "leave", "client": client_id})</code></pre>
+      <span class="code-label">broadcast.py</span>
+    </div>
+    <div class="callout callout-concept">
+      The architecture: each worker process has its own local WebSocket list +
+      one Redis subscriber. When any worker publishes a message, Redis delivers it
+      to <em>all</em> subscribers — every worker then fans it out to its local connections.
+      This enables true horizontal scaling of real-time features.
+    </div>
+
+    <!-- ── 9. Lifespan Events & Startup / Shutdown ── -->
+    <h2 id="lifespan">Lifespan Events &amp; Startup / Shutdown</h2>
+    <p>
+      Use the <code>lifespan</code> context manager (FastAPI 0.93+) to run code
+      when the app starts and shuts down — connecting to Redis, warming up ML models,
+      starting background loops.
+    </p>
+    <div style="position:relative">
+      <pre><code class="language-python">from contextlib import asynccontextmanager
+from fastapi import FastAPI
+import asyncio, logging
+
+logger = logging.getLogger(__name__)
+
+async def periodic_cleanup():
+    """Background coroutine that runs for the app's lifetime."""
+    while True:
+        logger.info("Running cleanup...")
+        await asyncio.sleep(60)   # every 60 seconds
+
+@asynccontextmanager
+async def lifespan(app):
+    # ── Startup ──
+    logger.info("App starting up")
+    task = asyncio.create_task(periodic_cleanup())
+    app.state.cleanup_task = task
+    yield
+    # ── Shutdown ──
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    logger.info("App shut down cleanly")
+
+app = FastAPI(lifespan=lifespan)
+
+@app.get("/health")
+def health():
+    return {"status": "ok"}</code></pre>
+      <span class="code-label">lifespan.py</span>
+    </div>
+    <div class="callout callout-tip">
+      Always cancel background tasks in the shutdown phase — uncancelled tasks
+      can delay Uvicorn's graceful shutdown and cause resource leaks.
+      Wrap the <code>await task</code> in <code>try/except CancelledError</code>
+      to suppress the expected cancellation exception.
+    </div>
+
+    <!-- ── 10. Testing WebSockets ── -->
+    <h2 id="testing-websockets">Testing WebSockets</h2>
+    <p>
+      FastAPI's <code>TestClient</code> supports WebSocket testing via a context-manager
+      interface — no running server needed.
+    </p>
+    <div style="position:relative">
+      <pre><code class="language-python"># test_ws.py
+from fastapi.testclient import TestClient
+from main import app   # your app with @app.websocket("/ws/{client_id}")
+
+client = TestClient(app)
+
+def test_echo():
+    with client.websocket_connect("/ws/test-user") as ws:
+        ws.send_json({"event": "message", "text": "hello"})
+        data = ws.receive_json()
+        assert data["event"] == "message"
+        assert data["text"] == "hello"
+
+def test_disconnect():
+    with client.websocket_connect("/ws/user-1") as ws:
+        ws.send_text("ping")
+        _ = ws.receive_text()
+    # Connection closes cleanly when the context manager exits
+
+def test_unauthorized():
+    """Secure endpoint should reject missing/invalid token."""
+    with client.websocket_connect("/ws/secure?token=bad-token") as ws:
+        # Server closes the connection immediately
+        import pytest
+        from starlette.websockets import WebSocketDisconnect
+        with pytest.raises((WebSocketDisconnect, Exception)):
+            ws.receive_text()</code></pre>
+      <span class="code-label">test_ws.py</span>
+    </div>
+    <div class="callout callout-tip">
+      <code>TestClient.websocket_connect()</code> uses <code>with</code> to manage
+      the connection lifecycle. Inside the block you can call
+      <code>ws.send_text()</code>, <code>ws.send_json()</code>,
+      <code>ws.receive_text()</code>, <code>ws.receive_json()</code> — all synchronous
+      in tests even though the server is async.
+    </div>
+
+    <!-- ── Best Practices ── -->
+    <h2 id="best-practices">Best Practices</h2>
+    <ul>
+      <li><strong>Use <code>BackgroundTasks</code> only for fast, I/O-bound fire-and-forget work</strong> — sending a single email, writing one log entry. Anything slow or CPU-heavy belongs in a real task queue.</li>
+      <li><strong>Use ARQ or Celery for durable jobs</strong> — jobs survive server restarts, can be retried on failure, and can be distributed across worker processes.</li>
+      <li><strong>Always handle <code>WebSocketDisconnect</code></strong> — if you don't catch it, the exception propagates and may leave the connection in a broken state without cleanup.</li>
+      <li><strong>Clean up dead connections in broadcast</strong> — wrap each <code>send</code> in a try/except and remove connections that fail; otherwise the manager list grows indefinitely.</li>
+      <li><strong>Use Redis Pub/Sub (or a message broker) when running multiple workers</strong> — in-memory managers only work with a single process.</li>
+      <li><strong>Authenticate before accepting</strong> — close with <code>WS_1008_POLICY_VIOLATION</code> if the token is invalid. If you must accept first, validate the token in the first message and close immediately on failure.</li>
+      <li><strong>Cancel background coroutines in <code>lifespan</code> shutdown</strong> — use <code>task.cancel()</code> + <code>try/except CancelledError</code> for clean shutdown.</li>
+      <li><strong>Send periodic pings</strong> — browsers and load balancers time out idle WebSocket connections. Send a ping every 20–30 seconds to keep the connection alive.</li>
+    </ul>
+
+    <!-- ── Exercises ── -->
+    <h2 id="exercises">Exercises</h2>
+    <div class="exercise-section">
+
+      <div class="exercise">
+        <h3>Exercise 1 — Email Queue with ARQ</h3>
+        <p>Build a signup endpoint that offloads email sending to ARQ:</p>
+        <ul>
+          <li>Define an ARQ task <code>send_welcome_email(ctx, email, username)</code> that simulates SMTP with a 1-second delay and logs success.</li>
+          <li>Define <code>WorkerSettings</code> with the task registered and <code>max_jobs=5</code>.</li>
+          <li>In <code>main.py</code>, use <code>lifespan</code> to create and close the ARQ pool; expose it on <code>app.state.arq</code>.</li>
+          <li><code>POST /signup</code> — create a user dict, enqueue the email task, return 201 with the user and the job id.</li>
+          <li><code>GET /jobs/{job_id}</code> — return the job status from ARQ.</li>
+          <li>Start a Redis instance locally and run the worker with <code>arq worker.WorkerSettings</code>.</li>
+        </ul>
+        <details>
+          <summary>💡 Hint — lifespan + enqueue</summary>
+          <pre><code class="language-python">from contextlib import asynccontextmanager
+from fastapi import FastAPI, Request
+from arq import create_pool
+from arq.connections import RedisSettings
+
+@asynccontextmanager
+async def lifespan(app):
+    app.state.arq = await create_pool(RedisSettings())
+    yield
+    await app.state.arq.aclose()
+
+app = FastAPI(lifespan=lifespan)
+
+@app.post("/signup", status_code=201)
+async def signup(body: SignupBody, request: Request):
+    user = {"id": 1, "username": body.username, "email": body.email}
+    job = await request.app.state.arq.enqueue_job("send_welcome_email", body.email, body.username)
+    return {"user": user, "job_id": job.job_id}</code></pre>
+        </details>
+      </div>
+
+      <div class="exercise">
+        <h3>Exercise 2 — Real-Time Chat Room</h3>
+        <p>Build a multi-room WebSocket chat system:</p>
+        <ul>
+          <li>Extend <code>ConnectionManager</code> to support named rooms — <code>dict[str, list[WebSocket]]</code>.</li>
+          <li><code>WS /ws/{room}/{username}</code> — connect to a room; broadcast join/leave/message events only to that room's members.</li>
+          <li>On message, broadcast <code>{"event": "message", "room": room, "user": username, "text": text}</code>.</li>
+          <li>Write two tests: (a) two clients in the same room receive each other's messages; (b) a client in a different room does NOT receive the message.</li>
+        </ul>
+        <details>
+          <summary>💡 Hint — room-aware manager</summary>
+          <pre><code class="language-python">class RoomManager:
+    def __init__(self):
+        self.rooms: dict[str, list[WebSocket]] = {}
+
+    async def connect(self, ws: WebSocket, room: str):
+        await ws.accept()
+        self.rooms.setdefault(room, []).append(ws)
+
+    def disconnect(self, ws: WebSocket, room: str):
+        if room in self.rooms:
+            self.rooms[room].remove(ws)
+
+    async def broadcast_room(self, room: str, data: dict):
+        import json
+        dead = []
+        for ws in self.rooms.get(room, []):
+            try:
+                await ws.send_text(json.dumps(data))
+            except Exception:
+                dead.append(ws)
+        for ws in dead:
+            self.rooms[room].remove(ws)</code></pre>
+        </details>
+      </div>
+
+      <div class="exercise">
+        <h3>Exercise 3 — Live Dashboard with Periodic Push</h3>
+        <p>Build a server-push dashboard endpoint:</p>
+        <ul>
+          <li><code>WS /ws/dashboard</code> — accepts a connection, then every 2 seconds pushes a JSON payload with <code>{"timestamp": "…", "active_connections": N, "random_metric": float}</code>.</li>
+          <li>Use <code>asyncio.sleep(2)</code> inside the handler loop.</li>
+          <li>Handle client disconnects gracefully — stop pushing when the client closes.</li>
+          <li>Add a <code>GET /dashboard/snapshot</code> HTTP endpoint that returns the same metrics once (for clients that don't support WebSockets).</li>
+          <li>Write a test that connects, receives 3 messages, then disconnects and confirms the server loop exits cleanly.</li>
+        </ul>
+        <details>
+          <summary>💡 Hint</summary>
+          <pre><code class="language-python">import asyncio, json, random
+from datetime import datetime, timezone
+from fastapi import WebSocket, WebSocketDisconnect
+
+@app.websocket("/ws/dashboard")
+async def dashboard(ws: WebSocket):
+    await ws.accept()
+    try:
+        while True:
+            payload = {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "active_connections": len(manager.active),
+                "random_metric": round(random.uniform(0, 100), 2),
+            }
+            await ws.send_json(payload)
+            await asyncio.sleep(2)
+    except WebSocketDisconnect:
+        pass</code></pre>
+        </details>
+      </div>
+
+    </div><!-- /exercise-section -->
+
+    <div id="quiz-section"></div>
+    <div id="lesson-nav-footer"></div>
+  </div><!-- /content -->
+</div><!-- /main -->
+
+<script src="../assets/nav-data.js"></script>
+<script src="../assets/nav.js"></script>
+<script src="../assets/quiz.js"></script>
+<script src="../assets/highlight.js"></script>
+
+<script>
+buildLessonFooter();
+
+QuizWidget.render("quiz-section", [
+  {
+    question: "What is the key limitation of FastAPI's built-in `BackgroundTasks` compared to a task queue like ARQ?",
+    options: [
+      "BackgroundTasks can only run synchronous functions, not async ones",
+      "BackgroundTasks are in-process and not persisted — if the server restarts before a task runs, it is lost; ARQ persists jobs in Redis so they survive restarts and can be retried",
+      "BackgroundTasks block the HTTP response until all tasks complete",
+      "BackgroundTasks cannot accept arguments — you must use global variables to pass data"
+    ],
+    correct: 1,
+    explanation: "BackgroundTasks run in the same process as the web server after the response is sent. They are held in memory — if the server process crashes or restarts, any queued tasks are lost with no retry. ARQ (and Celery) persist job definitions in Redis/RabbitMQ so jobs survive restarts, can be retried on failure, have configurable timeouts, and can be distributed across dedicated worker processes. Use BackgroundTasks for fast, disposable fire-and-forget work; use ARQ for anything that must not be lost."
+  },
+  {
+    question: "What must you call before sending or receiving any data on a FastAPI WebSocket connection?",
+    options: [
+      "websocket.open()",
+      "websocket.handshake()",
+      "websocket.accept()",
+      "websocket.connect()"
+    ],
+    correct: 2,
+    explanation: "websocket.accept() completes the WebSocket handshake — it sends the 101 Switching Protocols response to the client. Without it, the connection stays in a pending state and any send/receive call will fail. If you want to reject a connection (e.g. invalid auth token), call websocket.close(code=...) WITHOUT calling accept() first — closing before accepting cleanly rejects the upgrade request."
+  },
+  {
+    question: "Why does an in-memory `ConnectionManager` fail when running multiple Uvicorn workers?",
+    options: [
+      "Python's GIL prevents multiple workers from sharing the same list object",
+      "Each worker process has its own memory space — connections are registered in one worker's local list and messages published in another worker's context never reach them",
+      "Uvicorn workers don't support WebSocket connections — only the main process does",
+      "The ConnectionManager class is not thread-safe, causing race conditions between workers"
+    ],
+    correct: 1,
+    explanation: "Each OS process has its own isolated memory. When you run uvicorn main:app --workers 4, there are 4 separate Python processes. A WebSocket from client A connects to worker 1 and is stored in worker 1's ConnectionManager list. A message sent from client B (connected to worker 2) calls worker 2's broadcast — which has no knowledge of client A's connection. The solution is Redis Pub/Sub: each worker subscribes to a Redis channel, and publishing to that channel delivers the message to all workers which then fan it out to their local connections."
+  },
+  {
+    question: "What is the safest way to authenticate a WebSocket connection?",
+    options: [
+      "Use HTTP Basic Auth with the Authorization header — browsers send it automatically",
+      "Accept the connection first, then require the client to send a token as the first message and close with WS_1008_POLICY_VIOLATION if it fails",
+      "Pass the username and password as path parameters in the WebSocket URL",
+      "WebSockets cannot be authenticated — use HTTP polling instead for sensitive data"
+    ],
+    correct: 1,
+    explanation: "Browsers cannot set custom HTTP headers on WebSocket upgrade requests, so the Authorization header approach doesn't work from web clients. Passing tokens in the URL query string (?token=...) works but risks the token appearing in server access logs. The safest approach is: accept the connection, wait for the first message to contain the token, validate it, and immediately close with WS_1008_POLICY_VIOLATION if invalid. This keeps the token out of logs while still enabling authentication. For non-browser clients (mobile apps, backend services) that can set headers, query params or the first-message approach are both acceptable."
+  },
+  {
+    question: "In FastAPI's `lifespan` context manager, when does the code after `yield` run?",
+    options: [
+      "Immediately after the first request is processed",
+      "When the application shuts down — after all in-flight requests complete and before the process exits",
+      "After every request, alongside BackgroundTasks",
+      "Only when an unhandled exception occurs in a route handler"
+    ],
+    correct: 1,
+    explanation: "The lifespan context manager splits app lifecycle into two phases: code before yield runs at startup (after the server is ready to accept connections), and code after yield runs at shutdown (when Uvicorn receives a SIGTERM or is stopped). This is the correct place to close database connection pools, cancel background tasks, flush buffers, and release other resources. Always cancel asyncio tasks created during startup in the shutdown phase to avoid warnings about pending tasks."
+  }
+]);
+</script>
+</body>
+</html>

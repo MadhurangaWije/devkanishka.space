@@ -1,0 +1,418 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lesson 009 – VNet Peering & Hybrid Connectivity | AZ-305 Study Guide</title>
+    <link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<div class="lesson-wrap">
+
+    <!-- Header -->
+    <header class="lesson-header fade-in">
+        <span class="lesson-number">Lesson 009 · 🟡 REVIEW</span>
+        <h1>VNet Peering &amp; Hybrid Connectivity</h1>
+        <p>You know peering and VPN Gateway basics. Now master transit routing limitations, ExpressRoute decision criteria, and when Virtual WAN replaces your hand-built hub-spoke.</p>
+    </header>
+
+    <!-- Table of Contents -->
+    <nav class="toc fade-in">
+        <h2>In This Lesson</h2>
+        <ol>
+            <li><a href="#peering-limitations">Peering Limitations &amp; Transit Routing</a></li>
+            <li><a href="#vpn-vs-er">VPN Gateway vs ExpressRoute Decision Matrix</a></li>
+            <li><a href="#expressroute-deep">ExpressRoute: Global Reach, FastPath &amp; Peering Types</a></li>
+            <li><a href="#virtual-wan">Virtual WAN: When It Replaces Custom Hub-Spoke</a></li>
+            <li><a href="#vwan-vs-traditional">Virtual WAN vs Traditional Hub-Spoke Trade-offs</a></li>
+            <li><a href="#hybrid-dns">Hybrid DNS: Conditional Forwarding Across VPN/ER</a></li>
+            <li><a href="#real-world">Real-World: Multi-Region Enterprise with DR</a></li>
+            <li><a href="#quiz">Knowledge Check</a></li>
+        </ol>
+    </nav>
+
+    <!-- Section 1: Peering Limitations -->
+    <section id="peering-limitations" class="fade-in">
+        <h2>1. Peering Limitations &amp; Transit Routing</h2>
+
+        <div class="key-concept">
+            <h3>🔑 Non-Transitive by Default</h3>
+            <p>VNet peering is <strong>non-transitive</strong>. If VNet-A peers with VNet-B, and VNet-B peers with VNet-C, traffic from A cannot reach C through B — unless you explicitly configure routing (UDRs + NVA or gateway transit).</p>
+        </div>
+
+        <h3>Gateway Transit</h3>
+        <p>A hub VNet with a VPN/ExpressRoute gateway can share that gateway with peered spoke VNets via <code>Allow Gateway Transit</code> (hub side) and <code>Use Remote Gateways</code> (spoke side). This lets spokes reach on-premises without their own gateway.</p>
+
+        <h3>Hub-Spoke Implications</h3>
+        <ul>
+            <li><strong>Spoke-to-spoke traffic:</strong> Does NOT flow through peering alone. Requires an NVA or Azure Firewall in the hub + UDRs on each spoke pointing 0.0.0.0/0 or specific CIDRs to the NVA.</li>
+            <li><strong>Gateway transit is one-hop only:</strong> A spoke cannot use gateway transit through a peered hub to reach another hub's gateway (no chaining).</li>
+            <li><strong>Peering is non-overlapping:</strong> Address spaces of peered VNets must not overlap. Plan CIDR carefully.</li>
+            <li><strong>Cross-region peering (global):</strong> Works identically but incurs inter-region bandwidth charges and slightly higher latency.</li>
+        </ul>
+
+        <!-- BoxDiagram: Traditional Hub-Spoke -->
+        <div class="diagram slide-in-left" data-diagram='{
+            "nodes": [
+                {"id": "onprem", "label": "On-Premises DC", "x": 20, "y": 100, "w": 110, "h": 40, "shape": "rect", "icon": "🏢", "tooltip": "Corporate data center connected via VPN or ExpressRoute"},
+                {"id": "vpngw", "label": "VPN Gateway", "x": 180, "y": 100, "w": 100, "h": 35, "shape": "rect", "icon": "🔒", "tooltip": "VPN or ER Gateway in hub VNet — gateway transit enabled"},
+                {"id": "hub-fw", "label": "Azure Firewall", "x": 330, "y": 100, "w": 110, "h": 35, "shape": "rect", "icon": "🛡️", "tooltip": "NVA/Firewall for spoke-to-spoke and internet egress inspection"},
+                {"id": "spoke-a", "label": "Spoke A (Web)", "x": 330, "y": 20, "w": 110, "h": 35, "shape": "rect", "icon": "🌐", "tooltip": "Web tier — uses remote gateway for on-prem access"},
+                {"id": "spoke-b", "label": "Spoke B (App)", "x": 330, "y": 180, "w": 110, "h": 35, "shape": "rect", "icon": "⚙️", "tooltip": "App tier — spoke-to-spoke via firewall UDR"},
+                {"id": "spoke-c", "label": "Spoke C (Data)", "x": 500, "y": 100, "w": 110, "h": 35, "shape": "rect", "icon": "🗄️", "tooltip": "Data tier — SQL, Storage"}
+            ],
+            "edges": [
+                {"from": "onprem", "to": "vpngw", "label": "S2S VPN / ER", "style": "solid"},
+                {"from": "vpngw", "to": "hub-fw", "label": "hub VNet", "style": "solid"},
+                {"from": "hub-fw", "to": "spoke-a", "label": "peering + UDR", "style": "dashed"},
+                {"from": "hub-fw", "to": "spoke-b", "label": "peering + UDR", "style": "dashed"},
+                {"from": "hub-fw", "to": "spoke-c", "label": "peering + UDR", "style": "dashed"},
+                {"from": "spoke-a", "to": "spoke-b", "label": "via FW ✗ direct", "style": "dotted"}
+            ],
+            "groups": [
+                {"label": "Hub VNet", "x": 170, "y": 75, "w": 290, "h": 90},
+                {"label": "On-Premises", "x": 10, "y": 85, "w": 135, "h": 70}
+            ]
+        }'></div>
+        <p class="diagram-caption">Traditional hub-spoke: spoke-to-spoke traffic must traverse the firewall/NVA. Gateway transit allows spokes to reach on-premises through the hub gateway.</p>
+
+        <div class="exam-tip">
+            <strong>AZ-305 Exam Tip:</strong> If a question says "Spoke A needs to communicate with Spoke B through peering alone" — the answer is <em>it can't</em>. You need an NVA + UDRs or Virtual WAN.
+        </div>
+    </section>
+
+    <!-- Section 2: VPN vs ExpressRoute -->
+    <section id="vpn-vs-er" class="fade-in">
+        <h2>2. VPN Gateway vs ExpressRoute — Decision Matrix</h2>
+
+        <table class="compare-grid">
+            <thead>
+                <tr>
+                    <th>Criterion</th>
+                    <th>VPN Gateway (S2S/P2S)</th>
+                    <th>ExpressRoute</th>
+                    <th>Virtual WAN</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><strong>Bandwidth</strong></td>
+                    <td>Up to ~10 Gbps (VpnGw5)</td>
+                    <td>Up to 100 Gbps (Direct)</td>
+                    <td>Up to 20 Gbps per hub (aggregated)</td>
+                </tr>
+                <tr>
+                    <td><strong>Latency</strong></td>
+                    <td>Variable (internet path)</td>
+                    <td>Predictable, low (private path)</td>
+                    <td>Low (MS backbone)</td>
+                </tr>
+                <tr>
+                    <td><strong>Encryption</strong></td>
+                    <td>IPsec always on</td>
+                    <td>Not encrypted by default (MACsec for Direct)</td>
+                    <td>IPsec for VPN; ER not encrypted</td>
+                </tr>
+                <tr>
+                    <td><strong>Compliance</strong></td>
+                    <td>Adequate for most; encrypted</td>
+                    <td>Required for some regs (data never on public internet)</td>
+                    <td>Meets both; depends on connection type</td>
+                </tr>
+                <tr>
+                    <td><strong>Cost</strong></td>
+                    <td>$$  (gateway + egress)</td>
+                    <td>$$$$ (port fee + circuit + provider)</td>
+                    <td>$$$ (hub hourly + connection units)</td>
+                </tr>
+                <tr>
+                    <td><strong>Redundancy</strong></td>
+                    <td>Active-active; zone-redundant SKUs</td>
+                    <td>Dual circuits recommended; zone-redundant GW</td>
+                    <td>Built-in multi-hub; auto-failover</td>
+                </tr>
+                <tr>
+                    <td><strong>Setup Complexity</strong></td>
+                    <td>Low — self-service</td>
+                    <td>High — provider involvement, cross-connects</td>
+                    <td>Medium — managed by Azure, less UDR work</td>
+                </tr>
+                <tr>
+                    <td><strong>Best For</strong></td>
+                    <td>Dev/test, small offices, quick hybrid</td>
+                    <td>Production workloads, large data transfers, regulated industries</td>
+                    <td>Multi-branch, global orgs needing any-to-any</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <div class="key-concept">
+            <h3>🔑 When ExpressRoute Beats VPN</h3>
+            <ul>
+                <li><strong>Bandwidth:</strong> You need &gt;1 Gbps sustained throughput</li>
+                <li><strong>Latency SLAs:</strong> Real-time workloads (SAP HANA replication, financial trading)</li>
+                <li><strong>Compliance:</strong> Regulations prohibit data traversal over public internet</li>
+                <li><strong>Cost at scale:</strong> Egress-heavy workloads — ER Unlimited can be cheaper than metered internet egress</li>
+                <li><strong>Reliability:</strong> 99.95% SLA with redundant circuits vs best-effort internet</li>
+            </ul>
+        </div>
+    </section>
+
+    <!-- Section 3: ExpressRoute Deep Dive -->
+    <section id="expressroute-deep" class="fade-in">
+        <h2>3. ExpressRoute: Global Reach, FastPath &amp; Peering Types</h2>
+
+        <h3>Private Peering vs Microsoft Peering</h3>
+        <ul>
+            <li><strong>Private peering:</strong> Connects to your Azure VNets (10.x, 172.x address spaces). This is what most people think of as "ExpressRoute."</li>
+            <li><strong>Microsoft peering:</strong> Connects to Microsoft 365, Dynamics 365, Azure PaaS public endpoints (Storage, SQL). Replaces the deprecated "public peering."</li>
+        </ul>
+
+        <h3>Global Reach</h3>
+        <p>Connects two ExpressRoute circuits together so on-premises sites can communicate through the Microsoft backbone — <strong>without hairpinning through Azure VNets</strong>. Example: London office ↔ Sydney office via ER Global Reach, bypassing VPN over internet.</p>
+        <div class="callout-warning">
+            <strong>⚠️ Limitation:</strong> Global Reach is not available in all regions (notably China, some government regions). Check availability before designing.
+        </div>
+
+        <h3>FastPath</h3>
+        <p>Bypasses the ExpressRoute gateway for data-plane traffic, sending packets directly to VMs. Reduces latency for high-throughput scenarios.</p>
+        <ul>
+            <li>Requires Ultra Performance or ErGw3AZ gateway SKU</li>
+            <li>Does NOT support VNet peering — only works for VMs in the gateway VNet itself (or the directly connected VNet in newer preview)</li>
+            <li>Does not support UDRs on the GatewaySubnet for FastPath traffic</li>
+        </ul>
+
+        <h3>ExpressRoute + VPN Coexistence</h3>
+        <p>You can deploy both on the same VNet for redundancy: ER as primary, S2S VPN as failover. BGP ensures automatic failover. This is a common exam scenario.</p>
+    </section>
+
+    <!-- Section 4: Virtual WAN -->
+    <section id="virtual-wan" class="fade-in">
+        <h2>4. Virtual WAN: When It Replaces Custom Hub-Spoke</h2>
+
+        <p>Azure Virtual WAN is a Microsoft-managed networking service that provides <strong>any-to-any transit</strong> connectivity. It replaces the need to manually build hub VNets, NVAs for routing, and UDRs for spoke-to-spoke traffic.</p>
+
+        <h3>Key Capabilities</h3>
+        <ul>
+            <li><strong>Any-to-any connectivity:</strong> Spokes, branches (VPN), and ER circuits auto-route to each other</li>
+            <li><strong>Hub auto-mesh:</strong> Multiple hubs in different regions automatically route between each other over the MS backbone</li>
+            <li><strong>Integrated SD-WAN:</strong> Partners (Barracuda, Cisco, etc.) can inject branch CPE config automatically</li>
+            <li><strong>Scale:</strong> Supports hundreds of branches, thousands of spokes per hub</li>
+            <li><strong>Routing intent:</strong> Simplifies security by routing all traffic (internet + private) through a hub firewall/NVA</li>
+        </ul>
+
+        <!-- BoxDiagram: Virtual WAN Topology -->
+        <div class="diagram slide-in-right" data-diagram='{
+            "nodes": [
+                {"id": "vhub-west", "label": "vWAN Hub\nWest US", "x": 200, "y": 90, "w": 110, "h": 45, "shape": "rect", "icon": "🌀", "tooltip": "Virtual WAN hub — auto-provisions gateways, routing, firewall"},
+                {"id": "vhub-east", "label": "vWAN Hub\nEast US", "x": 420, "y": 90, "w": 110, "h": 45, "shape": "rect", "icon": "🌀", "tooltip": "Second hub — auto-mesh with West US hub over MS backbone"},
+                {"id": "branch1", "label": "NYC Office", "x": 420, "y": 10, "w": 100, "h": 35, "shape": "rect", "icon": "🏢", "tooltip": "Branch connected via S2S VPN or SD-WAN"},
+                {"id": "branch2", "label": "LA Office", "x": 60, "y": 90, "w": 100, "h": 35, "shape": "rect", "icon": "🏢", "tooltip": "Branch connected via S2S VPN"},
+                {"id": "er-dc", "label": "Primary DC\n(ExpressRoute)", "x": 60, "y": 170, "w": 120, "h": 40, "shape": "rect", "icon": "🏭", "tooltip": "Main data center connected via ExpressRoute to West hub"},
+                {"id": "spoke-w1", "label": "Spoke: Prod", "x": 180, "y": 180, "w": 95, "h": 30, "shape": "rect", "icon": "📦", "tooltip": "Production workloads peered to West hub"},
+                {"id": "spoke-w2", "label": "Spoke: Dev", "x": 290, "y": 180, "w": 95, "h": 30, "shape": "rect", "icon": "🧪", "tooltip": "Dev workloads peered to West hub"},
+                {"id": "spoke-e1", "label": "Spoke: DR", "x": 420, "y": 180, "w": 95, "h": 30, "shape": "rect", "icon": "🔄", "tooltip": "DR workloads peered to East hub"},
+                {"id": "branch3", "label": "London Office", "x": 540, "y": 50, "w": 100, "h": 35, "shape": "rect", "icon": "🏢", "tooltip": "International branch — P2S or ER"}
+            ],
+            "edges": [
+                {"from": "vhub-west", "to": "vhub-east", "label": "auto-mesh", "style": "solid"},
+                {"from": "branch2", "to": "vhub-west", "label": "VPN", "style": "solid"},
+                {"from": "er-dc", "to": "vhub-west", "label": "ER", "style": "solid"},
+                {"from": "vhub-west", "to": "spoke-w1", "label": "peering", "style": "dashed"},
+                {"from": "vhub-west", "to": "spoke-w2", "label": "peering", "style": "dashed"},
+                {"from": "branch1", "to": "vhub-east", "label": "VPN", "style": "solid"},
+                {"from": "branch3", "to": "vhub-east", "label": "VPN/ER", "style": "solid"},
+                {"from": "vhub-east", "to": "spoke-e1", "label": "peering", "style": "dashed"}
+            ],
+            "groups": [
+                {"label": "Azure Virtual WAN", "x": 180, "y": 70, "w": 370, "h": 80}
+            ]
+        }'></div>
+        <p class="diagram-caption">Virtual WAN: multi-hub topology with auto-mesh. Branches, ER circuits, and VNet spokes all achieve any-to-any connectivity without custom UDRs.</p>
+    </section>
+
+    <!-- Section 5: VWAN vs Traditional -->
+    <section id="vwan-vs-traditional" class="fade-in">
+        <h2>5. Virtual WAN vs Traditional Hub-Spoke Trade-offs</h2>
+
+        <table class="compare-grid">
+            <thead>
+                <tr>
+                    <th>Aspect</th>
+                    <th>Traditional Hub-Spoke</th>
+                    <th>Virtual WAN</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><strong>Routing control</strong></td>
+                    <td>Full control via UDRs, NVAs, BGP</td>
+                    <td>Managed routing; less granular (routing intent helps)</td>
+                </tr>
+                <tr>
+                    <td><strong>NVA flexibility</strong></td>
+                    <td>Any NVA from marketplace</td>
+                    <td>Limited NVA partners in hub; or use spoke NVA with routing intent</td>
+                </tr>
+                <tr>
+                    <td><strong>Spoke-to-spoke</strong></td>
+                    <td>Manual UDRs + NVA required</td>
+                    <td>Automatic — built-in transit</td>
+                </tr>
+                <tr>
+                    <td><strong>Multi-region</strong></td>
+                    <td>Manual hub-to-hub peering + routing</td>
+                    <td>Auto-mesh between hubs</td>
+                </tr>
+                <tr>
+                    <td><strong>Scale</strong></td>
+                    <td>Limited by NVA throughput, UDR limits (400 routes)</td>
+                    <td>Managed scale — thousands of connections</td>
+                </tr>
+                <tr>
+                    <td><strong>Cost</strong></td>
+                    <td>Pay for NVA VMs, gateway SKU</td>
+                    <td>Pay per hub-hour + connection unit + data processed</td>
+                </tr>
+                <tr>
+                    <td><strong>Complexity</strong></td>
+                    <td>High — many moving parts to maintain</td>
+                    <td>Lower — Microsoft manages gateway lifecycle</td>
+                </tr>
+                <tr>
+                    <td><strong>Best for</strong></td>
+                    <td>Small-medium orgs; need deep NVA customization</td>
+                    <td>Large enterprises; many branches; global footprint</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <div class="key-concept">
+            <h3>🔑 Choose Virtual WAN When…</h3>
+            <ul>
+                <li>You have <strong>&gt;10 branch sites</strong> needing automated connectivity</li>
+                <li>You want <strong>any-to-any transit</strong> without managing UDR tables</li>
+                <li>You're deploying <strong>multi-region</strong> and need hub-to-hub auto-mesh</li>
+                <li>You use <strong>SD-WAN partners</strong> and want integrated provisioning</li>
+            </ul>
+        </div>
+
+        <div class="key-concept">
+            <h3>🔑 Stick with Traditional Hub-Spoke When…</h3>
+            <ul>
+                <li>You need <strong>specific NVA vendors</strong> not supported in vWAN hubs</li>
+                <li>You require <strong>granular UDR control</strong> (e.g., traffic engineering per subnet)</li>
+                <li>You have a <strong>simple topology</strong> (1 hub, 3–5 spokes, 1 VPN connection)</li>
+                <li>Budget constraints — vWAN per-hub cost may exceed a single NVA for small deployments</li>
+            </ul>
+        </div>
+    </section>
+
+    <!-- Section 6: Hybrid DNS -->
+    <section id="hybrid-dns" class="fade-in">
+        <h2>6. Hybrid DNS: Conditional Forwarding Across VPN/ER</h2>
+
+        <p>In hybrid networks, DNS resolution must work bidirectionally:</p>
+
+        <h3>Azure → On-Premises</h3>
+        <ul>
+            <li>Deploy <strong>Azure DNS Private Resolver</strong> (or DNS forwarder VMs) in the hub VNet</li>
+            <li>Configure <strong>DNS forwarding rulesets</strong> to forward on-prem domains (e.g., <code>corp.contoso.com</code>) to on-prem DNS servers (reachable via VPN/ER)</li>
+            <li>Link rulesets to spoke VNets so all workloads resolve on-prem names</li>
+        </ul>
+
+        <h3>On-Premises → Azure Private Endpoints</h3>
+        <ul>
+            <li>On-prem DNS servers need conditional forwarders for Azure private DNS zones (e.g., <code>privatelink.blob.core.windows.net</code>)</li>
+            <li>Forward to the Azure DNS Private Resolver's <strong>inbound endpoint IP</strong> (in hub VNet)</li>
+            <li>Ensure the inbound endpoint is reachable from on-prem via VPN/ER</li>
+        </ul>
+
+        <h3>Architecture Pattern</h3>
+        <div class="callout-info">
+            <strong>Pattern:</strong> On-prem DNS → conditional forward (privatelink.*) → Azure DNS Private Resolver inbound endpoint → Azure Private DNS Zone → Private Endpoint IP
+        </div>
+
+        <div class="exam-tip">
+            <strong>AZ-305 Exam Tip:</strong> Azure DNS Private Resolver replaces the need for IaaS DNS forwarder VMs. It's the recommended solution for new deployments. Expect questions about inbound vs outbound endpoints.
+        </div>
+    </section>
+
+    <!-- Section 7: Real-World -->
+    <section id="real-world" class="fade-in">
+        <h2>7. Real-World: Multi-Region Enterprise with DR</h2>
+
+        <div class="real-world-scenario">
+            <h3>📋 Scenario</h3>
+            <p><strong>Contoso Financial</strong> has 3 offices (New York, London, Singapore), a primary data center (New Jersey), and needs Azure connectivity with DR in a secondary region.</p>
+
+            <h4>Requirements</h4>
+            <ul>
+                <li>NJ data center → Azure (high bandwidth, &lt;10ms latency for SAP replication)</li>
+                <li>All offices need access to Azure workloads and each other</li>
+                <li>Regulatory: financial data must not traverse public internet</li>
+                <li>DR: active-passive in East US 2, failover &lt;15 min RTO</li>
+                <li>Budget: optimize for reliability, not lowest cost</li>
+            </ul>
+
+            <h4>Solution Design</h4>
+            <ol>
+                <li><strong>ExpressRoute (NJ DC → East US):</strong> 10 Gbps circuit with redundant connections (two different peering locations). Private peering for VNet access. ErGw3AZ gateway (zone-redundant, FastPath-capable).</li>
+                <li><strong>Virtual WAN Standard:</strong> Two hubs — East US (primary) and East US 2 (DR). Auto-mesh gives inter-hub routing.</li>
+                <li><strong>Branch connectivity:</strong> NY office → S2S VPN to East US hub. London → ExpressRoute via Equinix London to East US hub. Singapore → S2S VPN to East US hub (consider ER if latency matters).</li>
+                <li><strong>Global Reach:</strong> NJ DC ↔ London office communicate via ER Global Reach (backbone-to-backbone, no Azure transit needed for inter-office traffic).</li>
+                <li><strong>DR:</strong> Spoke VNets replicated in East US 2 hub. ASR for VM replication. ER circuit has connection to both hubs. DNS failover via Traffic Manager + Private DNS zone auto-registration.</li>
+                <li><strong>DNS:</strong> Azure DNS Private Resolver in each hub. On-prem DNS forwards privatelink.* zones to resolver inbound endpoint. Resolver outbound rules forward corp.contoso.com to NJ DC DNS.</li>
+            </ol>
+
+            <h4>Why Not Traditional Hub-Spoke?</h4>
+            <p>With 3+ branches, 2 regions, and any-to-any requirements, manually managing UDRs and NVA HA across regions is error-prone. Virtual WAN's auto-mesh and integrated ER/VPN gateways reduce operational overhead significantly.</p>
+        </div>
+    </section>
+
+    <!-- Quiz -->
+    <section id="quiz" class="fade-in">
+        <h2>Knowledge Check</h2>
+
+        <div class="quiz-question">
+            <h4>Q1: Spoke VNet A is peered to Hub, and Spoke VNet B is peered to Hub. What's needed for A↔B communication?</h4>
+            <details>
+                <summary>Reveal Answer</summary>
+                <p><strong>An NVA or Azure Firewall in the Hub + UDRs on both spokes</strong> pointing each other's address space to the NVA IP. Peering alone is non-transitive — traffic from A to B won't traverse the hub without explicit routing. Alternatively, use Virtual WAN which provides this transit automatically.</p>
+            </details>
+        </div>
+
+        <div class="quiz-question">
+            <h4>Q2: A company needs 5 Gbps sustained throughput between their DC and Azure, with data that cannot traverse the public internet. Which connectivity option?</h4>
+            <details>
+                <summary>Reveal Answer</summary>
+                <p><strong>ExpressRoute</strong> — provides private connectivity (never public internet), supports up to 100 Gbps (Direct), and meets compliance requirements. VPN Gateway max is ~10 Gbps and always uses internet paths.</p>
+            </details>
+        </div>
+
+        <div class="quiz-question">
+            <h4>Q3: Two on-premises sites (London and Tokyo) each have their own ExpressRoute circuit to Azure. How can they communicate directly without routing through an Azure VNet?</h4>
+            <details>
+                <summary>Reveal Answer</summary>
+                <p><strong>ExpressRoute Global Reach</strong> — connects the two ER circuits so on-prem traffic flows over the Microsoft backbone directly between sites. No need to hairpin through Azure VNets or deploy VPN between sites.</p>
+            </details>
+        </div>
+
+        <div class="quiz-question">
+            <h4>Q4: An enterprise has 50 branch offices, 3 Azure regions, and wants automated any-to-any connectivity. Traditional hub-spoke or Virtual WAN?</h4>
+            <details>
+                <summary>Reveal Answer</summary>
+                <p><strong>Virtual WAN</strong> — at this scale, managing UDRs, NVA HA, and hub-to-hub routing manually is unsustainable. Virtual WAN provides auto-mesh between hubs, integrated VPN/ER gateways, SD-WAN partner integration, and automatic any-to-any routing.</p>
+            </details>
+        </div>
+    </section>
+
+    <!-- Navigation -->
+    <nav class="lesson-nav">
+        <a href="0008-networking-vnet-design-subnets-nsg.html">&larr; Prev: Lesson 008</a>
+        <a href="0010-load-balancing-traffic-management.html">Next: Lesson 010 &rarr;</a>
+    </nav>
+</div>
+<script src="../assets/diagrams.js"></script>
+</body>
+</html>

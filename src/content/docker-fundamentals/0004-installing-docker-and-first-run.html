@@ -1,0 +1,380 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lesson 4: Installing Docker & Your First Container</title>
+  <link rel="stylesheet" href="../assets/lesson-style.css">
+</head>
+<body>
+
+  <div class="lesson-meta">
+    <span>📦 Lesson 4 of 12</span>
+    <span>⏱️ 8–10 minutes</span>
+    <span>🏷️ Hands-on</span>
+  </div>
+
+  <h1>Installing Docker &amp; Your First Container</h1>
+  <p class="subtitle">You've learned <em>what</em> containers are and <em>why</em> they work. Now let's install the tooling and run your very first container — then dissect exactly what happened.</p>
+
+  <!-- ============================================================ -->
+  <h2>1. What Gets Installed</h2>
+
+  <p>When you "install Docker," you're actually installing a <strong>stack</strong> of cooperating components:</p>
+
+  <div class="diagram">
+<pre style="text-align:left; background:none; color:var(--color-text); margin:0; padding:0; font-size:0.85rem;">
+┌──────────────────────────────────────────────────────┐
+│              Your Machine (Host OS)                   │
+│                                                      │
+│  ┌─────────────┐         ┌──────────────────────┐   │
+│  │ docker CLI  │────────▶│  dockerd (daemon)     │   │
+│  └─────────────┘  REST   │  • image management   │   │
+│                   API     │  • networking         │   │
+│  ┌─────────────┐         │  • volumes            │   │
+│  │ Docker      │         └──────────┬───────────┘   │
+│  │ Compose     │                    │               │
+│  └─────────────┘                    ▼               │
+│                          ┌──────────────────────┐   │
+│                          │  containerd           │   │
+│                          │  (container runtime)  │   │
+│                          └──────────┬───────────┘   │
+│                                     │               │
+│                                     ▼               │
+│                          ┌──────────────────────┐   │
+│                          │  runc                 │   │
+│                          │  (OCI runtime — does  │   │
+│                          │   the actual clone/   │   │
+│                          │   unshare syscalls)   │   │
+│                          └──────────────────────┘   │
+└──────────────────────────────────────────────────────┘
+</pre>
+    <div class="diagram-caption">Fig 1. Components installed with Docker and how they communicate.</div>
+  </div>
+
+  <table style="width:100%; font-size:0.92rem; margin-bottom:1.5rem; border-collapse:collapse;">
+    <thead>
+      <tr style="border-bottom:2px solid var(--color-border);">
+        <th style="text-align:left; padding:0.5rem;">Component</th>
+        <th style="text-align:left; padding:0.5rem;">Role</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr><td style="padding:0.4rem 0.5rem;"><code>docker</code> CLI</td><td style="padding:0.4rem 0.5rem;">The command you type. Talks to the daemon via REST API over a Unix socket.</td></tr>
+      <tr><td style="padding:0.4rem 0.5rem;"><code>dockerd</code></td><td style="padding:0.4rem 0.5rem;">Long-running daemon. Manages images, networks, volumes. Delegates container execution to containerd.</td></tr>
+      <tr><td style="padding:0.4rem 0.5rem;"><code>containerd</code></td><td style="padding:0.4rem 0.5rem;">Industry-standard container runtime. Pulls images, manages container lifecycle.</td></tr>
+      <tr><td style="padding:0.4rem 0.5rem;"><code>runc</code></td><td style="padding:0.4rem 0.5rem;">Low-level OCI runtime. Makes the actual Linux syscalls (clone, unshare, pivot_root) you learned about in Lesson 3.</td></tr>
+      <tr><td style="padding:0.4rem 0.5rem;">Docker Compose</td><td style="padding:0.4rem 0.5rem;">Multi-container orchestration tool. Bundled with Docker Desktop; separate install on Linux.</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Docker Desktop vs Docker Engine</h3>
+  <ul>
+    <li><strong>Docker Desktop</strong> (Mac/Windows) — includes a Linux VM, the daemon, CLI, Compose, a GUI, and Kubernetes. One installer, everything works.</li>
+    <li><strong>Docker Engine</strong> (Linux) — just the daemon + CLI + containerd + runc. No VM needed because you're already on Linux.</li>
+  </ul>
+
+  <!-- ============================================================ -->
+  <h2>2. Installation (Quick Reference)</h2>
+
+  <p>You likely already have Docker installed. If not, here's the fast path:</p>
+
+  <h3>Linux (Ubuntu/Debian)</h3>
+<pre><code>curl -fsSL https://get.docker.com | sh
+sudo usermod -aG docker $USER
+# Log out and back in for group to take effect</code></pre>
+
+  <h3>macOS</h3>
+<pre><code># Download Docker Desktop from https://docker.com/products/docker-desktop
+# Or via Homebrew:
+brew install --cask docker</code></pre>
+
+  <h3>Windows</h3>
+<pre><code># Download Docker Desktop from https://docker.com/products/docker-desktop
+# Requires WSL 2 backend (enabled during install)</code></pre>
+
+  <p>Verify your installation:</p>
+<pre><code>$ docker --version
+Docker version 24.0.7, build afdd53b
+
+$ docker compose version
+Docker Compose version v2.23.0</code></pre>
+
+  <div class="callout">
+    <div class="callout-title">Focus on what, not how</div>
+    <p>Installation guides go stale fast. What matters is understanding the <em>components</em> you just installed — that knowledge applies whether you use Docker 20.x or 27.x.</p>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>3. Your First Run: <code>hello-world</code></h2>
+
+<pre><code>$ docker run hello-world</code></pre>
+
+  <p>This one command triggers a surprisingly complex flow. Let's trace every step:</p>
+
+  <div class="diagram">
+<pre style="text-align:left; background:none; color:var(--color-text); margin:0; padding:0; font-size:0.82rem;">
+ You type: docker run hello-world
+       │
+       ▼
+ ┌─────────────────────────────────────────────────────────────┐
+ │ 1. CLI parses command, sends request to dockerd             │
+ │    via /var/run/docker.sock                                 │
+ └─────────────────────┬───────────────────────────────────────┘
+                       ▼
+ ┌─────────────────────────────────────────────────────────────┐
+ │ 2. dockerd checks: do I have image "hello-world:latest"     │
+ │    locally? → NO                                            │
+ └─────────────────────┬───────────────────────────────────────┘
+                       ▼
+ ┌─────────────────────────────────────────────────────────────┐
+ │ 3. dockerd contacts Docker Hub (registry.docker.io)         │
+ │    • Downloads image manifest (SHA, layers)                 │
+ │    • Downloads layers (just one tiny layer for hello-world) │
+ │    • Stores in /var/lib/docker/overlay2/                    │
+ └─────────────────────┬───────────────────────────────────────┘
+                       ▼
+ ┌─────────────────────────────────────────────────────────────┐
+ │ 4. dockerd tells containerd: "create a container from       │
+ │    this image"                                              │
+ │    • containerd creates filesystem snapshot (overlay)       │
+ │    • containerd calls runc                                  │
+ └─────────────────────┬───────────────────────────────────────┘
+                       ▼
+ ┌─────────────────────────────────────────────────────────────┐
+ │ 5. runc creates namespaces + cgroups, runs the binary       │
+ │    inside the container → prints "Hello from Docker!"       │
+ └─────────────────────┬───────────────────────────────────────┘
+                       ▼
+ ┌─────────────────────────────────────────────────────────────┐
+ │ 6. Process exits (code 0). Container stops.                 │
+ │    Container still exists (status: Exited) until removed.   │
+ └─────────────────────────────────────────────────────────────┘
+</pre>
+    <div class="diagram-caption">Fig 2. The complete lifecycle of <code>docker run hello-world</code>.</div>
+  </div>
+
+  <p>Expected output:</p>
+<pre><code>Unable to find image 'hello-world:latest' locally
+latest: Pulling from library/hello-world
+c1ec31eb5944: Pull complete
+Digest: sha256:d211f485f2dd1dee407a80973c8f129f00d54604...
+Status: Downloaded newer image for hello-world:latest
+
+Hello from Docker!
+This message shows that your installation appears to be working correctly.
+...</code></pre>
+
+  <!-- ============================================================ -->
+  <h2>4. Pulling an Image</h2>
+
+  <p><code>docker pull</code> is the explicit version of the implicit pull that happens during <code>docker run</code>. Here's what it actually does:</p>
+
+  <ol>
+    <li><strong>Contact the registry</strong> — resolve <code>ubuntu</code> → <code>registry.docker.io/library/ubuntu:latest</code></li>
+    <li><strong>Download the manifest</strong> — a JSON file listing all layers (by SHA-256 digest) and the image config</li>
+    <li><strong>Download layers</strong> — each layer is a compressed tar; only layers you don't already have are downloaded</li>
+    <li><strong>Store locally</strong> — layers go into <code>/var/lib/docker/overlay2/</code>; the image metadata is indexed</li>
+  </ol>
+
+<pre><code>$ docker pull ubuntu
+Using default tag: latest
+latest: Pulling from library/ubuntu
+aece8493d397: Pull complete
+Digest: sha256:2b7412e6465c3c7fc5bb21...
+Status: Downloaded newer image for ubuntu:latest
+docker.io/library/ubuntu:latest</code></pre>
+
+  <p>Inspect what you have locally:</p>
+<pre><code>$ docker images
+REPOSITORY    TAG       IMAGE ID       CREATED       SIZE
+ubuntu        latest    ca2b0f26964c   2 weeks ago   77.9MB
+hello-world   latest    d2c94e258dcb   9 months ago  13.3kB</code></pre>
+
+  <table style="width:100%; font-size:0.92rem; margin-bottom:1.5rem; border-collapse:collapse;">
+    <thead>
+      <tr style="border-bottom:2px solid var(--color-border);">
+        <th style="text-align:left; padding:0.5rem;">Column</th>
+        <th style="text-align:left; padding:0.5rem;">Meaning</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr><td style="padding:0.4rem 0.5rem;">REPOSITORY</td><td style="padding:0.4rem 0.5rem;">Image name (from the registry)</td></tr>
+      <tr><td style="padding:0.4rem 0.5rem;">TAG</td><td style="padding:0.4rem 0.5rem;">Version label (<code>latest</code> is the default)</td></tr>
+      <tr><td style="padding:0.4rem 0.5rem;">IMAGE ID</td><td style="padding:0.4rem 0.5rem;">First 12 chars of the SHA-256 content hash</td></tr>
+      <tr><td style="padding:0.4rem 0.5rem;">SIZE</td><td style="padding:0.4rem 0.5rem;">Disk space used (shared layers aren't double-counted)</td></tr>
+    </tbody>
+  </table>
+
+  <!-- ============================================================ -->
+  <h2>5. Running an Interactive Container</h2>
+
+<pre><code>$ docker run -it ubuntu bash</code></pre>
+
+  <p>Flags: <code>-i</code> = keep STDIN open, <code>-t</code> = allocate a pseudo-TTY. Together they give you an interactive shell.</p>
+
+  <p>You're now <strong>inside</strong> a container. Let's look around:</p>
+
+<pre><code>root@3f7a2b1c9e4d:/# hostname
+3f7a2b1c9e4d
+
+root@3f7a2b1c9e4d:/# ps aux
+USER  PID %CPU %MEM    VSZ   RSS TTY  STAT START TIME COMMAND
+root    1  0.0  0.0   4624  3720 pts/0 Ss  12:00 0:00 bash
+root   10  0.0  0.0   7060  1564 pts/0 R+  12:00 0:00 ps aux
+
+root@3f7a2b1c9e4d:/# ls /
+bin  boot  dev  etc  home  lib  media  mnt  opt  proc  root  run  sbin  srv  sys  tmp  usr  var
+
+root@3f7a2b1c9e4d:/# cat /etc/os-release | head -2
+PRETTY_NAME="Ubuntu 22.04.3 LTS"
+NAME="Ubuntu"
+
+root@3f7a2b1c9e4d:/# exit
+$</code></pre>
+
+  <h3>What's different from the host?</h3>
+  <ul>
+    <li><strong>Hostname</strong> — a random hex string (the container ID), not your machine's name</li>
+    <li><strong>Process list</strong> — only <code>bash</code> and its children. PID 1 is bash, not systemd.</li>
+    <li><strong>Filesystem</strong> — Ubuntu's root filesystem, regardless of what OS your host runs</li>
+    <li><strong>Users</strong> — you're root inside, but that doesn't mean root on the host (user namespace)</li>
+    <li><strong>Network</strong> — separate network namespace with its own IP address</li>
+  </ul>
+
+  <div class="callout warning">
+    <div class="callout-title">Ephemeral by default</div>
+    <p>Any files you create inside the container are <strong>lost</strong> when you remove it. The image stays unchanged. This is the "cattle not pets" model — containers are disposable.</p>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>6. Container Lifecycle Commands</h2>
+
+  <table style="width:100%; font-size:0.92rem; margin-bottom:1.5rem; border-collapse:collapse;">
+    <thead>
+      <tr style="border-bottom:2px solid var(--color-border);">
+        <th style="text-align:left; padding:0.5rem;">Command</th>
+        <th style="text-align:left; padding:0.5rem;">What it does</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr><td style="padding:0.4rem 0.5rem;"><code>docker run &lt;image&gt;</code></td><td style="padding:0.4rem 0.5rem;">Create + start a new container from an image</td></tr>
+      <tr><td style="padding:0.4rem 0.5rem;"><code>docker ps</code></td><td style="padding:0.4rem 0.5rem;">List running containers (<code>-a</code> includes stopped ones)</td></tr>
+      <tr><td style="padding:0.4rem 0.5rem;"><code>docker stop &lt;id&gt;</code></td><td style="padding:0.4rem 0.5rem;">Send SIGTERM, then SIGKILL after timeout</td></tr>
+      <tr><td style="padding:0.4rem 0.5rem;"><code>docker start &lt;id&gt;</code></td><td style="padding:0.4rem 0.5rem;">Restart a stopped container (same filesystem state)</td></tr>
+      <tr><td style="padding:0.4rem 0.5rem;"><code>docker rm &lt;id&gt;</code></td><td style="padding:0.4rem 0.5rem;">Delete a stopped container permanently</td></tr>
+      <tr><td style="padding:0.4rem 0.5rem;"><code>docker logs &lt;id&gt;</code></td><td style="padding:0.4rem 0.5rem;">Show stdout/stderr captured from the container</td></tr>
+    </tbody>
+  </table>
+
+  <p>A container's lifecycle:</p>
+<pre><code>Created → Running → Stopped (Exited) → Removed
+           ↑           │
+           └───────────┘  (docker start)</code></pre>
+
+  <!-- ============================================================ -->
+  <h2>Hands-On Tasks</h2>
+
+  <div class="hands-on">
+    <div class="hands-on-title">Task 1: Run hello-world and read the output</div>
+    <ol>
+      <li>Run: <code>docker run hello-world</code></li>
+      <li>Read the output carefully — it explains the steps Docker took.</li>
+      <li>Run: <code>docker ps -a</code> — find the stopped hello-world container.</li>
+      <li>Clean up: <code>docker rm &lt;container-id&gt;</code></li>
+    </ol>
+  </div>
+
+  <div class="hands-on">
+    <div class="hands-on-title">Task 2: Explore an interactive Ubuntu container</div>
+    <ol>
+      <li>Run: <code>docker run -it ubuntu bash</code></li>
+      <li>Inside, try: <code>hostname</code>, <code>ps aux</code>, <code>ls /</code>, <code>whoami</code></li>
+      <li>Create a file: <code>echo "hello" > /tmp/test.txt</code></li>
+      <li>Type <code>exit</code> to leave</li>
+      <li>Run a new container: <code>docker run -it ubuntu bash</code> — check if <code>/tmp/test.txt</code> exists (it won't!)</li>
+      <li>Exit and clean up: <code>docker rm $(docker ps -aq)</code></li>
+    </ol>
+  </div>
+
+  <div class="hands-on">
+    <div class="hands-on-title">Task 3: Run nginx in detached mode</div>
+    <ol>
+      <li>Run: <code>docker run -d -p 8080:80 --name my-nginx nginx</code></li>
+      <li>Visit <code>http://localhost:8080</code> in your browser — you should see "Welcome to nginx!"</li>
+      <li>Check logs: <code>docker logs my-nginx</code></li>
+      <li>Check running containers: <code>docker ps</code></li>
+      <li>Stop it: <code>docker stop my-nginx</code></li>
+      <li>Remove it: <code>docker rm my-nginx</code></li>
+    </ol>
+    <p style="margin-top:0.8rem; font-size:0.9rem;"><strong>Key flags:</strong> <code>-d</code> = detached (run in background), <code>-p 8080:80</code> = map host port 8080 to container port 80, <code>--name</code> = give it a human-friendly name.</p>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>Knowledge Check</h2>
+
+  <div class="quiz" data-quiz="q1">
+    <p class="quiz-question">When you run <code>docker run hello-world</code> and the image isn't local, what happens first?</p>
+    <ul class="quiz-options">
+      <li data-correct="false">runc creates a new namespace</li>
+      <li data-correct="false">containerd starts the container</li>
+      <li data-correct="true">The daemon pulls the image from Docker Hub</li>
+      <li data-correct="false">The CLI compiles the image from source</li>
+    </ul>
+    <div class="quiz-feedback" data-correct="The daemon must have the image locally before it can create a container." data-incorrect="Think about what needs to exist before a container can be created."></div>
+  </div>
+
+  <div class="quiz" data-quiz="q2">
+    <p class="quiz-question">Which component makes the actual Linux syscalls (clone, unshare) to create namespaces?</p>
+    <ul class="quiz-options">
+      <li data-correct="false">docker CLI</li>
+      <li data-correct="false">dockerd</li>
+      <li data-correct="false">containerd</li>
+      <li data-correct="true">runc</li>
+    </ul>
+    <div class="quiz-feedback" data-correct="runc is the low-level OCI runtime that directly interfaces with the kernel." data-incorrect="Remember the layered architecture: CLI → dockerd → containerd → runc. The lowest layer does the kernel work."></div>
+  </div>
+
+  <div class="quiz" data-quiz="q3">
+    <p class="quiz-question">You run <code>docker run -it ubuntu bash</code>, create a file, then exit. You run the same command again. Is the file there?</p>
+    <ul class="quiz-options">
+      <li data-correct="true">No — each <code>docker run</code> creates a brand new container</li>
+      <li data-correct="false">Yes — the file persists in the image</li>
+      <li data-correct="false">Yes — Docker automatically mounts a volume</li>
+      <li data-correct="false">It depends on the filesystem driver</li>
+    </ul>
+    <div class="quiz-feedback" data-correct="Each 'docker run' creates a new container with a fresh filesystem layer. The original image is never modified." data-incorrect="Remember: containers are ephemeral. 'docker run' always creates a NEW container."></div>
+  </div>
+
+  <!-- ============================================================ -->
+  <div class="callout not-just-docker">
+    <div class="callout-title">What if you use Podman?</div>
+    <p>Podman is a drop-in replacement for Docker. Same commands, no daemon required:</p>
+<pre style="margin-bottom:0;"><code>podman run hello-world
+podman run -it ubuntu bash
+podman run -d -p 8080:80 nginx</code></pre>
+    <p style="margin-top:0.8rem;">The architecture differs (no central daemon — each container is a child process), but the CLI and image format are identical. Everything you learn here applies to both.</p>
+  </div>
+
+  <!-- ============================================================ -->
+  <div class="takeaways">
+    <h3>🔑 Key Takeaways</h3>
+    <ul>
+      <li><strong>Docker is a stack:</strong> CLI → dockerd → containerd → runc. Each layer has a distinct job.</li>
+      <li><strong><code>docker run</code> = pull + create + start.</strong> It's a compound operation.</li>
+      <li><strong>Images are downloaded as layers</strong> from a registry. Shared layers are stored once.</li>
+      <li><strong>Containers are ephemeral.</strong> Each <code>run</code> creates a fresh instance. Changes don't persist unless you use volumes (Lesson 7).</li>
+      <li><strong>Interactive (<code>-it</code>) vs detached (<code>-d</code>)</strong> — two modes for two use cases: debugging vs running services.</li>
+      <li><strong>Lifecycle:</strong> run → stop → start → rm. Stopped containers still exist until explicitly removed.</li>
+    </ul>
+  </div>
+
+  <!-- ============================================================ -->
+  <nav class="lesson-nav">
+    <a href="0003-how-containers-actually-work.html">← Prev: How Containers Actually Work</a>
+    <a href="0005-docker-images-and-layers.html">Next: Docker Images &amp; Layers →</a>
+  </nav>
+
+  <script src="../assets/quiz.js"></script>
+</body>
+</html>
