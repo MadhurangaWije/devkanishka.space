@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useCompletion } from '@ai-sdk/react';
 import { usePathname } from 'next/navigation';
+import Image from 'next/image';
 import { AnimatePresence, motion } from 'framer-motion';
 import { renderSimpleMarkdown } from '@/lib/simple-markdown';
 
@@ -12,10 +13,19 @@ type Props = {
   courseSlug: string;
 };
 
+const LOADING_MESSAGES = [
+  'Reading the lesson…',
+  'Digging through the guide…',
+  'Connecting the dots…',
+  'Checking the excerpts…',
+  'Almost there…',
+];
+
 export function LessonChatWidget({ courseSlug }: Props) {
   const [open, setOpen] = useState(false);
   const [hasOpened, setHasOpened] = useState(false);
   const [history, setHistory] = useState<Exchange[]>([]);
+  const [loadingMsgIndex, setLoadingMsgIndex] = useState(0);
   const pathname = usePathname();
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -33,6 +43,17 @@ export function LessonChatWidget({ courseSlug }: Props) {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' });
   }, [history, completion]);
 
+  // Cycles a short, friendly status line while waiting for the first token —
+  // resets to the first message at the start of every new question.
+  useEffect(() => {
+    if (!isLoading) return;
+    setLoadingMsgIndex(0);
+    const id = setInterval(() => {
+      setLoadingMsgIndex((i) => (i + 1) % LOADING_MESSAGES.length);
+    }, 1600);
+    return () => clearInterval(id);
+  }, [isLoading]);
+
   return (
     <>
       <motion.button
@@ -40,31 +61,31 @@ export function LessonChatWidget({ courseSlug }: Props) {
           setOpen((v) => !v);
           setHasOpened(true);
         }}
-        title={open ? 'Close chat' : 'Ask about this guide'}
-        className="fixed bottom-24 right-6 lg:bottom-6 z-50 flex items-center gap-2 px-4 py-2.5 bg-surface border-2 border-accent rounded-full font-mono text-xs font-semibold text-accent shadow-lg shadow-accent/20"
+        title={open ? 'Close chat' : 'Ask K.ai about this guide'}
+        className="fixed bottom-24 right-6 lg:bottom-6 z-50 w-14 h-14 rounded-full overflow-hidden shadow-lg"
         animate={
           !hasOpened
             ? {
                 y: [0, -10, 0, -5, 0],
                 boxShadow: [
                   '0 0 0 0 rgba(0, 232, 122, 0.5)',
-                  '0 0 0 8px rgba(0, 232, 122, 0)',
+                  '0 0 0 10px rgba(0, 232, 122, 0)',
                   '0 0 0 0 rgba(0, 232, 122, 0)',
-                  '0 0 0 8px rgba(0, 232, 122, 0)',
+                  '0 0 0 10px rgba(0, 232, 122, 0)',
                   '0 0 0 0 rgba(0, 232, 122, 0)',
                 ],
               }
-            : { y: 0 }
+            : { y: 0, boxShadow: '0 0 0 0 rgba(0, 232, 122, 0)' }
         }
         transition={
           !hasOpened
             ? { duration: 1.4, repeat: Infinity, repeatDelay: 2.2, ease: 'easeInOut' }
             : { duration: 0.2 }
         }
-        whileHover={{ scale: 1.06 }}
+        whileHover={{ scale: 1.08 }}
         whileTap={{ scale: 0.95 }}
       >
-        {open ? '× close' : '💬 ask'}
+        <Image src="/kai-logo.png" alt="Ask K.ai" fill sizes="56px" className="object-cover" priority />
       </motion.button>
 
       <AnimatePresence>
@@ -109,7 +130,30 @@ export function LessonChatWidget({ courseSlug }: Props) {
                       dangerouslySetInnerHTML={{ __html: renderSimpleMarkdown(completion) }}
                     />
                   ) : (
-                    <p className="font-mono text-xs text-text-secondary">…</p>
+                    <div className="flex items-center gap-2 py-1">
+                      <div className="flex gap-1">
+                        {[0, 1, 2].map((i) => (
+                          <motion.span
+                            key={i}
+                            className="w-1.5 h-1.5 rounded-full bg-accent"
+                            animate={{ opacity: [0.3, 1, 0.3], y: [0, -3, 0] }}
+                            transition={{ duration: 1, repeat: Infinity, delay: i * 0.15, ease: 'easeInOut' }}
+                          />
+                        ))}
+                      </div>
+                      <AnimatePresence mode="wait">
+                        <motion.span
+                          key={loadingMsgIndex}
+                          initial={{ opacity: 0, y: 4 }}
+                          animate={{ opacity: 1, y: 0 }}
+                          exit={{ opacity: 0, y: -4 }}
+                          transition={{ duration: 0.25 }}
+                          className="font-mono text-xs text-text-muted italic"
+                        >
+                          {LOADING_MESSAGES[loadingMsgIndex]}
+                        </motion.span>
+                      </AnimatePresence>
+                    </div>
                   )}
                 </div>
               )}
