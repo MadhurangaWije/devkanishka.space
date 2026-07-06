@@ -6,6 +6,7 @@ import { usePathname } from 'next/navigation';
 import { motion, AnimatePresence } from 'framer-motion';
 import type { PhaseMeta } from '@/lib/backend-course';
 import { useReadingMode } from '@/components/course/ReadingModeContext';
+import { LessonChatWidget } from '@/components/course/LessonChatWidget';
 
 const DEFAULT_COMING_SOON = [
   'Phase 3 — Data & Persistence',
@@ -204,6 +205,11 @@ export function CourseSidebar({
           {isReadingMode ? '⤢ exit' : '⛶ read'}
         </button>
       )}
+
+      {/* Chat — available across the whole course (overview + lessons), and
+          deliberately not hidden by reading mode since it's a reading aid,
+          not navigation chrome. */}
+      <LessonChatWidget courseSlug={courseBase.replace('/tutorials/', '')} />
     </>
   );
 }
