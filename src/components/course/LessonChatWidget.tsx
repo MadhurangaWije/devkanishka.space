@@ -37,7 +37,7 @@ export function LessonChatWidget({ courseSlug }: Props) {
       <button
         onClick={() => setOpen((v) => !v)}
         title={open ? 'Close chat' : 'Ask about this guide'}
-        className="fixed bottom-6 left-6 z-50 flex items-center gap-2 px-3.5 py-2 bg-surface border border-site-border rounded-full font-mono text-xs text-text-secondary hover:text-accent hover:border-accent/30 transition-colors shadow-lg"
+        className="fixed bottom-24 right-6 lg:bottom-6 z-50 flex items-center gap-2 px-3.5 py-2 bg-surface border border-site-border rounded-full font-mono text-xs text-text-secondary hover:text-accent hover:border-accent/30 transition-colors shadow-lg"
       >
         {open ? '× close' : '💬 ask'}
       </button>
@@ -49,7 +49,7 @@ export function LessonChatWidget({ courseSlug }: Props) {
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: 16, scale: 0.97 }}
             transition={{ duration: 0.15 }}
-            className="fixed bottom-20 left-6 z-50 w-[min(400px,calc(100vw-3rem))] h-[min(560px,calc(100vh-8rem))] bg-bg border border-site-border rounded-lg shadow-2xl flex flex-col overflow-hidden"
+            className="fixed bottom-40 right-6 lg:bottom-20 z-50 w-[min(400px,calc(100vw-3rem))] h-[min(560px,calc(100vh-8rem))] bg-bg border border-site-border rounded-lg shadow-2xl flex flex-col overflow-hidden"
           >
             {/* Header */}
             <div className="px-4 py-3 border-b border-site-border shrink-0">

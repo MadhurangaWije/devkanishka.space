@@ -4,6 +4,10 @@ import { getChatModel, getEmbeddingModel, EMBEDDING_PROVIDER_OPTIONS } from '@/l
 import { getSupabaseAdmin } from '@/lib/ai/supabase';
 
 export const runtime = 'nodejs';
+// Default Vercel Node function timeout (10s) can be tight once you count
+// embedding the question + vector search + the model's first token —
+// observed ~10s locally even on a good day. Give it headroom.
+export const maxDuration = 30;
 
 const MAX_QUESTION_LENGTH = 500;
 const DAILY_LIMIT = 40;
