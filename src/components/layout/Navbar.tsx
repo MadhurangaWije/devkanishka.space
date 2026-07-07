@@ -94,7 +94,7 @@ export function Navbar() {
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: -8 }}
             transition={{ duration: 0.15 }}
-            className="fixed inset-0 z-40 bg-bg/98 flex flex-col pt-20 px-6"
+            className="fixed inset-0 z-40 bg-bg flex flex-col pt-20 px-6"
           >
             <ul className="flex flex-col gap-6 mt-8">
               {NAV_LINKS.map((link, i) => (
