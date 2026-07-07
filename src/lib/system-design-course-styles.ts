@@ -23,7 +23,7 @@ export const SD_COURSE_CSS = `
   --font-body:  'Inter', system-ui, sans-serif;
   --font-heading: 'Inter', system-ui, sans-serif;
   --font-mono:  'JetBrains Mono', 'Fira Code', monospace;
-  --max-width: 700px;
+  --max-width: var(--reader-width, 700px);
   background: var(--bg);
   color: var(--text);
   font-family: var(--font-body);

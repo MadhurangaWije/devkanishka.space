@@ -25,7 +25,7 @@ export const AI_ENGINEERING_COURSE_CSS = `
   --red-50:     #2a1414;
   --font-sans:  'Inter', system-ui, sans-serif;
   --font-mono:  'JetBrains Mono', 'Fira Code', monospace;
-  --max-w:      700px;
+  --max-w:      var(--reader-width, 700px);
   --r-sm:       6px;
   --r-md:       10px;
   --r-lg:       16px;

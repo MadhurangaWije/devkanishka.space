@@ -21,7 +21,7 @@ export const AZURE_COURSE_CSS = `
   color: var(--az-text);
   background: transparent;
   line-height: 1.8;
-  max-width: 700px;
+  max-width: var(--reader-width, 700px);
   margin: 0 auto;
   padding: 2rem 1.5rem 5rem;
 }

@@ -6,6 +6,7 @@ import { usePathname } from 'next/navigation';
 import { motion, AnimatePresence } from 'framer-motion';
 import type { PhaseMeta } from '@/lib/backend-course';
 import { useReadingMode } from '@/components/course/ReadingModeContext';
+import { useContentWidth, CONTENT_WIDTHS } from '@/components/course/ContentWidthContext';
 import { LessonChatWidget } from '@/components/course/LessonChatWidget';
 
 const DEFAULT_COMING_SOON = [
@@ -34,6 +35,7 @@ export function CourseSidebar({
   const pathname = usePathname();
   const [mobileOpen, setMobileOpen] = useState(false);
   const { isReadingMode, toggleReadingMode } = useReadingMode();
+  const { widthKey, cycleWidth } = useContentWidth();
   // Only meaningful on an actual lesson page, not the course overview.
   const onLessonPage = pathname !== courseBase && pathname.startsWith(`${courseBase}/`);
 
@@ -203,6 +205,19 @@ export function CourseSidebar({
           className="fixed top-20 right-6 z-50 flex items-center gap-2 px-3.5 py-2 bg-surface border border-site-border rounded-full font-mono text-xs text-text-secondary hover:text-accent hover:border-accent/30 transition-colors shadow-lg"
         >
           {isReadingMode ? '⤢ exit' : '⛶ read'}
+        </button>
+      )}
+
+      {/* Content width control — cycles narrow/medium/wide/full. Lives next to
+          the reading-mode toggle and stays visible in reading mode too, since
+          width is exactly what large-screen readers want to adjust there. */}
+      {onLessonPage && (
+        <button
+          onClick={cycleWidth}
+          title={`Content width: ${CONTENT_WIDTHS.find((w) => w.key === widthKey)?.label} (click to change)`}
+          className="fixed top-32 right-6 z-50 flex items-center gap-2 px-3.5 py-2 bg-surface border border-site-border rounded-full font-mono text-xs text-text-secondary hover:text-accent hover:border-accent/30 transition-colors shadow-lg"
+        >
+          ↔ {CONTENT_WIDTHS.find((w) => w.key === widthKey)?.label}
         </button>
       )}
 

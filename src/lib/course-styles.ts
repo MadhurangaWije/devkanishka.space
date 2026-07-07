@@ -25,7 +25,7 @@ export const SHARED_COURSE_CSS = `
   line-height: 1.8;
   min-height: 100%;
 }
-.lesson-host .page { max-width: 700px; margin: 0 auto; padding: 48px 32px 32px; }
+.lesson-host .page { max-width: var(--reader-width, 700px); margin: 0 auto; padding: 48px 32px 32px; }
 
 /* Typography */
 .lesson-host h1 { font-family: var(--lh-sans); font-size: 2rem; font-weight: 700; line-height: 1.2; color: #fff; margin-bottom: 8px; letter-spacing: -0.02em; }

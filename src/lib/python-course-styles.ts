@@ -78,7 +78,7 @@ export const PY_COURSE_CSS = `
 .py-lesson-host .lesson-meta span { display: flex; align-items: center; gap: 4px; }
 
 .py-lesson-host #content {
-  max-width: 700px;
+  max-width: var(--reader-width, 700px);
   margin: 0 auto;
   padding: 40px 32px 60px;
   width: 100%;

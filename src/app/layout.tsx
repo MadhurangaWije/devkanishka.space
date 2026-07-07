@@ -5,6 +5,7 @@ import '@/styles/globals.css';
 import { Navbar } from '@/components/layout/Navbar';
 import { Footer } from '@/components/layout/Footer';
 import { ReadingModeProvider } from '@/components/course/ReadingModeContext';
+import { ContentWidthProvider } from '@/components/course/ContentWidthContext';
 
 const inter = Inter({
   subsets: ['latin'],
@@ -49,9 +50,11 @@ export default function RootLayout({
     >
       <body className="bg-bg text-text-primary font-mono antialiased">
         <ReadingModeProvider>
-          <Navbar />
-          <main>{children}</main>
-          <Footer />
+          <ContentWidthProvider>
+            <Navbar />
+            <main>{children}</main>
+            <Footer />
+          </ContentWidthProvider>
         </ReadingModeProvider>
       </body>
       <GoogleAnalytics gaId="G-8FHZD85CJ1" />
