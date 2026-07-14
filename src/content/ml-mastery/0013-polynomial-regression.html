@@ -134,7 +134,7 @@ for name, coef, scale in zip(X.columns, lr.coef_, scaler.scale_):
     <span class="callout-icon">🔑</span>
     <div class="callout-body">
       <strong>Multicollinearity: When Features Are Correlated</strong>
-      <p>If two features are highly correlated (e.g., "sqft" and "num_rooms" — larger houses have more rooms), it becomes difficult for the model to separate their individual effects. Coefficients become unstable — small changes to the data cause large changes to the coefficient values. Symptoms: absurdly large or opposite-sign coefficients. Fix: remove one of the correlated features, use PCA to combine them, or use Ridge regression which handles multicollinearity gracefully.</p>
+      <p>If two features are highly correlated (e.g., "sqft" and "num_rooms" — larger houses have more rooms), it becomes difficult for the model to separate their individual effects. Coefficients become unstable — small changes to the data cause large changes to the coefficient values. Symptoms: absurdly large or opposite-sign coefficients. The simplest fix available to you now: remove one of the correlated features. Later lessons add two more options — Ridge regression (Lesson 21) tolerates correlated features gracefully, and PCA (Lesson 31) can merge them into one.</p>
     </div>
   </div>
 </div>
@@ -511,6 +511,14 @@ for x, p in zip(x_values.ravel(), predictions):
 
   <p>To find the best polynomial degree, we use a <strong>validation curve</strong>: train models with different degrees and compare training and validation performance. This directly visualises the bias-variance tradeoff (explored deeply in Lesson 14).</p>
 
+  <div class="callout callout-key">
+    <span class="callout-icon">🔑</span>
+    <div class="callout-body">
+      <strong>Cross-validation, recapped (you first met it in Lesson 10)</strong>
+      <p>We need a fair way to score each degree <em>without touching the test set</em>. One option is to carve a chunk off the training data as a "validation set" — but then the score depends on which lucky (or unlucky) chunk you picked. <strong>K-fold cross-validation</strong> fixes this: split the training data into K equal folds (here K=5), train on 4 folds and score on the 5th, then rotate so every fold gets a turn as the scorer, and average the 5 scores. Every training sample gets used for both training and validation, and no single unlucky split can mislead you. In scikit-learn this whole procedure is one call: <code>cross_val_score(model, X_train, y_train, cv=5)</code>.</p>
+    </div>
+  </div>
+
   <div class="jupyter-cell">
   <div class="jupyter-input-row">
     <div class="input-prompt">In [9]:</div>
@@ -585,9 +593,9 @@ for d, tr, vr in zip(degrees, train_r2s, val_r2s):
       <pre><code class="language-python">import numpy as np
 import pandas as pd
 from sklearn.preprocessing import PolynomialFeatures, StandardScaler
-from sklearn.linear_model import LinearRegression, Ridge
+from sklearn.linear_model import LinearRegression
 from sklearn.pipeline import Pipeline
-from sklearn.model_selection import train_test_split, GridSearchCV, cross_val_score
+from sklearn.model_selection import train_test_split, cross_val_score
 from sklearn.metrics import r2_score, mean_squared_error
 
 # Build a multivariate dataset with non-linear relationships
@@ -619,24 +627,33 @@ pipe_d2 = Pipeline([
 pipe_d2.fit(X_train, y_train)
 print(f"Degree-2 Test R²: {pipe_d2.score(X_test, y_test):.4f}")
 
-# Option 2: Use Ridge regression to reduce overfitting from polynomial features
-pipe_ridge = Pipeline([
+# Option 2: choose the degree honestly with cross-validation
+# (the Section 7 recipe, now on a realistic multivariate dataset)
+best_degree, best_cv_r2 = None, -np.inf
+for degree in [1, 2, 3]:
+    pipe = Pipeline([
+        ('scaler', StandardScaler()),
+        ('poly',   PolynomialFeatures(degree=degree, include_bias=False)),
+        ('model',  LinearRegression()),
+    ])
+    cv_r2 = cross_val_score(pipe, X_train, y_train, cv=5, scoring='r2').mean()
+    print(f"degree={degree}: CV R² = {cv_r2:.4f}")
+    if cv_r2 > best_cv_r2:
+        best_cv_r2, best_degree = cv_r2, degree
+
+# Refit the winning degree on all training data; test set used exactly once
+final_pipe = Pipeline([
     ('scaler', StandardScaler()),
-    ('poly',   PolynomialFeatures(degree=2, include_bias=False)),
-    ('model',  Ridge()),
+    ('poly',   PolynomialFeatures(degree=best_degree, include_bias=False)),
+    ('model',  LinearRegression()),
 ])
+final_pipe.fit(X_train, y_train)
+print(f"\nBest degree: {best_degree}")
+print(f"Test R²:     {final_pipe.score(X_test, y_test):.4f}")
 
-# GridSearchCV to find best alpha (Ridge regularization) and degree together
-param_grid = {
-    'poly__degree': [1, 2, 3],
-    'model__alpha': [0.01, 1.0, 10.0, 100.0],
-}
-grid_search = GridSearchCV(pipe_ridge, param_grid, cv=5, scoring='r2', n_jobs=-1)
-grid_search.fit(X_train, y_train)
-
-print(f"Best params: {grid_search.best_params_}")
-print(f"Best CV R²: {grid_search.best_score_:.4f}")
-print(f"Test R²:    {grid_search.score(X_test, y_test):.4f}")
+# Looking ahead: Lesson 21 adds "regularization" to tame wild high-degree
+# polynomials, and Lesson 27 introduces GridSearchCV — a tool that runs
+# search loops like the one above for you, over any number of settings
 
 # Note: number of features after PolynomialFeatures(degree=2) with 3 input features:
 # 1 + 3 + 3 + 3 = (bias) + (linear) + (squared) + (interactions) = 10 features total
@@ -729,7 +746,7 @@ for name, metrics in results.items():
   <ol>
     <li>Load the Boston Housing or California Housing dataset. Plot each feature against the target variable. Identify at least 2 features that appear non-linear in their relationship with price. Confirm by comparing linear vs degree-2 polynomial R² for those features individually.</li>
     <li>Starting with 3 input features, compute how many features PolynomialFeatures generates for degree=2, degree=3, and degree=4 (using the formula C(p+d, d) where p=features, d=degree). Verify your answer with sklearn.</li>
-    <li>Build a pipeline that compares: (a) LinearRegression with degree=1, (b) LinearRegression with degree=2, (c) Ridge with degree=3, using GridSearchCV on a training set. Report best params and final test R².</li>
+    <li>Build pipelines for polynomial degrees 1, 2, and 3 (scaler → PolynomialFeatures → LinearRegression) and compare them with 5-fold <code>cross_val_score</code> on the training set. Refit the winner on the full training set and report its final test R².</li>
     <li>Create a dataset with a true interaction effect: price = 100*sqft + 50*bedrooms + 0.1*sqft*bedrooms + noise. Show that a model WITHOUT the interaction term has systematically wrong predictions for large houses with many bedrooms. Add PolynomialFeatures(degree=2) to capture the interaction and measure the improvement.</li>
   </ol>
 </div>
@@ -978,7 +995,7 @@ new MLQuiz('lesson-13-quiz', [
       "A correct model — the test set must contain outliers that artificially reduce R²"
     ],
     correct: 0,
-    explanation: "R² can be negative on the test set, and it means the model is WORSE than simply predicting the mean for every point. A 0.99 train R² with -1.2 test R² is a classic overfitting signature: the model has enough capacity to memorize the training set (every data point, including noise), but learned patterns that don't generalize. The solution is to reduce the polynomial degree, use regularization (Ridge/Lasso), or use cross-validation to select degree."
+    explanation: "R² can be negative on the test set, and it means the model is WORSE than simply predicting the mean for every point. A 0.99 train R² with -1.2 test R² is a classic overfitting signature: the model has enough capacity to memorize the training set (every data point, including noise), but learned patterns that don't generalize. The solution: reduce the polynomial degree, or use cross-validation to select it honestly. (Lesson 21 adds one more weapon — regularization.)"
   },
   {
     question: "In a multivariate regression model, the coefficient for 'num_bedrooms' is 12,000. What does this mean?",
