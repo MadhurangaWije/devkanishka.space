@@ -18,10 +18,13 @@ function getDriveClient(): drive_v3.Drive {
   const clientId = process.env.GOOGLE_OAUTH_CLIENT_ID;
   const clientSecret = process.env.GOOGLE_OAUTH_CLIENT_SECRET;
   const refreshToken = process.env.GOOGLE_OAUTH_REFRESH_TOKEN;
-  if (!clientId || !clientSecret || !refreshToken) {
-    throw new Error(
-      'GOOGLE_OAUTH_CLIENT_ID / GOOGLE_OAUTH_CLIENT_SECRET / GOOGLE_OAUTH_REFRESH_TOKEN are not configured'
-    );
+  const missing = [
+    !clientId && 'GOOGLE_OAUTH_CLIENT_ID',
+    !clientSecret && 'GOOGLE_OAUTH_CLIENT_SECRET',
+    !refreshToken && 'GOOGLE_OAUTH_REFRESH_TOKEN',
+  ].filter(Boolean);
+  if (missing.length) {
+    throw new Error(`${missing.join(', ')} not configured (empty or missing at runtime)`);
   }
 
   const auth = new google.auth.OAuth2(clientId, clientSecret);
