@@ -67,3 +67,38 @@ create table if not exists chat_rate_limits (
   count int not null default 0,
   primary key (ip, day)
 );
+
+-- ── Memories app (memories.devkanishka.space) ──────────────────────────────
+-- Photo bytes live in Google Drive (see src/lib/drive.ts); only the Drive
+-- file id is stored here. Photos are never served directly from Drive —
+-- every request goes through /api/memories/photo/[photoId], which checks
+-- the parent memory's visibility before streaming bytes back, so a
+-- "private" memory's photos are never reachable without the owner session.
+create table if not exists memories (
+  id uuid primary key default gen_random_uuid(),
+  title text not null,
+  story text not null default '',
+  area text not null default 'family' check (area in ('family', 'personal', 'work')),
+  visibility text not null default 'public' check (visibility in ('public', 'private')),
+  memory_date date,
+  location text,
+  mood text,
+  people text[] not null default '{}',
+  added_by text,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create index if not exists memories_visibility_idx on memories (visibility);
+create index if not exists memories_memory_date_idx on memories (memory_date desc);
+
+create table if not exists memory_photos (
+  id uuid primary key default gen_random_uuid(),
+  memory_id uuid not null references memories (id) on delete cascade,
+  drive_file_id text not null,
+  mime_type text not null,
+  position int not null default 0,
+  created_at timestamptz not null default now()
+);
+
+create index if not exists memory_photos_memory_id_idx on memory_photos (memory_id);
