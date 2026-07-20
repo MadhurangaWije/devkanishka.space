@@ -68,3 +68,9 @@ export async function streamPhotoFromDrive(fileId: string): Promise<Readable> {
   const res = await drive.files.get({ fileId, alt: 'media' }, { responseType: 'stream' });
   return res.data as unknown as Readable;
 }
+
+/** Permanently deletes a photo from Drive — used when a photo is removed from a memory during editing. */
+export async function deletePhotoFromDrive(fileId: string): Promise<void> {
+  const drive = getDriveClient();
+  await drive.files.delete({ fileId });
+}

@@ -2,50 +2,19 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getSupabaseAdmin } from '@/lib/ai/supabase';
 import { uploadPhotoToDrive } from '@/lib/drive';
 import { OWNER_COOKIE_NAME, verifyOwnerSessionToken } from '@/lib/owner-auth';
+import {
+  MemoryMetaInput,
+  MemoryRow,
+  normalizeArea,
+  normalizeVisibility,
+  toClientShape,
+  validatePhotoFiles,
+} from '@/lib/memories';
 
 export const runtime = 'nodejs';
 
-const AREAS = ['family', 'personal', 'work'] as const;
-const VISIBILITIES = ['public', 'private'] as const;
-const MAX_PHOTOS = 20;
-const MAX_TOTAL_BYTES = 50 * 1024 * 1024;
-
-type MemoryRow = {
-  id: string;
-  title: string;
-  story: string;
-  area: string;
-  visibility: string;
-  memory_date: string | null;
-  location: string | null;
-  mood: string | null;
-  people: string[];
-  added_by: string | null;
-  created_at: string;
-  memory_photos: { id: string; position: number }[];
-};
-
 function isOwnerRequest(request: NextRequest): boolean {
   return verifyOwnerSessionToken(request.cookies.get(OWNER_COOKIE_NAME)?.value);
-}
-
-function toClientShape(row: MemoryRow) {
-  return {
-    id: row.id,
-    title: row.title,
-    story: row.story,
-    area: row.area,
-    visibility: row.visibility,
-    date: row.memory_date,
-    location: row.location,
-    mood: row.mood,
-    people: row.people,
-    addedBy: row.added_by,
-    createdAt: row.created_at,
-    photos: [...row.memory_photos]
-      .sort((a, b) => a.position - b.position)
-      .map((p) => ({ id: p.id, url: `/api/memories/photo/${p.id}` })),
-  };
 }
 
 export async function GET(request: NextRequest) {
@@ -54,7 +23,7 @@ export async function GET(request: NextRequest) {
 
   let query = supabase
     .from('memories')
-    .select('*, memory_photos(id, position)')
+    .select('*, memory_photos(id, position, mime_type)')
     .order('memory_date', { ascending: false });
 
   if (!owner) {
@@ -82,17 +51,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: 'Invalid submission.' }, { status: 400 });
   }
 
-  let meta: {
-    title?: string;
-    story?: string;
-    area?: string;
-    visibility?: string;
-    date?: string;
-    location?: string;
-    mood?: string;
-    people?: string[];
-    addedBy?: string;
-  };
+  let meta: MemoryMetaInput;
   try {
     meta = JSON.parse((formData.get('memory') as string | null) ?? '');
   } catch {
@@ -104,23 +63,13 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: 'Title is required.' }, { status: 400 });
   }
 
-  const area = AREAS.includes(meta.area as (typeof AREAS)[number]) ? meta.area! : 'family';
-  const visibility = VISIBILITIES.includes(meta.visibility as (typeof VISIBILITIES)[number])
-    ? meta.visibility!
-    : 'public';
+  const area = normalizeArea(meta.area);
+  const visibility = normalizeVisibility(meta.visibility);
 
   const photos = formData.getAll('photos').filter((f): f is File => f instanceof File && f.size > 0);
-
-  if (photos.length > MAX_PHOTOS) {
-    return NextResponse.json({ error: `You can add up to ${MAX_PHOTOS} photos per memory.` }, { status: 400 });
-  }
-  const nonImage = photos.find((f) => !f.type.startsWith('image/'));
-  if (nonImage) {
-    return NextResponse.json({ error: `"${nonImage.name}" isn't an image.` }, { status: 400 });
-  }
-  const totalBytes = photos.reduce((sum, f) => sum + f.size, 0);
-  if (totalBytes > MAX_TOTAL_BYTES) {
-    return NextResponse.json({ error: 'Photos are too large — keep the total under 50MB.' }, { status: 400 });
+  const validationError = validatePhotoFiles(photos);
+  if (validationError) {
+    return NextResponse.json({ error: validationError }, { status: 400 });
   }
 
   // Upload to Drive before touching the DB, so a failed upload never leaves
@@ -159,7 +108,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: 'Could not save the memory.' }, { status: 500 });
   }
 
-  let photoRows: { id: string; position: number }[] = [];
+  let photoRows: { id: string; position: number; mime_type: string }[] = [];
   if (uploaded.length) {
     const { data: insertedPhotos, error: photosError } = await supabase
       .from('memory_photos')
@@ -171,7 +120,7 @@ export async function POST(request: NextRequest) {
           position: index,
         }))
       )
-      .select('id, position');
+      .select('id, position, mime_type');
     if (photosError || !insertedPhotos) {
       console.error('Memories create: photo rows insert failed', photosError);
       return NextResponse.json({ error: 'Photos uploaded but could not be linked to the memory.' }, { status: 500 });
