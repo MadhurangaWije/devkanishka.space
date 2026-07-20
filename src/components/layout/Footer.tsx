@@ -7,6 +7,7 @@ const SOCIAL_LINKS = [
   { label: 'GitHub', href: 'https://github.com/kanishka' },
   { label: 'LinkedIn', href: 'https://linkedin.com' },
   { label: 'Twitter', href: 'https://twitter.com/kanishka' },
+  { label: 'Memories', href: 'https://memories.devkanishka.space' },
 ];
 
 export function Footer() {
